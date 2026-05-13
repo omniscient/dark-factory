@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # --- Configuration ---
-POLL_INTERVAL="${POLL_INTERVAL:-30}"
+POLL_INTERVAL="${POLL_INTERVAL:-60}"
 SKIP_LABELS="needs-discussion,epic"
 MAX_RETRIES="${MAX_RETRIES:-3}"
 STATE_FILE="/tmp/scheduler-state.json"
+RATE_LIMIT_FLOOR="${RATE_LIMIT_FLOOR:-200}"
 
 # Board constants
 PROJECT_NUMBER=1
@@ -17,6 +18,12 @@ STATUS_IN_PROGRESS="47fc9ee4"
 STATUS_IN_REVIEW="df73e18b"
 STATUS_BLOCKED="93d87b2f"
 STATUS_DONE="98236657"
+STATUS_BACKLOG="f75ad846"
+STATUS_REFINED="0c79ebe5"
+
+# Refinement pipeline configuration
+REFINE_WIP_LIMIT="${REFINE_WIP_LIMIT:-2}"
+REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review"
 
 # --- Validate required environment ---
 if [ -z "${GH_TOKEN:-}" ]; then
@@ -32,6 +39,24 @@ fi
 if [ ! -f "$STATE_FILE" ]; then
   echo '{}' > "$STATE_FILE"
 fi
+
+# --- Rate limit guard ---
+check_rate_limit() {
+  local rate_json
+  rate_json=$(gh api rate_limit --jq '.resources.graphql' 2>/dev/null) || return 0
+  local remaining reset_at
+  remaining=$(echo "$rate_json" | jq -r '.remaining')
+  reset_at=$(echo "$rate_json" | jq -r '.reset')
+  if [ "$remaining" -le "$RATE_LIMIT_FLOOR" ]; then
+    local now
+    now=$(date +%s)
+    local wait=$((reset_at - now + 5))
+    if [ "$wait" -gt 0 ]; then
+      echo "[$(date -u +%FT%TZ)] rate_limit remaining=${remaining} sleeping=${wait}s until_reset"
+      sleep "$wait"
+    fi
+  fi
+}
 
 # --- Retry tracking ---
 get_retry_count() {
@@ -63,6 +88,47 @@ is_issue_running() {
   return 1
 }
 
+count_refine_running() {
+  docker ps --format '{{.Command}}' 2>/dev/null | grep -cE 'Refine issue|Plan issue' || true
+}
+
+has_refine_skip_label() {
+  local item="$1"
+  local labels
+  labels=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
+  IFS=',' read -ra SKIP_ARRAY <<< "$REFINE_SKIP_LABELS"
+  for skip in "${SKIP_ARRAY[@]}"; do
+    if echo "$labels" | grep -qi "$skip"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+has_new_comment_after_report() {
+  local issue_num="$1"
+  local report_marker="$2"
+  local comments
+  comments=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json comments -q '.comments' 2>/dev/null) || { echo "no"; return; }
+
+  local report_idx
+  report_idx=$(echo "$comments" | jq "map(.body) | to_entries | map(select(.value | test(\"$report_marker\"))) | last | .key // -1")
+
+  if [ "$report_idx" = "-1" ]; then
+    echo "no"
+    return
+  fi
+
+  local total
+  total=$(echo "$comments" | jq 'length')
+  local next_idx=$((report_idx + 1))
+  if [ "$next_idx" -lt "$total" ]; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
 # --- Dispatch ---
 dispatch() {
   local command="$1"
@@ -72,7 +138,34 @@ dispatch() {
 
 # --- Board state ---
 fetch_board_items() {
-  gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" --format json --limit 200
+  local raw
+  raw=$(gh api graphql -f query='
+    query {
+      node(id: "'"$PROJECT_ID"'") {
+        ... on ProjectV2 {
+          items(first: 50) {
+            nodes {
+              fieldValueByName(name: "Status") {
+                ... on ProjectV2ItemFieldSingleSelectValue { name }
+              }
+              content {
+                ... on Issue {
+                  number
+                  title
+                  labels(first: 10) { nodes { name } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ')
+  echo "$raw" | jq '{items: [.data.node.items.nodes[]
+    | select(.content.number != null)
+    | {content: {number: .content.number, title: .content.title, type: "Issue"},
+       labels: [.content.labels.nodes[].name],
+       status: .fieldValueByName.name}]}'
 }
 
 get_items_by_status() {
@@ -136,7 +229,7 @@ dependencies_met() {
   local issue_num="$1"
   local board_items="$2"
   local body
-  body=$(gh issue view "$issue_num" --json body -q '.body' 2>/dev/null) || return 0
+  body=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json body -q '.body' 2>/dev/null) || return 0
   local deps
   deps=$(echo "$body" | grep -oP 'Depends on:\s*#\K\d+' || true)
   if [ -z "$deps" ]; then
@@ -156,13 +249,13 @@ dependencies_met() {
 get_new_comments() {
   local issue_num="$1"
   local comments
-  comments=$(gh issue view "$issue_num" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
+  comments=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
 
   local factory_idx
   factory_idx=$(echo "$comments" | jq 'map(.body) | to_entries | map(select(.value | test("Posted by MarketHawk Dark Factory"))) | last | .key // -1')
 
   if [ "$factory_idx" = "-1" ]; then
-    echo "[]"
+    echo "$comments"
     return
   fi
 
@@ -209,27 +302,79 @@ ${comment_text}"
   esac
 }
 
+# --- Fetch WIP limits once at startup (cached until restart) ---
+WIP_DATA=$(fetch_wip_limits)
+MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "$STATUS_IN_PROGRESS")
+MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "$STATUS_IN_REVIEW")
+echo "WIP limits: in_progress=${MAX_IN_PROGRESS} in_review=${MAX_IN_REVIEW}"
+
 # --- Main loop ---
 echo "Backlog scheduler started (poll every ${POLL_INTERVAL}s)"
 
 while true; do
   DISPATCHED=""
 
+  # Guard against rate limit exhaustion (REST call, doesn't cost GraphQL points)
+  check_rate_limit
+
   # Fetch board state
   BOARD_ITEMS=$(fetch_board_items 2>/dev/null) || { echo "[$(date -u +%FT%TZ)] error=gh_api_failed"; sleep "$POLL_INTERVAL"; continue; }
 
-  IN_REVIEW=$(get_items_by_status "$BOARD_ITEMS" "In Review")
+  IN_REVIEW=$(get_items_by_status "$BOARD_ITEMS" "In review")
   BLOCKED=$(get_items_by_status "$BOARD_ITEMS" "Blocked")
   READY=$(get_items_by_status "$BOARD_ITEMS" "Ready")
-  IN_PROGRESS=$(get_items_by_status "$BOARD_ITEMS" "In Progress")
+  IN_PROGRESS=$(get_items_by_status "$BOARD_ITEMS" "In progress")
+
+  BACKLOG=$(get_items_by_status "$BOARD_ITEMS" "Backlog")
+  REFINED=$(get_items_by_status "$BOARD_ITEMS" "Refined")
 
   IN_PROGRESS_COUNT=$(echo "$IN_PROGRESS" | jq 'length')
   IN_REVIEW_COUNT=$(echo "$IN_REVIEW" | jq 'length')
+  BACKLOG_COUNT=$(echo "$BACKLOG" | jq 'length')
+  REFINED_COUNT=$(echo "$REFINED" | jq 'length')
+  REFINE_RUNNING=$(count_refine_running)
 
-  # Read WIP limits
-  WIP_DATA=$(fetch_wip_limits)
-  MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "$STATUS_IN_PROGRESS")
-  MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "$STATUS_IN_REVIEW")
+  # --- Priority 0: Backlog items (refinement) ---
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+
+    # Handle spec-pending-review items first (before skip-label check would filter them)
+    ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
+    if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
+      if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+        HAS_NEW=$(has_new_comment_after_report "$ISSUE" "Posted by MarketHawk Refinement Pipeline")
+        if [ "$HAS_NEW" = "yes" ]; then
+          gh issue edit "$ISSUE" --repo "${OWNER}/markethawk" --remove-label "spec-pending-review" 2>/dev/null || true
+          dispatch "Refine issue #${ISSUE}"
+          DISPATCHED="Refine issue #${ISSUE}"
+          REFINE_RUNNING=$((REFINE_RUNNING + 1))
+        fi
+      fi
+      continue
+    fi
+
+    if has_refine_skip_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
+    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+
+    dispatch "Refine issue #${ISSUE}"
+    DISPATCHED="Refine issue #${ISSUE}"
+    REFINE_RUNNING=$((REFINE_RUNNING + 1))
+  done < <(echo "$BACKLOG" | jq -c '.[]')
+
+  # --- Priority 0.5: Refined items (plan generation) ---
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+    if has_refine_skip_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
+    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+
+    dispatch "Plan issue #${ISSUE}"
+    DISPATCHED="Plan issue #${ISSUE}"
+    REFINE_RUNNING=$((REFINE_RUNNING + 1))
+  done < <(echo "$REFINED" | jq -c '.[]')
 
   # --- Priority 1: In Review items with new comments ---
   while IFS= read -r item; do
@@ -290,10 +435,11 @@ while true; do
   done < <(echo "$READY" | jq -c '.[]')
 
   # --- Log cycle summary ---
+  BUDGET=$(gh api rate_limit --jq '.resources.graphql | "\(.used)/\(.limit)"' 2>/dev/null) || BUDGET="?"
   if [ -n "$DISPATCHED" ]; then
-    echo "[$(date -u +%FT%TZ)] in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} dispatched=\"${DISPATCHED}\""
+    echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} dispatched=\"${DISPATCHED}\" graphql=${BUDGET}"
   else
-    echo "[$(date -u +%FT%TZ)] in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} skip=nothing_to_do"
+    echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} skip=nothing_to_do graphql=${BUDGET}"
   fi
 
   sleep "$POLL_INTERVAL"
