@@ -447,7 +447,7 @@ def main() -> None:
     else:
         # scripts/ → repo root (one level up)
         script_dir = Path(__file__).resolve().parent
-        repo_root = script_dir.parent.parent
+        repo_root = script_dir.parent
         memory_dir = repo_root / ".archon" / "memory"
 
     if not memory_dir.exists():

@@ -33,7 +33,7 @@ Do NOT create or modify any other files. Do NOT implement code, write tests, or 
 3. The issue context has been fetched by the workflow. It is available in the conversation.
 4. Read `/opt/refinement-skills/orchestrator-prompt.md` for your process instructions
 5. Read `/opt/refinement-skills/product-owner-prompt.md` — you will pass this to subagents
-6. Read `/opt/refinement-skills/config.yaml` for pipeline configuration
+6. Read `/opt/dark-factory/config/config.yaml` for pipeline configuration
 7. Compute the affected file set and load memory context:
 
 ```bash
