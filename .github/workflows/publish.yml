@@ -13,7 +13,11 @@ jobs:
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: docker/metadata-action@v5
         id: meta
-        with: { images: "ghcr.io/omniscient/dark-factory" }
+        with:
+          images: "ghcr.io/omniscient/dark-factory"
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
       - uses: docker/build-push-action@v6
         with:
           context: .
