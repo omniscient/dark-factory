@@ -6,7 +6,7 @@ emits a ranked diff to stdout with a configurable token budget, and writes
 diff-ranking.json to --artifacts-dir.
 
 CLI:
-    python3 dark-factory/scripts/diff_rank.py \
+    python3 scripts/diff_rank.py \
       --diff <path>            \\
       --artifacts-dir <dir>    \\
       [--config <yaml>]        \\

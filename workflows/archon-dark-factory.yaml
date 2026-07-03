@@ -6,6 +6,10 @@ description: |
         spins up preview stack (implement only) -> validates -> pushes and creates PR/spec/plan.
   NOT for: Running outside the dark-factory container.
 
+  NOTE: All "$_CLONE/dark-factory/scripts/..." paths below are TARGET-PATHs — they
+  reference scripts inside the TARGET repo's dark-factory/ subdirectory (MarketHawk),
+  which retains the dark-factory/ layout until Phase 3.
+
 provider: claude
 model: sonnet
 

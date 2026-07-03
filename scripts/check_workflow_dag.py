@@ -7,7 +7,7 @@ all_success.  Under all_success a skipped upstream causes the join to be skipped
 too, silently aborting the remainder of the workflow.
 
 Usage (CI):
-    python dark-factory/scripts/check_workflow_dag.py .archon/workflows/archon-dark-factory.yaml
+    python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
 
 API:
     from dark_factory.scripts.check_workflow_dag import check

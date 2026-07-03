@@ -5,7 +5,7 @@
 # PREVIEW_BACKEND_IMAGE / PREVIEW_FRONTEND_IMAGE, then brings the stack up WITHOUT --build.
 # This avoids the docker.sock connection-hijack the socket-proxy blocks. Invoked as:
 #   PREVIEW_BACKEND_IMAGE=… PREVIEW_FRONTEND_IMAGE=… ISSUE_NUM_PADDED=03 \
-#     docker compose -p mh-preview-3 -f dark-factory/docker-compose.preview.yml up -d
+#     docker compose -p mh-preview-3 -f dark-factory/docker-compose.preview.yml up -d  # TARGET-PATH: run from TARGET clone
 #
 # DB schema is applied by the one-shot `migrate` service (alembic upgrade head); backend
 # and celery-worker gate on its successful completion because the backend entrypoint runs

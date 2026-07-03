@@ -7,9 +7,9 @@ Produces:
   .archon/memory/index.jsonl        — append-only compact summary index
 
 Usage:
-  python dark-factory/scripts/memory_import.py              # write mode
-  python dark-factory/scripts/memory_import.py --dry-run    # preview only
-  python dark-factory/scripts/memory_import.py --memory-dir .archon/memory
+  python scripts/memory_import.py              # write mode
+  python scripts/memory_import.py --dry-run    # preview only
+  python scripts/memory_import.py --memory-dir .archon/memory
 """
 import argparse
 import hashlib
@@ -445,7 +445,7 @@ def main() -> None:
     if args.memory_dir:
         memory_dir = args.memory_dir.resolve()
     else:
-        # dark-factory/scripts/ → repo root (two levels up)
+        # scripts/ → repo root (one level up)
         script_dir = Path(__file__).resolve().parent
         repo_root = script_dir.parent.parent
         memory_dir = repo_root / ".archon" / "memory"

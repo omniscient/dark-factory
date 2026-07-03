@@ -14,7 +14,7 @@ Not supported:
 
 Usage (CI)::
 
-    python dark-factory/scripts/check_workflow_when.py .archon/workflows/archon-dark-factory.yaml
+    python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
 
 API::
 
