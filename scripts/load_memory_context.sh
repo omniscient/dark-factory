@@ -2,6 +2,7 @@
 # Load memory context for a given phase.
 # Usage: load_memory_context.sh <phase>
 # Env:   ARTIFACTS_DIR (required), REPO_ROOT (optional, defaults to git rev-parse),
+#        MEMORY_DIR (optional, defaults to ${REPO_ROOT}/.archon/memory),
 #        ISSUE_NUM (optional)
 # Stdout: memory context text (empty string if memory_retrieve.py fails or has no output)
 # Side effects:
@@ -12,6 +13,7 @@ set -euo pipefail
 PHASE="${1:?Usage: load_memory_context.sh <phase>}"
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:?ARTIFACTS_DIR must be set}"
+MEMORY_DIR="${MEMORY_DIR:-${REPO_ROOT}/.archon/memory}"
 
 AFFECTED=$(git -C "${REPO_ROOT}" diff --name-only origin/main...HEAD 2>/dev/null || echo "")
 
@@ -25,7 +27,7 @@ MEMORY_CONTEXT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/memory_retrieve.py" \
   --phase "$PHASE" \
   --files "$AFFECTED" \
   ${ISSUE_ARG} \
-  --memory-dir "${REPO_ROOT}/.archon/memory" \
+  --memory-dir "${MEMORY_DIR}" \
   --emit-trace-to "${ARTIFACTS_DIR}/memory-trace.json" 2>/dev/null || true)
 printf '%s\n' "$MEMORY_CONTEXT" > "${ARTIFACTS_DIR}/memory-context.md"
 printf '%s\n' "$MEMORY_CONTEXT"

@@ -310,7 +310,7 @@ def test_update_index_created_at_none_when_no_date():
 
 def test_integration_dry_run_real_memory():
     """Dry-run import against the live .archon/memory/ — no files written, invariants hold."""
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     memory_dir = repo_root / ".archon" / "memory"
     if not memory_dir.exists():
         pytest.skip(".archon/memory not found — skipping integration test")

@@ -34,36 +34,36 @@ class TestSuiteJson:
         assert _SUITE_FILE.exists(), f"suite.json not found at {_SUITE_FILE}"
 
     def test_suite_loads_as_json(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
 
     def test_suite_has_tasks_key(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         assert "tasks" in data, "suite.json must have a 'tasks' key"
 
     def test_suite_has_at_least_ten_tasks(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         assert len(data["tasks"]) >= 10, (
             f"Suite must have ≥10 tasks, got {len(data['tasks'])}"
         )
 
     def test_each_task_has_required_fields(self):
         required = {"issue", "title", "size", "pre_pr_sha", "golden_pr", "oracle_tests", "oracle_cmd"}
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         for task in data["tasks"]:
             missing = required - set(task.keys())
             assert not missing, f"Task #{task.get('issue', '?')} missing fields: {missing}"
 
     def test_each_task_size_is_valid(self):
         valid_sizes = {"S", "M", "L"}
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         for task in data["tasks"]:
             assert task["size"] in valid_sizes, (
                 f"Task #{task['issue']} has invalid size: {task['size']!r}"
             )
 
     def test_each_task_has_oracle_tests(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         for task in data["tasks"]:
             assert len(task["oracle_tests"]) >= 1, (
                 f"Task #{task['issue']} must have at least one oracle test"
@@ -71,14 +71,14 @@ class TestSuiteJson:
 
     def test_each_task_oracle_cmd_is_valid(self):
         valid_cmds = {"pytest", "bash", "jest"}
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         for task in data["tasks"]:
             assert task["oracle_cmd"] in valid_cmds, (
                 f"Task #{task['issue']} has invalid oracle_cmd: {task['oracle_cmd']!r}"
             )
 
     def test_each_task_pre_pr_sha_is_hex(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         for task in data["tasks"]:
             sha = task["pre_pr_sha"]
             assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha), (
@@ -86,14 +86,14 @@ class TestSuiteJson:
             )
 
     def test_issue_numbers_are_unique(self):
-        data = json.loads(_SUITE_FILE.read_text())
+        data = json.loads(_SUITE_FILE.read_text(encoding="utf-8"))
         issues = [t["issue"] for t in data["tasks"]]
         assert len(issues) == len(set(issues)), f"Duplicate issue numbers in suite.json"
 
     def test_results_gitignore_exists(self):
         gitignore = _BENCH_DIR / ".gitignore"
         assert gitignore.exists(), ".gitignore not found in bench/"
-        content = gitignore.read_text()
+        content = gitignore.read_text(encoding="utf-8")
         assert "results/*.json" in content, ".gitignore must exclude results/*.json"
 
 
@@ -139,7 +139,7 @@ class TestPassK:
 
 class TestBenchModeWorkflow:
     def _load_workflow(self) -> dict:
-        return yaml.safe_load(_WORKFLOW_PATH.read_text())
+        return yaml.safe_load(_WORKFLOW_PATH.read_text(encoding="utf-8"))
 
     def _get_node(self, workflow: dict, node_id: str) -> dict:
         for node in workflow.get("nodes", []):
@@ -253,7 +253,7 @@ class TestBaseline:
     def _non_comment_lines(self) -> list[str]:
         """Return non-comment, non-empty lines from run_suite.sh."""
         lines = []
-        for line in self._RUN_SUITE.read_text().splitlines():
+        for line in self._RUN_SUITE.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith('#'):
                 lines.append(stripped)

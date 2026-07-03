@@ -14,7 +14,7 @@ _CONFORMANCE_CMD = _REPO_ROOT / "commands/dark-factory-conformance.md"
 
 
 def _config():
-    return yaml.safe_load(_CONFIG.read_text())
+    return yaml.safe_load(_CONFIG.read_text(encoding="utf-8"))
 
 
 def _tok_opt():
@@ -22,7 +22,7 @@ def _tok_opt():
 
 
 def _workflow_nodes():
-    data = yaml.safe_load(_WORKFLOW.read_text())
+    data = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     return {n["id"]: n for n in data.get("nodes", []) if isinstance(n, dict) and "id" in n}
 
 
@@ -261,7 +261,7 @@ def test_dag_validator_passes():
 # ── T3-S1: load_memory_context.sh sources token-opt-caps.env ─────────────────
 
 def test_load_memory_context_sources_caps():
-    content = _LOAD_MEMORY.read_text()
+    content = _LOAD_MEMORY.read_text(encoding="utf-8")
     assert "token-opt-caps.env" in content, \
         "load_memory_context.sh must source token-opt-caps.env"
     assert "[ -f" in content or "test -f" in content, \
@@ -271,13 +271,13 @@ def test_load_memory_context_sources_caps():
 # ── T3-S2: code-review command sources token-opt-caps.env ────────────────────
 
 def test_code_review_cmd_sources_caps():
-    content = _CODE_REVIEW_CMD.read_text()
+    content = _CODE_REVIEW_CMD.read_text(encoding="utf-8")
     assert "token-opt-caps.env" in content, \
         "dark-factory-code-review.md must source token-opt-caps.env"
 
 
 def test_code_review_cmd_sources_after_rank_in():
-    content = _CODE_REVIEW_CMD.read_text()
+    content = _CODE_REVIEW_CMD.read_text(encoding="utf-8")
     rank_pos = content.find("RANK_IN=$(mktemp")
     caps_pos = content.find("token-opt-caps.env")
     assert rank_pos != -1, "code-review must have RANK_IN=$(mktemp ...) block"
@@ -289,13 +289,13 @@ def test_code_review_cmd_sources_after_rank_in():
 # ── T3-S3: conformance command sources token-opt-caps.env ────────────────────
 
 def test_conformance_cmd_sources_caps():
-    content = _CONFORMANCE_CMD.read_text()
+    content = _CONFORMANCE_CMD.read_text(encoding="utf-8")
     assert "token-opt-caps.env" in content, \
         "dark-factory-conformance.md must source token-opt-caps.env"
 
 
 def test_conformance_cmd_sources_near_diff_rank():
-    content = _CONFORMANCE_CMD.read_text()
+    content = _CONFORMANCE_CMD.read_text(encoding="utf-8")
     # Find the ranking block RANK_IN (not the pre-triage RANK_IN)
     # The ranking block calls diff_rank.py with TRIAGED_DIFF
     rank_pos = content.rfind("RANK_IN=$(mktemp")  # last occurrence = ranking block

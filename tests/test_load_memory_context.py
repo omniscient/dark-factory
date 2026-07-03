@@ -18,11 +18,21 @@ def run_script(phase: str, env: dict) -> subprocess.CompletedProcess:
     )
 
 
+def _make_minimal_memory_dir(tmp_path: Path) -> Path:
+    """Create a minimal .archon/memory-style dir so memory_retrieve.py can run."""
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "codebase-patterns.md").write_text("# Codebase Patterns\n")
+    return mem
+
+
 def base_env(tmp_path: Path) -> dict:
     import os
     e = os.environ.copy()
     e["ARTIFACTS_DIR"] = str(tmp_path)
     e["REPO_ROOT"] = str(REPO_ROOT)
+    # Provide a writable memory dir so memory_retrieve.py can run and emit the trace
+    e["MEMORY_DIR"] = str(_make_minimal_memory_dir(tmp_path))
     e.pop("ISSUE_NUM", None)
     return e
 

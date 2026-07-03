@@ -1,7 +1,7 @@
 from pathlib import Path
 import yaml
 
-WF = Path(__file__).resolve().parents[2] / ".archon" / "workflows" / "archon-dark-factory.yaml"
+WF = Path(__file__).resolve().parents[1] / "workflows" / "archon-dark-factory.yaml"
 
 
 def _nodes():

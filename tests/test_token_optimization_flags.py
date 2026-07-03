@@ -4,7 +4,7 @@ import pathlib
 import pytest
 import yaml
 
-CONFIG = pathlib.Path(__file__).resolve().parents[2] / ".claude/skills/refinement/config.yaml"
+CONFIG = pathlib.Path(__file__).resolve().parents[1] / "config/config.yaml"
 
 
 def _tok_opt():
@@ -67,7 +67,7 @@ def test_scheduler_wires_diff_enabled():
 
 def test_workflow_gates_comment_digest_on_env_var():
     content = (
-        pathlib.Path(__file__).resolve().parents[2]
-        / ".archon/workflows/archon-dark-factory.yaml"
-    ).read_text()
+        pathlib.Path(__file__).resolve().parents[1]
+        / "workflows/archon-dark-factory.yaml"
+    ).read_text(encoding="utf-8")
     assert "TOKEN_OPTIMIZATION_COMMENTS_ENABLED" in content

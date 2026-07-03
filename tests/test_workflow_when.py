@@ -18,8 +18,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from check_workflow_when import check  # noqa: E402
 
 _WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[2]
-    / ".archon" / "workflows" / "archon-dark-factory.yaml"
+    Path(__file__).resolve().parents[1]
+    / "workflows" / "archon-dark-factory.yaml"
 )
 
 

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-WF = Path(__file__).resolve().parents[2] / ".archon" / "workflows" / "archon-dark-factory.yaml"
+WF = Path(__file__).resolve().parents[1] / "workflows" / "archon-dark-factory.yaml"
 
 
 def test_report_node_renders_code_review_section():
