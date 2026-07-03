@@ -38,7 +38,7 @@ Do NOT create or modify any other files. Do NOT implement code, write tests, or 
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" refine)
+MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" refine)  # TARGET-PATH
 ```
 
 Include `$MEMORY_CONTEXT` in the context for this phase. If empty, proceed without memory context.
@@ -97,7 +97,7 @@ Follow the process in `orchestrator-prompt.md`:
 4. Self-review: placeholder scan, consistency check, scope check, ambiguity check. Fix inline.
 5. Run the OOS gate — detect and revert any files committed outside the refine allowlist:
    ```bash
-   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/specs/ .archon/memory/" refine)
+   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/specs/ .archon/memory/" refine)  # TARGET-PATH
    ```
    Retain `$OOS_FILES` for use in the Phase 6 comment.
 6. Commit the spec
@@ -123,7 +123,7 @@ Follow the process in `orchestrator-prompt.md`:
    # Tool limitation (#652): memory_write.py always writes [AVOID] entries; both the
    # chosen-approach and rejected-approach lessons are written as [AVOID]. This is a
    # known tool constraint, not a silent substitution.
-   python3 "${REPO_ROOT}/dark-factory/scripts/memory_write.py" \
+   python3 "${REPO_ROOT}/dark-factory/scripts/memory_write.py" \  # TARGET-PATH
      --target .archon/memory/architecture.md \
      --path-prefix .archon/commands/ \
      --text "<the rejected or chosen approach and concrete reasoning>" \

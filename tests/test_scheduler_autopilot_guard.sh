@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies the scheduler.sh Priority-6 autopilot hook exists and is correctly guarded.
-# Run: bash dark-factory/tests/test_scheduler_autopilot_guard.sh
+# Run: bash tests/test_scheduler_autopilot_guard.sh
 set -euo pipefail
 sched="$(cd "$(dirname "$0")" && pwd)/../scheduler.sh"
 

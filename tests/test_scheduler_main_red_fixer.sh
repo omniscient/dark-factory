@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verifies scheduler.sh dispatches a main-red fixer, gated by enable + dedupe + throttle,
 # only inside the MAIN_IS_RED block.
-# Run: bash dark-factory/tests/test_scheduler_main_red_fixer.sh
+# Run: bash tests/test_scheduler_main_red_fixer.sh
 set -euo pipefail
 sched="$(cd "$(dirname "$0")" && pwd)/../scheduler.sh"
 

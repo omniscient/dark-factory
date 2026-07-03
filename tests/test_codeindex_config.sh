@@ -2,10 +2,10 @@
 # Static configuration tests for issue #159 — codeindex dark factory integration.
 # Validates that all committed config changes are in place without requiring the
 # dark-factory image to be built.
-# Run: bash dark-factory/tests/test_codeindex_config.sh
+# Run: bash tests/test_codeindex_config.sh
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PASSED=0; FAILED=0
 
 assert_contains() {
@@ -42,49 +42,49 @@ echo ""
 
 echo "--- A: Dockerfile ---"
 assert_contains "Dockerfile installs codeindex via git URL" \
-  "$REPO_ROOT/dark-factory/Dockerfile" \
+  "$REPO_ROOT/Dockerfile" \
   'pip install --quiet "git+https://github.com/scheidydude/codeindex.git"'
 assert_contains "Dockerfile installs pre-commit" \
-  "$REPO_ROOT/dark-factory/Dockerfile" \
+  "$REPO_ROOT/Dockerfile" \
   "pre-commit"
 
 echo ""
 echo "--- B: entrypoint.sh ---"
 assert_contains "entrypoint.sh writes settings.local.json" \
-  "$REPO_ROOT/dark-factory/entrypoint.sh" \
+  "$REPO_ROOT/entrypoint.sh" \
   "settings.local.json"
 assert_contains "entrypoint.sh registers MCP server" \
-  "$REPO_ROOT/dark-factory/entrypoint.sh" \
+  "$REPO_ROOT/entrypoint.sh" \
   "mcpServers"
 assert_contains "entrypoint.sh runs pre-commit install" \
-  "$REPO_ROOT/dark-factory/entrypoint.sh" \
+  "$REPO_ROOT/entrypoint.sh" \
   "pre-commit install"
 
 echo ""
 echo "--- C: archon-dark-factory.yaml workflow ---"
 assert_contains "workflow has update-codeindex node" \
-  "$REPO_ROOT/.archon/workflows/archon-dark-factory.yaml" \
+  "$REPO_ROOT/workflows/archon-dark-factory.yaml" \
   "update-codeindex"
 assert_contains "workflow has regen-codeindex node" \
-  "$REPO_ROOT/.archon/workflows/archon-dark-factory.yaml" \
+  "$REPO_ROOT/workflows/archon-dark-factory.yaml" \
   "regen-codeindex"
 assert_contains "implement depends on update-codeindex" \
-  "$REPO_ROOT/.archon/workflows/archon-dark-factory.yaml" \
+  "$REPO_ROOT/workflows/archon-dark-factory.yaml" \
   "depends_on: [update-codeindex, fetch-issue]"
 assert_contains "preview-up depends on regen-codeindex" \
-  "$REPO_ROOT/.archon/workflows/archon-dark-factory.yaml" \
+  "$REPO_ROOT/workflows/archon-dark-factory.yaml" \
   "depends_on: [regen-codeindex]"
 assert_contains "push-and-pr includes blast radius section" \
-  "$REPO_ROOT/.archon/workflows/archon-dark-factory.yaml" \
+  "$REPO_ROOT/workflows/archon-dark-factory.yaml" \
   "Blast radius"
 
 echo ""
 echo "--- D: dark-factory-implement.md ---"
 assert_contains "implement command has get_impact instruction" \
-  "$REPO_ROOT/.archon/commands/dark-factory-implement.md" \
+  "$REPO_ROOT/commands/dark-factory-implement.md" \
   "get_impact"
 assert_contains "implement command has lookup_symbol instruction" \
-  "$REPO_ROOT/.archon/commands/dark-factory-implement.md" \
+  "$REPO_ROOT/commands/dark-factory-implement.md" \
   "lookup_symbol"
 
 echo ""

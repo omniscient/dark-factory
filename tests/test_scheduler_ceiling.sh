@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies scheduler.sh raised the dispatch ceiling to L and maps the epic_started outcome.
-# Run: bash dark-factory/tests/test_scheduler_ceiling.sh
+# Run: bash tests/test_scheduler_ceiling.sh
 set -euo pipefail
 sched="$(cd "$(dirname "$0")" && pwd)/../scheduler.sh"
 

@@ -3,14 +3,14 @@
 eval_memory_quality.py — Read-only harness for evaluating Dark Factory memory retrieval quality.
 
 Measures whether memory_retrieve.py surfaces the right lessons for historical factory
-regressions recorded in dark-factory/evals/factory-failures.jsonl.
+regressions recorded in evals/factory-failures.jsonl.
 
 Usage:
     python eval_memory_quality.py \\
-        [--failures dark-factory/evals/factory-failures.jsonl] \\
+        [--failures evals/factory-failures.jsonl] \\
         [--memory-dir .archon/memory] \\
-        [--retrieve-script dark-factory/scripts/memory_retrieve.py] \\
-        [--output dark-factory/evals/memory-quality-report.md] \\
+        [--retrieve-script scripts/memory_retrieve.py] \\
+        [--output evals/memory-quality-report.md] \\
         [--timestamp 2026-06-30T15:00:00Z]
 """
 
@@ -285,14 +285,14 @@ def write_report(
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def main():
-    repo_root = Path(__file__).parent.parent.parent
+    repo_root = Path(__file__).parent.parent
 
     parser = argparse.ArgumentParser(
         description="Evaluate Dark Factory memory retrieval quality."
     )
     parser.add_argument(
         "--failures",
-        default=str(repo_root / "dark-factory/evals/factory-failures.jsonl"),
+        default=str(repo_root / "evals/factory-failures.jsonl"),
         help="Path to factory-failures.jsonl",
     )
     parser.add_argument(
@@ -307,7 +307,7 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default=str(repo_root / "dark-factory/evals/memory-quality-report.md"),
+        default=str(repo_root / "evals/memory-quality-report.md"),
         help="Output path for the report",
     )
     parser.add_argument(

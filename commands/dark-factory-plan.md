@@ -30,7 +30,7 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" plan)
+MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" plan)  # TARGET-PATH
 ```
 
 7. Include `$MEMORY_CONTEXT` in the context for this phase. If empty, proceed without memory context.
@@ -144,7 +144,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    > ⏩ **Auto-advancing in ~`$PLAN_GRACE` min** unless you comment — the scheduler will move this to **Ready** automatically. Leave a comment to re-run the plan or redirect.
 4. Run the OOS gate — detect and revert any files committed outside the plan allowlist:
    ```bash
-   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/" plan)
+   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/" plan)  # TARGET-PATH
    ```
 5. Commit the plan
 6. Post a summary comment on the issue:

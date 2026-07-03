@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/dark-factory/scripts/agent_roles.sh"
+source "${REPO_ROOT}/scripts/agent_roles.sh"
 
 PASS=0; FAIL=0
 

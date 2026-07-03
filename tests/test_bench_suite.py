@@ -17,8 +17,8 @@ import yaml
 _BENCH_DIR = Path(__file__).resolve().parents[1] / "bench"
 _SUITE_FILE = _BENCH_DIR / "suite.json"
 _WORKFLOW_PATH = (
-    Path(__file__).resolve().parents[2]
-    / ".archon" / "workflows" / "archon-dark-factory.yaml"
+    Path(__file__).resolve().parents[1]
+    / "workflows" / "archon-dark-factory.yaml"
 )
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:

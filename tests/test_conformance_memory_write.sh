@@ -2,7 +2,7 @@
 # Unit test for route_memory_file() — sourced from gate_lib.sh.
 set -euo pipefail
 
-source "$(git rev-parse --show-toplevel)/dark-factory/scripts/gate_lib.sh"
+source "$(git rev-parse --show-toplevel)/scripts/gate_lib.sh"
 
 PASS=0; FAIL=0
 

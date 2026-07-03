@@ -4,7 +4,7 @@
 **Suite version**: 1  
 **Run parameters**: n=3 runs/task, k=3, BENCH_MODE=stub  
 **Status**: Stub baseline — pass^k tables show 0 (no runs executed yet).  
-             Run `dark-factory/bench/run_suite.sh --baseline` to populate with real results.
+             Run `bench/run_suite.sh --baseline` to populate with real results.
 
 ---
 
@@ -41,6 +41,7 @@ _Interpretation_: 70% single-run success → only 34% chance of 3 clean runs.
 
 ```bash
 # Single command — runs n=3 per task, emits pass^k per size bucket
+# TARGET-PATH: bench/ lives under dark-factory/ in the TARGET clone (MarketHawk) until Phase 3
 docker compose --profile factory run --rm dark-factory \
   bash /workspace/markethawk/dark-factory/bench/run_suite.sh
 
@@ -62,7 +63,7 @@ docker compose --profile factory run --rm dark-factory \
   bash /workspace/markethawk/dark-factory/bench/run_suite.sh --baseline
 ```
 
-Results are written to `dark-factory/bench/results/YYYY-MM-DD-HH-run.json`. These files are gitignored — only this `baseline.md` is committed.
+Results are written to `bench/results/YYYY-MM-DD-HH-run.json`. These files are gitignored — only this `baseline.md` is committed.
 
 ---
 
@@ -87,7 +88,7 @@ Set `BENCH_MODE=full` to skip only `push-and-pr` (runs a real preview stack). Us
 
 ## Adding Tasks
 
-1. Run `python3 dark-factory/bench/find_eligible.py --verify` to identify new candidates.
+1. Run `python3 bench/find_eligible.py --verify` to identify new candidates.
 2. Manually verify the fail→pass transition is genuine (not a fixture-dependent fluke).
 3. Add the task to `suite.json` and re-run the suite to establish its baseline.
 4. Update this file with the new task and its pass^k.

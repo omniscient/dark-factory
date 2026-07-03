@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "dark-factory" / "scripts" / "load_memory_context.sh"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "load_memory_context.sh"
 
 
 def run_script(phase: str, env: dict) -> subprocess.CompletedProcess:

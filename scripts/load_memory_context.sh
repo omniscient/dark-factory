@@ -21,7 +21,7 @@ ISSUE_ARG=""
 mkdir -p "$ARTIFACTS_DIR"
 [ -f "${ARTIFACTS_DIR}/token-opt-caps.env" ] && . "${ARTIFACTS_DIR}/token-opt-caps.env" || true
 
-MEMORY_CONTEXT=$(python3 "${REPO_ROOT}/dark-factory/scripts/memory_retrieve.py" \
+MEMORY_CONTEXT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/memory_retrieve.py" \
   --phase "$PHASE" \
   --files "$AFFECTED" \
   ${ISSUE_ARG} \

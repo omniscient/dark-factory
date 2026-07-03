@@ -13,7 +13,7 @@
 # bc), so this is a static guard: the single-comment endpoint must NOT carry an issue
 # number. The list/create endpoint (/issues/{n}/comments, no trailing id) is fine.
 #
-# Run: bash dark-factory/tests/test_cost_report_endpoint.sh
+# Run: bash tests/test_cost_report_endpoint.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

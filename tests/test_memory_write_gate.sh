@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
+source "${REPO_ROOT}/scripts/gate_lib.sh"
 
 PASS=0; FAIL=0
 

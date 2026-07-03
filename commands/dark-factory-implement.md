@@ -30,7 +30,7 @@ Read the project rules:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" implement)
+MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" implement)  # TARGET-PATH
 ```
 
 6. Include `$MEMORY_CONTEXT` in the context for this phase. Apply these lessons as strong hints throughout implementation. If a lesson conflicts with `CLAUDE.md` or `ARCHITECTURE.md`, follow those documents instead and note the conflict in `$ARTIFACTS_DIR/implementation.md`.

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-CMD = Path(__file__).resolve().parents[2] / ".archon" / "commands" / "dark-factory-code-review.md"
+CMD = Path(__file__).resolve().parents[1] / "commands" / "dark-factory-code-review.md"
 
 
 def test_command_wires_the_contract():

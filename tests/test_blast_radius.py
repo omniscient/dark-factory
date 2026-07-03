@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-SCRIPT = Path(__file__).resolve().parents[2] / "dark-factory" / "scripts" / "gate_blast_radius.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gate_blast_radius.py"
 
 
 def run_script(

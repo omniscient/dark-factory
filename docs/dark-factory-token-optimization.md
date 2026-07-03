@@ -205,7 +205,7 @@ As of T3b (#733), budget enforcement is **active** for `conformance`, `code-revi
 
 Budgets for refine and plan were validated by the full-corpus calibration in #731 (Phase 4b T2)
 with 0% `section_at_risk_rate` at the 30k budget. Budgets for conformance and code-review were
-derived from the T5 smoke run — run `dark-factory/evals/token_opt_eval.py --calibrate` after
+derived from the T5 smoke run — run `evals/token_opt_eval.py --calibrate` after
 accumulating ≥ 10 bench issues to confirm or adjust.
 
 ### How enforcement works
@@ -250,7 +250,7 @@ Use this procedure when promoting a scenario from observe-only to enforced.
 Run the calibration eval to check:
 ```bash
 # Inside the factory container
-python3 dark-factory/evals/token_opt_eval.py --calibrate \
+python3 evals/token_opt_eval.py --calibrate \
   --budget <candidate_tokens> --scenario <scenario_name>
 ```
 

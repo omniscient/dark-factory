@@ -1,8 +1,8 @@
 from pathlib import Path
 
 CMD = (
-    Path(__file__).resolve().parents[2]
-    / ".archon" / "commands" / "dark-factory-conformance.md"
+    Path(__file__).resolve().parents[1]
+    / "commands" / "dark-factory-conformance.md"
 )
 
 

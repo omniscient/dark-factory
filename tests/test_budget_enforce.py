@@ -577,8 +577,8 @@ def test_hardcoded_arch_caps_match_config_yaml():
     If this test fails, update _HARDCODED in budget_enforce.py (or config.yaml)
     so both sources agree — never let them drift silently.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    config_path = repo_root / ".claude" / "skills" / "refinement" / "config.yaml"
+    repo_root = Path(__file__).resolve().parents[1]
+    config_path = repo_root / "config" / "config.yaml"
     config = be._load_config(str(config_path))
     arch_cfg = config["token_optimization"]["architecture"]
     arch_hc = be._HARDCODED["token_optimization"]["architecture"]

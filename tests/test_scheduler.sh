@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for scheduler.sh helpers.
-# Run: bash dark-factory/tests/test_scheduler.sh
+# Run: bash tests/test_scheduler.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

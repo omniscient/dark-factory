@@ -2,14 +2,14 @@
 # run_suite.sh — Replay benchmark suite runner
 #
 # Usage:
-#   dark-factory/bench/run_suite.sh [OPTIONS]
+#   bench/run_suite.sh [OPTIONS]
 #
 # Options:
-#   --tasks FILE      Path to suite manifest (default: dark-factory/bench/suite.json)
+#   --tasks FILE      Path to suite manifest (default: bench/suite.json)
 #   --n N             Runs per task (default: 3)
 #   --k K             Exponent for pass^k formula (default: same as --n)
 #   --baseline        After collecting results, generate Haiku prose summaries and
-#                     write/update dark-factory/bench/baseline.md
+#                     write/update bench/baseline.md
 #   --issues LIST     Comma-separated issue numbers to run (default: all tasks)
 #   --dry-run         Print plan without running archon
 #
@@ -19,13 +19,13 @@
 #   ANTHROPIC_API_KEY   Required for --baseline Haiku summaries
 #
 # Output:
-#   Per-run JSON: dark-factory/bench/results/YYYY-MM-DD-HH-run.json
+#   Per-run JSON: bench/results/YYYY-MM-DD-HH-run.json
 #   Summary table: stdout
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BENCH_DIR="$REPO_ROOT/dark-factory/bench"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_DIR="$REPO_ROOT/bench"
 RESULTS_DIR="$BENCH_DIR/results"
 
 # Defaults
@@ -360,7 +360,7 @@ baseline_md = sys.argv[3]
 data = json.load(open(results_file))
 tasks = data.get("tasks", [])
 
-suite = json.load(open(Path(repo_root) / "dark-factory/bench/suite.json"))
+suite = json.load(open(Path(repo_root) / "bench/suite.json"))
 suite_by_issue = {t["issue"]: t for t in suite["tasks"]}
 
 for task in tasks:

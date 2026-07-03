@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the dispatch ceiling (issue #339): size/type classification helpers,
 # Priority 2 ceiling gate, Priority 3 guard, and plan_advance_check suppression.
-# Run: bash dark-factory/tests/test_dispatch_ceiling.sh
+# Run: bash tests/test_dispatch_ceiling.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

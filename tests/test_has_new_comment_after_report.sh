@@ -7,7 +7,7 @@
 # so the bot-authored cost report was mistaken for human feedback and a duplicate spec run
 # was dispatched. Only genuine human comments after the spec should return "yes".
 #
-# Run: bash dark-factory/tests/test_has_new_comment_after_report.sh
+# Run: bash tests/test_has_new_comment_after_report.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

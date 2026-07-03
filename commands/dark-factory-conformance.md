@@ -13,7 +13,7 @@ argument-hint: (no arguments - reads issue context from workflow)
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
+source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 AGENT_ID="${AGENT_ID_DECONFLICT}"
 ```
 
@@ -133,7 +133,7 @@ if [ -n "$PY_FILES" ]; then
   printf '%s\n' $PY_FILES > "$FILES_TMP"
 
   # Run the hunk filter; on script error fall back to raw diff (fail-open)
-  FILTER_OUT=$(python3 dark-factory/scripts/fmt_hunk_filter.py \
+  FILTER_OUT=$(python3 dark-factory/scripts/fmt_hunk_filter.py \  # TARGET-PATH
     "$DIFF_TMP" "$FILES_TMP" 2>/tmp/fmt_filter_err.txt) \
     && TRIAGED_DIFF="$FILTER_OUT" \
     || echo "pre-triage: fmt_hunk_filter.py failed — using raw diff ($(cat /tmp/fmt_filter_err.txt))"
@@ -162,7 +162,7 @@ absent). `$FILTER_ANNOTATION` is the one-line informational note (empty if no st
 RANK_IN=$(mktemp /tmp/rank_in_XXXXXX.txt)
 [ -f "$ARTIFACTS_DIR/token-opt-caps.env" ] && . "$ARTIFACTS_DIR/token-opt-caps.env" || true
 printf '%s' "$TRIAGED_DIFF" > "$RANK_IN"
-RANKED=$(python3 dark-factory/scripts/diff_rank.py \
+RANKED=$(python3 dark-factory/scripts/diff_rank.py \  # TARGET-PATH
   --diff "$RANK_IN" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --config ".claude/skills/refinement/config.yaml" \
@@ -312,7 +312,7 @@ OOS_ENTRIES_JSON=$(python3 -c \
   "import json,sys; entries=sys.argv[1:]; print(json.dumps(entries))" \
   "${OOS_ENTRIES[@]}")
 
-DEDUPE_OUT=$(python3 dark-factory/scripts/dedupe_oos.py \
+DEDUPE_OUT=$(python3 dark-factory/scripts/dedupe_oos.py \  # TARGET-PATH
   --oos "$OOS_ENTRIES_JSON" --spillovers "$SPILLOVER_JSON" 2>/tmp/dedupe_err.txt) \
   && ACTION_LIST="$DEDUPE_OUT" \
   || {

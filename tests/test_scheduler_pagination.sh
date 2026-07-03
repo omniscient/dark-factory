@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit test for ProjectV2 pagination in scheduler.sh.
-# Run: bash dark-factory/tests/test_scheduler_pagination.sh
+# Run: bash tests/test_scheduler_pagination.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,7 +13,7 @@ export GH_TOKEN="${GH_TOKEN:-stub-token}"
 export CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-stub-token}"
 export SCHEDULER_SOURCE_ONLY=1
 export SCHEDULER_STATE_DIR="$(mktemp -d /tmp/sched-page-test-statedir-XXXXXX)"
-export FACTORY_CORE_CLI="$PWD/dark-factory/scripts/factory_core/cli.py"
+export FACTORY_CORE_CLI="$SCRIPT_DIR/../scripts/factory_core/cli.py"
 
 STUB_LOG="$(mktemp /tmp/sched-page-test-gh-XXXXXX.log)"
 

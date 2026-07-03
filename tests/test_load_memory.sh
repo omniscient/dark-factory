@@ -17,7 +17,7 @@ assert() {
 AFFECTED="backend/app/routers/scanner.py"
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/dark-factory/scripts/agent_roles.sh"
+source "${REPO_ROOT}/scripts/agent_roles.sh"
 
 load_memory() {
   local MEMFILE="$1"

@@ -1,7 +1,7 @@
 from pathlib import Path
 import yaml
 
-CONFIG = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "refinement" / "config.yaml"
+CONFIG = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
 
 def test_code_review_block_present_with_defaults():
     cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))

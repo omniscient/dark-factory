@@ -2,7 +2,7 @@
 # Evaluation script for rohitg00/agentmemory spike (#644).
 #
 # Usage (from host, after starting the engine + worker):
-#   AGENTMEMORY_URL=http://<engine-ip>:3111 bash dark-factory/scripts/eval_agentmemory.sh
+#   AGENTMEMORY_URL=http://<engine-ip>:3111 bash scripts/eval_agentmemory.sh
 #
 # Prerequisites — two steps:
 #   1. docker compose --profile agentmemory-spike up -d agentmemory-init agentmemory-engine

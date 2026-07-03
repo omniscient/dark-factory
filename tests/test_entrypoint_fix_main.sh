@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verifies entrypoint.sh routes "Fix main" to the fixer, disambiguated from INTENT=fix,
 # and BEFORE the smoke gate can red-exit.
-# Run: bash dark-factory/tests/test_entrypoint_fix_main.sh
+# Run: bash tests/test_entrypoint_fix_main.sh
 set -euo pipefail
 ep="$(cd "$(dirname "$0")" && pwd)/../entrypoint.sh"
 

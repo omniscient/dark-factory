@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Verifies the epic_autopilot config section + scheduler.sh read_config wiring.
-# Run (needs yq): bash dark-factory/tests/test_epic_autopilot_config.sh
+# Run (needs yq): bash tests/test_epic_autopilot_config.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-cfg="$HERE/../../.claude/skills/refinement/config.yaml"
+cfg="$HERE/../config/config.yaml"
 sched="$HERE/../scheduler.sh"
 
 val=$(yq '.epic_autopilot.enabled' "$cfg")

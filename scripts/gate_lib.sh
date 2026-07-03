@@ -4,7 +4,7 @@
 # Do NOT add set -euo pipefail: this file is sourced and must not alter caller shell options.
 
 GATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=dark-factory/scripts/agent_roles.sh
+# shellcheck source=scripts/agent_roles.sh
 source "${GATE_LIB_DIR}/agent_roles.sh"
 
 route_memory_file() {

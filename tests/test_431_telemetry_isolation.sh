@@ -2,7 +2,7 @@
 # Test: run_post_mortem() writes failure telemetry to ARTIFACTS_DIR,
 # with zero git operations — no worktree, no push, no commit.
 # Issue #521
-# Run: bash dark-factory/tests/test_431_telemetry_isolation.sh
+# Run: bash tests/test_431_telemetry_isolation.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

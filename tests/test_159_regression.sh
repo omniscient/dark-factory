@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression test for the #159 dispatch loop.
 # Simulates: unlabelled Backlog issue, failing dispatch, N cycles → Blocked.
-# Run: bash dark-factory/tests/test_159_regression.sh
+# Run: bash tests/test_159_regression.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

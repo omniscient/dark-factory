@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression tests for the preview environment differentiator.
 # Tests the preview-up guard logic and validate skip path.
-# Run: bash dark-factory/tests/test_preview_differentiator.sh
+# Run: bash tests/test_preview_differentiator.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

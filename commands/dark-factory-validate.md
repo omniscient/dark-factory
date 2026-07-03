@@ -45,7 +45,7 @@ if [ "$BLAST_ENABLED" != "skip" ]; then
   LINES=$((ADDED + DELETED))
 
   # 2. Run the blast-radius checker — pass real line count via --lines-changed
-  echo "$CHANGED" | python3 dark-factory/scripts/gate_blast_radius.py \
+  echo "$CHANGED" | python3 dark-factory/scripts/gate_blast_radius.py \  # TARGET-PATH
     --changed-files-stdin \
     --lines-changed "$LINES" \
     --hotspots docs/codeindex-hotspots.md \
@@ -110,7 +110,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel)
 ISSUE_ARG=""
 [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]] && ISSUE_ARG="--issue $ISSUE_NUM"
 
-MEMORY_CONTEXT=$(python3 "${REPO_ROOT}/dark-factory/scripts/memory_retrieve.py" \
+MEMORY_CONTEXT=$(python3 "${REPO_ROOT}/dark-factory/scripts/memory_retrieve.py" \  # TARGET-PATH
   --phase validate \
   --files "$AFFECTED" \
   $ISSUE_ARG \

@@ -13,7 +13,7 @@ argument-hint: (no arguments - reads issue/PR context from the workflow)
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
+source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 AGENT_ID="${AGENT_ID_CODE_REVIEW}"
 ```
 
@@ -51,7 +51,7 @@ git diff main...HEAD \
   ':!codeindex.json' ':!symbolindex.json' \
   ':!docs/codeindex-hotspots.md' ':!docs/database-schema.md' \
   2>/dev/null > "$RANK_IN"
-python3 dark-factory/scripts/diff_rank.py \
+python3 dark-factory/scripts/diff_rank.py \  # TARGET-PATH
   --diff "$RANK_IN" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --config ".claude/skills/refinement/config.yaml" \
@@ -89,7 +89,7 @@ rm -f "$RANK_IN"
 Run the deterministic helper to parse findings, anchor them to the diff, apply the threshold, and build the GitHub review payload:
 
 ```bash
-python3 dark-factory/scripts/code_review_payload.py \
+python3 dark-factory/scripts/code_review_payload.py \  # TARGET-PATH
   --review "$ARTIFACTS_DIR/review_findings.md" \
   --diff "$ARTIFACTS_DIR/review_diff.txt" \
   --block-threshold "$BLOCK_THRESHOLD" \

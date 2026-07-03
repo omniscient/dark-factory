@@ -2,11 +2,11 @@
 # Smoke test: memory_retrieve.py integrates correctly with all 4 Dark Factory phases.
 # Asserts exit 0 for each phase, validates phase→source filter, and confirms
 # the --issue flag passes through cleanly.
-# Run manually: bash dark-factory/tests/test_memory_integration.sh
+# Run manually: bash tests/test_memory_integration.sh
 set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
-SCRIPT="${REPO_ROOT}/dark-factory/scripts/memory_retrieve.py"
+SCRIPT="${REPO_ROOT}/scripts/memory_retrieve.py"
 MEMORY_DIR="${REPO_ROOT}/.archon/memory"
 
 PASS=0; FAIL=0

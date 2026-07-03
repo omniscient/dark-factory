@@ -1,7 +1,7 @@
 """
 Unit tests for memory_write.py — markdown write pipeline.
 Tests are pure filesystem: no mocking, no network.
-Run from repo root: pytest dark-factory/tests/test_memory_write.py -v
+Run from repo root: pytest tests/test_memory_write.py -v
 """
 import json
 import re

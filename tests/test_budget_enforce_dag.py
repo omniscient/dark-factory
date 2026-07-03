@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_CONFIG = _REPO_ROOT / ".claude/skills/refinement/config.yaml"
-_WORKFLOW = _REPO_ROOT / ".archon/workflows/archon-dark-factory.yaml"
-_LOAD_MEMORY = _REPO_ROOT / "dark-factory/scripts/load_memory_context.sh"
-_CODE_REVIEW_CMD = _REPO_ROOT / ".archon/commands/dark-factory-code-review.md"
-_CONFORMANCE_CMD = _REPO_ROOT / ".archon/commands/dark-factory-conformance.md"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_CONFIG = _REPO_ROOT / "config/config.yaml"
+_WORKFLOW = _REPO_ROOT / "workflows/archon-dark-factory.yaml"
+_LOAD_MEMORY = _REPO_ROOT / "scripts/load_memory_context.sh"
+_CODE_REVIEW_CMD = _REPO_ROOT / "commands/dark-factory-code-review.md"
+_CONFORMANCE_CMD = _REPO_ROOT / "commands/dark-factory-conformance.md"
 
 
 def _config():
@@ -252,7 +252,7 @@ def test_implement_retains_trigger_rule():
 # ── T3-D10: DAG validator passes (tripwire count unchanged) ──────────────────
 
 def test_dag_validator_passes():
-    sys.path.insert(0, str(_REPO_ROOT / "dark-factory/scripts"))
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
     from check_workflow_dag import check
     errors = check(_WORKFLOW)
     assert errors == [], "\n".join(errors)

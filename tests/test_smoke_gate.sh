@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for issue #332: smoke gate must not increment per-ticket counters on red main.
-# Run: bash dark-factory/tests/test_smoke_gate.sh
+# Run: bash tests/test_smoke_gate.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
