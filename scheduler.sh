@@ -22,16 +22,18 @@ STATUS_BLOCKED="93d87b2f"
 STATUS_DONE="98236657"
 STATUS_BACKLOG="f75ad846"
 STATUS_REFINED="0c79ebe5"
-FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/workspace/project/dark-factory/scripts/factory_core/cli.py}"
+FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/workspace/project/scripts/factory_core/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
 REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review,plan-pending-review"
 REFINE_MAX_RETRIES="${REFINE_MAX_RETRIES:-3}"
 
 # --- Config YAML resolution ---
-# Ordered search: bind-mounted repo (local dev / deletion test) → baked image (production).
+# Ordered search: bind-mounted repo (canonical new location) → baked image (config/) →
+# baked image legacy (refinement-skills/, compat fallback for P2 transition).
 CONFIG_YAML_PATHS=(
-  "/workspace/project/.claude/skills/refinement/config.yaml"
+  "/workspace/project/config/config.yaml"
+  "/opt/dark-factory/config/config.yaml"
   "/opt/refinement-skills/config.yaml"
 )
 

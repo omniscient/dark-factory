@@ -419,6 +419,7 @@ ${RUN_ROWS}
 on_failure() {
   local EXIT_CODE=$?
   # Capture partial-failure record before any other action (non-fatal)
+  # TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
     --run-id "${RUN_ID:-unknown}" \
     --issue "${ISSUE_NUM:-0}" \
@@ -479,6 +480,7 @@ trap on_failure ERR
 # Merge origin/main into HEAD using the tiered factory_core resolver.
 # Returns 0 on clean merge or successful resolution, 1 after Tier-3 escalation.
 _resolve_merge_conflicts() {
+  # TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" \
     deconflict --issue "$ISSUE_NUM" || return $?
 }
@@ -500,6 +502,7 @@ cd "$CLONE_DIR"
 _entrypoint_cfg_apply
 
 # --- Copy preview template and seed data into clone ---
+# TARGET-PATH: the TARGET clone (MarketHawk) still has a dark-factory/ subdirectory until Phase 3
 mkdir -p "$CLONE_DIR/dark-factory"
 cp /opt/dark-factory/docker-compose.preview.yml "$CLONE_DIR/dark-factory/docker-compose.preview.yml"
 cp -r /opt/dark-factory/seed/ "$CLONE_DIR/dark-factory/seed/"
@@ -540,7 +543,7 @@ if [ "$INTENT" = "fix-main" ]; then
     echo "[fix-main] disabled (MAIN_RED_AUTOFIX_ENABLED != true); exiting"
     exit 0
   fi
-  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" main-red-fix --once || true
+  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" main-red-fix --once || true  # TARGET-PATH
   exit 0
 fi
 
@@ -584,7 +587,7 @@ if [ "$INTENT" = "deconflict" ]; then
   # first. Scope clean to the copied dirs and never use -x, so gitignored node_modules survives
   # for the tsc validation below.
   git reset --hard HEAD >/dev/null 2>&1 || true
-  git clean -fd dark-factory/ .claude/ >/dev/null 2>&1 || true
+  git clean -fd dark-factory/ .claude/ >/dev/null 2>&1 || true  # TARGET-PATH: runs in $CLONE_DIR
 
   if ! git checkout "$FEATURE_BRANCH" 2>&1 \
        && ! git checkout -b "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH" 2>&1; then
@@ -709,6 +712,7 @@ done
 ARCHON_COST_JSON=$(mktemp)
 archon workflow cost --last --json --quiet > "$ARCHON_COST_JSON" 2>/dev/null || true
 
+# TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
 python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
   --run-id "${RUN_ID:-unknown}" \
   --issue "$ISSUE_NUM" \

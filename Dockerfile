@@ -106,14 +106,16 @@ RUN git clone https://github.com/omniscient/Archon.git /opt/archon && \
 # Workspace directory
 RUN mkdir -p /workspace
 
-# Copy entrypoint, scheduler, preview template, seed data, and base compose file
-COPY dark-factory/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY dark-factory/scheduler.sh /opt/dark-factory/scheduler.sh
-COPY dark-factory/smoke_gate.sh /opt/dark-factory/smoke_gate.sh
-COPY dark-factory/docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
-COPY dark-factory/seed/ /opt/dark-factory/seed/
-COPY docker-compose.yml /opt/dark-factory/docker-compose.yml
-COPY .claude/skills/refinement/ /opt/refinement-skills/
+# Copy entrypoint, scheduler, preview template, seed data, and factory config
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY scheduler.sh /opt/dark-factory/scheduler.sh
+COPY smoke_gate.sh /opt/dark-factory/smoke_gate.sh
+COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
+COPY seed/ /opt/dark-factory/seed/
+# NOTE: docker-compose.yml (MarketHawk app compose) is NOT baked — it is TARGET material
+# read from ${CLONE_DIR}/docker-compose.yml at runtime.
+COPY refinement-skills/ /opt/refinement-skills/
+COPY config/ /opt/dark-factory/config/
 RUN chmod +x /usr/local/bin/entrypoint.sh /opt/dark-factory/scheduler.sh /opt/dark-factory/smoke_gate.sh
 
 # Non-root factory user — must be created AFTER all root-level installs.
