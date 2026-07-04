@@ -106,11 +106,26 @@ All assertions PASSED
 
 ## 5. Identity-Override Smoke
 
-**Bash syntax check:**
+**Full override check (scheduler.sh + entrypoint.sh syntax validation under identity override):**
 ```bash
-bash -n scripts/identity.sh
-# → (exit 0, "syntax OK")
+FACTORY_OWNER=acme FACTORY_REPO=widgets bash -c '
+  source scripts/identity.sh
+  bash -n scheduler.sh && echo "scheduler.sh: syntax OK"
+  bash -n entrypoint.sh && echo "entrypoint.sh: syntax OK"
+  echo "SLUG=$FACTORY_REPO_SLUG"'
 ```
+
+**Output:**
+```
+scheduler.sh: syntax OK
+entrypoint.sh: syntax OK
+SLUG=acme/widgets
+```
+
+**Result: PASS** — identity override working correctly:
+- `FACTORY_OWNER=acme` and `FACTORY_REPO=widgets` sourced through `scripts/identity.sh`
+- Both `scheduler.sh` and `entrypoint.sh` have valid bash syntax under override context
+- `FACTORY_REPO_SLUG` correctly computed as `acme/widgets` from override variables
 
 **Environment-variable override pattern verified:**
 ```
