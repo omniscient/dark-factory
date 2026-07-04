@@ -321,9 +321,9 @@ def test_integration_dry_run_real_memory():
     result = mi.run_import(memory_dir, dry_run=True)
     records = result["records"]
 
-    # Total entry count must be at least 100 across all five files
-    assert result["totals"]["total"] >= 100, (
-        f"Expected >=100 entries, got {result['totals']['total']}"
+    # Total entry count must be at least 30 (seeded dark-factory-ops.md only, no target-domain leaks)
+    assert result["totals"]["total"] >= 30, (
+        f"Expected >=30 entries, got {result['totals']['total']}"
     )
 
     # No duplicate IDs
