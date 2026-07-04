@@ -14,6 +14,25 @@ import subprocess
 
 from . import identity
 
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+try:
+    from .adapter_defaults import DEFAULTS as _AD
+    _DEFAULT_ALLOWED_PATHS = _AD["safety"]["main_red_allowed_paths"]
+except Exception:
+    _DEFAULT_ALLOWED_PATHS = ["backend/", "frontend/", "alembic/", "dark-factory/smoke_gate.sh"]
+
+
+def _main_red_allowed_paths(clone_dir: str | None = None) -> list:
+    """Return main_red_allowed_paths from adapter at use-time, falling back to defaults."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "safety.main_red_allowed_paths")
+        if val is not None and isinstance(val, list):
+            return val
+    except Exception:
+        pass
+    return list(_DEFAULT_ALLOWED_PATHS)
+
 
 def classify_scope(changed_paths: list, allowed: list, blocked: list) -> str:
     """'protected' if ANY changed path matches a blocked prefix (fail-closed, dominates);
@@ -252,13 +271,13 @@ def main_once() -> int:
             state = json.load(f)
     except Exception:
         state = {}
+    clone_dir = os.environ.get("CLONE_DIR", ".")
     cfg = dict(
         max_attempts=int(os.environ.get("MAIN_RED_AUTOFIX_MAX_ATTEMPTS", "3")),
         model=os.environ.get("MAIN_RED_AUTOFIX_MODEL", "claude-opus-4-8"),
         ci_wait_minutes=int(os.environ.get("MAIN_RED_AUTOFIX_CI_WAIT_MINUTES", "20")),
         agent_timeout=int(os.environ.get("MAIN_RED_AUTOFIX_AGENT_TIMEOUT", "1200")),
-        allowed_paths=["backend/", "frontend/", "alembic/", "dark-factory/smoke_gate.sh",
-                       "docker-compose", ".github/", ".env"],
+        allowed_paths=_main_red_allowed_paths(clone_dir) + ["docker-compose", ".github/", ".env"],
         blocked_paths=["dark-factory/scheduler.sh", "dark-factory/scripts/factory_core/",
                        "dark-factory/entrypoint.sh"])
     try:
