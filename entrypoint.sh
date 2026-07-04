@@ -228,7 +228,7 @@ ${post_mortem_text}
 **Exit code:** ${exit_code} | **Phase:** ${INTENT:-fix} | **Timestamp:** ${PROMOTED_AT}
 
 ---
-*Posted by MarketHawk Dark Factory*" || true
+*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" || true
 
   # Write failure telemetry to per-run ARTIFACTS_DIR (no git operations).
   if [ -n "${ARTIFACTS_DIR:-}" ]; then
@@ -393,7 +393,7 @@ ${RUN_ROWS}
 | **Subtotal** | | **$(fmt_tokens "$TOTAL_IN")** | **$(fmt_tokens "$TOTAL_OUT")** | **\$${TOTAL_COST}** | |
 
 ---
-*Updated by MarketHawk Dark Factory*"
+*Updated by ${FACTORY_PRODUCT_NAME} Dark Factory*"
 
   # Create or update the comment
   local TMPFILE
@@ -442,7 +442,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
 
 ---
-*Posted by MarketHawk Refinement Pipeline*"
+*Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
     else
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "" || true
@@ -460,7 +460,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
 
 ---
-*Posted by MarketHawk Dark Factory*"
+*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
     fi
   fi
   # Cost report runs LAST and is non-fatal: a failure here (missing dependency,
@@ -645,7 +645,7 @@ EOF
 The branch has been pushed and is ready for re-review.
 
 ---
-*Posted by MarketHawk Dark Factory*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" 2>/dev/null || true
 
   echo "[deconflict] Done — issue #${ISSUE_NUM} conflicts resolved and pushed."
   exit 0

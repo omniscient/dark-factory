@@ -31,14 +31,15 @@ gh() {
   esac
 }
 
-REPORT_MARKER="Posted by MarketHawk Refinement Pipeline"
+REPORT_MARKER="Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline"
 PASS=0
 FAIL=0
 
-# Footers used by the comment factories, kept verbatim so the test breaks if they drift.
-SCHED_FOOTER="*Posted by MarketHawk Backlog Scheduler*"
-SPEC_FOOTER="*Posted by MarketHawk Refinement Pipeline*"
-COST_FOOTER="*Updated by MarketHawk Dark Factory*"
+# Footers used by the comment factories; derived from FACTORY_PRODUCT_NAME so the test
+# tracks any configured instance identity (defaults to MarketHawk parity when unset).
+SCHED_FOOTER="*Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Backlog Scheduler*"
+SPEC_FOOTER="*Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline*"
+COST_FOOTER="*Updated by ${FACTORY_PRODUCT_NAME:-MarketHawk} Dark Factory*"
 
 # Build a GitHub-shaped comments array from the body strings passed as arguments.
 # Uses jq --args (NOT process substitution, which is broken under MSYS bash).

@@ -318,7 +318,7 @@ spec_advance_check() {
   local item="$2"
   has_skip_label "$item" && return 0
   local has_new
-  has_new=$(has_new_comment_after_report "$issue_num" "Posted by MarketHawk Refinement Pipeline")
+  has_new=$(has_new_comment_after_report "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:refine"
     gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
@@ -327,7 +327,7 @@ spec_advance_check() {
 "🔄 **Refinement Pipeline** — Re-running with new feedback.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
     if dispatch "Refine issue #${issue_num}"; then
       DISPATCHED="Refine issue #${issue_num}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -336,7 +336,7 @@ spec_advance_check() {
   fi
   if has_direct_to_pr_label "$item"; then
     local elapsed
-    elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by MarketHawk Refinement Pipeline")
+    elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$SPEC_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
       gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
@@ -353,7 +353,7 @@ plan_advance_check() {
   local item="$2"
   has_skip_label "$item" && return 0
   local has_new
-  has_new=$(has_new_comment_after_report "$issue_num" "Posted by MarketHawk Refinement Pipeline")
+  has_new=$(has_new_comment_after_report "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:plan"
     gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
@@ -362,7 +362,7 @@ plan_advance_check() {
 "🔄 **Refinement Pipeline** — Re-running plan with new feedback.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
     if dispatch "Plan issue #${issue_num}"; then
       DISPATCHED="Plan issue #${issue_num}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -376,7 +376,7 @@ plan_advance_check() {
   fi
   if has_direct_to_pr_label "$item"; then
     local elapsed
-    elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by MarketHawk Refinement Pipeline")
+    elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$PLAN_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
       gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
@@ -435,7 +435,7 @@ has_new_comment_after_report() {
   # posts pipeline-status comments — none are feedback, so re-running the spec on them
   # loops the pipeline (issue #124: cost report -> spurious second spec). Match on
   # footer/marker, NOT author: every comment is authored by the same PAT account.
-  local bot_re="Posted by MarketHawk Refinement Pipeline|Posted by MarketHawk Backlog Scheduler|Posted by MarketHawk Dark Factory|Updated by MarketHawk Dark Factory|dark-factory-cost-report|Posted by MarketHawk Epic Autopilot"
+  local bot_re="Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline|Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler|Posted by ${FACTORY_PRODUCT_NAME} Dark Factory|Updated by ${FACTORY_PRODUCT_NAME} Dark Factory|dark-factory-cost-report|Posted by ${FACTORY_PRODUCT_NAME} Epic Autopilot"
 
   local has_human
   has_human=$(echo "$comments" | jq --arg marker "$report_marker" --arg bot "$bot_re" '
@@ -663,7 +663,7 @@ get_new_comments() {
   comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
 
   local factory_idx
-  factory_idx=$(echo "$comments" | jq 'map(.body) | to_entries | map(select(.value | test("Posted by MarketHawk Dark Factory"))) | last | .key // -1')
+  factory_idx=$(echo "$comments" | jq --arg pat "Posted by ${FACTORY_PRODUCT_NAME} Dark Factory" 'map(.body) | to_entries | map(select(.value | test($pat))) | last | .key // -1')
 
   if [ "$factory_idx" = "-1" ]; then
     echo "$comments"
@@ -851,7 +851,7 @@ PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In r
 ${FAIL_LIST}
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
 
     CI_BLOCKED="${CI_BLOCKED} ${ISSUE} "
   done < <(echo "$IN_REVIEW" | jq -c '.[]')
@@ -913,7 +913,7 @@ ${FAIL_LIST}
 This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
   done < <(echo "$IN_PROGRESS" | jq -c '.[]')
 
   # --- Read main-is-red sentinel (written by smoke_gate.sh in dispatched containers) ---
@@ -1040,7 +1040,7 @@ To proceed:
    Or implement directly in a local worktree.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
         fi
         continue
       fi
@@ -1117,7 +1117,7 @@ To proceed:
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
     if dispatch "Plan issue #${ISSUE}"; then
       DISPATCHED="Plan issue #${ISSUE}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -1155,7 +1155,7 @@ To proceed:
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
 
 ---
-*Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
+*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
     if dispatch "Refine issue #${ISSUE}"; then
       DISPATCHED="Refine issue #${ISSUE}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
