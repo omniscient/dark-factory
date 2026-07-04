@@ -90,6 +90,8 @@ For a non-MarketHawk target, every `FACTORY_*` identity variable must be
 overridden. Run the GraphQL queries in the example file's comments to retrieve
 your project board IDs.
 
+Per-instance configs live under `deploy/instances/` (markethawk: see [`docs/cutover-markethawk.md`](docs/cutover-markethawk.md)).
+
 ### 3. Point PROJECT_DIR at your target repo
 
 ```bash
