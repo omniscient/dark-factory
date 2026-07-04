@@ -149,7 +149,7 @@ Exit `0`. `status-in-review` and `report` proceed.
    Fix the issues and re-run: \`docker compose --profile factory run --rm dark-factory \\\"Continue issue #${ISSUE_NUM}\\\"\`, or add \`needs-discussion\` if a finding is a false positive.
 
    ---
-   *Posted by MarketHawk Dark Factory*"
+   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
    ```
 2. Move the issue to **Blocked** on the project board:
    ```bash

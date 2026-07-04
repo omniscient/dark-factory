@@ -184,7 +184,7 @@ Weekly revisit of the dispatch ceiling policy introduced in #339.
 **${NEXT_DATE}** (weekly from ${UNTIL}).
 
 ---
-*Filed automatically by MarketHawk weekly ceiling revisit agent*" \
+*Filed automatically by ${FACTORY_PRODUCT_NAME} weekly ceiling revisit agent*" \
   --label "enhancement" \
   --label "priority: should-have" \
   --label "size: S" \

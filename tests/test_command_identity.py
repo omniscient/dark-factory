@@ -10,3 +10,6 @@ def test_no_hardcoded_project_id():
         t = f.read_text(encoding="utf-8")
         assert "PVT_kwHOAAFds84BWh4w" not in t, f
         assert "PVTSSF_lAHOAAFds84BWh4wzhR1VaA" not in t, f
+def test_no_literal_by_markethawk():
+    for f in FILES:
+        assert "by MarketHawk" not in f.read_text(encoding="utf-8"), f

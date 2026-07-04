@@ -203,7 +203,7 @@ Follow the process in `orchestrator-prompt.md`:
    - ❓ **Need to discuss** — add the `needs-discussion` label to pause automation.
 
    ---
-   *Posted by MarketHawk Refinement Pipeline*
+   *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
    ```
 6. Write status to `$ARTIFACTS_DIR/refinement-status.md`:
    ```

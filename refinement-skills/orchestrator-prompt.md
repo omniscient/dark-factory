@@ -58,7 +58,7 @@ Fix issues inline.
 
 ### Phase 6: Publish
 1. Commit the spec to the current branch
-2. Build GitHub links for the spec file and branch (using `https://github.com/omniscient/markethawk/blob/<branch>/<path>`)
+2. Build GitHub links for the spec file and branch (using `https://github.com/${FACTORY_REPO_SLUG}/blob/<branch>/<path>`)
 3. Post a summary comment on the issue including:
    - Links to spec file and branch on GitHub
    - The full Q&A log from Phase 2 (every question and answer)

@@ -113,8 +113,9 @@ COPY smoke_gate.sh /opt/dark-factory/smoke_gate.sh
 COPY scripts/ /opt/dark-factory/scripts/
 COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
 COPY seed/ /opt/dark-factory/seed/
-# NOTE: docker-compose.yml (MarketHawk app compose) is NOT baked — it is TARGET material
-# read from ${CLONE_DIR}/docker-compose.yml at runtime.
+# Factory-owned run compose (NOT the target project's docker-compose.yml).
+# scheduler.sh dispatch() calls: docker compose -f /opt/dark-factory/docker-compose.yml run dark-factory
+COPY run-compose.yml /opt/dark-factory/docker-compose.yml
 COPY refinement-skills/ /opt/refinement-skills/
 COPY config/ /opt/dark-factory/config/
 RUN chmod +x /usr/local/bin/entrypoint.sh /opt/dark-factory/scheduler.sh /opt/dark-factory/smoke_gate.sh /opt/dark-factory/scripts/identity.sh

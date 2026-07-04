@@ -299,7 +299,9 @@ except Exception:
         r"trading|ibkr|live order|notional|authentication|authorization"
         r"|authn|authz|jwt|oauth|rbac|/auth"
     )
-_CONFIG_PATHS = ["/workspace/project/.claude/skills/refinement/config.yaml",
+_CONFIG_PATHS = ["/workspace/project/config/config.yaml",
+                 "/opt/dark-factory/config/config.yaml",
+                 "/workspace/project/.claude/skills/refinement/config.yaml",
                  "/opt/refinement-skills/config.yaml"]
 
 

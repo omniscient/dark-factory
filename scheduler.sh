@@ -11,7 +11,7 @@ STATE_FILE="${SCHEDULER_STATE_DIR}/scheduler-state.json"
 RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
-FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/workspace/project/scripts/factory_core/cli.py}"
+FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
 REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review,plan-pending-review"

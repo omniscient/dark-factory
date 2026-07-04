@@ -16,7 +16,7 @@ def _board_move(args):
 def _deconflict(args):
     from factory_core.deconflict import resolve_merge_conflicts
     from factory_core import identity
-    clone_dir = os.environ.get("CLONE_DIR", f"/workspace/{identity.REPO}")
+    clone_dir = os.environ.get("CLONE_DIR", identity.CLONE_DIR)
     artifacts_dir = os.environ.get("ARTIFACTS_DIR", f"/tmp/artifacts/{args.issue}")
     if args.repo:
         owner, _, repo = args.repo.partition("/")
