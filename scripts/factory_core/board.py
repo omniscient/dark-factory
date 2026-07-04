@@ -3,18 +3,20 @@ import os
 import subprocess
 import tempfile
 
-OWNER = "omniscient"
-REPO = "markethawk"
+from . import identity
+
+OWNER = identity.OWNER
+REPO = identity.REPO
 PROJECT_NUMBER = 1
-PROJECT_ID = "PVT_kwHOAAFds84BWh4w"
-STATUS_FIELD = "PVTSSF_lAHOAAFds84BWh4wzhR1VaA"
-STATUS_READY = "61e4505c"
-STATUS_IN_PROGRESS = "47fc9ee4"
-STATUS_IN_REVIEW = "df73e18b"
-STATUS_BLOCKED = "93d87b2f"
-STATUS_DONE = "98236657"
-STATUS_BACKLOG = "f75ad846"
-STATUS_REFINED = "0c79ebe5"
+PROJECT_ID = identity.PROJECT_ID
+STATUS_FIELD = identity.STATUS_FIELD
+STATUS_READY = identity.STATUS["ready"]
+STATUS_IN_PROGRESS = identity.STATUS["in_progress"]
+STATUS_IN_REVIEW = identity.STATUS["in_review"]
+STATUS_BLOCKED = identity.STATUS["blocked"]
+STATUS_DONE = identity.STATUS["done"]
+STATUS_BACKLOG = identity.STATUS["backlog"]
+STATUS_REFINED = identity.STATUS["refined"]
 
 
 def find_board_item(issue_num: int) -> str:

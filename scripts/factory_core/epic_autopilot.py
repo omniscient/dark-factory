@@ -244,7 +244,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
                 io.promote_epic(epic_num)
                 io.comment(epic_num,
                            "\U0001f916 **Epic Autopilot** — starting epic: promoted to In progress and "
-                           "marked its open children ready-for-agent.\n\n---\n*Posted by MarketHawk Epic Autopilot*")
+                           f"marked its open children ready-for-agent.\n\n---\n{identity.marker('autopilot')}")
                 io.notify(f"Autopilot starting epic #{epic_num}",
                           "Promoted to In progress; children marked ready-for-agent.", "info", None)
                 record_advance(state, today)
@@ -262,7 +262,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
         reason = "; ".join(verdict.get("reasons", [])) or "low-risk"
         io.comment(cand["number"],
                    f"\U0001f916 **Epic Autopilot** — advancing (risk={verdict['risk']}, conf={verdict['confidence']}). "
-                   f"Reason: {reason}\n\n---\n*Posted by MarketHawk Epic Autopilot*")
+                   f"Reason: {reason}\n\n---\n{identity.marker('autopilot')}")
         io.notify(f"Autopilot advancing #{cand['number']}",
                   f"{cand['title']} — risk=low: {reason}", "info", None)
         record_advance(state, today)
@@ -271,7 +271,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
 
     concerns = "; ".join(verdict.get("concerns", [])) or "not low-risk / low confidence"
     io.comment(cand["number"],
-               f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n*Posted by MarketHawk Epic Autopilot*")
+               f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}")
     record_verdict(state, cand["number"], h, "HOLD", now_iso)
     return {"outcome": "hold", "issue": cand["number"], "reason": concerns}
 
@@ -282,9 +282,10 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
 import os  # noqa: E402
 import subprocess  # noqa: E402
 import urllib.request  # noqa: E402
+from . import identity  # noqa: E402
 
-OWNER = "omniscient/markethawk"
-PROJECT_ID = "PVT_kwHOAAFds84BWh4w"
+OWNER = identity.SLUG
+PROJECT_ID = identity.PROJECT_ID
 _GATING_LABELS = ("plan-pending-review", "spec-pending-review")  # plan takes precedence
 _DEFAULT_EXCLUDE = ["dark-factory/", ".archon/", "scheduler.sh", "factory_core/",
                     "app/services/trading", "app/tasks/trading.py", "app/core/auth", "app/routers/auth"]
@@ -341,8 +342,8 @@ def _ready_epics() -> list:
 
 def _open_child_numbers(epic: int) -> list:
     """All OPEN sub-issue numbers of an epic (any label)."""
-    q = ('query { repository(owner:"omniscient", name:"markethawk") { issue(number:%d) { '
-         'subIssues(first:50) { nodes { number state } } } } }') % epic
+    q = ('query { repository(owner:"%s", name:"%s") { issue(number:%d) { '
+         'subIssues(first:50) { nodes { number state } } } } }' % (identity.OWNER, identity.REPO, epic))
     data = _gh_json(["api", "graphql", "-f", "query=" + q])
     if not data:
         return []
@@ -370,8 +371,8 @@ def _in_progress_epics() -> list:
 
 
 def _sub_issue_numbers(epic: int) -> list:
-    q = ('query { repository(owner:"omniscient", name:"markethawk") { issue(number:%d) { '
-         'subIssues(first:50) { nodes { number state labels(first:20){nodes{name}} } } } } }') % epic
+    q = ('query { repository(owner:"%s", name:"%s") { issue(number:%d) { '
+         'subIssues(first:50) { nodes { number state labels(first:20){nodes{name}} } } } } }' % (identity.OWNER, identity.REPO, epic))
     data = _gh_json(["api", "graphql", "-f", "query=" + q])
     if not data:
         return []
