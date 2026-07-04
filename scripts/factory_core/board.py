@@ -7,7 +7,7 @@ from . import identity
 
 OWNER = identity.OWNER
 REPO = identity.REPO
-PROJECT_NUMBER = 1
+PROJECT_NUMBER = identity.PROJECT_NUMBER
 PROJECT_ID = identity.PROJECT_ID
 STATUS_FIELD = identity.STATUS_FIELD
 STATUS_READY = identity.STATUS["ready"]

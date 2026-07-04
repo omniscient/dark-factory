@@ -112,7 +112,7 @@ fi
 
 # --- Helper: look up project board item for this issue ---
 find_board_item() {
-  gh project item-list 1 --owner "$FACTORY_OWNER" --format json --limit 200 \
+  gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
     | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id"
 }
 
@@ -554,9 +554,9 @@ if [ "$INTENT" = "fix" ] || [ "$INTENT" = "continue" ] || [ "$INTENT" = "deconfl
 fi
 
 # --- Recheck flow: the run exists solely to re-evaluate the gate (#365) ---
-# Reaching this line means the gate passed (on red, run_smoke_gate exits 0 inside
-# _smoke_on_red). _smoke_on_green has already cleared the sentinel and closed the
-# regression ticket — there is no per-ticket work to do.
+# Reaching this line means the gate passed (on red, run_hook --gate smoke-gate exits 0
+# inside _smoke_on_red). _smoke_on_green has already cleared the sentinel and closed
+# the regression ticket — there is no per-ticket work to do.
 if [ "$INTENT" = "recheck" ]; then
   echo "[recheck] main is green — sentinel cleared; done."
   exit 0

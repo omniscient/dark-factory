@@ -12,6 +12,9 @@ jobs:
       - run: pip install pytest pyyaml
       - run: python -m pytest tests/ -v
         env: { PYTHONPATH: scripts }
+      - run: bash tests/test_identity.sh
+      - run: bash tests/test_hooks.sh
+      - run: bash tests/test_smoke_gate.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:

@@ -17,6 +17,15 @@ def _ok():
     return subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
 
+def test_project_number_tracks_env_override(monkeypatch):
+    import importlib
+    monkeypatch.setenv("FACTORY_PROJECT_NUMBER", "7")
+    from factory_core import identity as ident
+    importlib.reload(ident)
+    importlib.reload(board)
+    assert board.PROJECT_NUMBER == 7
+
+
 def test_find_board_item_found(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _items([
         {"id": "ITEM42", "content": {"number": 42, "type": "Issue"}},
