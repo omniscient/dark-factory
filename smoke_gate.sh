@@ -4,13 +4,17 @@
 # On red main: exits 0 (no ERR trap, no per-ticket board/retry/breaker change).
 # On green main: cleans up any prior red state and returns 0.
 
+# Source instance identity (env-overridable; defaults = MarketHawk parity).
+# Safe to source again if entrypoint.sh already sourced it — all vars use :- semantics.
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
+
 SMOKE_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
 SMOKE_MARKER="<!-- df-main-red -->"
 
 # Runs tsc + python import on origin/main. Returns 0 on full pass, non-zero on first failure.
 _smoke_check_main() {
   echo "[smoke_gate] Checking frontend TypeScript (tsc)..."
-  if ! (cd "${CLONE_DIR:-/workspace/markethawk}/frontend" \
+  if ! (cd "${CLONE_DIR:-$FACTORY_CLONE_DIR}/frontend" \
         && rm -f tsconfig.app.tsbuildinfo \
         && npx tsc -p tsconfig.app.json --noEmit 2>&1); then
     echo "[smoke_gate] tsc FAILED — main is red"
@@ -24,7 +28,7 @@ _smoke_check_main() {
   # without throwaway values the check is red in every factory container, so
   # every fix/continue/deconflict run false-latches the sentinel (#365). Same
   # pattern as docker-compose.preview.yml and ci.yml.
-  if ! (cd "${CLONE_DIR:-/workspace/markethawk}/backend" \
+  if ! (cd "${CLONE_DIR:-$FACTORY_CLONE_DIR}/backend" \
         && DATABASE_URL="postgresql://smoke:smoke@localhost:5432/smoke" \
            POLYGON_API_KEY="smoke-gate-only-not-a-real-key" \
            JWT_SECRET_KEY="smoke-gate-only-not-secret-0123456789abcdef" \
@@ -50,13 +54,13 @@ _smoke_on_red() {
     local REGR_NUM
     REGR_NUM=$(cat "$ISSUE_FILE")
     gh issue comment "$REGR_NUM" \
-      --repo "${OWNER:-omniscient}/markethawk" \
+      --repo "$FACTORY_REPO_SLUG" \
       --body "main still red at $(date -u +%FT%TZ) — factory implementation runs remain paused." \
       2>/dev/null || true
   else
     local REGR_URL
     REGR_URL=$(gh issue create \
-      --repo "${OWNER:-omniscient}/markethawk" \
+      --repo "$FACTORY_REPO_SLUG" \
       --label regression \
       --title "main is red: tsc/python import failure" \
       --body "${SMOKE_MARKER}
@@ -88,7 +92,7 @@ _smoke_on_green() {
     local REGR_NUM
     REGR_NUM=$(cat "$ISSUE_FILE")
     gh issue close "$REGR_NUM" \
-      --repo "${OWNER:-omniscient}/markethawk" \
+      --repo "$FACTORY_REPO_SLUG" \
       --comment "main smoke gate passed — closing regression ticket." \
       2>/dev/null || true
     rm -f "$ISSUE_FILE"

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Instance identity (env-overridable; defaults = MarketHawk parity) ---
+source /opt/dark-factory/scripts/identity.sh
+
 # --- Configuration ---
-REPO_URL="https://${GH_TOKEN}@github.com/omniscient/markethawk.git"
-CLONE_DIR="/workspace/markethawk"
-FACTORY_NAME="MarketHawk Factory"
-FACTORY_EMAIL="factory@markethawk"
+REPO_URL="https://${GH_TOKEN}@github.com/${FACTORY_REPO_SLUG}.git"
+CLONE_DIR="$FACTORY_CLONE_DIR"
+FACTORY_NAME="${FACTORY_PRODUCT_NAME} Factory"
+FACTORY_EMAIL="factory@${FACTORY_REPO}"
 
 # --- Validate required environment ---
 if [ -z "${GH_TOKEN:-}" ]; then
@@ -24,13 +27,7 @@ git config --global user.email "$FACTORY_EMAIL"
 # --- GitHub CLI auth (GH_TOKEN env var is auto-detected by gh) ---
 echo "GitHub auth: $(gh auth status 2>&1 | head -2 | tail -1 || echo 'using GH_TOKEN env var')"
 
-# --- Project board constants ---
-OWNER="omniscient"
-PROJECT_ID="PVT_kwHOAAFds84BWh4w"
-STATUS_FIELD="PVTSSF_lAHOAAFds84BWh4wzhR1VaA"
-STATUS_IN_PROGRESS="47fc9ee4"
-STATUS_IN_REVIEW="df73e18b"
-STATUS_BLOCKED="93d87b2f"
+# --- Project board constants (provided by identity.sh above) ---
 
 # Bootstrap defaults for pre-clone concurrency guard — overridden by _entrypoint_cfg_apply post-clone.
 FACTORY_WIP_LIMIT="${FACTORY_WIP_LIMIT:-1}"
@@ -92,7 +89,7 @@ esac
 # ARCHON_RUN_ID is not set by archon; always generate a UUID for correlation.
 RUN_ID=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
 RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-ARTIFACTS_DIR="${HOME}/.archon/workspaces/omniscient/markethawk/artifacts/runs/${RUN_ID}"
+ARTIFACTS_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs/${RUN_ID}"
 export ARTIFACTS_DIR
 mkdir -p "$ARTIFACTS_DIR"
 
@@ -104,7 +101,7 @@ mkdir -p "$ARTIFACTS_DIR"
 FACTORY_WIP_LIMIT="${FACTORY_WIP_LIMIT:-1}"
 MY_ID=$(cat /proc/self/cgroup 2>/dev/null | grep -oP '[a-f0-9]{64}' | head -1 || hostname)
 RUNNING=$(docker ps --format '{{.ID}} {{.Names}}' 2>/dev/null \
-  | grep 'markethawk-dark-factory-run-' \
+  | grep "${FACTORY_RUN_PREFIX}" \
   | grep -vc "${MY_ID:0:12}" || true)
 RUNNING=${RUNNING:-0}
 if [ "$RUNNING" -ge "$FACTORY_WIP_LIMIT" ]; then
@@ -115,7 +112,7 @@ fi
 
 # --- Helper: look up project board item for this issue ---
 find_board_item() {
-  gh project item-list 1 --owner omniscient --format json --limit 200 \
+  gh project item-list 1 --owner "$FACTORY_OWNER" --format json --limit 200 \
     | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id"
 }
 
@@ -125,15 +122,15 @@ set_board_status() {
   local ITEM_ID
   ITEM_ID=$(find_board_item)
   if [ -n "$ITEM_ID" ]; then
-    gh project item-edit --project-id "$PROJECT_ID" --id "$ITEM_ID" \
-      --field-id "$STATUS_FIELD" --single-select-option-id "$OPTION_ID"
+    gh project item-edit --project-id "$FACTORY_PROJECT_ID" --id "$ITEM_ID" \
+      --field-id "$FACTORY_STATUS_FIELD" --single-select-option-id "$OPTION_ID"
   fi
 }
 
 # --- Move to "In Progress" immediately (skip for close) ---
 if [ -n "$ISSUE_NUM" ] && [ "$INTENT" != "close" ] && [ "$INTENT" != "refine" ] && [ "$INTENT" != "plan" ] && [ "$INTENT" != "deconflict" ]; then
   echo "Moving issue #$ISSUE_NUM to In Progress..."
-  set_board_status "$STATUS_IN_PROGRESS" || echo "WARNING: Could not update project board"
+  set_board_status "$FACTORY_STATUS_IN_PROGRESS" || echo "WARNING: Could not update project board"
 fi
 
 # --- Helper: post or update cost report on issue ---
@@ -146,13 +143,13 @@ post_or_update_comment() {
   local marker="$1"
   local body="$2"
   local COMMENT_ID
-  COMMENT_ID=$(gh api "repos/omniscient/markethawk/issues/${ISSUE_NUM}/comments" \
+  COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
     --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty" 2>/dev/null || true)
   local TMPFILE
   TMPFILE=$(mktemp /tmp/failure-comment-XXXXXX.md)
   echo "$body" > "$TMPFILE"
   if [ -n "$COMMENT_ID" ]; then
-    gh api "repos/omniscient/markethawk/issues/comments/${COMMENT_ID}" \
+    gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
       --method PATCH -F "body=@${TMPFILE}" >/dev/null 2>&1 || true
   else
     gh issue comment "$ISSUE_NUM" --body-file "$TMPFILE" 2>/dev/null || true
@@ -178,7 +175,7 @@ run_post_mortem() {
   fi
 
   local artifacts_context=""
-  local ARTIFACTS_BASE_DIR="${HOME}/.archon/workspaces/omniscient/markethawk/artifacts/runs"
+  local ARTIFACTS_BASE_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs"
   # Find the most recent run artifacts directory for this issue
   local run_dir
   run_dir=$(ls -dt "${ARTIFACTS_BASE_DIR}"/*/issue.json 2>/dev/null \
@@ -241,7 +238,7 @@ ${post_mortem_text}
     local record
     record=$(printf '{"issue":%s,"title":"%s","phase":"%s","exit_code":%s,"postmortem":"%s","promoted_at":"%s"}\n' \
       "${ISSUE_NUM}" \
-      "$(gh issue view "${ISSUE_NUM}" --repo "omniscient/markethawk" --json title --jq '.title' 2>/dev/null | sed 's/"/\\"/g' || echo "unknown")" \
+      "$(gh issue view "${ISSUE_NUM}" --repo "$FACTORY_REPO_SLUG" --json title --jq '.title' 2>/dev/null | sed 's/"/\\"/g' || echo "unknown")" \
       "${INTENT:-fix}" \
       "${exit_code}" \
       "$(echo "$excerpt" | sed 's/"/\\"/g')" \
@@ -283,7 +280,7 @@ post_cost_report() {
 
   # Find existing cost report comment by marker
   local COMMENT_ID
-  COMMENT_ID=$(gh api "repos/omniscient/markethawk/issues/${ISSUE_NUM}/comments" \
+  COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
     --jq "[.[] | select(.body | contains(\"$COST_MARKER\"))] | last | .id // empty" 2>/dev/null || true)
 
   # If there's an existing comment, extract prior run sections and cumulative totals
@@ -293,7 +290,7 @@ post_cost_report() {
     # Single-comment endpoint omits the issue number: /issues/comments/{id}, NOT
     # /issues/{n}/comments/{id} (the latter 404s — it silently lost all prior-run
     # history and left the report frozen on its first run).
-    EXISTING_BODY=$(gh api "repos/omniscient/markethawk/issues/comments/${COMMENT_ID}" \
+    EXISTING_BODY=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
       --jq '.body' 2>/dev/null || true)
     PRIOR_RUNS=$(echo "$EXISTING_BODY" | sed -n '/^### Run:/,/^---$/p' | head -n -1 || true)
     PREV_COST=$(echo "$EXISTING_BODY" | grep -oP '<!-- cumulative: cost=\K[0-9.]+' || echo "0")
@@ -404,7 +401,7 @@ ${RUN_ROWS}
   echo "$BODY" > "$TMPFILE"
 
   if [ -n "$COMMENT_ID" ]; then
-    if ! gh api "repos/omniscient/markethawk/issues/comments/${COMMENT_ID}" \
+    if ! gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
         --method PATCH -F "body=@${TMPFILE}" >/dev/null; then
       echo "WARNING: Could not update cost report comment ${COMMENT_ID}"
     fi
@@ -449,7 +446,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
     else
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "" || true
-      set_board_status "$STATUS_BLOCKED" 2>/dev/null || true
+      set_board_status "$FACTORY_STATUS_BLOCKED" 2>/dev/null || true
       post_or_update_comment "$FACTORY_FAILURE_MARKER" \
         "${FACTORY_FAILURE_MARKER}
 ## Dark Factory Run — Failed
@@ -491,7 +488,7 @@ _resolve_merge_conflicts() {
 [ "${ENTRYPOINT_SOURCE_ONLY:-0}" = "1" ] && return 0
 
 # --- Clone the repo ---
-echo "Cloning markethawk..."
+echo "Cloning ${FACTORY_REPO}..."
 if [ -d "$CLONE_DIR" ]; then
   rm -rf "$CLONE_DIR"
 fi
@@ -626,7 +623,7 @@ if [ "$INTENT" = "deconflict" ]; then
   git push origin "$FEATURE_BRANCH" 2>&1
 
   # --- Move board back to In Review ---
-  set_board_status "$STATUS_IN_REVIEW" 2>/dev/null || true
+  set_board_status "$FACTORY_STATUS_IN_REVIEW" 2>/dev/null || true
 
   # --- Write artifact ---
   cat > "$ARTIFACTS_DIR/conflict_resolution.md" << EOF
@@ -640,7 +637,7 @@ Merged origin/main into the feature branch using the tiered resolution strategy.
 EOF
 
   # --- Post success comment ---
-  gh issue comment "$ISSUE_NUM" --repo "${OWNER}/markethawk" --body \
+  gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
 "## Dark Factory — Merge Conflicts Resolved
 
 \`main\` has been merged into \`${FEATURE_BRANCH}\` and all conflicts were resolved automatically.

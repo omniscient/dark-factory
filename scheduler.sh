@@ -10,18 +10,7 @@ SCHEDULER_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
 STATE_FILE="${SCHEDULER_STATE_DIR}/scheduler-state.json"
 RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
-# Board constants
-PROJECT_NUMBER=1
-OWNER="omniscient"
-PROJECT_ID="PVT_kwHOAAFds84BWh4w"
-STATUS_FIELD="PVTSSF_lAHOAAFds84BWh4wzhR1VaA"
-STATUS_READY="61e4505c"
-STATUS_IN_PROGRESS="47fc9ee4"
-STATUS_IN_REVIEW="df73e18b"
-STATUS_BLOCKED="93d87b2f"
-STATUS_DONE="98236657"
-STATUS_BACKLOG="f75ad846"
-STATUS_REFINED="0c79ebe5"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/workspace/project/scripts/factory_core/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
@@ -177,7 +166,7 @@ is_issue_running() {
 }
 
 count_factory_running() {
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -c 'markethawk-dark-factory-run-' || true
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -c "${FACTORY_RUN_PREFIX}" || true
 }
 
 # True when the running factory-container count ($1) has reached FACTORY_WIP_LIMIT.
@@ -312,7 +301,7 @@ elapsed_minutes_since_marker() {
   local issue_num="$1"
   local marker_re="$2"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" \
+  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" \
     --json comments -q '.comments' 2>/dev/null) || { echo ""; return; }
   local created_at
   created_at=$(echo "$comments" | jq -r --arg m "$marker_re" \
@@ -332,9 +321,9 @@ spec_advance_check() {
   has_new=$(has_new_comment_after_report "$issue_num" "Posted by MarketHawk Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:refine"
-    gh issue edit "$issue_num" --repo "${OWNER}/markethawk" \
+    gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
       --remove-label "spec-pending-review" 2>/dev/null || true
-    gh issue comment "$issue_num" --repo "${OWNER}/markethawk" --body \
+    gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running with new feedback.
 
 ---
@@ -350,9 +339,9 @@ spec_advance_check() {
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by MarketHawk Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$SPEC_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
-      gh issue edit "$issue_num" --repo "${OWNER}/markethawk" \
+      gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
         --remove-label "spec-pending-review" 2>/dev/null || true
-      set_board_status "$issue_num" "$STATUS_REFINED" || true
+      set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" || true
     else
       echo "[$(date -u +%FT%TZ)] spec_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${SPEC_GRACE_MINUTES}m action=waiting"
     fi
@@ -367,9 +356,9 @@ plan_advance_check() {
   has_new=$(has_new_comment_after_report "$issue_num" "Posted by MarketHawk Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:plan"
-    gh issue edit "$issue_num" --repo "${OWNER}/markethawk" \
+    gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
       --remove-label "plan-pending-review" 2>/dev/null || true
-    gh issue comment "$issue_num" --repo "${OWNER}/markethawk" --body \
+    gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running plan with new feedback.
 
 ---
@@ -390,7 +379,7 @@ plan_advance_check() {
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by MarketHawk Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$PLAN_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
-      gh issue edit "$issue_num" --repo "${OWNER}/markethawk" \
+      gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
         --remove-label "plan-pending-review" 2>/dev/null || true
       set_board_status "$issue_num" "$STATUS_READY" || true
     else
@@ -407,7 +396,7 @@ end_gate_check() {
   pr_num=$(get_pr_for_issue "$issue_num")
   [ -z "$pr_num" ] && return 1
   local review_state
-  review_state=$(gh pr view "$pr_num" --repo "${OWNER}/markethawk" --json reviews \
+  review_state=$(gh pr view "$pr_num" --repo "$FACTORY_REPO_SLUG" --json reviews \
     --jq '[.reviews[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | last | .state // ""' \
     2>/dev/null) || review_state=""
   case "$review_state" in
@@ -438,7 +427,7 @@ has_new_comment_after_report() {
   local issue_num="$1"
   local report_marker="$2"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json comments -q '.comments' 2>/dev/null) || { echo "no"; return; }
+  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json comments -q '.comments' 2>/dev/null) || { echo "no"; return; }
 
   # A comment counts as reviewer feedback only if it appears AFTER the last spec report
   # AND is not one of our own automated comments. The dark factory posts its cost report
@@ -498,7 +487,7 @@ trip_to_blocked() {
 check_pr_mergeable() {
   local pr_num="$1"
   local result
-  result=$(gh pr view "$pr_num" --repo "${OWNER}/markethawk" --json mergeable \
+  result=$(gh pr view "$pr_num" --repo "$FACTORY_REPO_SLUG" --json mergeable \
     --jq '.mergeable' 2>/dev/null) || true
   echo "${result:-UNKNOWN}"
 }
@@ -511,7 +500,7 @@ check_pr_mergeable() {
 # from aborting the loop under `set -e` (callers assign the result with $(...), which
 # would otherwise propagate gh's non-zero exit).
 get_pr_for_issue() {
-  gh pr list --repo "${OWNER}/markethawk" --search "head:feat/issue-${1}-" --json number --jq '.[0].number // empty' 2>/dev/null || true
+  gh pr list --repo "$FACTORY_REPO_SLUG" --search "head:feat/issue-${1}-" --json number --jq '.[0].number // empty' 2>/dev/null || true
 }
 
 # --- CI status: JSON array of definitively-failing checks (bucket == "fail") for a PR ---
@@ -524,7 +513,7 @@ failing_checks_for_pr() {
   local pr_num="$1"
   local checks
   # --repo required for the same reason as get_pr_for_issue (scheduler runs outside a checkout).
-  checks=$(gh pr checks "$pr_num" --repo "${OWNER}/markethawk" --json name,bucket,link 2>/dev/null) || true
+  checks=$(gh pr checks "$pr_num" --repo "$FACTORY_REPO_SLUG" --json name,bucket,link 2>/dev/null) || true
   echo "$checks" | jq -e 'type == "array"' >/dev/null 2>&1 || checks='[]'
   echo "$checks" | jq -c '[.[] | select(.bucket == "fail")]'
 }
@@ -634,7 +623,7 @@ dependencies_met() {
   local issue_num="$1"
   local board_items="$2"
   local body
-  body=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json body -q '.body' 2>/dev/null) || return 0
+  body=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json body -q '.body' 2>/dev/null) || return 0
   local deps
   deps=$(echo "$body" | grep -oP 'Depends on:\s*#\K\d+' || true)
   if [ -z "$deps" ]; then
@@ -647,7 +636,7 @@ dependencies_met() {
       # Dep not found on board (archived or beyond fetch window) — fall back to issue state
       local dep_state
       local dep_gh_exit=0
-      dep_state=$(gh issue view "$dep_num" --repo "${OWNER}/markethawk" --json state -q '.state' 2>/dev/null) || dep_gh_exit=$?
+      dep_state=$(gh issue view "$dep_num" --repo "$FACTORY_REPO_SLUG" --json state -q '.state' 2>/dev/null) || dep_gh_exit=$?
       if [ "$dep_state" = "CLOSED" ]; then
         echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} resolved=closed_off_board"
         continue
@@ -671,7 +660,7 @@ dependencies_met() {
 get_new_comments() {
   local issue_num="$1"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "${OWNER}/markethawk" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
+  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
 
   local factory_idx
   factory_idx=$(echo "$comments" | jq 'map(.body) | to_entries | map(select(.value | test("Posted by MarketHawk Dark Factory"))) | last | .key // -1')
@@ -766,15 +755,14 @@ trap '_sched_err_trap' ERR
 
 # --- Fetch WIP limits once at startup (cached until restart) ---
 WIP_DATA=$(fetch_wip_limits)
-MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "$STATUS_IN_PROGRESS")
-MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "$STATUS_IN_REVIEW")
+MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "$FACTORY_STATUS_IN_PROGRESS")
+MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "$FACTORY_STATUS_IN_REVIEW")
 echo "WIP limits: in_progress=${MAX_IN_PROGRESS} in_review=${MAX_IN_REVIEW} factory=${FACTORY_WIP_LIMIT}"
 
 # --- Startup probe: verify factory image is available locally ---
 # `docker compose run` does not build inline by default, so a missing image causes every
 # dispatch to fail immediately. Exit here with actionable instructions rather than entering a loop
 # where every dispatch fails and the circuit-breaker trips in N cycles.
-FACTORY_IMAGE="${FACTORY_IMAGE:-ghcr.io/omniscient/markethawk-dark-factory:${IMAGE_TAG:-latest}}"
 echo "[$(date -u +%FT%TZ)] probe=image_check image=${FACTORY_IMAGE}"
 if ! docker image inspect "$FACTORY_IMAGE" >/dev/null 2>&1; then
   echo "[$(date -u +%FT%TZ)] probe=image_missing — attempting docker pull"
@@ -852,10 +840,10 @@ while true; do
     [ "$FAIL_COUNT" -eq 0 ] && continue
 
     echo "[$(date -u +%FT%TZ)] ci_gate issue=#${ISSUE} pr=#${PR_NUM} failing=${FAIL_COUNT} action=move_to_blocked"
-    set_board_status "$ISSUE" "$STATUS_BLOCKED"
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
 
     FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
-    gh issue comment "$ISSUE" --repo "${OWNER}/markethawk" --body "## Dark Factory — CI Failing, Moved to Blocked
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — CI Failing, Moved to Blocked
 
 PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In review** to **Blocked**. The factory will retry automatically, continue the existing PR branch, and attempt to fix the failures.
 
@@ -919,8 +907,8 @@ ${FAIL_LIST}
     if has_skip_label "$item"; then continue; fi
     if is_issue_running "$ISSUE"; then continue; fi
     echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
-    set_board_status "$ISSUE" "$STATUS_BLOCKED"
-    gh issue comment "$ISSUE" --repo "${OWNER}/markethawk" --body "## Dark Factory — Orphaned Run Recovered
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — Orphaned Run Recovered
 
 This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
 
@@ -1032,10 +1020,10 @@ This issue was left in **In progress** with no running factory container — the
       if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
         if ! has_above_ceiling_label "$item"; then
           echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
-          gh issue edit "$ISSUE" --repo "${OWNER}/markethawk" \
+          gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" \
             --add-label "$ABOVE_CEILING_LABEL" 2>/dev/null || true
-          set_board_status "$ISSUE" "$STATUS_BLOCKED" || true
-          gh issue comment "$ISSUE" --repo "${OWNER}/markethawk" --body \
+          set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
+          gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
 "## Scheduler — Above Dispatch Ceiling
 
 This ticket has been classified as **above the autonomous dispatch ceiling** \
@@ -1126,7 +1114,7 @@ To proceed:
     fi
 
     increment_retry "${ISSUE}:plan"
-    gh issue comment "$ISSUE" --repo "${OWNER}/markethawk" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
 
 ---
 *Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true
@@ -1164,7 +1152,7 @@ To proceed:
     fi
 
     increment_retry "${ISSUE}:refine"
-    gh issue comment "$ISSUE" --repo "${OWNER}/markethawk" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
 
 ---
 *Posted by MarketHawk Backlog Scheduler*" 2>/dev/null || true

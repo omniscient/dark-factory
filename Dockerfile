@@ -110,13 +110,14 @@ RUN mkdir -p /workspace
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scheduler.sh /opt/dark-factory/scheduler.sh
 COPY smoke_gate.sh /opt/dark-factory/smoke_gate.sh
+COPY scripts/ /opt/dark-factory/scripts/
 COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
 COPY seed/ /opt/dark-factory/seed/
 # NOTE: docker-compose.yml (MarketHawk app compose) is NOT baked — it is TARGET material
 # read from ${CLONE_DIR}/docker-compose.yml at runtime.
 COPY refinement-skills/ /opt/refinement-skills/
 COPY config/ /opt/dark-factory/config/
-RUN chmod +x /usr/local/bin/entrypoint.sh /opt/dark-factory/scheduler.sh /opt/dark-factory/smoke_gate.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /opt/dark-factory/scheduler.sh /opt/dark-factory/smoke_gate.sh /opt/dark-factory/scripts/identity.sh
 
 # Non-root factory user — must be created AFTER all root-level installs.
 # ubuntu:24.04 ships a default 'ubuntu' user at UID/GID 1000; evict it first or
