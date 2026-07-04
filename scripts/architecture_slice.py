@@ -17,34 +17,56 @@ sys.path.insert(0, os.path.dirname(__file__))
 import token_estimate as te
 
 # ── Component → section map ────────────────────────────────────────────────────
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+# Existing importers that read COMPONENT_SECTION_MAP directly still work.
 
-COMPONENT_SECTION_MAP: dict[str, list[str]] = {
-    "backend": [
-        "Scan Execution Flow",
-        "Backend Module Map",
-        "Error Tracking System",
-        "Celery Task Architecture",
-        "Test Architecture",
-    ],
-    "frontend": [
-        "Frontend Architecture",
-        "Backend Module Map",
-        "Error Tracking System",
-    ],
-    "dark-factory": [
-        "Service Topology",
-        "Celery Task Architecture",
-        "Metrics and Observability",
-    ],
-    "infrastructure": [
-        "Service Topology",
-        "IB Gateway Integration",
-        "Live Scanner",
-        "Celery Task Architecture",
-        "Catch Up Feature (Universe Aggregate Backfill)",
-        "Metrics and Observability",
-    ],
-}
+try:
+    from factory_core.adapter_defaults import DEFAULTS as _AD
+    COMPONENT_SECTION_MAP: dict[str, list[str]] = _AD["components"]
+except Exception:
+    COMPONENT_SECTION_MAP = {
+        "backend": [
+            "Scan Execution Flow",
+            "Backend Module Map",
+            "Error Tracking System",
+            "Celery Task Architecture",
+            "Test Architecture",
+        ],
+        "frontend": [
+            "Frontend Architecture",
+            "Backend Module Map",
+            "Error Tracking System",
+        ],
+        "dark-factory": [
+            "Service Topology",
+            "Celery Task Architecture",
+            "Metrics and Observability",
+        ],
+        "infrastructure": [
+            "Service Topology",
+            "IB Gateway Integration",
+            "Live Scanner",
+            "Celery Task Architecture",
+            "Catch Up Feature (Universe Aggregate Backfill)",
+            "Metrics and Observability",
+        ],
+    }
+
+
+def _component_section_map(clone_dir: str | None) -> dict:
+    """Return the component→section map, reading from adapter at use-time.
+
+    Falls back to COMPONENT_SECTION_MAP (which re-exports adapter_defaults.DEFAULTS)
+    on any error so behaviour is identical to today when no adapter file is present.
+    """
+    try:
+        from factory_core import adapter
+        val = adapter.get(clone_dir or ".", "components")
+        if val is not None and isinstance(val, dict):
+            return val
+    except Exception:
+        pass
+    return COMPONENT_SECTION_MAP
 
 # ── Component inference keyword tables ────────────────────────────────────────
 
@@ -376,7 +398,7 @@ def slice_architecture(
                                 scenario, None, "component_unresolved")
 
     # 4. Component resolved — unknown component key → fallback
-    wanted = COMPONENT_SECTION_MAP.get(component)
+    wanted = _component_section_map(clone_dir).get(component)
     if not wanted:
         return _full_doc_result(arch_path, all_sections, all_section_names,
                                 scenario, component, f"unknown_component:{component}")

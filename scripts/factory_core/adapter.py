@@ -53,11 +53,19 @@ def main() -> None:
     p.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
     p.add_argument("--get")
     p.add_argument("--validate", action="store_true")
+    p.add_argument("--format", choices=["plain", "keyvalue"], default="plain",
+                   help="Output format: 'plain' (default) or 'keyvalue' (tab-separated key\\tvalue lines for dicts)")
     args = p.parse_args()
     try:
         if args.get:
             val = get(args.clone_dir, args.get)
-            print("" if val is None else val)
+            if val is None:
+                print("")
+            elif args.format == "keyvalue" and isinstance(val, dict):
+                for k, v in val.items():
+                    print(f"{k}\t{v}")
+            else:
+                print(val)
         elif args.validate:
             load(args.clone_dir)
             print("adapter OK")

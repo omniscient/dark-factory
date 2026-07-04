@@ -10,6 +10,39 @@ _INCLUDED_EXTS = frozenset({
     ".yaml", ".yml", ".sh", ".sql", ".md",
 })
 
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+try:
+    from .adapter_defaults import DEFAULTS as _AD
+    _DEFAULT_MODELS_INIT = _AD["deconflict"]["models_init"]
+    _DEFAULT_MIGRATIONS_DIR = _AD["deconflict"]["migrations_dir"]
+except Exception:
+    _DEFAULT_MODELS_INIT = "backend/app/models/__init__.py"
+    _DEFAULT_MIGRATIONS_DIR = "alembic/versions/"
+
+
+def _deconflict_models_init(clone_dir: str | None = None) -> str:
+    """Return deconflict.models_init from adapter at use-time, falling back to default."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "deconflict.models_init")
+        if val is not None and isinstance(val, str):
+            return val
+    except Exception:
+        pass
+    return _DEFAULT_MODELS_INIT
+
+
+def _deconflict_migrations_dir(clone_dir: str | None = None) -> str:
+    """Return deconflict.migrations_dir from adapter at use-time, falling back to default."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "deconflict.migrations_dir")
+        if val is not None and isinstance(val, str):
+            return val
+    except Exception:
+        pass
+    return _DEFAULT_MIGRATIONS_DIR
+
 
 def tier1(filepath: str, clone_dir: str) -> bool:
     """Mechanical resolution for known file patterns. Returns True if resolved."""
@@ -33,7 +66,7 @@ def tier1(filepath: str, clone_dir: str) -> bool:
         subprocess.run(["git", "add", filepath], cwd=clone_dir, capture_output=True)
         return True
 
-    if filepath == "backend/app/models/__init__.py":
+    if filepath == _deconflict_models_init(clone_dir):
         full = os.path.join(clone_dir, filepath)
         try:
             with open(full) as fh:
@@ -60,7 +93,7 @@ def tier1(filepath: str, clone_dir: str) -> bool:
         except OSError:
             return False
 
-    if "alembic/versions/" in filepath and filepath.endswith(".py"):
+    if _deconflict_migrations_dir(clone_dir) in filepath and filepath.endswith(".py"):
         r = subprocess.run(["git", "checkout", "--theirs", filepath],
                            cwd=clone_dir, capture_output=True)
         if r.returncode != 0:

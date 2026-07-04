@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to .claude/skills/refinement/config.yaml",
     )
+    import os as _os
+    p.add_argument(
+        "--clone-dir",
+        default=_os.environ.get("CLONE_DIR", "."),
+        help="Clone root for adapter.yaml lookup (default: $CLONE_DIR or '.')",
+    )
     return p.parse_args()
 
 
@@ -72,20 +78,43 @@ def parse_hotspots(path: str, score_floor: float) -> set:
     return hot
 
 
-MIGRATION_SEED_AUTH_PATTERNS = [
-    re.compile(r"^alembic/versions/"),
-    re.compile(r"^dark-factory/seed/"),
-    re.compile(r"seed.*\.sql$"),
-    re.compile(r"^backend/app/routers/auth\.py$"),
-]
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+try:
+    from factory_core.adapter_defaults import DEFAULTS as _AD
+    MIGRATION_SEED_AUTH_PATTERNS = [
+        re.compile(p) for p in _AD["safety"]["migration_seed_auth_patterns"]
+    ]
+except Exception:
+    MIGRATION_SEED_AUTH_PATTERNS = [
+        re.compile(r"^alembic/versions/"),
+        re.compile(r"^dark-factory/seed/"),
+        re.compile(r"seed.*\.sql$"),
+        re.compile(r"^backend/app/routers/auth\.py$"),
+    ]
 
 
-def classify_file(fpath: str, hotspots: set) -> list:
+def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
+    """Return compiled migration/seed/auth patterns, reading from adapter at use-time.
+
+    Falls back to MIGRATION_SEED_AUTH_PATTERNS (which re-exports adapter_defaults.DEFAULTS)
+    on any error so behaviour is identical to today when no adapter file is present.
+    """
+    try:
+        from factory_core import adapter
+        val = adapter.get(clone_dir or ".", "safety.migration_seed_auth_patterns")
+        if val is not None and isinstance(val, list):
+            return [re.compile(p) for p in val]
+    except Exception:
+        pass
+    return MIGRATION_SEED_AUTH_PATTERNS
+
+
+def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> list:
     """Return list of triggered categories for a single file path."""
     cats = []
     if fpath in hotspots:
         cats.append("hotspot")
-    for pat in MIGRATION_SEED_AUTH_PATTERNS:
+    for pat in _migration_seed_auth_patterns(clone_dir):
         if pat.search(fpath):
             cats.append("migration-seed")
             break
@@ -113,9 +142,10 @@ def main() -> None:
 
     lines_changed = args.lines_changed
 
+    clone_dir = getattr(args, "clone_dir", None)
     triggered = []
     for fpath in changed_files:
-        cats = classify_file(fpath, hotspots)
+        cats = classify_file(fpath, hotspots, clone_dir=clone_dir)
         if cats:
             triggered.append((fpath, cats))
 

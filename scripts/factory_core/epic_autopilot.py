@@ -287,10 +287,44 @@ from . import identity  # noqa: E402
 OWNER = identity.SLUG
 PROJECT_ID = identity.PROJECT_ID
 _GATING_LABELS = ("plan-pending-review", "spec-pending-review")  # plan takes precedence
-_DEFAULT_EXCLUDE = ["dark-factory/", ".archon/", "scheduler.sh", "factory_core/",
-                    "app/services/trading", "app/tasks/trading.py", "app/core/auth", "app/routers/auth"]
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+try:
+    from .adapter_defaults import DEFAULTS as _AD
+    _DEFAULT_EXCLUDE = _AD["safety"]["hard_exclude_paths"]
+    _DEFAULT_SENSITIVE_KEYWORDS = _AD["safety"]["sensitive_keywords"]
+except Exception:
+    _DEFAULT_EXCLUDE = ["dark-factory/", ".archon/", "scheduler.sh", "factory_core/",
+                        "app/services/trading", "app/tasks/trading.py", "app/core/auth", "app/routers/auth"]
+    _DEFAULT_SENSITIVE_KEYWORDS = (
+        r"trading|ibkr|live order|notional|authentication|authorization"
+        r"|authn|authz|jwt|oauth|rbac|/auth"
+    )
 _CONFIG_PATHS = ["/workspace/project/.claude/skills/refinement/config.yaml",
                  "/opt/refinement-skills/config.yaml"]
+
+
+def _hard_exclude_paths(clone_dir: str | None = None) -> list:
+    """Return hard_exclude_paths from adapter at use-time, falling back to _DEFAULT_EXCLUDE."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "safety.hard_exclude_paths")
+        if val is not None and isinstance(val, list):
+            return val
+    except Exception:
+        pass
+    return list(_DEFAULT_EXCLUDE)
+
+
+def _sensitive_keywords(clone_dir: str | None = None) -> str:
+    """Return sensitive_keywords pattern from adapter at use-time, falling back to default."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "safety.sensitive_keywords")
+        if val is not None and isinstance(val, str):
+            return val
+    except Exception:
+        pass
+    return _DEFAULT_SENSITIVE_KEYWORDS
 
 
 def _gh_json(args: list):
@@ -304,8 +338,17 @@ def _gh_json(args: list):
         return None
 
 
-def _load_exclude_paths() -> list:
-    """Read epic_autopilot.hard_exclude_paths from config.yaml (via yq); fall back to defaults."""
+def _load_exclude_paths(clone_dir: str | None = None) -> list:
+    """Read hard_exclude_paths from adapter, then config.yaml (via yq); fall back to defaults."""
+    # Try adapter first (use-time read, fail-open)
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "safety.hard_exclude_paths")
+        if val is not None and isinstance(val, list):
+            return val
+    except Exception:
+        pass
+    # Legacy: yq from config.yaml
     for cfg in _CONFIG_PATHS:
         if not os.path.exists(cfg):
             continue
@@ -486,13 +529,14 @@ def main_once() -> int:
     except Exception:
         state = {}
     today = datetime.now(timezone.utc).date().isoformat()
+    clone_dir = os.environ.get("CLONE_DIR", ".")
     cfg = dict(
-        exclude_paths=_load_exclude_paths(),
+        exclude_paths=_load_exclude_paths(clone_dir),
         opt_out_label=os.environ.get("EPIC_AUTOPILOT_OPT_OUT_LABEL", "no-autopilot"),
         size_ceiling=os.environ.get("EPIC_AUTOPILOT_SIZE_CEILING", "XL"),
         sensitive_keywords=os.environ.get(
             "EPIC_AUTOPILOT_SENSITIVE_KEYWORDS",
-            r"trading|ibkr|live order|notional|authentication|authorization|authn|authz|jwt|oauth|rbac|/auth"),
+            _sensitive_keywords(clone_dir)),
         hold_ttl_hours=float(os.environ.get("EPIC_AUTOPILOT_HOLD_TTL_HOURS", "24")),
         start_epics=os.environ.get("EPIC_AUTOPILOT_START_EPICS", "true").lower() == "true",
         confidence_floor=float(os.environ.get("EPIC_AUTOPILOT_CONFIDENCE_FLOOR", "0.7")),

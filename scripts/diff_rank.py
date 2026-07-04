@@ -49,14 +49,36 @@ from gate_blast_radius import parse_hotspots  # noqa: E402  # re-exported for te
 #   Auth router uses prefix "^backend/app/routers/auth" (all auth routes), vs the single exact
 #   file match "^backend/app/routers/auth\.py$" in MIGRATION_SEED_AUTH_PATTERNS.
 #   Trading paths are added here (not in gate_blast_radius) per spec R4.
-SAFETY_PATH_PATTERNS = [
-    re.compile(r"^alembic/versions/"),
-    re.compile(r"^backend/app/routers/auth"),
-    re.compile(r"^backend/app/core/auth"),
-    re.compile(r"app/services/trading"),
-    re.compile(r"app/tasks/trading\.py"),
-    re.compile(r"^dark-factory/"),
-]
+#
+# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+try:
+    from factory_core.adapter_defaults import DEFAULTS as _AD
+    SAFETY_PATH_PATTERNS = [re.compile(p) for p in _AD["safety"]["critical_diff_paths"]]
+except Exception:
+    SAFETY_PATH_PATTERNS = [
+        re.compile(r"^alembic/versions/"),
+        re.compile(r"^backend/app/routers/auth"),
+        re.compile(r"^backend/app/core/auth"),
+        re.compile(r"app/services/trading"),
+        re.compile(r"app/tasks/trading\.py"),
+        re.compile(r"^dark-factory/"),
+    ]
+
+
+def _safety_path_patterns(clone_dir: str | None = None) -> list:
+    """Return compiled safety path patterns, reading from adapter at use-time.
+
+    Falls back to SAFETY_PATH_PATTERNS (which re-exports adapter_defaults.DEFAULTS)
+    on any error so behaviour is identical to today when no adapter file is present.
+    """
+    try:
+        from factory_core import adapter
+        val = adapter.get(clone_dir or ".", "safety.critical_diff_paths")
+        if val is not None and isinstance(val, list):
+            return [re.compile(p) for p in val]
+    except Exception:
+        pass
+    return SAFETY_PATH_PATTERNS
 
 TEST_PATH_PATTERNS = [
     re.compile(r"(^|/)test_[^/]+\.py$"),
@@ -174,8 +196,8 @@ def _extract_spec_names(spec_file: str) -> set:
 # Risk classification
 # ---------------------------------------------------------------------------
 
-def _safety_signal(path: str) -> str:
-    for pat in SAFETY_PATH_PATTERNS:
+def _safety_signal(path: str, clone_dir: str | None = None) -> str:
+    for pat in _safety_path_patterns(clone_dir):
         if pat.search(path):
             src = pat.pattern
             if "alembic" in src:
@@ -197,6 +219,7 @@ def classify_file(
     score_floor: float,
     total_lines: int = 0,
     hotspot_scores: dict = None,
+    clone_dir: str | None = None,
 ) -> tuple:
     """Classify a file path into a risk tier.
 
@@ -214,7 +237,7 @@ def classify_file(
         return "low", ["test_file"], blast_score
 
     # --- Critical: safety paths OR hotspot at/above floor ---
-    safety_sig = _safety_signal(path)
+    safety_sig = _safety_signal(path, clone_dir)
     is_hotspot_critical = path in hotspot_paths
     if safety_sig or is_hotspot_critical:
         signals = []
@@ -303,6 +326,7 @@ def build_ranked_diff(
     spec_names: set,
     score_floor: float,
     diff_enabled: bool = True,
+    clone_dir: str | None = None,
 ) -> tuple:
     """Return (ranked_diff_str, ranking_info_dict).
 
@@ -341,6 +365,7 @@ def build_ranked_diff(
             score_floor,
             total_lines=total_lines,
             hotspot_scores=hotspot_scores,
+            clone_dir=clone_dir,
         )
         classified.append({"file": f, "tier": tier, "signals": signals, "blast_score": blast_score})
 
@@ -523,6 +548,11 @@ def parse_args():
         default="docs/codeindex-hotspots.md",
         help="Path to codeindex-hotspots.md",
     )
+    p.add_argument(
+        "--clone-dir",
+        default=os.environ.get("CLONE_DIR", "."),
+        help="Clone root for adapter.yaml lookup (default: $CLONE_DIR or '.')",
+    )
     return p.parse_args()
 
 
@@ -534,10 +564,12 @@ def main():
     hotspot_paths = parse_hotspots(args.hotspots, score_floor)  # set (fail-open in parse_hotspots)
     hotspot_scores = _read_hotspot_scores(args.hotspots)         # dict for JSON + elevated blast
     spec_names = _extract_spec_names(args.spec_file)
+    clone_dir = args.clone_dir
 
     ranked_diff, ranking_info = build_ranked_diff(
         diff_text, token_cap, hotspot_paths, hotspot_scores, spec_names, score_floor,
         diff_enabled=diff_enabled,
+        clone_dir=clone_dir,
     )
 
     # Write diff-ranking.json
