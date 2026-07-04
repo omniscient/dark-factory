@@ -40,6 +40,7 @@ FAIL=0
 SCHED_FOOTER="*Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Backlog Scheduler*"
 SPEC_FOOTER="*Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline*"
 COST_FOOTER="*Updated by ${FACTORY_PRODUCT_NAME:-MarketHawk} Dark Factory*"
+AUTOPILOT_FOOTER="*Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Epic Autopilot*"
 
 # Build a GitHub-shaped comments array from the body strings passed as arguments.
 # Uses jq --args (NOT process substitution, which is broken under MSYS bash).
@@ -101,7 +102,7 @@ MOCK_COMMENTS=$(mock_comments \
 ${SPEC_FOOTER}" \
   "🤖 **Epic Autopilot** — parked (HOLD). Too risky to autonomously advance.
 ---
-*Posted by MarketHawk Epic Autopilot*")
+${AUTOPILOT_FOOTER}")
 assert_eq "Epic Autopilot HOLD comment after spec is NOT human feedback" "no" "$(has_new_comment_after_report 124 "$REPORT_MARKER")"
 
 # Scenario D — spec only, nothing after => "no".
