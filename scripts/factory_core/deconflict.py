@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import identity
+
 _EXCLUDED_DIRS = frozenset({".git", "node_modules"})
 _INCLUDED_EXTS = frozenset({
     ".py", ".ts", ".tsx", ".js", ".json",
@@ -188,7 +190,7 @@ def _escalate(issue_num: int, owner: str, repo: str, reason: str) -> None:
         "git merge origin/main\n"
         "# Resolve conflicts manually, then push\n"
         "```\n\n"
-        "---\n*Posted by MarketHawk Dark Factory*"
+        f"---\n{identity.marker('factory')}"
     )
     subprocess.run(
         ["gh", "issue", "comment", str(issue_num),

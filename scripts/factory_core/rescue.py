@@ -18,7 +18,7 @@ The scheduler calls ``rescue-blocked --issue N`` once per Blocked item each cycl
 import json
 import subprocess
 
-from factory_core import board
+from factory_core import board, identity
 
 OWNER = board.OWNER
 REPO = board.REPO
@@ -111,7 +111,7 @@ def _comment_body(issue_num: int, pr_num: int) -> str:
         "to **In review** instead — ready for the normal merge flow "
         f"(merge the PR, or dispatch `Close issue #{issue_num}`).\n\n"
         "---\n"
-        "*Posted by MarketHawk Backlog Scheduler*"
+        f"{identity.marker('scheduler')}"
     )
 
 

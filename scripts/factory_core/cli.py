@@ -15,13 +15,14 @@ def _board_move(args):
 
 def _deconflict(args):
     from factory_core.deconflict import resolve_merge_conflicts
-    clone_dir = os.environ.get("CLONE_DIR", "/workspace/markethawk")
+    from factory_core import identity
+    clone_dir = os.environ.get("CLONE_DIR", f"/workspace/{identity.REPO}")
     artifacts_dir = os.environ.get("ARTIFACTS_DIR", f"/tmp/artifacts/{args.issue}")
     if args.repo:
         owner, _, repo = args.repo.partition("/")
     else:
-        owner = os.environ.get("FACTORY_OWNER", "omniscient")
-        repo = os.environ.get("FACTORY_REPO", "markethawk")
+        owner = identity.OWNER
+        repo = identity.REPO
     rc = resolve_merge_conflicts(
         issue_num=args.issue,
         clone_dir=clone_dir,

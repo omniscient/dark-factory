@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import identity
+
 _DEFAULT_STATE = Path(
     os.environ.get("STATE_FILE", "/var/lib/dark-factory/scheduler-state.json")
 )
@@ -59,8 +61,8 @@ def trip_to_blocked(
     phase: str,
     reason: str,
     state_file: Path = _DEFAULT_STATE,
-    owner: str = "omniscient",
-    repo: str = "markethawk",
+    owner: str = identity.OWNER,
+    repo: str = identity.REPO,
 ) -> None:
     from .board import set_board_status, STATUS_BLOCKED
 
@@ -97,7 +99,7 @@ def trip_to_blocked(
         f"# Or re-run manually:\n"
         f'docker compose --profile factory run --rm dark-factory "{retry_cmd}"\n'
         "```\n\n"
-        "---\n*Posted by MarketHawk Backlog Scheduler*"
+        f"---\n{identity.marker('scheduler')}"
     )
     subprocess.run(
         ["gh", "issue", "comment", str(issue_num),

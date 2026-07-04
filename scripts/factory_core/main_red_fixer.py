@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 
+from . import identity
+
 
 def classify_scope(changed_paths: list, allowed: list, blocked: list) -> str:
     """'protected' if ANY changed path matches a blocked prefix (fail-closed, dominates);
@@ -125,8 +127,8 @@ def run_once(cfg: dict, io, state: dict) -> dict:
 
 
 # ── Live IO (exercised in manual validation, not unit tests) ────────────────
-OWNER = "omniscient/markethawk"
-CLONE_DIR = os.environ.get("CLONE_DIR", "/workspace/markethawk")
+OWNER = identity.SLUG
+CLONE_DIR = identity.CLONE_DIR
 
 def _run(cmd, cwd=None, timeout=600, stdin=None):
     return subprocess.run(cmd, cwd=cwd or CLONE_DIR, input=stdin,
@@ -182,7 +184,7 @@ class LiveIO:
         if push.returncode != 0:
             raise RuntimeError(f"git push failed for {branch}: {push.stderr.strip()}")
         body = (f"Closes #{issue}\n\nAutonomous main-red recovery. Reproduced failure:\n\n"
-                f"```\n{failure[:4000]}\n```\n\n---\n*MarketHawk Main-Red Auto-Fix*")
+                f"```\n{failure[:4000]}\n```\n\n---\n{identity.marker('main_red')}")
         r = _run(["gh", "pr", "create", "--repo", OWNER, "--base", "main",
                   "--head", branch, "--title", f"fix: main-red recovery (#{issue})",
                   "--body", body])
@@ -237,7 +239,7 @@ class LiveIO:
     def escalate(self, issue, reason, pr=None):
         pr_txt = f" PR #{pr} left open for review." if pr else ""
         self.comment(issue, f"\U0001f6e0️ **Main-Red Auto-Fix** — escalating to a human "
-                            f"(reason: {reason}).{pr_txt}\n\n---\n*MarketHawk Main-Red Auto-Fix*")
+                            f"(reason: {reason}).{pr_txt}\n\n---\n{identity.marker('main_red')}")
         self.notify("Main-red auto-fix needs a human",
                     f"Regression #{issue}: {reason}.{pr_txt}", "warning", f"main-red-{issue}")
 
