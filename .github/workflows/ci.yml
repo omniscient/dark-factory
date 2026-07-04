@@ -15,6 +15,7 @@ jobs:
       - run: bash tests/test_identity.sh
       - run: bash tests/test_hooks.sh
       - run: bash tests/test_smoke_gate.sh
+      - run: bash tests/test_run_compose.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:

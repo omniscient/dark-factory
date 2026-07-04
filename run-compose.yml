@@ -20,6 +20,8 @@ services:
     environment:
       # Socket proxy URL — pass through the scheduler's DOCKER_HOST (TCP)
       DOCKER_HOST: ${DOCKER_HOST:-}
+      # Log aggregation URL — pass through to Seq
+      SEQ_URL: ${SEQ_URL:-http://seq:5341}
       # Identity vars — propagated from the scheduler's instance.env
       FACTORY_OWNER: ${FACTORY_OWNER:-omniscient}
       FACTORY_REPO: ${FACTORY_REPO:-markethawk}
