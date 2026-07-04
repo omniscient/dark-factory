@@ -549,8 +549,8 @@ fi
 # On red main: exits 0 (no per-ticket failure), files a regression ticket, writes sentinel.
 # On green: cleans up any prior red state and proceeds.
 if [ "$INTENT" = "fix" ] || [ "$INTENT" = "continue" ] || [ "$INTENT" = "deconflict" ] || [ "$INTENT" = "recheck" ]; then
-  source /opt/dark-factory/smoke_gate.sh
-  run_smoke_gate
+  source /opt/dark-factory/scripts/hooks.sh
+  run_hook --gate smoke-gate
 fi
 
 # --- Recheck flow: the run exists solely to re-evaluate the gate (#365) ---
