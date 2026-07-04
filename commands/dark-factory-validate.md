@@ -79,7 +79,7 @@ EOF
 )"
     gh issue edit "$ISSUE_NUM" --add-label needs-discussion
     # Move to Blocked on the project board
-    ITEM_ID=$(gh project item-list $FACTORY_PROJECT_NUMBER --owner "$FACTORY_OWNER" --format json --limit 200 \
+    ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
       | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
     if [ -n "$ITEM_ID" ]; then
       gh project item-edit \

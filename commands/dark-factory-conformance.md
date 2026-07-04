@@ -502,7 +502,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list $FACTORY_PROJECT_NUMBER --owner "$FACTORY_OWNER" --format json --limit 200 \
+   ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
      | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
    if [ -n "$ITEM_ID" ]; then
      gh project item-edit \
