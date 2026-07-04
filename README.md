@@ -148,8 +148,8 @@ The factory discovers and runs them at the appropriate pipeline stage.
 
 | Hook name | Stage | Gate? | Description |
 |-----------|-------|-------|-------------|
-| `smoke-gate` | Pre-dispatch | Yes | Blocks dispatch if main is broken. Built-in default: tsc + backend import checks (MarketHawk). |
-| `validate` | Post-implement | No | Validates the working tree (lint, type-check, etc.). Built-in default: no-op. |
+| `smoke-gate` | Pre-dispatch | Yes (check-only) | Exit 0 = green, non-zero = red. Factory keeps sentinel + regression-ticket handling regardless of hook presence. Built-in default: tsc + backend import checks (MarketHawk). |
+| `validate` | Deconflict | No | Post-merge validation (lint, type-check, etc.). Built-in default: no-op (deconflict flow falls back to inline tsc). |
 | `preview-up` | Post-implement | No | Spins up a preview stack for the PR branch. Built-in default: no-op. |
 | `preview-down` | PR closed | No | Tears down the preview stack. Built-in default: no-op. |
 
@@ -162,10 +162,35 @@ The factory discovers and runs them at the appropriate pipeline stage.
 | `ISSUE_NUM` | The GitHub issue number being processed. |
 | `FACTORY_REPO_SLUG` | `owner/repo` of the target repository. |
 
-**Gate semantics**: hooks called with `--gate` propagate their exit code to the
-factory pipeline. A non-zero exit from a gate hook marks the ticket Blocked and
-stops the run.  Non-gate hooks always return success to the pipeline regardless
-of their exit code.
+**Gate semantics**: for most hooks, `--gate` propagates the exit code to the
+factory pipeline — a non-zero exit marks the ticket Blocked and stops the run.
+Non-gate hooks always return success to the pipeline.
+
+**smoke-gate is check-only**: the hook supplies only the pass/fail signal
+(exit 0 = green, non-zero = red).  All state machinery — writing/clearing the
+`main-is-red` sentinel, filing/closing the regression ticket, and clean-halting
+with exit 0 — stays factory-side and runs identically whether the check comes
+from a target hook or the built-in default.  This means you never need to
+replicate sentinel or ticket logic in your hook.
+
+### Bench parity
+
+`bench/run_suite.sh` is baked into the image at `/opt/dark-factory/bench/run_suite.sh`
+so it can drive parity runs against a cloned target repo without requiring a
+separate dark-factory checkout.
+
+Set `BENCH_TARGET_DIR` to point the suite at a specific clone:
+
+```bash
+# Run the suite against a pre-cloned MarketHawk checkout
+BENCH_TARGET_DIR=/workspace/markethawk \
+  bash /opt/dark-factory/bench/run_suite.sh --tasks /opt/dark-factory/bench/suite.json --dry-run
+```
+
+Without `BENCH_TARGET_DIR`, the suite resolves the repo root from its own
+location (the dark-factory checkout), which is the normal local development
+workflow.  Passing `--tasks FILE` overrides the manifest path so you can supply
+a target-specific suite alongside `BENCH_TARGET_DIR`.
 
 ---
 

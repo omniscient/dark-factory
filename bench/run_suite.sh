@@ -24,7 +24,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# BENCH_TARGET_DIR: run the suite against a target clone (extracted-factory parity runs)
+REPO_ROOT="${BENCH_TARGET_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 BENCH_DIR="$REPO_ROOT/bench"
 RESULTS_DIR="$BENCH_DIR/results"
 
