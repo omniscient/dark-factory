@@ -38,14 +38,19 @@ def _get_comments_max_tokens() -> int | None:
     return None
 
 
-_BOT_RE = re.compile(
-    r"Posted by MarketHawk Refinement Pipeline"
-    r"|Posted by MarketHawk Backlog Scheduler"
-    r"|Posted by MarketHawk Dark Factory"
-    r"|Updated by MarketHawk Dark Factory"
-    r"|dark-factory-cost-report"
-    r"|Posted by MarketHawk Epic Autopilot",
-)
+def _build_bot_re() -> "re.Pattern[str]":
+    p = re.escape(os.environ.get("FACTORY_PRODUCT_NAME", "MarketHawk"))
+    return re.compile(
+        rf"Posted by {p} Refinement Pipeline"
+        rf"|Posted by {p} Backlog Scheduler"
+        rf"|Posted by {p} Dark Factory"
+        rf"|Updated by {p} Dark Factory"
+        r"|dark-factory-cost-report"
+        rf"|Posted by {p} Epic Autopilot",
+    )
+
+
+_BOT_RE = _build_bot_re()
 
 
 def _is_factory_comment(body: str) -> bool:

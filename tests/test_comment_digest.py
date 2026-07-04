@@ -401,3 +401,13 @@ def test_comments_cap_build_digest_stays_pure(monkeypatch):
     result = cd.build_digest(issue_data)
     assert len(result) > 4  # env cap of 1 token = 4 chars; build_digest ignores it
     assert "<!-- truncated:" not in result
+
+
+# ── FACTORY_PRODUCT_NAME parameterization ─────────────────────────────────────
+
+def test_bot_markers_follow_product_name(monkeypatch):
+    monkeypatch.setenv("FACTORY_PRODUCT_NAME", "Acme")
+    import importlib, comment_digest as cd
+    importlib.reload(cd)
+    body = "---\n*Posted by Acme Dark Factory*"
+    assert cd._BOT_RE.search(body), "marker regex must track FACTORY_PRODUCT_NAME"
