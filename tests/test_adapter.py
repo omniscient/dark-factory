@@ -84,6 +84,47 @@ def test_component_section_map_adapter_override(tmp_path):
     assert "backend" in m  # defaults still merged in
 
 
+# ── Consumer 6: adapter CLI --format keyvalue (gate_lib.sh support) ───────────
+
+def test_adapter_cli_keyvalue_format(tmp_path, capsys):
+    """--format keyvalue emits tab-separated key\\tvalue lines for dict values."""
+    import sys as _sys
+    old_argv = _sys.argv[:]
+    try:
+        _sys.argv = ["adapter", "--clone-dir", str(tmp_path),
+                     "--get", "memory_routing", "--format", "keyvalue"]
+        adapter.main()
+    except SystemExit:
+        pass
+    finally:
+        _sys.argv = old_argv
+    out = capsys.readouterr().out
+    # Default memory_routing has at least one entry; each line must be key<TAB>value
+    lines = [l for l in out.splitlines() if l.strip()]
+    assert len(lines) > 0
+    for line in lines:
+        assert "\t" in line, f"Expected tab-separated line, got: {line!r}"
+
+
+def test_adapter_cli_keyvalue_format_override(tmp_path, capsys):
+    """--format keyvalue reflects adapter.yaml override for dict values."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "memory_routing:\n  custom/path/*: '.archon/memory/custom.md'\n")
+    import sys as _sys
+    old_argv = _sys.argv[:]
+    try:
+        _sys.argv = ["adapter", "--clone-dir", str(tmp_path),
+                     "--get", "memory_routing", "--format", "keyvalue"]
+        adapter.main()
+    except SystemExit:
+        pass
+    finally:
+        _sys.argv = old_argv
+    out = capsys.readouterr().out
+    assert "custom/path/*\t.archon/memory/custom.md" in out
+
+
 # ── Consumer 2: diff_rank._safety_path_patterns ────────────────────────────────
 
 def test_safety_path_patterns_default_parity(tmp_path):

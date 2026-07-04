@@ -9,6 +9,29 @@ source "${GATE_LIB_DIR}/agent_roles.sh"
 
 route_memory_file() {
   local FILE="$1"
+  # Try adapter for memory_routing (fail-open: fall back to hardcoded table on any failure).
+  # --format keyvalue emits "pattern<TAB>target" lines for dict values.
+  if command -v python3 >/dev/null 2>&1; then
+    local ROUTING
+    ROUTING=$(PYTHONPATH="$GATE_LIB_DIR" python3 -m factory_core.adapter \
+      --clone-dir "${CLONE_DIR:-.}" \
+      --get memory_routing \
+      --format keyvalue 2>/dev/null)
+    if [ -n "$ROUTING" ]; then
+      local MATCHED=""
+      while IFS=$'\t' read -r PATTERN TARGET; do
+        [ -z "$PATTERN" ] && continue
+        case "$FILE" in
+          $PATTERN) MATCHED="$TARGET"; break ;;
+        esac
+      done <<< "$ROUTING"
+      if [ -n "$MATCHED" ]; then
+        echo "$MATCHED"
+        return
+      fi
+    fi
+  fi
+  # Fallback: hardcoded routing table (used when python fails or no match in adapter table).
   case "$FILE" in
     backend/app/*)            echo ".archon/memory/backend-patterns.md" ;;
     frontend/src/*)           echo ".archon/memory/frontend-patterns.md" ;;
