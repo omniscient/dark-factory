@@ -381,7 +381,7 @@ plan_advance_check() {
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
       gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
         --remove-label "plan-pending-review" 2>/dev/null || true
-      set_board_status "$issue_num" "$STATUS_READY" || true
+      set_board_status "$issue_num" "$FACTORY_STATUS_READY" || true
     else
       echo "[$(date -u +%FT%TZ)] plan_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${PLAN_GRACE_MINUTES}m action=waiting"
     fi
@@ -526,7 +526,7 @@ fetch_board_items() {
     [ -n "$cursor" ] && after_arg=', after: "'"$cursor"'"'
     raw=$(gh api graphql -f query='
       query {
-        node(id: "'"$PROJECT_ID"'") {
+        node(id: "'"$FACTORY_PROJECT_ID"'") {
           ... on ProjectV2 {
             items(first: 100'"$after_arg"') {
               pageInfo { hasNextPage endCursor }
@@ -591,7 +591,7 @@ fetch_wip_limits() {
   local result
   result=$(gh api graphql -f query='
     query {
-      node(id: "'"$PROJECT_ID"'") {
+      node(id: "'"$FACTORY_PROJECT_ID"'") {
         ... on ProjectV2 {
           field(name: "Status") {
             ... on ProjectV2SingleSelectField {

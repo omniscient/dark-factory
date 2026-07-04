@@ -14,4 +14,6 @@ FACTORY_OWNER=acme FACTORY_REPO=widgets bash -c '
   [ "$FACTORY_REPO_SLUG" = "acme/widgets" ] || exit 1'
 # 3) no hardcoded slug remains in the three shell entrypoints outside identity defaults
 ! grep -n "omniscient/markethawk" scheduler.sh entrypoint.sh smoke_gate.sh || { echo "FAIL residual slug"; exit 1; }
+# 4) no orphaned pre-identity variable names remain (undefined under set -u)
+! grep -nE '\$\{?(STATUS_(READY|IN_PROGRESS|IN_REVIEW|BLOCKED|DONE|BACKLOG|REFINED)|PROJECT_ID|STATUS_FIELD)\b' scheduler.sh entrypoint.sh smoke_gate.sh || { echo "FAIL orphaned pre-identity variable"; exit 1; }
 echo PASS
