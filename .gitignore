@@ -35,3 +35,4 @@ Thumbs.db
 venv/
 ENV/
 node_modules/
+deploy/instance.env
