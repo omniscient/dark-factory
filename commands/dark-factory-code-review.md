@@ -34,7 +34,7 @@ AGENT_ID="${AGENT_ID_CODE_REVIEW}"
 7. Determine `PR_NUM`:
    ```bash
    BRANCH=$(git branch --show-current)
-   PR_NUM=$(gh pr list --repo omniscient/markethawk --head "$BRANCH" --json number --jq '.[0].number // empty')
+   PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" --json number --jq '.[0].number // empty')
    ```
    If `PR_NUM` is empty, write `STATUS: ERROR\nREASON: no PR found` to `$ARTIFACTS_DIR/review.md` and exit `0` (fail-open — never block the board on missing PR).
 
@@ -71,7 +71,7 @@ rm -f "$RANK_IN"
 
 1. Build `$ISSUE_CONTEXT` = issue title + body:
    ```bash
-   gh issue view "$ISSUE_NUM" --repo omniscient/markethawk --json title,body \
+   gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json title,body \
      --jq '"Title: \(.title)\n\n\(.body)"'
    ```
 2. Read `.claude/skills/refinement/code-review-reviewer-prompt.md`.
@@ -112,7 +112,7 @@ Post a single GitHub review carrying the inline comments + body:
 
 ```bash
 jq '.payload' "$ARTIFACTS_DIR/review_result.json" > "$ARTIFACTS_DIR/review_payload.json"
-gh api "repos/omniscient/markethawk/pulls/$PR_NUM/reviews" \
+gh api "repos/${FACTORY_REPO_SLUG}/pulls/$PR_NUM/reviews" \
   --method POST --input "$ARTIFACTS_DIR/review_payload.json" || \
   echo "code-review: WARNING — posting the PR review failed (continuing to gate decision)"
 ```
@@ -139,7 +139,7 @@ Exit `0`. `status-in-review` and `report` proceed.
 
 1. Post a "Code Review — Blocked" comment on the issue, listing the blocking findings (from `.blockers` in the result JSON):
    ```bash
-   gh issue comment "$ISSUE_NUM" --repo omniscient/markethawk --body "## Code Review — Blocked
+   gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body "## Code Review — Blocked
 
    The AI code reviewer found ${BLOCKERS} blocking issue(s) (severity ≥ ${BLOCK_THRESHOLD}). See the inline comments on PR #${PR_NUM}.
 
@@ -153,19 +153,19 @@ Exit `0`. `status-in-review` and `report` proceed.
    ```
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list 1 --owner omniscient --format json --limit 200 \
+   ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
      | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
    if [ -n "$ITEM_ID" ]; then
      gh project item-edit \
-       --project-id PVT_kwHOAAFds84BWh4w \
+       --project-id "$FACTORY_PROJECT_ID" \
        --id "$ITEM_ID" \
-       --field-id PVTSSF_lAHOAAFds84BWh4wzhR1VaA \
-       --single-select-option-id 93d87b2f
+       --field-id "$FACTORY_STATUS_FIELD" \
+       --single-select-option-id "$FACTORY_STATUS_BLOCKED"
    fi
    ```
 3. Add the `needs-discussion` label:
    ```bash
-   gh issue edit "$ISSUE_NUM" --repo omniscient/markethawk --add-label needs-discussion
+   gh issue edit "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --add-label needs-discussion
    ```
 4. Write to `$ARTIFACTS_DIR/review.md`:
    ```bash

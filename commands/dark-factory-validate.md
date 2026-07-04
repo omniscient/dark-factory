@@ -79,14 +79,14 @@ EOF
 )"
     gh issue edit "$ISSUE_NUM" --add-label needs-discussion
     # Move to Blocked on the project board
-    ITEM_ID=$(gh project item-list 1 --owner omniscient --format json --limit 200 \
+    ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
       | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
     if [ -n "$ITEM_ID" ]; then
       gh project item-edit \
-        --project-id PVT_kwHOAAFds84BWh4w \
+        --project-id "$FACTORY_PROJECT_ID" \
         --id "$ITEM_ID" \
-        --field-id PVTSSF_lAHOAAFds84BWh4wzhR1VaA \
-        --single-select-option-id 93d87b2f
+        --field-id "$FACTORY_STATUS_FIELD" \
+        --single-select-option-id "$FACTORY_STATUS_BLOCKED"
     fi
     exit 1
   fi

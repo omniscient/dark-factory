@@ -5,6 +5,7 @@ OWNER = os.environ.get("FACTORY_OWNER", "omniscient")
 REPO = os.environ.get("FACTORY_REPO", "markethawk")
 SLUG = f"{OWNER}/{REPO}"
 PROJECT_ID = os.environ.get("FACTORY_PROJECT_ID", "PVT_kwHOAAFds84BWh4w")
+PROJECT_NUMBER = os.environ.get("FACTORY_PROJECT_NUMBER", "1")
 STATUS_FIELD = os.environ.get("FACTORY_STATUS_FIELD", "PVTSSF_lAHOAAFds84BWh4wzhR1VaA")
 STATUS = {
     "ready": os.environ.get("FACTORY_STATUS_READY", "61e4505c"),

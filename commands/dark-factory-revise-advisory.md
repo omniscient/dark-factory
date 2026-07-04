@@ -33,7 +33,7 @@ source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
    ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json" 2>/dev/null || \
      git branch --show-current | grep -oP 'issue-\K\d+')
    BRANCH=$(git branch --show-current)
-   PR_NUM=$(gh pr list --repo omniscient/markethawk --head "$BRANCH" --json number --jq '.[0].number // empty')
+   PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" --json number --jq '.[0].number // empty')
    ```
    If `PR_NUM` is empty → log a warning and exit 0 (fail-open; can't push comments without a PR).
 
@@ -52,7 +52,7 @@ source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
    ```
 3. Announce on the issue:
    ```bash
-   gh issue comment "$ISSUE_NUM" --repo omniscient/markethawk \
+   gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" \
      --body "Addressing ${ADVISORY_COUNT} advisory finding(s) from code review..."
    ```
 
@@ -126,7 +126,7 @@ Post a follow-up comment on the PR listing what was addressed:
 
 ```bash
 SUMMARY=$(cat "$ARTIFACTS_DIR/revise_summary.txt" 2>/dev/null || echo "(no summary)")
-gh api "repos/omniscient/markethawk/pulls/$PR_NUM/reviews" \
+gh api "repos/${FACTORY_REPO_SLUG}/pulls/$PR_NUM/reviews" \
   --method POST \
   --field body="## Advisory Findings Addressed
 

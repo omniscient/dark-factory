@@ -108,7 +108,7 @@ nodes:
       PR_NUM=$(gh pr list --search "head:feat/issue-${N}-" --json number --jq '.[0].number // empty')
       if [ -n "$PR_NUM" ]; then
         PR_COMMENTS=$(gh pr view "$PR_NUM" --json reviews,comments,reviewRequests)
-        INLINE_COMMENTS=$(gh api "repos/omniscient/markethawk/pulls/$PR_NUM/comments" \
+        INLINE_COMMENTS=$(gh api "repos/${FACTORY_REPO_SLUG}/pulls/$PR_NUM/comments" \
           --jq '[.[] | {path: .path, line: .line, body: .body, created_at: .created_at}]' 2>/dev/null || echo '[]')
         ISSUE_DATA=$(echo "$ISSUE_DATA" \
           | jq --argjson pr "$PR_COMMENTS" --argjson inline "$INLINE_COMMENTS" \
@@ -221,7 +221,7 @@ nodes:
 
       # Refuse auto-merge if a blast-radius block (or any other gate block) is still active
       HAS_NEEDS_DISCUSSION=$(gh issue view "$ISSUE" \
-        --repo omniscient/markethawk \
+        --repo "$FACTORY_REPO_SLUG" \
         --json labels --jq '.labels[].name' \
         | grep -c 'needs-discussion' || true)
       if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
@@ -240,14 +240,14 @@ nodes:
       echo "PR #$PR_NUM merged successfully"
 
       # Move the sub-issue to Done (never the epic — it stays In Progress)
-      ITEM_ID=$(gh project item-list 1 --owner omniscient --format json --limit 200 \
+      ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
         | jq -r ".items[] | select(.content.number == $ISSUE and .content.type == \"Issue\") | .id")
       if [ -n "$ITEM_ID" ]; then
         gh project item-edit \
-          --project-id PVT_kwHOAAFds84BWh4w \
+          --project-id "$FACTORY_PROJECT_ID" \
           --id "$ITEM_ID" \
-          --field-id PVTSSF_lAHOAAFds84BWh4wzhR1VaA \
-          --single-select-option-id 98236657
+          --field-id "$FACTORY_STATUS_FIELD" \
+          --single-select-option-id "$FACTORY_STATUS_DONE"
         echo "Moved issue #$ISSUE to Done"
       fi
       gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete."
@@ -447,7 +447,7 @@ nodes:
       BRANCH=$(git branch --show-current)
 
       git push -u origin "$BRANCH"
-      gh issue edit "$ISSUE" --repo omniscient/markethawk --add-label spec-pending-review
+      gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" --add-label spec-pending-review
       echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
     depends_on: [refine]
     when: "$parse-intent.output.intent == 'refine'"
@@ -464,7 +464,7 @@ nodes:
       BRANCH=$(git branch --show-current)
 
       git push -u origin "$BRANCH"
-      gh issue edit "$ISSUE" --repo omniscient/markethawk --add-label plan-pending-review
+      gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" --add-label plan-pending-review
       echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
     depends_on: [plan]
     when: "$parse-intent.output.intent == 'plan'"
@@ -958,7 +958,7 @@ nodes:
         echo "ERROR: branch '$BRANCH' is not on origin after push — aborting" >&2
         exit 1
       fi
-      PR_NUM=$(gh pr list --repo omniscient/markethawk --head "$BRANCH" \
+      PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" \
         --json number --jq '.[0].number // empty')
       echo "Pushed branch ${BRANCH} to PR #${PR_NUM:-unknown}"
       echo "PR_NUM=${PR_NUM:-}"
@@ -1170,14 +1170,14 @@ nodes:
         exit 0
       fi
       echo "Moving issue #${ISSUE} to In Review..."
-      ITEM_ID=$(gh project item-list 1 --owner omniscient --format json --limit 200 \
+      ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
         | jq -r ".items[] | select(.content.number == $ISSUE and .content.type == \"Issue\") | .id")
       if [ -n "$ITEM_ID" ]; then
         gh project item-edit \
-          --project-id PVT_kwHOAAFds84BWh4w \
+          --project-id "$FACTORY_PROJECT_ID" \
           --id "$ITEM_ID" \
-          --field-id PVTSSF_lAHOAAFds84BWh4wzhR1VaA \
-          --single-select-option-id df73e18b
+          --field-id "$FACTORY_STATUS_FIELD" \
+          --single-select-option-id "$FACTORY_STATUS_IN_REVIEW"
         echo "Moved issue #$ISSUE to In Review"
       else
         echo "WARNING: Issue #$ISSUE not found on project board"
