@@ -7,6 +7,7 @@ source scripts/identity.sh
 [ "$FACTORY_REPO" = "markethawk" ] || { echo "FAIL repo default"; exit 1; }
 [ "$FACTORY_REPO_SLUG" = "omniscient/markethawk" ] || { echo "FAIL slug"; exit 1; }
 [ "$FACTORY_STATUS_DONE" = "98236657" ] || { echo "FAIL status ids"; exit 1; }
+[ "$FACTORY_PROJECT_NUMBER" = "1" ] || { echo "FAIL project number"; exit 1; }
 [ "$FACTORY_PRODUCT_NAME" = "MarketHawk" ] || { echo "FAIL product name"; exit 1; }
 # 2) env wins
 FACTORY_OWNER=acme FACTORY_REPO=widgets bash -c '

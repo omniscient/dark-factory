@@ -45,7 +45,7 @@ Parse the **Spec:** or **Plan:** line from that comment to find the spec file pa
 
 ```bash
 # Extract the first docs/superpowers/specs/ path from the "Plan Generated" comment
-PLAN_COMMENT=$(gh issue view "$ISSUE_NUM" --repo omniscient/markethawk --json comments \
+PLAN_COMMENT=$(gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json comments \
   | jq -r '[.comments[] | select(.body | test("Refinement Pipeline — Plan Generated"))] | last | .body // ""')
 SPEC_FILE=$(printf '%s' "$PLAN_COMMENT" \
   | grep -oP 'docs/superpowers/specs/[^\s\])"]+' | head -1)
@@ -73,7 +73,7 @@ ls docs/superpowers/specs/ 2>/dev/null | sort -r | head -10
 Look for a file whose name contains keywords from the issue title. Pick the most recently created file that matches.
 
 ```bash
-ISSUE_KEYWORDS=$(gh issue view "$ISSUE_NUM" --repo omniscient/markethawk --json title \
+ISSUE_KEYWORDS=$(gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json title \
   --jq '.title' | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 SPEC_MATCH=$(ls docs/superpowers/specs/ 2>/dev/null | sort -r | head -10 \
   | grep -im1 "$(echo "$ISSUE_KEYWORDS" | cut -c1-20)" || true)
@@ -298,7 +298,7 @@ Skip to 3.6.3 if `${#OOS_ENTRIES[@]} -eq 0`.
 
 ```bash
 SPILLOVER_JSON=$(gh issue list \
-  --repo omniscient/markethawk \
+  --repo "$FACTORY_REPO_SLUG" \
   --label "$BACKLOG_LABEL" \
   --state open \
   --json number,title,body \
@@ -347,7 +347,7 @@ ${DEDUP_KEY_COMMENT}
 *Automatically triaged by MarketHawk Dark Factory scope enforcement.*"
 
       SPILLOVER_URL=$(gh issue create \
-        --repo omniscient/markethawk \
+        --repo "$FACTORY_REPO_SLUG" \
         --title "$SPILLOVER_TITLE" \
         --body "$SPILLOVER_BODY" \
         --label "needs-triage,${BACKLOG_LABEL}")
@@ -358,7 +358,7 @@ ${DEDUP_KEY_COMMENT}
     comment:*)
       EXISTING_NUM="${ACTION#comment:}"
       gh issue comment "$EXISTING_NUM" \
-        --repo omniscient/markethawk \
+        --repo "$FACTORY_REPO_SLUG" \
         --body "**Scope enforcement (re-observed):** This finding was re-surfaced while implementing issue #${ISSUE_NUM}.
 
 **Entry:** ${ENTRY}
@@ -502,14 +502,14 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list 1 --owner omniscient --format json --limit 200 \
+   ITEM_ID=$(gh project item-list $FACTORY_PROJECT_NUMBER --owner "$FACTORY_OWNER" --format json --limit 200 \
      | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
    if [ -n "$ITEM_ID" ]; then
      gh project item-edit \
-       --project-id PVT_kwHOAAFds84BWh4w \
+       --project-id "$FACTORY_PROJECT_ID" \
        --id "$ITEM_ID" \
-       --field-id PVTSSF_lAHOAAFds84BWh4wzhR1VaA \
-       --single-select-option-id 93d87b2f
+       --field-id "$FACTORY_STATUS_FIELD" \
+       --single-select-option-id "$FACTORY_STATUS_BLOCKED"
    fi
    ```
 

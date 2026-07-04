@@ -14,8 +14,8 @@ def test_command_wires_the_contract():
     # mirrors conformance's pre-triage diff exclusions
     assert "':!*.lock'" in text and "':!.archon/memory/**'" in text
     # blocking path uses the real Blocked board option id
-    assert "93d87b2f" in text
-    assert "PVTSSF_lAHOAAFds84BWh4wzhR1VaA" in text
+    assert "FACTORY_STATUS_BLOCKED" in text
+    assert "FACTORY_STATUS_FIELD" in text
     # posts the review via the Pulls Reviews API
     assert "/pulls/" in text and "/reviews" in text
     # writes the artifact the report node reads

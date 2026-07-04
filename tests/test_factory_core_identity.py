@@ -13,6 +13,7 @@ def test_defaults_are_markethawk(monkeypatch):
     ident = _fresh(monkeypatch)
     assert ident.SLUG == "omniscient/markethawk"
     assert ident.PROJECT_ID == "PVT_kwHOAAFds84BWh4w"
+    assert ident.PROJECT_NUMBER == "1"
     assert ident.STATUS["done"] == "98236657"
     assert ident.marker("factory") == "*Posted by MarketHawk Dark Factory*"
     assert ident.marker("scheduler") == "*Posted by MarketHawk Backlog Scheduler*"

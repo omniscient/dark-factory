@@ -151,11 +151,11 @@ Follow the process in `orchestrator-prompt.md`:
 
 1. Determine the current branch name: `BRANCH=$(git branch --show-current)`
 2. Build GitHub links:
-   - Spec link: `https://github.com/omniscient/markethawk/blob/$BRANCH/<spec-file-path>` (e.g. `docs/superpowers/specs/2026-05-13-topic-design.md`)
-   - Branch link: `https://github.com/omniscient/markethawk/tree/$BRANCH`
+   - Spec link: `https://github.com/${FACTORY_REPO_SLUG}/blob/$BRANCH/<spec-file-path>` (e.g. `docs/superpowers/specs/2026-05-13-topic-design.md`)
+   - Branch link: `https://github.com/${FACTORY_REPO_SLUG}/tree/$BRANCH`
 3. Check if the issue carries the `direct-to-pr` label:
    ```bash
-   IS_DIRECT_TO_PR=$(gh issue view $ISSUE_NUM --repo omniscient/markethawk \
+   IS_DIRECT_TO_PR=$(gh issue view $ISSUE_NUM --repo "$FACTORY_REPO_SLUG" \
      --json labels --jq '.labels[].name' | grep -q "direct-to-pr" && echo "yes" || echo "no")
    SPEC_GRACE=$(python3 -c "import yaml; d=yaml.safe_load(open('.claude/skills/refinement/config.yaml')); print(d.get('direct_to_pr',{}).get('spec_grace_minutes',30))" 2>/dev/null || echo "30")
    ```
@@ -165,8 +165,8 @@ Follow the process in `orchestrator-prompt.md`:
    ```
    ## Refinement Pipeline — Spec Generated
 
-   **Spec:** [<spec-file-path>](https://github.com/omniscient/markethawk/blob/<BRANCH>/<spec-file-path>)
-   **Branch:** [`<BRANCH>`](https://github.com/omniscient/markethawk/tree/<BRANCH>)
+   **Spec:** [<spec-file-path>](https://github.com/${FACTORY_REPO_SLUG}/blob/<BRANCH>/<spec-file-path>)
+   **Branch:** [`<BRANCH>`](https://github.com/${FACTORY_REPO_SLUG}/tree/<BRANCH>)
    <!-- If OOS_FILES is non-empty, include this line: -->
    > ⚠️ **OOS excision**: The following files were created outside the refine scope and were reverted before publishing: `$OOS_FILES`. Scope-spillover tickets may be filed automatically.
 

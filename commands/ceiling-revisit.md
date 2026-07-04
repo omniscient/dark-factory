@@ -22,7 +22,7 @@ unconditionally files the next weekly revisit issue.
 ## Phase 1 — Fetch and Analyze
 
 ```bash
-REPO=omniscient/markethawk
+REPO="${FACTORY_REPO_SLUG}"
 SCORECARD=/tmp/ceiling-revisit-scorecard.json
 
 # Fetch scorecard data for cumulative window since policy introduction
