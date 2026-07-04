@@ -608,14 +608,24 @@ if [ "$INTENT" = "deconflict" ]; then
 fi
 
 if [ "$INTENT" = "deconflict" ]; then
-  # --- Validate: TypeScript type-check (lightweight; no running DB needed) ---
+  # --- Validate: target hook if present, else inline tsc (parity fallback) ---
   DECONFLICT_VALIDATION="PASS"
-  echo "[deconflict] Running TypeScript validation..."
-  if ! (cd "$CLONE_DIR/frontend" && npx tsc --noEmit 2>&1); then
-    DECONFLICT_VALIDATION="FAIL"
-    echo "[deconflict] TypeScript validation failed — escalating to Blocked."
-    _conflict_escalate "TypeScript type errors after merge. Run 'cd frontend && npx tsc --noEmit' to see them."
-    exit 0
+  if [ -x "$CLONE_DIR/.factory/hooks/validate" ]; then
+    echo "[deconflict] Running .factory/hooks/validate..."
+    if ! run_hook --gate validate; then
+      DECONFLICT_VALIDATION="FAIL"
+      echo "[deconflict] validate hook failed — escalating to Blocked."
+      _conflict_escalate "Validation failed after merge (.factory/hooks/validate). Run the hook locally to see errors."
+      exit 0
+    fi
+  else
+    echo "[deconflict] Running TypeScript validation..."
+    if ! (cd "$CLONE_DIR/frontend" && npx tsc --noEmit 2>&1); then
+      DECONFLICT_VALIDATION="FAIL"
+      echo "[deconflict] TypeScript validation failed — escalating to Blocked."
+      _conflict_escalate "TypeScript type errors after merge. Run 'cd frontend && npx tsc --noEmit' to see them."
+      exit 0
+    fi
   fi
 
   # --- Push the resolved branch ---

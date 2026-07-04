@@ -21,8 +21,21 @@ run_hook() {
   local hook="${CLONE_DIR}/.factory/hooks/${name}"
   local rc=0
   if [ -x "$hook" ]; then
-    CLONE_DIR="$CLONE_DIR" ARTIFACTS_DIR="${ARTIFACTS_DIR:-}" ISSUE_NUM="${ISSUE_NUM:-}" \
-      FACTORY_REPO_SLUG="${FACTORY_REPO_SLUG:-}" "$hook" "$@" || rc=$?
+    if [ "$name" = "smoke-gate" ]; then
+      # Target hook supplies the CHECK only (exit 0 green / non-zero red).
+      # Red/green STATE machinery (sentinel, regression ticket, clean-halt
+      # exit 0) stays factory-side — identical semantics to the built-in gate.
+      if CLONE_DIR="$CLONE_DIR" ARTIFACTS_DIR="${ARTIFACTS_DIR:-}" ISSUE_NUM="${ISSUE_NUM:-}" \
+           FACTORY_REPO_SLUG="${FACTORY_REPO_SLUG:-}" "$hook" "$@"; then
+        _smoke_on_green
+        rc=0
+      else
+        _smoke_on_red   # exits 0 (clean halt); unreachable after
+      fi
+    else
+      CLONE_DIR="$CLONE_DIR" ARTIFACTS_DIR="${ARTIFACTS_DIR:-}" ISSUE_NUM="${ISSUE_NUM:-}" \
+        FACTORY_REPO_SLUG="${FACTORY_REPO_SLUG:-}" "$hook" "$@" || rc=$?
+    fi
   else
     case "$name" in
       smoke-gate) _default_smoke_gate "$@" || rc=$? ;;   # provided by smoke_gate.sh

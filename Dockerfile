@@ -111,6 +111,7 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scheduler.sh /opt/dark-factory/scheduler.sh
 COPY smoke_gate.sh /opt/dark-factory/smoke_gate.sh
 COPY scripts/ /opt/dark-factory/scripts/
+COPY bench/ /opt/dark-factory/bench/
 COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
 COPY seed/ /opt/dark-factory/seed/
 # Factory-owned run compose (NOT the target project's docker-compose.yml).
