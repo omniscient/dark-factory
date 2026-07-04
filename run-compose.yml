@@ -1,0 +1,52 @@
+# Factory-owned run compose — scheduler.sh dispatch() uses this file.
+# Baked into the image at /opt/dark-factory/docker-compose.yml by the Dockerfile.
+# This is NOT the target project's docker-compose.yml.
+#
+# env_file .archon/.env resolves to /opt/dark-factory/.archon/.env (relative to
+# the baked compose file location). The scheduler provisions that file at startup
+# by copying it from the bind-mounted /workspace/project/.archon/.env.
+#
+# All FACTORY_* vars are explicit here so identity propagates even when the
+# scheduler's instance.env is not re-read by the run container (F1 fix).
+
+name: dark-factory
+
+services:
+  dark-factory:
+    image: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+    env_file:
+      - path: .archon/.env
+        required: true
+    environment:
+      # Socket proxy URL — pass through the scheduler's DOCKER_HOST (TCP)
+      DOCKER_HOST: ${DOCKER_HOST:-}
+      # Identity vars — propagated from the scheduler's instance.env
+      FACTORY_OWNER: ${FACTORY_OWNER:-omniscient}
+      FACTORY_REPO: ${FACTORY_REPO:-markethawk}
+      FACTORY_PROJECT_ID: ${FACTORY_PROJECT_ID:-PVT_kwHOAAFds84BWh4w}
+      FACTORY_PROJECT_NUMBER: ${FACTORY_PROJECT_NUMBER:-1}
+      FACTORY_STATUS_FIELD: ${FACTORY_STATUS_FIELD:-PVTSSF_lAHOAAFds84BWh4wzhR1VaA}
+      FACTORY_STATUS_READY: ${FACTORY_STATUS_READY:-61e4505c}
+      FACTORY_STATUS_IN_PROGRESS: ${FACTORY_STATUS_IN_PROGRESS:-47fc9ee4}
+      FACTORY_STATUS_IN_REVIEW: ${FACTORY_STATUS_IN_REVIEW:-df73e18b}
+      FACTORY_STATUS_BLOCKED: ${FACTORY_STATUS_BLOCKED:-93d87b2f}
+      FACTORY_STATUS_DONE: ${FACTORY_STATUS_DONE:-98236657}
+      FACTORY_STATUS_BACKLOG: ${FACTORY_STATUS_BACKLOG:-f75ad846}
+      FACTORY_STATUS_REFINED: ${FACTORY_STATUS_REFINED:-0c79ebe5}
+      FACTORY_PRODUCT_NAME: ${FACTORY_PRODUCT_NAME:-MarketHawk}
+      FACTORY_CLONE_DIR: ${FACTORY_CLONE_DIR:-.}
+      FACTORY_RUN_PREFIX: ${FACTORY_RUN_PREFIX:-}
+      FACTORY_IMAGE: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+    volumes:
+      - scheduler_state:/var/lib/dark-factory
+    networks:
+      - dark-factory-net
+    profiles:
+      - factory
+
+networks:
+  dark-factory-net:
+    driver: bridge
+
+volumes:
+  scheduler_state:
