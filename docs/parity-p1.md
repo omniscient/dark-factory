@@ -29,16 +29,17 @@ docker run --rm --entrypoint bash \
   -c "pip install pytest -q 2>&1 | tail -3; cd /repo && PYTHONPATH=scripts python -m pytest tests/ -q 2>&1"
 ```
 
-**Result: 841 passed, 21 failed, 1 skipped (35.16s)**
+**Result (initial): 841 passed, 21 failed, 1 skipped (35.16s)**
 
-### Failures (21)
+### Fix round 1: CRLF regression (root-caused, NOT pre-existing)
 
-All 21 failures are `set: pipefail` bash compatibility issues in the container — the image ships `/bin/sh`-compatible bash but the scripts use `set -o pipefail`, which some shells reject with `invalid option name`. The failures are:
+The 21 failures were caused by CRLF line endings in the worktree, not a `set -o pipefail` bash compatibility issue. Windows-host edits on this branch introduced CRLF to `scripts/load_memory_context.sh` (line 11) and `scripts/oos_excise.sh` (line 15) — Docker's bind-mounted volume served those CRLF files to the container, so bash received `pipefail\r` as the option name.
 
-- **10 failures** in `tests/test_load_memory_context.py` — `scripts/load_memory_context.sh` line 11: `set: pipefail: invalid option name`
-- **11 failures** in `tests/test_oos_excise.py` — `scripts/oos_excise.sh` line 15: `set: pipefail: invalid option name`
+Root cause: `core.autocrlf=true` globally on the Windows dev machine + no `.gitattributes` to enforce `eol=lf`.
 
-These are **pre-existing environment-compatibility issues** (not regressions introduced by P1 work). The 841 core tests pass, covering all identity, adapter, and factory-logic suites.
+Fix applied: added `.gitattributes` at repo root (`* text=auto eol=lf`) and converted all tracked CRLF worktree files to LF via `sed`. Only `.gitattributes` was staged (index was already LF; no content changes).
+
+**Result (after fix): 862 passed, 1 skipped (35.31s)** — all 21 failures eliminated.
 
 ---
 
@@ -129,7 +130,7 @@ Pattern is correct: all identity variables use `${VAR:-default}` syntax allowing
 | Gate | Result |
 |------|--------|
 | Image published for HEAD SHA | PASS (run in_progress, image digest confirmed) |
-| In-image test suite | **PARTIAL** — 841/862 pass; 21 pre-existing `set -o pipefail` compat failures |
+| In-image test suite | **PASS** — 862 passed, 1 skipped; CRLF regression fixed with `.gitattributes` |
 | NO-RESIDUAL-SLUG | PASS |
 | Default-parity assertions | PASS |
 | Identity-override bash syntax | PASS |
@@ -143,4 +144,3 @@ Pattern is correct: all identity variables use `${VAR:-default}` syntax allowing
 3. **Bench parity run** — execute `dark-factory/bench/run_suite.sh` against the extracted image to establish baseline scores matching the embedded-MH baseline
 4. **Entrypoint inline-tsc relocation** — move TypeScript compilation step from entrypoint.sh inline block into a proper `.factory/hooks/build.sh` hook
 5. **Cutover** — update `.archon/workflows/` in MH to point to `ghcr.io/omniscient/dark-factory:latest` instead of the MH-embedded image; deprecate `dark-factory/` subdirectory in MH
-6. **Fix `set -o pipefail` compatibility** in `scripts/load_memory_context.sh` and `scripts/oos_excise.sh` (use `#!/usr/bin/env bash` or detect shell capability)
