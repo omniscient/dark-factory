@@ -344,7 +344,7 @@ The dark factory noticed this pre-existing defect while implementing issue #${IS
 ${DEDUP_KEY_COMMENT}
 
 ---
-*Automatically triaged by MarketHawk Dark Factory scope enforcement.*"
+*Automatically triaged by ${FACTORY_PRODUCT_NAME} Dark Factory scope enforcement.*"
 
       SPILLOVER_URL=$(gh issue create \
         --repo "$FACTORY_REPO_SLUG" \
@@ -497,7 +497,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    - Add \`needs-discussion\` if the spec itself needs revisiting.
 
    ---
-   *Posted by MarketHawk Dark Factory*"
+   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
    ```
 
 2. Move the issue to **Blocked** on the project board:

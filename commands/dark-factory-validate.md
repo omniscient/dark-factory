@@ -74,7 +74,7 @@ Remove the \`needs-discussion\` label after reviewing and approving the risk, th
 docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_NUM"
 \`\`\`
 ---
-*Posted by MarketHawk Dark Factory*
+*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*
 EOF
 )"
     gh issue edit "$ISSUE_NUM" --add-label needs-discussion

@@ -135,7 +135,7 @@ Automatically addressed **${ADVISORY_COUNT}** advisory finding(s):
 ${SUMMARY}
 
 ---
-*Posted by MarketHawk Dark Factory*" \
+*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" \
   --field event="COMMENT" || \
   echo "revise-advisory: WARNING — posting follow-up review comment failed (continuing)"
 ```

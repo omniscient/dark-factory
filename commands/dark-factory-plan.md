@@ -118,7 +118,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
         $CONFORMANCE_DIALOGUE
 
         ---
-        *Posted by MarketHawk Refinement Pipeline*
+        *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
         ```
       - Add `needs-discussion` label: `gh issue edit $ISSUE_NUM --add-label needs-discussion`
       - Exit cleanly (do not abort — this is a known state)
@@ -189,7 +189,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    - ❓ **Need to discuss** — add the `needs-discussion` label to pause automation.
 
    ---
-   *Posted by MarketHawk Refinement Pipeline*
+   *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
    ```
 8. Write status to `$ARTIFACTS_DIR/refinement-status.md`:
    ```
