@@ -182,18 +182,25 @@ repo fresh from the default branch.  This means:
   baked into the image.  Rollback for those requires re-tagging or pinning
   `IMAGE_TAG` in `instance.env`.
 
-### Token budget enforcement kill-switch
+### Token budget enforcement rollback (Tier 0 & Tier 1)
 
-If budget enforcement causes unexpected run failures, it can be disabled by
-committing a `.factory/adapter.yaml` change to the target repo:
+Two tiers are available. Tier 0 is instant (no git commit); Tier 1 is durable
+and tracked in history.
 
-```yaml
-token_optimization:
-  enforce_budgets: false
+**Tier 0 — env kill-switch (fastest):** set `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false`
+in `instance.env`, then force-recreate the scheduler:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
 ```
 
-**Note:** `enforce_budgets` does not have an environment variable override by
-design — rollback must go through git so the decision is tracked in history.
+Kill-only semantics: `false`/`0`/`no` forces observe mode on subsequent runs;
+the variable can never force enforcement ON. In-flight runs keep their spawn-time env.
+
+**Tier 1 — git (durable):** commit `enforce_budgets: false` (or revert the enabling
+commit) to `.factory/adapter.yaml` in the target repo — clone-read, effective on
+the next factory run; the only way to durably change budgets/flags.
+
 See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 
 ---
