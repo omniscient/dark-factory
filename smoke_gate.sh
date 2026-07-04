@@ -99,9 +99,11 @@ _smoke_on_green() {
   fi
 }
 
-# Main entry point called by entrypoint.sh.
+# Built-in default for the smoke-gate hook — called by hooks.sh run_hook when no
+# target repo ships .factory/hooks/smoke-gate. Contains today's MarketHawk checks
+# (tsc + python import). Parity invariant: MarketHawk needs zero hooks.
 # Returns 0 on green (proceed); exits 0 on red (clean halt, no per-ticket failure).
-run_smoke_gate() {
+_default_smoke_gate() {
   if _smoke_check_main; then
     _smoke_on_green
     return 0
@@ -110,6 +112,9 @@ run_smoke_gate() {
     # _smoke_on_red calls exit 0; unreachable
   fi
 }
+
+# Thin wrapper kept for backward compatibility (scheduler.sh, tests, direct calls).
+run_smoke_gate() { _default_smoke_gate "$@"; }
 
 # Source-only guard: when set, functions above are defined but no auto-exec code runs.
 # Mirrors scheduler.sh's SCHEDULER_SOURCE_ONLY pattern for unit testing.
