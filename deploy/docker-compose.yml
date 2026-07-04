@@ -1,0 +1,78 @@
+# Dark Factory — standalone deploy compose
+#
+# Runs the Backlog Scheduler + its Docker Socket Proxy for a single project instance.
+# Copy deploy/instance.env.example → deploy/instance.env, fill in your values, then:
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# PROJECT_DIR (env var, default: parent of deploy/) must point to the target project
+# checkout on the host so the scheduler can read it as /workspace/project.
+#
+#   PROJECT_DIR=/path/to/your-repo docker compose -f deploy/docker-compose.yml up -d
+#
+# IMAGE_TAG (env var, default: latest) pins the factory image version.
+
+services:
+
+  # Docker Socket Proxy (scheduler) — allows container lifecycle ops
+  # (create/run/stop/delete) via POST+CONTAINERS for `docker compose run`;
+  # BUILD/EXEC stay 0 (run never builds/execs).
+  docker-socket-proxy-scheduler:
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+    container_name: dark-factory-socket-proxy-scheduler
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 1
+      # `docker compose run dark-factory` (dispatch) must look up the service's
+      # networks and its scheduler_state volume before creating the container —
+      # both were 0, which 403'd every dispatch after a proxy recreate.
+      # BUILD/EXEC stay 0 (run never builds/execs).
+      NETWORKS: 1
+      VOLUMES: 1
+      BUILD: 0
+      SERVICES: 0
+      EXEC: 0
+      AUTH: 0
+      SECRETS: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - dark-factory-net
+
+  # Backlog Scheduler — polls the GitHub project board and dispatches factory runs
+  backlog-scheduler:
+    image: ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}
+    container_name: dark-factory-scheduler
+    restart: unless-stopped
+    entrypoint: ["/opt/dark-factory/scheduler.sh"]
+    env_file:
+      - path: instance.env
+        required: true
+    environment:
+      FACTORY_IMAGE: "ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}"
+      DOCKER_HOST: tcp://docker-socket-proxy-scheduler:2375
+    depends_on:
+      - docker-socket-proxy-scheduler
+    volumes:
+      - dark_factory_state:/var/lib/dark-factory
+      # Bind-mount the target project checkout read-only.
+      # Set PROJECT_DIR on the host to the absolute path of your project checkout.
+      # Default (..) resolves to the parent of the deploy/ directory.
+      - ${PROJECT_DIR:-..}:/workspace/project:ro
+    networks:
+      - dark-factory-net
+    # Optional: structured logging to Seq/Gelf. Comment out if you don't run Seq.
+    # logging:
+    #   driver: gelf
+    #   options:
+    #     gelf-address: "udp://host.docker.internal:12201"
+    #     tag: "backlog-scheduler"
+
+networks:
+  dark-factory-net:
+    driver: bridge
+
+volumes:
+  dark_factory_state:
