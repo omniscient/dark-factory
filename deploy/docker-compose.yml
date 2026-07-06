@@ -62,7 +62,11 @@ services:
     restart: unless-stopped
     entrypoint: ["/opt/dark-factory/scheduler.sh"]
     env_file:
-      - path: instance.env
+      # FACTORY_INSTANCE_ENV (interpolation env var, default instance.env) lets a
+      # second instance point at its own uncommitted env file, e.g.
+      #   docker compose --env-file deploy/instance-self.env -f deploy/docker-compose.yml up -d
+      # with FACTORY_INSTANCE_ENV=instance-self.env set inside that same file.
+      - path: ${FACTORY_INSTANCE_ENV:-instance.env}
         required: true
     environment:
       FACTORY_IMAGE: "ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}"
