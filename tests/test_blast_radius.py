@@ -4,9 +4,23 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "gate_blast_radius.py"
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_cwd(tmp_path, monkeypatch):
+    """Run from an adapter-free directory.
+
+    This repo carries its own .factory/adapter.yaml (self-target dogfood);
+    the default clone_dir="." lookup would pick it up and override the
+    MarketHawk-parity defaults these tests assert.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+
 
 
 def run_script(

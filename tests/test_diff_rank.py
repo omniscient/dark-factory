@@ -10,11 +10,25 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 # In-process import matching fmt_hunk_filter.py's self-contained pattern
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import diff_rank as dr          # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_cwd(tmp_path, monkeypatch):
+    """Run from an adapter-free directory.
+
+    This repo carries its own .factory/adapter.yaml (self-target dogfood);
+    the default clone_dir="." lookup would pick it up and override the
+    MarketHawk-parity defaults these tests assert.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+
 import gate_blast_radius as gbr  # noqa: E402
 
 
