@@ -542,13 +542,23 @@ mkdir -p "$CLONE_DIR/dark-factory"
 cp /opt/dark-factory/docker-compose.preview.yml "$CLONE_DIR/dark-factory/docker-compose.preview.yml"
 cp -r /opt/dark-factory/seed/ "$CLONE_DIR/dark-factory/seed/"
 
-# --- Install backend/frontend deps for local testing ---
-echo "Installing backend dependencies..."
-# --no-warn-script-location: pip installs as non-root into ~/.local/bin (off
-# PATH); harmless because all tools run via `python -m`, so mute the 20+ warnings.
-cd "$CLONE_DIR/backend" && pip install --quiet --no-warn-script-location -r requirements.txt
-echo "Installing frontend dependencies..."
-cd "$CLONE_DIR/frontend" && npm install --silent
+# --- Install target project deps for local testing (target-conditional, #23) ---
+# Targets without a Python backend or Node frontend (e.g. this repo as the P4
+# dogfood self-target) must not die here under set -euo pipefail.
+if [ -f "$CLONE_DIR/backend/requirements.txt" ]; then
+  echo "Installing backend dependencies..."
+  # --no-warn-script-location: pip installs as non-root into ~/.local/bin (off
+  # PATH); harmless because all tools run via `python -m`, so mute the 20+ warnings.
+  cd "$CLONE_DIR/backend" && pip install --quiet --no-warn-script-location -r requirements.txt
+else
+  echo "[deps] no backend/requirements.txt in target — skipping pip install"
+fi
+if [ -f "$CLONE_DIR/frontend/package.json" ]; then
+  echo "Installing frontend dependencies..."
+  cd "$CLONE_DIR/frontend" && npm install --silent
+else
+  echo "[deps] no frontend/package.json in target — skipping npm install"
+fi
 cd "$CLONE_DIR"
 
 # --- Write factory-scoped Claude settings (gitignored, never committed) ---
