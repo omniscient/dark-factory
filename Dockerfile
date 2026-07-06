@@ -114,6 +114,10 @@ COPY scripts/ /opt/dark-factory/scripts/
 COPY bench/ /opt/dark-factory/bench/
 COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
 COPY seed/ /opt/dark-factory/seed/
+# Baked workflow + command copies for the self-contained fallbacks (df#14):
+# entrypoint.sh copies these into the clone when the target repo provides none.
+COPY workflows/ /opt/dark-factory/workflows/
+COPY commands/ /opt/dark-factory/commands/
 # Factory-owned run compose (NOT the target project's docker-compose.yml).
 # scheduler.sh dispatch() calls: docker compose -f /opt/dark-factory/docker-compose.yml run dark-factory
 COPY run-compose.yml /opt/dark-factory/docker-compose.yml
