@@ -34,6 +34,11 @@ DC_VOL=$(grep -oE 'name: \$\{FACTORY_INSTANCE:-dark-factory\}-scheduler-state' "
 grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$RC" || { echo "FAIL: run-compose.yml project name not FACTORY_INSTANCE-scoped"; exit 1; }
 grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$DC" || { echo "FAIL: deploy compose project name not FACTORY_INSTANCE-scoped"; exit 1; }
 
+# 3d) WIP-guard seam: identity.sh's default FACTORY_RUN_PREFIX must match the
+# names `docker compose run` actually produces (<project>-dark-factory-run-…).
+IDS="$REPO_ROOT/scripts/identity.sh"
+grep -q 'FACTORY_RUN_PREFIX:-${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-' "$IDS"   || { echo "FAIL: identity.sh RUN_PREFIX default does not match compose run-container naming"; exit 1; }
+
 # 4) Parse check via docker compose config (skipped if docker not available)
 if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
   # Provision a scratch .archon/.env so the required env_file check passes

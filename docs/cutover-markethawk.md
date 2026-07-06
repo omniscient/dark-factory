@@ -102,13 +102,13 @@ see:
 
 ```
 [scheduler] dispatching issue #N …
-[scheduler] run container markethawk-dark-factory-run-<N>-<ts> started
+[scheduler] run container dark-factory-dark-factory-run-<hash> started
 ```
 
 Confirm the run container appears:
 
 ```bash
-docker ps --filter name=markethawk-dark-factory-run
+docker ps --filter name=dark-factory-dark-factory-run
 ```
 
 ### Step 2.5 — Observe 2–3 tickets end-to-end
