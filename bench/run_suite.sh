@@ -57,6 +57,12 @@ BENCH_TOKEN_BUDGET="${BENCH_TOKEN_BUDGET:-5.00}"
 
 mkdir -p "$RESULTS_DIR"
 
+# Allow git to operate on volume-mounted directories (Docker host-mount ownership)
+git config --global --add safe.directory "$REPO_ROOT" 2>/dev/null || true
+
+# Ensure we run from the repo root so archon finds the git repo
+cd "$REPO_ROOT"
+
 # ---- Helpers ----
 log() { echo "[bench] $*" >&2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -150,7 +156,8 @@ except Exception:
 RUN_TS=$(date -u +%Y-%m-%dT%H-%M)
 RESULTS_FILE="$RESULTS_DIR/${RUN_TS}-run.json"
 
-declare -a ALL_RESULTS=()
+RESULTS_TMPFILE=$(mktemp /tmp/bench_results_XXXXXX.ndjson)
+export RESULTS_TMPFILE
 
 # Iterate tasks
 python3 -c "
@@ -185,8 +192,15 @@ for t in tasks:
       log "    Cleaned up prior branch: $EXISTING_BRANCH"
     fi
 
+    # Remove codeindex artifacts before each run so codeindex analyze starts fresh.
+    # Without this, the analyze step accumulates state across runs and exceeds its
+    # 120s timeout from run 2 onwards, causing implement to be skipped.
+    rm -f "$REPO_ROOT/symbolindex.json" "$REPO_ROOT/codeindex.json" \
+          "$REPO_ROOT/symbolindex.json.bak" 2>/dev/null || true
+
     # Pin to pre-PR commit so oracle tests fail before the fix
-    git -C "$REPO_ROOT" checkout "$PRE_SHA" 2>/dev/null || {
+    # Use -f to discard any local modifications (e.g. the bench script itself)
+    git -C "$REPO_ROOT" checkout -f "$PRE_SHA" 2>/dev/null || {
       log "    ERROR: could not checkout pre_pr_sha $PRE_SHA — skipping run"
       continue
     }
@@ -257,7 +271,7 @@ print(json.dumps({
     'runs': json.loads('$TASK_RUNS_JSON'),
 }))
 ")
-  ALL_RESULTS+=("$TASK_RESULT")
+  echo "$TASK_RESULT" >> "$RESULTS_TMPFILE"
   log "  Task #$ISSUE: $PASSES/$N passed, pass^k=$PASS_K"
 
 done
@@ -267,8 +281,11 @@ done
 RESULTS_JSON=$(python3 -c "
 import json, sys, os, datetime
 
-results_raw = os.environ.get('ALL_RESULTS_RAW', '[]')
-results = json.loads(results_raw)
+tmpfile = os.environ.get('RESULTS_TMPFILE', '')
+if tmpfile and os.path.exists(tmpfile):
+    results = [json.loads(l) for l in open(tmpfile).readlines() if l.strip()]
+else:
+    results = []
 
 # Aggregate by size bucket
 by_size = {}
