@@ -115,10 +115,12 @@ def materialize(clone_dir: str, baked_path: str = _BAKED_PATH) -> str:
                          for b in TARGET_TUNABLE_BLOCKS)
         return f"effective-config: clone config present — left in place ({srcs})"
     import yaml
+    # Exclude BEFORE writing: if the exclude append fails, better to have no
+    # materialized file than an unexcluded one a factory agent could commit.
+    _git_exclude(clone_dir, _CLONE_REL)
     os.makedirs(os.path.dirname(clone_cfg_path), exist_ok=True)
     with open(clone_cfg_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(merged, f, sort_keys=False)
-    _git_exclude(clone_dir, _CLONE_REL)
     srcs = ", ".join(f"{b} source: {sources[b]}" for b in TARGET_TUNABLE_BLOCKS)
     return f"effective-config: materialized from baked defaults ({srcs})"
 
