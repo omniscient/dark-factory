@@ -36,3 +36,6 @@ venv/
 ENV/
 node_modules/
 deploy/instance.env
+deploy/instance-*.env
+# Local scheduler secrets for the self-target instance (bind-mounted, never cloned)
+.archon/.env
