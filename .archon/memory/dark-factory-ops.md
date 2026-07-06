@@ -57,6 +57,7 @@ Entries are advisory. If an entry conflicts with CLAUDE.md or ARCHITECTURE.md, f
 
 - [PATTERN] Path-tag filtering in Phase 1 LOAD extracts the `path:` prefix with `sed 's/.*path:\([^ >]*\).*/\1/'` (POSIX-compatible; not `grep -oP`) and matches via `echo "$AFFECTED" | grep -q "^${PATH_TAG}"` against the affected file list; empty `AFFECTED` means "include all" — correct fallback for new branches. <!-- issue:#213 date:2026-06-09 expires:2026-12-09 source:implement -->
 
+- [AVOID] The top-level dark-factory/ subdirectory seen as untracked in a fresh self-target clone is NOT part of the repo — entrypoint.sh materializes it at container start by copying /opt/dark-factory/{scripts,workflows,commands,docker-compose.preview.yml,seed} from the factory image (see entrypoint.sh around the CLONE_DIR/dark-factory checks), then git-cleans it at the end of the run. The authoritative, version-controlled copies for this repo's own self-hosted (P4 dogfood) development live at top-level scripts/, .archon/workflows/, .archon/commands/ — edit those, not anything under dark-factory/. <!-- issue:#18 date:2026-07-06 expires:2027-01-06 source:refine agent:refine scope:dark-factory path:scripts/ -->
 ---
 <!-- PROVISIONAL — entries below are from a single observed run; unverified.
      Do not rely on these as authoritative guidance. They are excluded from
