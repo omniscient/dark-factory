@@ -8,8 +8,14 @@
 #
 # All FACTORY_* vars are explicit here so identity propagates even when the
 # scheduler's instance.env is not re-read by the run container (F1 fix).
+#
+# FACTORY_INSTANCE scopes the compose project AND the shared state volume so
+# multiple factory instances can coexist on one host. The volume name MUST stay
+# in lockstep with deploy/docker-compose.yml: run containers write the main-red
+# sentinel to /var/lib/dark-factory (smoke_gate.sh) and the scheduler reads it
+# from the same path — mismatched volume names silently break the red-main latch.
 
-name: dark-factory
+name: ${FACTORY_INSTANCE:-dark-factory}
 
 services:
   dark-factory:
@@ -52,3 +58,4 @@ networks:
 
 volumes:
   scheduler_state:
+    name: ${FACTORY_INSTANCE:-dark-factory}-scheduler-state

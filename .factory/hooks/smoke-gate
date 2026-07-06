@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Dark Factory self-target smoke-gate hook — CHECK ONLY.
+# Exit 0 = origin/main is green; non-zero = red.
+# Red/green STATE handling (sentinel, regression ticket, clean-halt exit 0)
+# stays factory-side in scripts/hooks.sh. Do not add state handling here.
+set -uo pipefail
+
+cd "${CLONE_DIR}"
+
+echo "[smoke-gate hook] Installing test deps..."
+pip install --quiet --no-warn-script-location pytest pyyaml
+
+echo "[smoke-gate hook] Python test suite..."
+if ! python -m pytest tests/ -q; then
+  echo "[smoke-gate hook] pytest FAILED — main is red"
+  exit 1
+fi
+
+echo "[smoke-gate hook] Workflow DAG checks..."
+if ! python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml; then
+  echo "[smoke-gate hook] dag-check FAILED — main is red"
+  exit 1
+fi
+if ! python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml; then
+  echo "[smoke-gate hook] when-check FAILED — main is red"
+  exit 1
+fi
+
+echo "[smoke-gate hook] main is green"
+exit 0
