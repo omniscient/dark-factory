@@ -15,5 +15,9 @@ export FACTORY_STATUS_REFINED="${FACTORY_STATUS_REFINED:-0c79ebe5}"
 export FACTORY_PROJECT_NUMBER="${FACTORY_PROJECT_NUMBER:-1}"
 export FACTORY_PRODUCT_NAME="${FACTORY_PRODUCT_NAME:-MarketHawk}"
 export FACTORY_CLONE_DIR="${FACTORY_CLONE_DIR:-/workspace/${FACTORY_REPO}}"
-export FACTORY_RUN_PREFIX="${FACTORY_RUN_PREFIX:-${FACTORY_REPO}-dark-factory-run-}"
+# Run containers are named <compose-project>-<service>-run-<hash> by `docker
+# compose run`; the project is run-compose.yml's ${FACTORY_INSTANCE:-dark-factory}.
+# The old ${FACTORY_REPO}- default matched the pre-extraction in-repo compose
+# project and silently broke every WIP-limit grep after cutover.
+export FACTORY_RUN_PREFIX="${FACTORY_RUN_PREFIX:-${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-}"
 export FACTORY_IMAGE="${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}}"
