@@ -20,6 +20,20 @@ done
 # 3) Profiles block must declare 'factory'
 grep -q "factory" "$RC" || { echo "FAIL: 'factory' profile not found in run-compose.yml"; exit 1; }
 
+# 3b) Sentinel-seam lockstep: the state-volume name expression must be IDENTICAL
+# in run-compose.yml and deploy/docker-compose.yml. Run containers write the
+# main-red sentinel to /var/lib/dark-factory; the scheduler reads it from the
+# same volume — a name drift silently breaks the red-main latch.
+DC="$REPO_ROOT/deploy/docker-compose.yml"
+RC_VOL=$(grep -oE 'name: \$\{FACTORY_INSTANCE:-dark-factory\}-scheduler-state' "$RC" | head -1)
+DC_VOL=$(grep -oE 'name: \$\{FACTORY_INSTANCE:-dark-factory\}-scheduler-state' "$DC" | head -1)
+[ -n "$RC_VOL" ] || { echo "FAIL: run-compose.yml missing instance-scoped scheduler-state volume name"; exit 1; }
+[ "$RC_VOL" = "$DC_VOL" ] || { echo "FAIL: state-volume name expression drifted between run-compose.yml and deploy/docker-compose.yml"; exit 1; }
+
+# 3c) Both compose files must scope the project name by FACTORY_INSTANCE
+grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$RC" || { echo "FAIL: run-compose.yml project name not FACTORY_INSTANCE-scoped"; exit 1; }
+grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$DC" || { echo "FAIL: deploy compose project name not FACTORY_INSTANCE-scoped"; exit 1; }
+
 # 4) Parse check via docker compose config (skipped if docker not available)
 if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
   # Provision a scratch .archon/.env so the required env_file check passes

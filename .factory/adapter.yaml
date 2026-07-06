@@ -1,0 +1,44 @@
+# Dark Factory self-target adapter (.factory/adapter.yaml) — P4 dogfood.
+# The factory develops its own repository. Deep-merged over
+# scripts/factory_core/adapter_defaults.py (whose defaults are MarketHawk's
+# constants); every block here overrides those MarketHawk-specific values
+# with dark-factory-appropriate ones.
+schema_version: 1
+
+# No ARCHITECTURE.md in this repo yet — an empty map makes architecture
+# slicing fall back to full-doc/no-doc behavior instead of resolving
+# MarketHawk section names.
+components: {}
+
+safety:
+  sensitive_keywords: "token|secret|credential|oauth|gh_token|docker socket|publish"
+  # Instance secrets and the image-publish pipeline need a human in the loop.
+  hard_exclude_paths:
+    - "deploy/instances/"
+    - ".github/workflows/publish.yml"
+  dispatch_ceiling_keywords: "migration|migrate|performance|perf|architectur|refactor"
+  # Highest-blast files first when the diff must be truncated for review.
+  critical_diff_paths:
+    - "^scheduler\\.sh$"
+    - "^entrypoint\\.sh$"
+    - "^workflows/"
+    - "^run-compose\\.yml$"
+    - "^Dockerfile$"
+    - "^deploy/"
+  migration_seed_auth_patterns:
+    - "^deploy/"
+    - "^\\.github/workflows/"
+  main_red_allowed_paths:
+    - "scripts/"
+    - "tests/"
+    - "workflows/"
+    - "commands/"
+
+memory_routing:
+  "scripts/*": ".archon/memory/dark-factory-ops.md"
+  "workflows/*": ".archon/memory/dark-factory-ops.md"
+  "commands/*": ".archon/memory/dark-factory-ops.md"
+
+# deconflict: omitted — defaults name MarketHawk paths that do not exist in
+# this repo; the tiered resolver skips paths it cannot find.
+# token_optimization: omitted — baked config/config.yaml defaults apply.

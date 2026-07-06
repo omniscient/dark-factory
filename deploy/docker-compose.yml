@@ -1,4 +1,4 @@
-name: dark-factory
+name: ${FACTORY_INSTANCE:-dark-factory}
 
 # Dark Factory — standalone deploy compose
 #
@@ -13,6 +13,18 @@ name: dark-factory
 #   PROJECT_DIR=/path/to/your-repo docker compose -f deploy/docker-compose.yml up -d
 #
 # IMAGE_TAG (env var, default: latest) pins the factory image version.
+#
+# FACTORY_INSTANCE (env var, default: dark-factory) scopes the compose project,
+# container names, and the scheduler state volume so several instances (one per
+# target repo) can coexist on one host. Bring up a second instance with its own
+# env file supplying interpolation values:
+#
+#   docker compose --env-file deploy/instances/<repo>/instance.env \
+#     -f deploy/docker-compose.yml up -d
+#
+# FACTORY_INSTANCE must ALSO be set inside instance.env (the scheduler passes it
+# to dispatched run containers; run-compose.yml derives the shared state-volume
+# name from it — see the sentinel note there).
 
 services:
 
@@ -21,7 +33,7 @@ services:
   # BUILD/EXEC stay 0 (run never builds/execs).
   docker-socket-proxy-scheduler:
     image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
-    container_name: dark-factory-socket-proxy-scheduler
+    container_name: ${FACTORY_INSTANCE:-dark-factory}-socket-proxy-scheduler
     restart: unless-stopped
     environment:
       CONTAINERS: 1
@@ -46,7 +58,7 @@ services:
   # Backlog Scheduler — polls the GitHub project board and dispatches factory runs
   backlog-scheduler:
     image: ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}
-    container_name: dark-factory-scheduler
+    container_name: ${FACTORY_INSTANCE:-dark-factory}-scheduler
     restart: unless-stopped
     entrypoint: ["/opt/dark-factory/scheduler.sh"]
     env_file:
@@ -55,6 +67,10 @@ services:
     environment:
       FACTORY_IMAGE: "ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}"
       DOCKER_HOST: tcp://docker-socket-proxy-scheduler:2375
+      # Interpolated at `up` time and passed through so dispatch (docker compose
+      # inside this container) names the run project/volume consistently even
+      # when instance.env omits FACTORY_INSTANCE.
+      FACTORY_INSTANCE: ${FACTORY_INSTANCE:-dark-factory}
     depends_on:
       - docker-socket-proxy-scheduler
     volumes:
@@ -78,4 +94,6 @@ networks:
 
 volumes:
   dark_factory_state:
-    name: dark-factory-scheduler-state
+    # MUST stay in lockstep with run-compose.yml's scheduler_state volume name —
+    # run containers write the main-red sentinel here; the scheduler reads it.
+    name: ${FACTORY_INSTANCE:-dark-factory}-scheduler-state

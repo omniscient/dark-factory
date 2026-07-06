@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Dark Factory self-target validate hook — lightweight post-merge validation.
+# Called as a gate by the factory's deconflict flow; non-zero exit escalates
+# the ticket to Blocked.
+set -uo pipefail
+
+cd "${CLONE_DIR}"
+
+echo "[validate hook] Installing test deps..."
+pip install --quiet --no-warn-script-location pytest pyyaml
+
+echo "[validate hook] Python test suite..."
+python -m pytest tests/ -q
