@@ -416,7 +416,8 @@ ${RUN_ROWS}
 on_failure() {
   local EXIT_CODE=$?
   # Capture partial-failure record before any other action (non-fatal)
-  # TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
+  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+  # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
     --run-id "${RUN_ID:-unknown}" \
     --issue "${ISSUE_NUM:-0}" \
@@ -477,7 +478,8 @@ trap on_failure ERR
 # Merge origin/main into HEAD using the tiered factory_core resolver.
 # Returns 0 on clean merge or successful resolution, 1 after Tier-3 escalation.
 _resolve_merge_conflicts() {
-  # TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
+  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+  # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" \
     deconflict --issue "$ISSUE_NUM" || return $?
 }
@@ -495,11 +497,47 @@ fi
 git clone "$REPO_URL" "$CLONE_DIR"
 cd "$CLONE_DIR"
 
+# --- Self-contained fallbacks: target repos without in-repo factory files (post-P3 cleanup) ---
+# Copy baked factory pieces into the clone ONLY where the target repo does not provide them.
+# Everything copied here is appended to .git/info/exclude so it can never be committed back.
+_exclude_in_clone() {
+  local rel="$1"
+  local excl="$CLONE_DIR/.git/info/exclude"
+  mkdir -p "$(dirname "$excl")"
+  grep -qxF "$rel" "$excl" 2>/dev/null || echo "$rel" >> "$excl"
+}
+if [ ! -d "$CLONE_DIR/dark-factory/scripts" ]; then
+  mkdir -p "$CLONE_DIR/dark-factory"
+  cp -r /opt/dark-factory/scripts "$CLONE_DIR/dark-factory/scripts"
+  _exclude_in_clone "dark-factory/scripts/"
+  echo "[self-contained] baked scripts copied into clone (target repo has none)"
+fi
+if [ ! -d "$CLONE_DIR/.archon/workflows" ]; then
+  mkdir -p "$CLONE_DIR/.archon"
+  cp -r /opt/dark-factory/workflows "$CLONE_DIR/.archon/workflows"
+  _exclude_in_clone ".archon/workflows/"
+  echo "[self-contained] baked workflows copied into clone (target repo has none)"
+fi
+if [ ! -d "$CLONE_DIR/.archon/commands" ]; then
+  mkdir -p "$CLONE_DIR/.archon"
+  cp -r /opt/dark-factory/commands "$CLONE_DIR/.archon/commands"
+  _exclude_in_clone ".archon/commands/"
+  echo "[self-contained] baked commands copied into clone (target repo has none)"
+fi
+
+# --- Effective config: adapter token_optimization > clone config.yaml > baked defaults (df#14) ---
+# Transition (clone config.yaml committed): no-op, clone file wins byte-identically.
+# Post-cleanup: materializes baked←adapter config at the clone path all readers expect,
+# git-excluded so it can never be committed back. Fail-open: never kills the run.
+PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.effective_config \
+  --clone-dir "$CLONE_DIR" --materialize || true
+
 # --- Apply config.yaml policy knobs post-clone (env overrides logged when active) ---
 _entrypoint_cfg_apply
 
 # --- Copy preview template and seed data into clone ---
-# TARGET-PATH: the TARGET clone (MarketHawk) still has a dark-factory/ subdirectory until Phase 3
+# TARGET-PATH: dark-factory/ exists in the clone in both worlds — the target's own subtree
+# until P3 cleanup, or created by the self-contained fallback copy above (df#14)
 mkdir -p "$CLONE_DIR/dark-factory"
 cp /opt/dark-factory/docker-compose.preview.yml "$CLONE_DIR/dark-factory/docker-compose.preview.yml"
 cp -r /opt/dark-factory/seed/ "$CLONE_DIR/dark-factory/seed/"
@@ -719,7 +757,8 @@ done
 ARCHON_COST_JSON=$(mktemp)
 archon workflow cost --last --json --quiet > "$ARCHON_COST_JSON" 2>/dev/null || true
 
-# TARGET-PATH: cli.py lives under dark-factory/ in the TARGET clone until Phase 3
+# TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+# P3 cleanup, baked self-contained fallback copy afterwards (df#14)
 python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
   --run-id "${RUN_ID:-unknown}" \
   --issue "$ISSUE_NUM" \

@@ -41,7 +41,9 @@ RUN apt-get update && apt-get install -y \
 
 # codeindex dependency analyzer (dark-factory / agent tooling only — never in backend/requirements.txt)
 # pre-commit for the codeindex-blast warn-only hook
-RUN pip install --quiet "git+https://github.com/scheidydude/codeindex.git" pre-commit
+# pyyaml pinned explicitly: effective-config materialization (entrypoint.sh)
+# imports yaml before any target dep install — do not rely on transitive deps.
+RUN pip install --quiet "git+https://github.com/scheidydude/codeindex.git" pre-commit pyyaml
 
 # Bun — pinned release artifact verified against a hardcoded sha256 instead of
 # `curl … bun.sh/install | bash`. The expected hash lives in git, so a tampered
@@ -114,6 +116,10 @@ COPY scripts/ /opt/dark-factory/scripts/
 COPY bench/ /opt/dark-factory/bench/
 COPY docker-compose.preview.yml /opt/dark-factory/docker-compose.preview.yml
 COPY seed/ /opt/dark-factory/seed/
+# Baked workflow + command copies for the self-contained fallbacks (df#14):
+# entrypoint.sh copies these into the clone when the target repo provides none.
+COPY workflows/ /opt/dark-factory/workflows/
+COPY commands/ /opt/dark-factory/commands/
 # Factory-owned run compose (NOT the target project's docker-compose.yml).
 # scheduler.sh dispatch() calls: docker compose -f /opt/dark-factory/docker-compose.yml run dark-factory
 COPY run-compose.yml /opt/dark-factory/docker-compose.yml

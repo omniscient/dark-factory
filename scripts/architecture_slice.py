@@ -118,7 +118,8 @@ _DEFAULT_EXCLUDE_PATHS = [
 
 _CONFIG_PATHS = [
     "/workspace/project/.claude/skills/refinement/config.yaml",
-    "/opt/refinement-skills/config.yaml",
+    "/opt/dark-factory/config/config.yaml",
+    "/opt/refinement-skills/config.yaml",  # legacy parity — absent in the extracted image
 ]
 
 

@@ -159,10 +159,12 @@ deleting the in-repo factory files:
 
 **a) token_optimization config re-point** (omniscient/dark-factory
 [#14](https://github.com/omniscient/dark-factory/issues/14))  
-Deleting `dark-factory/.claude/skills/refinement/config.yaml` before this
-ticket lands silently reverts all token budget overrides to the baked-image
-defaults.  Either confirm the ticket is merged or accept a temporary budget
-regression.
+**RESOLVED** — resolved by the #14 PR: the factory materializes the effective
+config per run (adapter `token_optimization` > clone
+`.claude/skills/refinement/config.yaml` (transition) > baked
+`config/config.yaml`), and self-contained fallback copies let the cleanup
+also delete `.archon/workflows/`, `.archon/commands/` and the `dark-factory/`
+scripts.  Verify the image running in production was built after that merge.
 
 **b) Memory relocation** `.archon/memory/` → `.factory/memory/`  
 Requires `MEMORY_DIR` generalization in the factory; coordinate with whoever

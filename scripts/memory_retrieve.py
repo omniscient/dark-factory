@@ -93,7 +93,8 @@ _TAG_RE = re.compile(r"(\w+\d*):([^\s>]+)")
 
 _MEMORY_CONFIG_PATHS = [
     "/workspace/project/.claude/skills/refinement/config.yaml",
-    "/opt/refinement-skills/config.yaml",
+    "/opt/dark-factory/config/config.yaml",
+    "/opt/refinement-skills/config.yaml",  # legacy parity — absent in the extracted image
 ]
 
 

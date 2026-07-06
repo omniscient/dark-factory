@@ -59,6 +59,18 @@ scripts from the *fresh clone* of the target repo, not from the baked image.
 Committing a change to `.factory/` in the target repo takes effect on the next
 dispatch — no image rebuild required.
 
+**Self-contained fallbacks**: at run start the entrypoint copies baked pieces
+into the clone *only where the target repo does not provide them* —
+`dark-factory/scripts/` (factory scripts + `factory_core`),
+`.archon/workflows/`, and `.archon/commands/`.  Every fallback copy is
+appended to the clone's `.git/info/exclude`, so it can never be committed
+back to the target repo.  Targets that still commit their own copies
+(transition period) are untouched.  The effective refinement config is
+likewise resolved per run: when the target commits no
+`.claude/skills/refinement/config.yaml`, the factory materializes one from
+the baked defaults plus the adapter's `token_optimization` block (also
+git-excluded); when the target does commit one, it wins byte-identically.
+
 ---
 
 ## Quickstart
@@ -139,7 +151,7 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 | `safety.main_red_allowed_paths` | `list[str]` | Path prefixes the main-red auto-fixer is allowed to modify. |
 | `memory_routing` | map | Maps glob patterns to memory file paths inside the target repo. |
 | `deconflict` | map | Paths for models index (`models_init`) and migrations dir (`migrations_dir`) used by the deconflict guard. |
-| `token_optimization` | map | Per-scenario token budget overrides (deep-merged; see `config/config.yaml` for schema). |
+| `token_optimization` | map | **Active.** Per-scenario token budget overrides (deep-merged; see `config/config.yaml` for schema). Resolution order, highest wins: adapter > clone `.claude/skills/refinement/config.yaml` (transition period) > baked `config/config.yaml` defaults — resolved per run by `factory_core.effective_config`. |
 
 All keys are optional and deep-merged over the built-in defaults.
 
