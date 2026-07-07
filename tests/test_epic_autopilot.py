@@ -216,6 +216,27 @@ def test_run_daily_cap_reached_notifies():
     assert any(key == "autopilot-cap" for _, key in io.notes)
 
 
+def test_run_default_still_drops_factory_self_child():
+    cand = c(number=185, target_paths=["dark-factory/scheduler.sh"])
+    io = FakeIO([cand], '{"decision":"ADVANCE","risk":"low","confidence":0.9}')
+    out = ap.run_once(CFG, io, {}, "2026-07-07")
+    assert out["outcome"] == "no_candidates" and io.advanced == []
+
+
+def test_run_allow_self_advances_factory_self_child():
+    cand = c(number=185, target_paths=["dark-factory/scheduler.sh", "factory_core/board.py"])
+    io = FakeIO([cand], '{"decision":"ADVANCE","risk":"low","confidence":0.9,"reasons":["safe"],"concerns":[]}')
+    out = ap.run_once(dict(CFG, allow_self_improvement=True), io, {}, "2026-07-07")
+    assert out["outcome"] == "advanced" and io.advanced == [185]
+
+
+def test_run_allow_self_keeps_trading_auth_excludes():
+    cand = c(number=99, target_paths=["backend/app/core/auth/jwt.py"])
+    io = FakeIO([cand], '{"decision":"ADVANCE","risk":"low","confidence":0.9}')
+    out = ap.run_once(dict(CFG, allow_self_improvement=True), io, {}, "2026-07-07")
+    assert out["outcome"] == "no_candidates" and io.advanced == []
+
+
 def test_run_skips_cached_hold():
     cand = c(number=402)
     st = {}
@@ -270,6 +291,46 @@ def test_pick_next_epic_none_when_all_excluded():
     epics = [_e(373, "auth", labels=["epic", "security"]),
              _e(601, "trading kill switch", labels=["epic"])]
     assert ap.pick_next_epic(epics) is None
+
+
+# ── allow_self_improvement: factory-self epics/children become eligible ─────
+
+def test_pick_next_epic_default_still_skips_factory_self():
+    epics = [_e(187, "architecture improvement", labels=["epic", "Dark Factory", "must-have"])]
+    assert ap.pick_next_epic(epics) is None
+
+
+def test_pick_next_epic_allow_self_selects_factory_epic():
+    epics = [
+        _e(187, "architecture improvement", labels=["epic", "Dark Factory", "must-have"], board_order=0),
+        _e(373, "Authorization model", labels=["epic", "security", "must-have"], board_order=1),
+    ]
+    assert ap.pick_next_epic(epics, ap.epic_exclude_pattern(True)) == 187
+
+
+def test_pick_next_epic_allow_self_keeps_security_trading_exclusions():
+    epics = [_e(373, "auth", labels=["epic", "security"]),
+             _e(601, "trading kill switch", labels=["epic"])]
+    assert ap.pick_next_epic(epics, ap.epic_exclude_pattern(True)) is None
+
+
+def test_review_prompt_default_forbids_factory_self():
+    p = ap.build_review_prompt(c())
+    assert "the factory/scheduler itself" in p
+
+
+def test_review_prompt_allow_self_permits_factory_work():
+    p = ap.build_review_prompt(c(), allow_self_improvement=True)
+    assert "the factory/scheduler itself" not in p
+    assert "IN SCOPE" in p
+    assert "NOT touching automated trading or authentication/authorization" in p
+
+
+def test_review_prompt_allow_self_undeclared_scope_drops_factory_self_risk():
+    cand = c(target_paths=[])
+    ap.hard_excluded(cand, [])  # sets scope_undeclared
+    p = ap.build_review_prompt(cand, allow_self_improvement=True)
+    assert "trading/auth risk" in p and "factory-self" not in p
 
 
 class FakeEpicIO(FakeIO):

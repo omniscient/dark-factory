@@ -18,9 +18,14 @@ model=$(yq '.epic_autopilot.model' "$cfg")
 floor=$(yq '.epic_autopilot.confidence_floor' "$cfg")
 [ "$floor" = "0.7" ] || { echo "FAIL: epic_autopilot.confidence_floor should be 0.7, got '$floor'"; exit 1; }
 
+asi=$(yq '.epic_autopilot.allow_self_improvement' "$cfg")
+[ "$asi" = "true" ] || { echo "FAIL: epic_autopilot.allow_self_improvement should default true, got '$asi'"; exit 1; }
+
 # scheduler.sh read_config wires the knobs
 grep -qE 'EPIC_AUTOPILOT_ENABLED[[:space:]]+.\.epic_autopilot\.enabled.' "$sched" \
   || { echo "FAIL: scheduler.sh read_config missing EPIC_AUTOPILOT_ENABLED wiring"; exit 1; }
+grep -qE 'EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT[[:space:]]+.\.epic_autopilot\.allow_self_improvement.' "$sched" \
+  || { echo "FAIL: scheduler.sh read_config missing EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT wiring"; exit 1; }
 grep -qE 'EPIC_AUTOPILOT_DAILY_CAP[[:space:]]+.\.epic_autopilot\.daily_cap.' "$sched" \
   || { echo "FAIL: scheduler.sh read_config missing EPIC_AUTOPILOT_DAILY_CAP wiring"; exit 1; }
 
