@@ -57,6 +57,7 @@ Entries are advisory. If an entry conflicts with CLAUDE.md or ARCHITECTURE.md, f
 
 - [PATTERN] Path-tag filtering in Phase 1 LOAD extracts the `path:` prefix with `sed 's/.*path:\([^ >]*\).*/\1/'` (POSIX-compatible; not `grep -oP`) and matches via `echo "$AFFECTED" | grep -q "^${PATH_TAG}"` against the affected file list; empty `AFFECTED` means "include all" — correct fallback for new branches. <!-- issue:#213 date:2026-06-09 expires:2026-12-09 source:implement -->
 
+- [AVOID] This repo's working tree carries untracked runtime fallback-copy directories (dark-factory/, .claude/, .archon/commands/, .archon/workflows/) that mirror the canonical git-tracked top-level dirs (scripts/, refinement-skills/, commands/, workflows/) byte-for-byte — entrypoint.sh materializes them per-run and git-excludes them. Always read/edit the canonical top-level path; the mirrored copies are not committed and edits there are silently lost. Verify with 'git ls-files <dir>/' before trusting a path is source-of-truth. <!-- issue:#180 date:2026-07-07 expires:2027-01-07 source:refine agent:refine scope:dark-factory path: -->
 ---
 <!-- PROVISIONAL — entries below are from a single observed run; unverified.
      Do not rely on these as authoritative guidance. They are excluded from
