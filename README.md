@@ -208,6 +208,24 @@ a target-specific suite alongside `BENCH_TARGET_DIR`.
 
 ---
 
+## Weekly dispatch-ceiling revisit
+
+A generic, env-driven maintenance capability that tunes the dispatch-ceiling
+keyword list (`dispatch_ceiling.keywords` / `ABOVE_CEILING_KEYWORDS`). Weekly it
+builds a **Factory Scorecard** (`scripts/fetch_scorecard.py`), measures each
+above-ceiling keyword's success rate against the M-size baseline
+(`scripts/ceiling_revisit.py`), and — via the Archon command
+[`commands/ceiling-revisit.md`](commands/ceiling-revisit.md) — posts an analysis
+comment, optionally opens a PR editing `.archon/.env`, and files next week's
+revisit issue.
+
+No target repo is hardcoded: the scripts resolve identity from
+`FACTORY_REPO_SLUG`, `FACTORY_EMAIL`, and `FACTORY_PRODUCT_NAME` (defaults =
+MarketHawk parity, matching `scripts/identity.sh`), with `--repo` /
+`--factory-email` overrides on `fetch_scorecard.py`.
+
+---
+
 ## Rollback
 
 The factory relies on **clone-read semantics**: every run clones the target
