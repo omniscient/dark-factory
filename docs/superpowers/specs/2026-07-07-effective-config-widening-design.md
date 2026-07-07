@@ -153,9 +153,9 @@ Distilled from the issue's acceptance criteria and the brainstorming Q&A below.
      `safety.hard_exclude_paths` to an unrelated conformance list
      (`deploy/instances/`, `.github/workflows/publish.yml`). This is currently latent —
      `config/config.yaml`'s `epic_autopilot.enabled` ships `false` — but must be fixed
-     (union both lists explicitly, never silent override) in a follow-up issue **filed
-     before this spec is approved and labeled as a blocking precondition on ever setting
-     `epic_autopilot.enabled: true`**. See Open Questions.
+     (union both lists explicitly, never silent override) in follow-up **#205**, filed
+     as a blocking precondition on ever setting `epic_autopilot.enabled: true`. See
+     Open Questions.
 
 10. **`architecture_slice.py`'s independent `_CONFIG_PATHS`/`_load_config()` (lines
     119-146) is swept onto the new materialized artifact** for the config keys it reads
@@ -494,10 +494,9 @@ Distilled from the issue's acceptance criteria and the brainstorming Q&A below.
   `--get <dotted.path>` is left to the implementer; either satisfies "one shared
   pattern, not 5 divergent one-liners."
 - **The `epic_autopilot.py` `hard_exclude_paths` union-vs-override behavior fix
-  (Requirement 9's deferred item) must be filed as a follow-up GitHub issue before this
-  spec moves to Refined**, labeled as blocking `epic_autopilot.enabled: true`. Filing
-  that issue is a Phase 6 publish-time action, not part of this ticket's own
-  acceptance criteria.
+  (Requirement 9's deferred item) is filed as #205**, a blocking precondition on ever
+  setting `epic_autopilot.enabled: true`. Not part of this ticket's own acceptance
+  criteria.
 - Whether the `yq` binary can be fully dropped from the Dockerfile once `scheduler.sh`
   and `entrypoint.sh` no longer call it directly is left open — `epic_autopilot.py`'s
   removal (Requirement 9) also drops its last live call site, so this may be a free
