@@ -5,9 +5,14 @@ argument-hint: "ceiling-revisit <issue-number> <since-date> <until-date>"
 
 # Weekly Dispatch Ceiling Revisit
 
+> **Env-driven, generic capability.** All repo/identity values are resolved from
+> the factory identity env (`FACTORY_REPO_SLUG`, `FACTORY_EMAIL`,
+> `FACTORY_PRODUCT_NAME`) — no target repo is hardcoded. The command is invoked
+> with args `$ISSUE_NUM`, `$SINCE`, `$UNTIL`, `$NEXT_DATE` (see Inputs below).
+
 ## Purpose
 
-Runs the weekly dispatch ceiling keyword review for the MarketHawk factory scheduler.
+Runs the weekly dispatch ceiling keyword review for the factory scheduler.
 Reads Factory Scorecard data, applies deterministic decision rules, posts an analysis
 comment on the given GitHub issue, optionally opens a PR for keyword changes, and
 unconditionally files the next weekly revisit issue.
@@ -26,14 +31,14 @@ REPO="${FACTORY_REPO_SLUG}"
 SCORECARD=/tmp/ceiling-revisit-scorecard.json
 
 # Fetch scorecard data for cumulative window since policy introduction
-python3 scripts/fetch_scorecard.py \
+python3 dark-factory/scripts/fetch_scorecard.py \  # TARGET-PATH
   --since "$SINCE" \
   --until "$UNTIL" \
   --output "$SCORECARD"
 
 # Generate analysis report and machine-readable recommendation
 REPORT_FILE=/tmp/ceiling-revisit-report.md
-python3 scripts/ceiling_revisit.py \
+python3 dark-factory/scripts/ceiling_revisit.py \  # TARGET-PATH
   --since "$SINCE" \
   --until "$UNTIL" \
   --scorecard "$SCORECARD" \
@@ -62,14 +67,14 @@ Only execute this phase if `KEYWORDS_TO_REMOVE` is non-empty.
 
 ```bash
 if [ -n "$KEYWORDS_TO_REMOVE" ]; then
-  # Read effective ABOVE_CEILING_KEYWORDS: .archon/.env override takes precedence over scheduler.sh default
+  # Read effective ABOVE_CEILING_KEYWORDS from .archon/.env when the target
+  # overrides it; otherwise fall back to the built-in default (config default,
+  # mirrored by ceiling_revisit.py DEFAULT_KEYWORDS).
   ENV_FILE=".archon/.env"
   if [ -f "$ENV_FILE" ] && grep -q "^ABOVE_CEILING_KEYWORDS=" "$ENV_FILE"; then
     CURRENT=$(grep '^ABOVE_CEILING_KEYWORDS=' "$ENV_FILE" | cut -d= -f2-)
   else
-    # Extract default from scheduler.sh — use grep not line number (line may shift with edits)
-    CURRENT=$(grep -E '^ABOVE_CEILING_KEYWORDS="\$\{ABOVE_CEILING_KEYWORDS:-' \
-      dark-factory/scheduler.sh | sed 's/.*:-\(.*\)"}/\1/')
+    CURRENT="migration|migrate|performance|perf|architectur|refactor"
   fi
 
   # Compute new value by removing flagged keywords
@@ -130,46 +135,44 @@ in \`scheduler.sh\` may be overly conservative.
 
 ## What to review
 
-- Inspect \`is_above_ceiling()\` in \`dark-factory/scheduler.sh\` (~line 213).
+- Inspect \`is_above_ceiling()\` in \`scheduler.sh\` (~line 213).
 - Assess whether the L-bucket ceiling should be relaxed (e.g. L+keyword pattern only).
 - This is a **code change** (not an env-var change) — requires PR to \`scheduler.sh\`.
 
 ## References
 
 - Triggering analysis: issue #${ISSUE_NUM}
-- Policy spec: \`docs/superpowers/specs/2026-06-13-dispatch-ceiling-quarterly-revisit-design.md\`
+- Policy: the dispatch-ceiling revisit design (see the dispatch-ceiling design spec)
 
 ---
 *Filed automatically by weekly ceiling revisit*" \
     --label "enhancement" \
-    --label "priority: should-have" \
-    --label "Dark Factory"
+    --label "priority: should-have"
 fi
 ```
 
 ## Phase 5 — File Next Weekly Revisit Issue (unconditional)
 
 ```bash
-NEXT_TITLE="Revisit dispatch ceiling (C9) — re-measure success-by-size/type"
+NEXT_TITLE="Revisit dispatch ceiling — re-measure success-by-size/type"
 gh issue create \
   --repo "$REPO" \
   --title "$NEXT_TITLE" \
   --body "## Purpose
 
-Weekly revisit of the dispatch ceiling policy introduced in #339.
+Weekly revisit of the size/type-aware dispatch ceiling policy.
 
 ## What to review
 
-1. Pull Factory Scorecard (#331) success-by-S/M/L numbers for the latest week.
+1. Pull the Factory Scorecard success-by-S/M/L numbers for the latest week.
 2. Compare against current ABOVE_CEILING_KEYWORDS thresholds.
 3. Assess keyword false-positive rate. If high, narrow the list.
 4. Recommend \`ABOVE_CEILING_KEYWORDS\` update in \`.archon/.env\` via PR if data warrants.
 
 ## References
 
-- Spec: \`docs/superpowers/specs/2026-06-13-dispatch-ceiling-quarterly-revisit-design.md\`
-- Archon command: \`.archon/commands/ceiling-revisit.md\`
-- Architecture review candidate C9: \`docs/dark-factory-architecture-review-2026-06-11.html\`
+- Policy: the dispatch-ceiling revisit design (see the dispatch-ceiling design spec)
+- Archon command: \`commands/ceiling-revisit.md\`
 - Prior revisit: #${ISSUE_NUM} (comment with results)
 
 ## Parameters for the agent
@@ -188,6 +191,5 @@ Weekly revisit of the dispatch ceiling policy introduced in #339.
   --label "enhancement" \
   --label "priority: should-have" \
   --label "size: S" \
-  --label "Dark Factory" \
   --label "ready-for-agent"
 ```
