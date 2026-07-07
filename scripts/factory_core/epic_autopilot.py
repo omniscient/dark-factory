@@ -163,7 +163,20 @@ def record_verdict(state: dict, issue: int, spec_hash_: str, verdict: str, now_i
 
 # ── Epic selector (pure; used by epic-starter workflow) ──────────────────────
 
-_EPIC_EXCLUDE_RE = r"security|auth|authz|authn|trading|ibkr|dark.?factory|scheduler|factory.self"
+# Factory-self terms are split out so self-improvement can be enabled by config
+# (epic_autopilot.allow_self_improvement) without loosening the trading/auth exclusions.
+_EPIC_EXCLUDE_RE_BASE = r"security|auth|authz|authn|trading|ibkr"
+_FACTORY_SELF_RE = r"dark.?factory|scheduler|factory.self"
+_EPIC_EXCLUDE_RE = _EPIC_EXCLUDE_RE_BASE + "|" + _FACTORY_SELF_RE
+
+# Factory-self prefixes within the shipped hard_exclude_paths defaults; dropped from the
+# Stage B exclude list when self-improvement is on. Trading/auth paths are never dropped.
+_FACTORY_SELF_PATHS = frozenset({"dark-factory/", ".archon/", "scheduler.sh", "factory_core/"})
+
+
+def epic_exclude_pattern(allow_self_improvement: bool = False) -> str:
+    """Epic-selector exclude regex; factory-self terms drop when self-improvement is on."""
+    return _EPIC_EXCLUDE_RE_BASE if allow_self_improvement else _EPIC_EXCLUDE_RE
 
 
 def _priority_rank(labels: list) -> int:
@@ -190,10 +203,16 @@ def pick_next_epic(epics: list, exclude_pattern: str = _EPIC_EXCLUDE_RE):
 
 # ── Orchestrator (pure control flow; all IO injected via `io`) ──────────────
 
-def build_review_prompt(c: dict) -> str:
+def build_review_prompt(c: dict, allow_self_improvement: bool = False) -> str:
     scope = ", ".join(c.get("target_paths") or []) or "(none declared)"
-    warn = ("\nNOTE: file scope is UNDECLARED — treat trading/auth/factory-self risk as "
+    risk_kinds = "trading/auth" if allow_self_improvement else "trading/auth/factory-self"
+    warn = (f"\nNOTE: file scope is UNDECLARED — treat {risk_kinds} risk as "
             "possible and lean HOLD unless the spec is clearly safe." if c.get("scope_undeclared") else "")
+    no_touch = ("automated trading or authentication/authorization" if allow_self_improvement
+                else "automated trading, authentication/authorization, or the factory/scheduler itself")
+    self_note = ("\nFactory-self changes (scheduler, entrypoint, factory_core, workflows) are IN SCOPE "
+                 "for autonomous work — judge them on blast radius, reversibility, and test coverage "
+                 "like any other change." if allow_self_improvement else "")
     return f"""You are a cautious senior engineer deciding whether a refined ticket is safe to
 implement and merge AUTONOMOUSLY (adding the direct-to-pr label means it flows
 spec->plan->implement->PR with NO further human gate before the PR opens).
@@ -203,9 +222,8 @@ Reply with ONLY a JSON object:
   "reasons":[...],"concerns":[...]}}
 
 ADVANCE only if the work is genuinely low-risk: small, well-scoped, reversible, good test
-coverage in the spec/plan, low blast radius, and NOT touching automated trading,
-authentication/authorization, or the factory/scheduler itself. If the spec is vague, an
-empty-branch/no-op risk, or you are unsure -- choose HOLD.
+coverage in the spec/plan, low blast radius, and NOT touching {no_touch}. If the spec is vague, an
+empty-branch/no-op risk, or you are unsure -- choose HOLD.{self_note}
 
 Ticket #{c['number']}: {c['title']}
 Labels: {', '.join(c.get('labels', []))}   Size: {c.get('size')}
@@ -224,12 +242,17 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
                   "warning", "autopilot-cap")
         return {"outcome": "daily_cap_reached", "issue": None, "reason": "cap"}
 
+    allow_self = bool(cfg.get("allow_self_improvement"))
+    exclude_paths = cfg["exclude_paths"]
+    if allow_self:
+        exclude_paths = [p for p in exclude_paths if p not in _FACTORY_SELF_PATHS]
+
     candidates = []
     for cand in io.fetch_candidates():
         ok, _ = is_eligible(cand, cfg["opt_out_label"], cfg.get("size_ceiling", "XL"))
         if not ok:
             continue
-        excluded, _ = hard_excluded(cand, cfg["exclude_paths"], cfg.get("sensitive_keywords", ""))
+        excluded, _ = hard_excluded(cand, exclude_paths, cfg.get("sensitive_keywords", ""))
         if excluded:
             continue
         if cached_verdict(state, cand["number"], spec_hash(cand.get("spec_text", "")),
@@ -239,7 +262,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
 
     if not candidates:
         if cfg.get("start_epics") and hasattr(io, "fetch_ready_epics"):
-            epic_num = pick_next_epic(io.fetch_ready_epics())
+            epic_num = pick_next_epic(io.fetch_ready_epics(), epic_exclude_pattern(allow_self))
             if epic_num is not None:
                 io.promote_epic(epic_num)
                 io.comment(epic_num,
@@ -255,7 +278,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
         return {"outcome": "no_candidates", "issue": None, "reason": "empty"}
 
     cand = candidates[0]
-    verdict = parse_verdict(io.review(build_review_prompt(cand), cfg["model"]))
+    verdict = parse_verdict(io.review(build_review_prompt(cand, allow_self), cfg["model"]))
     h = spec_hash(cand.get("spec_text", ""))
     if should_advance(verdict, cfg["confidence_floor"]):
         io.advance(cand["number"])
@@ -541,6 +564,9 @@ def main_once() -> int:
             _sensitive_keywords(clone_dir)),
         hold_ttl_hours=float(os.environ.get("EPIC_AUTOPILOT_HOLD_TTL_HOURS", "24")),
         start_epics=os.environ.get("EPIC_AUTOPILOT_START_EPICS", "true").lower() == "true",
+        # Fail-closed: self-improvement is only on when config/env says so explicitly.
+        allow_self_improvement=os.environ.get(
+            "EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT", "false").lower() == "true",
         confidence_floor=float(os.environ.get("EPIC_AUTOPILOT_CONFIDENCE_FLOOR", "0.7")),
         daily_cap=int(os.environ.get("EPIC_AUTOPILOT_DAILY_CAP", "5")),
         model=os.environ.get("EPIC_AUTOPILOT_MODEL", "claude-opus-4-8"))

@@ -83,6 +83,7 @@ read_config() {
   _set_cfg EPIC_AUTOPILOT_SIZE_CEILING      '.epic_autopilot.size_ceiling'
   _set_cfg EPIC_AUTOPILOT_START_EPICS       '.epic_autopilot.start_epics'
   _set_cfg EPIC_AUTOPILOT_SENSITIVE_KEYWORDS '.epic_autopilot.sensitive_keywords'
+  _set_cfg EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT '.epic_autopilot.allow_self_improvement'
   _set_cfg MAIN_RED_AUTOFIX_ENABLED        '.main_red_autofix.enabled'
   _set_cfg MAIN_RED_AUTOFIX_MODEL          '.main_red_autofix.model'
   _set_cfg MAIN_RED_AUTOFIX_MAX_ATTEMPTS   '.main_red_autofix.max_attempts'
