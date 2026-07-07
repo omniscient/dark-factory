@@ -391,6 +391,11 @@ if __name__ == "__main__":
     # so reassign the module globals before any fetch runs.
     if args.repo:
         REPO = _OWNER_REPO = args.repo
+        # Keep the factory-email default in step with --repo unless the caller
+        # set it explicitly — otherwise --repo alone silently fingerprints zero
+        # PRs (still factory@<old-repo>) and produces an empty scorecard.
+        if not args.factory_email and "FACTORY_EMAIL" not in os.environ:
+            FACTORY_EMAIL = f"factory@{args.repo.split('/')[-1]}"
     if args.factory_email:
         FACTORY_EMAIL = args.factory_email
 

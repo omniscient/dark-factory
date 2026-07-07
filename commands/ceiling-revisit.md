@@ -154,7 +154,7 @@ fi
 ## Phase 5 — File Next Weekly Revisit Issue (unconditional)
 
 ```bash
-NEXT_TITLE="Revisit dispatch ceiling (C9) — re-measure success-by-size/type"
+NEXT_TITLE="Revisit dispatch ceiling — re-measure success-by-size/type"
 gh issue create \
   --repo "$REPO" \
   --title "$NEXT_TITLE" \
