@@ -196,10 +196,23 @@ def _extract_spec_names(spec_file: str) -> set:
 # Risk classification
 # ---------------------------------------------------------------------------
 
+# Checked first, before the "dark-factory" branch below, so .factory/hooks/
+# (and the rest of the skill/settings/plugin/MCP surface) is never
+# mislabeled as a generic factory_path match. Tokens deliberately omit the
+# trailing ".json"/".local.json" — the source patterns regex-escape those
+# dots (e.g. r"settings\.json$"), which breaks a plain unescaped-dot
+# substring match; "settings" and "mcp" alone are unambiguous here.
+_SKILL_SECURITY_TOKENS = (
+    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+)
+
+
 def _safety_signal(path: str, clone_dir: str | None = None) -> str:
     for pat in _safety_path_patterns(clone_dir):
         if pat.search(path):
             src = pat.pattern
+            if any(tok in src for tok in _SKILL_SECURITY_TOKENS):
+                return "skill_security_path"
             if "alembic" in src:
                 return "migration_path"
             if "auth" in src:

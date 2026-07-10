@@ -559,3 +559,22 @@ def test_critical_tier_files_cap_immune(monkeypatch):
     # Critical files are always emitted in full, bypassing the token cap
     assert auth_entry["included"] == "full"
     assert auth_entry["risk_class"] == "critical"
+
+
+def test_safety_signal_skill_security_path():
+    assert dr._safety_signal(".claude/settings.json") == "skill_security_path"
+    assert dr._safety_signal(".claude/settings.local.json") == "skill_security_path"
+    assert dr._safety_signal(".claude/skills/code-review/scripts/foo.py") == "skill_security_path"
+    assert dr._safety_signal(".claude/skills/code-review/SKILL.md") == "skill_security_path"
+    assert dr._safety_signal(".factory/hooks/validate") == "skill_security_path"
+
+
+def test_safety_signal_dark_factory_path_unaffected():
+    """.factory/hooks/ must not collide with the dark-factory/ factory_path signal."""
+    assert dr._safety_signal("dark-factory/scheduler.sh") == "factory_path"
+
+
+def test_classify_file_skill_security_is_critical_tier():
+    tier, signals, _ = dr.classify_file(".claude/settings.json", set(), set(), 5.0, total_lines=10)
+    assert tier == "critical"
+    assert "skill_security_path" in signals
