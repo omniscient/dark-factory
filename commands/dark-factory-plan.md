@@ -1,11 +1,23 @@
 ---
 description: Generate an implementation plan from an approved spec, validated by an architect subagent
-argument-hint: (no arguments - reads issue context from workflow)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json)
 ---
 
 # Dark Factory — Plan
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, and comments.
 
 ---
 
@@ -22,7 +34,7 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
 ## Phase 1: LOAD
 
 1. Read `CLAUDE.md` for development rules, architecture, and conventions
-2. The issue context has been fetched by the workflow. It is available in the conversation.
+2. Read `$ARTIFACTS_DIR/issue.json`; this is the authoritative issue context artifact.
 3. Read `/opt/refinement-skills/architect-prompt.md` — you will pass this to the review subagent
 4. Find the spec file: look in `docs/superpowers/specs/` for a file matching this issue's topic, or check the issue comments for a "Refinement Pipeline — Spec Generated" report that names the spec path
 5. Read the spec file
@@ -30,6 +42,8 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
+ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
+INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
 MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" plan)  # TARGET-PATH
 ```
 

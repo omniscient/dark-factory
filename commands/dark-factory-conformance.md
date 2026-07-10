@@ -1,11 +1,23 @@
 ---
 description: Verify that the implementation conforms to its approved spec (Gate 2 — code vs spec)
-argument-hint: (no arguments - reads issue context from workflow)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json)
 ---
 
 # Dark Factory — Conformance
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, and comments.
 
 ---
 
@@ -15,6 +27,7 @@ argument-hint: (no arguments - reads issue context from workflow)
 REPO_ROOT=$(git rev-parse --show-toplevel)
 source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 AGENT_ID="${AGENT_ID_DECONFLICT}"
+ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 ```
 
 1. Read `.claude/skills/refinement/config.yaml` and extract the `conformance` block.
@@ -28,7 +41,7 @@ AGENT_ID="${AGENT_ID_DECONFLICT}"
 7. Extract `SCOPE_ENFORCEMENT` from `conformance.scope_enforcement` (default: true)
 8. Extract `EXCISE_OOS` from `conformance.excise_out_of_scope` (default: true)
 9. Extract `BACKLOG_LABEL` from `conformance.backlog_label` (default: `scope-spillover`)
-10. Determine `ISSUE_NUM` from the workflow context (look at the issue context passed by the workflow, or run `git branch --show-current | grep -oP 'issue-\K\d+'`)
+10. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
 
 ## Phase 2: LOCATE SPEC
 
