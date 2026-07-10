@@ -262,3 +262,58 @@ def test_deconflict_migrations_dir_adapter_override(tmp_path):
     sys.path.insert(0, "scripts")
     from factory_core import deconflict as dc
     assert dc._deconflict_migrations_dir(str(tmp_path)) == "db/migrations/"
+
+
+# ── Skill-security safety globs (#46) ──────────────────────────────────────
+
+def test_skill_security_globs_in_defaults_hard_exclude_paths():
+    paths = adapter_defaults.DEFAULTS["safety"]["hard_exclude_paths"]
+    assert any(".claude/skills/" in p for p in paths)
+    assert any("settings.json" in p for p in paths)
+    assert any(".mcp.json" in p for p in paths)
+    assert any(".claude/plugins/" in p for p in paths)
+    assert any(".claude-plugin/" in p for p in paths)
+    assert any(".factory/hooks/" in p for p in paths)
+
+
+def test_skill_security_globs_in_defaults_critical_diff_paths():
+    import re
+    patterns = adapter_defaults.DEFAULTS["safety"]["critical_diff_paths"]
+    for p in patterns:
+        re.compile(p)  # every entry must be a valid regex
+    joined = "|".join(patterns)
+    assert "claude/skills" in joined
+    assert re.search(r"settings\\?\.json", joined)  # dot is regex-escaped in these patterns
+    assert "factory/hooks" in joined
+    assert any("SKILL" in p for p in patterns), "SKILL.md must appear (visibility only)"
+
+
+def test_skill_md_not_in_migration_seed_auth_patterns():
+    """SKILL.md must never be a path-level HUMAN_REQUIRED trigger — see spec Q2/A2."""
+    patterns = adapter_defaults.DEFAULTS["safety"]["migration_seed_auth_patterns"]
+    assert not any("SKILL" in p for p in patterns)
+
+
+def test_skill_scripts_and_settings_in_migration_seed_auth_patterns():
+    import re
+    patterns = [re.compile(p) for p in adapter_defaults.DEFAULTS["safety"]["migration_seed_auth_patterns"]]
+    assert any(p.search(".claude/skills/code-review/scripts/foo.py") for p in patterns)
+    assert any(p.search(".claude/settings.json") for p in patterns)
+    assert any(p.search(".factory/hooks/validate") for p in patterns)
+
+
+def test_dark_factory_own_adapter_yaml_has_skill_security_globs():
+    """Guards the A4 merge-semantics gap: .factory/adapter.yaml list-replaces DEFAULTS,
+    so it must carry the skill-security globs independently, not just inherit them."""
+    import re
+    import yaml
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    data = yaml.safe_load((repo_root / ".factory" / "adapter.yaml").read_text())
+    for key in ("hard_exclude_paths", "critical_diff_paths", "migration_seed_auth_patterns"):
+        joined = "|".join(data["safety"][key])
+        assert ".claude/skills" in joined, f"{key} missing .claude/skills glob"
+        # dot is regex-escaped in the two pattern-based lists but not in hard_exclude_paths
+        assert re.search(r"settings\\?\.json", joined), f"{key} missing settings.json glob"
+        assert "factory/hooks" in joined, f"{key} missing .factory/hooks glob"
+    assert not any("SKILL" in p for p in data["safety"]["migration_seed_auth_patterns"])

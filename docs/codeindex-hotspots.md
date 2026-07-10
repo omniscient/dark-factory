@@ -1,7 +1,7 @@
 Files with blast score ≥ 5.0  (8 found)
 
      9.0  dark-factory/scripts/factory_core/adapter_defaults.py  (7d / 4t)  63 loc
-     9.0  scripts/factory_core/adapter_defaults.py  (7d / 4t)  63 loc
+     9.0  scripts/factory_core/adapter_defaults.py  (7d / 4t)  91 loc
      8.0  dark-factory/scripts/factory_core/identity.py  (5d / 6t)  33 loc
      8.0  scripts/factory_core/identity.py  (5d / 6t)  33 loc
      7.0  dark-factory/scripts/factory_core/adapter.py  (4d / 6t)  78 loc

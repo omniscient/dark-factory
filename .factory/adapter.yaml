@@ -13,9 +13,20 @@ components: {}
 safety:
   sensitive_keywords: "token|secret|credential|oauth|gh_token|docker socket|publish"
   # Instance secrets and the image-publish pipeline need a human in the loop.
+  # Skill/settings/hooks/plugin/MCP surfaces are the self-modifying-factory
+  # mechanism itself (#46) — always human-reviewed, independent of
+  # epic_autopilot's enabled flag. Mirrors adapter_defaults.py DEFAULTS
+  # because list-valued keys are replaced, not merged, by _deep_merge.
   hard_exclude_paths:
     - "deploy/instances/"
     - ".github/workflows/publish.yml"
+    - ".claude/skills/"
+    - ".claude/settings.json"
+    - ".claude/settings.local.json"
+    - ".mcp.json"
+    - ".claude/plugins/"
+    - ".claude-plugin/"
+    - ".factory/hooks/"
   dispatch_ceiling_keywords: "migration|migrate|performance|perf|architectur|refactor"
   # Highest-blast files first when the diff must be truncated for review.
   critical_diff_paths:
@@ -25,9 +36,24 @@ safety:
     - "^run-compose\\.yml$"
     - "^Dockerfile$"
     - "^deploy/"
+    - "^\\.claude/skills/.*/scripts/"
+    - "^\\.claude/skills/.*/SKILL\\.md$"
+    - "^\\.claude/settings\\.json$"
+    - "^\\.claude/settings\\.local\\.json$"
+    - "^\\.mcp\\.json$"
+    - "^\\.claude/plugins/"
+    - "^\\.claude-plugin/"
+    - "^\\.factory/hooks/"
   migration_seed_auth_patterns:
     - "^deploy/"
     - "^\\.github/workflows/"
+    - "^\\.claude/skills/.*/scripts/"
+    - "^\\.claude/settings\\.json$"
+    - "^\\.claude/settings\\.local\\.json$"
+    - "^\\.mcp\\.json$"
+    - "^\\.claude/plugins/"
+    - "^\\.claude-plugin/"
+    - "^\\.factory/hooks/"
   main_red_allowed_paths:
     - "scripts/"
     - "tests/"

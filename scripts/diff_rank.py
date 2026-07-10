@@ -36,7 +36,8 @@ from gate_blast_radius import parse_hotspots  # noqa: E402  # re-exported for te
 # Risk classification constants
 #
 # Canonical signal string values (appear in signals list and diff-ranking.json):
-#   Critical signals: "migration_path", "auth_path", "trading_path", "factory_path", "hotspot"
+#   Critical signals: "migration_path", "auth_path", "trading_path", "factory_path",
+#                     "skill_security_path", "hotspot"
 #   High signals:     "spec_named", "api_endpoint", "dependency", "elevated_blast"
 #   Low signals:      "test_file"
 #   Medium/low:       [] (empty list — no specific signal)
@@ -196,10 +197,29 @@ def _extract_spec_names(spec_file: str) -> set:
 # Risk classification
 # ---------------------------------------------------------------------------
 
+# Checked first, before the "dark-factory" branch below, so .factory/hooks/
+# (and the rest of the skill/settings/plugin/MCP surface) is never
+# mislabeled as a generic factory_path match. Tokens deliberately omit the
+# trailing ".json"/".local.json" — the source patterns regex-escape those
+# dots (e.g. r"settings\.json$"), which breaks a plain unescaped-dot
+# substring match; "settings" and "mcp" alone are unambiguous here.
+#
+# Re-exported from adapter_defaults so this and gate_blast_radius.py's
+# identical classification logic can't drift out of sync.
+try:
+    from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
+except Exception:
+    _SKILL_SECURITY_TOKENS = (
+        "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+    )
+
+
 def _safety_signal(path: str, clone_dir: str | None = None) -> str:
     for pat in _safety_path_patterns(clone_dir):
         if pat.search(path):
             src = pat.pattern
+            if any(tok in src for tok in _SKILL_SECURITY_TOKENS):
+                return "skill_security_path"
             if "alembic" in src:
                 return "migration_path"
             if "auth" in src:

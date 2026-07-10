@@ -156,3 +156,57 @@ def test_disabled_produces_skipped():
         )
     assert proc.returncode == 0
     assert "SKIPPED" in proc.stdout
+
+
+def test_settings_json_triggers_skill_security():
+    out = run_script([".claude/settings.json"])
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "skill-security"
+
+
+def test_skill_script_triggers_skill_security():
+    out = run_script([".claude/skills/code-review/scripts/foo.py"])
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "skill-security"
+
+
+def test_factory_hooks_triggers_skill_security():
+    out = run_script([".factory/hooks/validate"])
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "skill-security"
+
+
+def test_skill_md_alone_does_not_trigger():
+    out = run_script([".claude/skills/code-review/SKILL.md"])
+    assert out["STATUS"] == "PASS"
+
+
+def test_migration_file_trigger_label_still_migration_seed():
+    out = run_script(["alembic/versions/abc123_add_col.py"])
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "migration-seed"
+
+
+def test_dark_factory_own_adapter_yaml_protects_skill_security():
+    """Non-hermetic: run against this repo's real .factory/adapter.yaml (not the
+    MarketHawk-parity default) to guard the A4 merge-semantics gap end to end."""
+    import tempfile as _tempfile
+    repo_root = Path(SCRIPT).resolve().parents[1]
+    with _tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as hf:
+        hf.write("")
+        hf.flush()
+        with _tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as cf:
+            cf.write(yaml.dump({"blast_radius": {
+                "enabled": True, "hotspot_score_floor": 5.0,
+                "size_budget_lines": 400, "size_budget_blocks": False,
+            }}))
+            cf.flush()
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
+                 "--hotspots", hf.name, "--config", cf.name, "--clone-dir", str(repo_root)],
+                input=".claude/settings.json",
+                capture_output=True, text=True,
+            )
+    assert proc.returncode == 0, proc.stderr
+    assert "STATUS: HUMAN_REQUIRED" in proc.stdout
+    assert "TRIGGER: skill-security" in proc.stdout

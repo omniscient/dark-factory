@@ -40,7 +40,33 @@ pre-existing code that the diff merely moves or leaves untouched.
 
 ## Categories
 
-`security`, `correctness`, `edge-case`, `naming`, `maintainability`.
+`security`, `correctness`, `edge-case`, `naming`, `maintainability`, `skill-security`.
+
+## Security-Sensitive Surfaces: Claude Skills, Hooks, and Tool Permissions
+
+A touched `.claude/skills/**/SKILL.md`, `.claude/settings.json` (or `.claude/settings.local.json`),
+`.mcp.json`, plugin/marketplace config (`.claude/plugins/**`, `.claude-plugin/**`), or
+`.factory/hooks/**` file gets these checks in addition to the standard rubric above — category
+`skill-security` for all of them:
+
+- **Broadened tool permissions** — a new or widened `allowed-tools`/`disallowed-tools` entry in
+  `SKILL.md` frontmatter or `.claude/settings.json`, especially a bare `Bash(*)` or a
+  family-level wildcard (`Bash(git:*)`, `Bash(gh:*)`) — `high` or `critical` depending on blast
+  radius.
+- **New or changed `hooks` entry**, `context: fork`, or a model/effort override in frontmatter —
+  `high` or `critical`.
+- **Plugin/MCP config changes** — `high` or `critical`.
+- **Dynamic shell injection** in a `.claude/skills/**/scripts/**` or `.factory/hooks/**` script —
+  externally-influenced input (a variable, argument, env value, or issue-comment field)
+  interpolated *unescaped* into an executed command string (`bash -c "...$VAR..."`, an
+  f-string/`.format()`/concatenated command passed to `subprocess` with `shell=True`, `eval`,
+  or backticks) is a finding. Argv-list invocation (`shell=False`) or explicitly quoted/
+  `shlex.quote`d input is not.
+- **Justification downgrade** — a `# justification:` comment immediately above the changed
+  frontmatter field, if substantive (concrete and specific, not boilerplate), downgrades the
+  finding from `high`/`critical` to `medium` advisory — but the finding description must still
+  state that human sign-off on the PR is expected; a justification comment never removes that
+  expectation.
 
 ## Output format
 
