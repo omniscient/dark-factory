@@ -178,13 +178,14 @@ tracked as its own migration-map row below, not assumed to already exist.
 | `.archon/memory/dark-factory-ops.md` | 4,436 | large reference (selectively retrieved, top-k capped by #156 — not always-loaded) | Working as designed; growing toward the 30-entry R4 cap on some sections. No action needed. | n/a | #156, #140 |
 | `docs/{domain,cutover-markethawk,dark-factory-token-optimization,dark-factory-memory-contract,triage-labels,parity-p1,parity-p2}.md` (7 files) | 14,339 total (~2,048 avg) | large reference | Not loaded by any phase command or workflow node today (confirmed by grep — zero references). Legitimate standalone reference docs; no migration action needed, just noting they are outside the always-loaded budget. | n/a | n/a |
 
-*(Total across present, in-scope files: ~72 surfaces, phase-procedure ≈43,559 tok across 15 files,
-deterministic-script ≈113,039 tok across 45 files (many grouped above), security-sensitive-config
-≈2,910 tok across 2 files, always-needed-fact ≈3,301 tok across 2 present files (+2 phantom),
-large-reference ≈18,888 tok across 8 files. Deterministic scripts dominate raw byte count but are
+*(Total across present, in-scope files: ~72 surfaces, phase-procedure ≈43,366 tok across 15 files,
+deterministic-script ≈111,641 tok across 45 files (many grouped above), security-sensitive-config
+≈2,897 tok across 2 files, always-needed-fact ≈3,152 tok across 2 present files (+2 phantom),
+large-reference ≈18,775 tok across 8 files. Deterministic scripts dominate raw byte count but are
 never loaded into an LLM context wholesale — they only matter for factory maintainability, not
 prompt budget, which is why the previous run's category tally emphasized phase-procedure /
-always-needed-fact / large-reference as the actual budget-relevant categories.)*
+always-needed-fact / large-reference as the actual budget-relevant categories. Re-verified
+2026-07-10 against every row in Table 1, not a sample; see Assumptions.)*
 
 ### Table 2 — Prompt-surface analysis (14 rows: the actual LLM-facing prompts only)
 
