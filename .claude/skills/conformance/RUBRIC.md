@@ -69,6 +69,12 @@ when the spec's file-change list does not name them. The dark factory's implemen
 must be redone. Do NOT emit an `[OOS]` bullet for them. Only flag a doc change as `[OOS]` if it
 documents something entirely unrelated to the in-scope work.
 
+**Security-sensitive exception carve-out:** The Documentation exception above never applies to
+`.claude/skills/**`, `.claude/settings.json` (or `.claude/settings.local.json`), `.mcp.json`,
+plugin/marketplace config, or `.factory/hooks/**` — these are security-sensitive
+factory-mechanism paths, not documentation. Any such change that is not named in the spec must
+be flagged `[OOS]` regardless of how beneficial or hygienic it looks.
+
 - [OOS] <file or area> — <one-sentence description of the unrelated change>
 
 (If there are no out-of-scope changes, write: None.)
