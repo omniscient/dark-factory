@@ -5,7 +5,9 @@ description: >
   Project-scoped override bootstrapped by Claude Code's global `verify` skill.
 allowed-tools: Read, Grep, Glob, Bash(PYTHONPATH=scripts python -m pytest tests/:*),
   Bash(python -m pytest tests/:*), Bash(python scripts/check_workflow_dag.py:*),
-  Bash(python scripts/check_workflow_when.py:*), Bash(bash tests/*.sh:*),
+  Bash(python scripts/check_workflow_when.py:*), Bash(bash tests/test_identity.sh:*),
+  Bash(bash tests/test_hooks.sh:*), Bash(bash tests/test_smoke_gate.sh:*),
+  Bash(bash tests/test_run_compose.sh:*),
   Bash(docker compose -f run-compose.yml config:*), Bash(command -v docker:*),
   Bash(docker compose version:*)
 ---
