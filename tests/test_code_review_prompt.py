@@ -1,6 +1,6 @@
 from pathlib import Path
 
-PROMPT = Path(__file__).resolve().parents[1] / "refinement-skills" / "code-review-reviewer-prompt.md"
+PROMPT = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "code-review" / "RUBRIC.md"
 
 
 def test_prompt_exists_and_has_contract():

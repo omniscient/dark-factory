@@ -2,7 +2,7 @@ from pathlib import Path
 
 PROMPT = (
     Path(__file__).resolve().parents[1]
-    / "refinement-skills" / "conformance-reviewer-prompt.md"
+    / ".claude" / "skills" / "conformance" / "RUBRIC.md"
 )
 
 
