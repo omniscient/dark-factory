@@ -12,3 +12,9 @@ def test_orchestrator_prompt_is_thin_stub():
     assert "$ISSUE_CONTEXT" not in text, "vestigial template placeholder must be removed"
     assert "$FEEDBACK" not in text, "vestigial template placeholder must be removed"
     assert len(text.strip()) > 0, "stub file must not be deleted (context_budget.py enumerates it)"
+
+
+def test_skill_md_describes_orchestrator_as_stub():
+    skill = (REPO_ROOT / "refinement-skills" / "SKILL.md").read_text(encoding="utf-8")
+    assert "dark-factory-refine.md" in skill
+    assert "stub" in skill.lower()

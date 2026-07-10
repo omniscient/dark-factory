@@ -47,4 +47,4 @@ See `config.yaml` for tunable parameters.
 
 - `product-owner-prompt.md` — Persona for the Q&A subagent (adjustable)
 - `architect-prompt.md` — Persona for the plan reviewer (adjustable)
-- `orchestrator-prompt.md` — Instructions for the brainstorming orchestrator
+- `orchestrator-prompt.md` — Persona stub for the brainstorming orchestrator — full process lives in `dark-factory-refine.md`
