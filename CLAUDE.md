@@ -54,6 +54,36 @@ each destroyed real runs when violated (see #212, #214):
 - Scope discipline: touch only what the plan lists; the conformance gate excises
   out-of-scope changes and files spillover tickets.
 
+## Harness changes are bench-gated
+
+Changes to prompts, `workflows/` DAG nodes, or gate thresholds are gated by the replay
+bench suite: `bench/run_suite.sh` (point `BENCH_TARGET_DIR` at a target-repo checkout).
+Workflow YAML edits must also pass `scripts/check_workflow_dag.py`,
+`scripts/check_workflow_when.py`, and `smoke_gate.sh` — CI runs all three.
+
+## Issue tracker
+
+GitHub Issues on this repo, with `priority:` (`must-have`/`should-have`) and `size:`
+(`S/M/L/XL`) labels. Epics group tickets as **native GitHub sub-issues**, not body
+checklists. Triage vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human,
+wontfix): `docs/triage-labels.md`.
+
+## Codeindex
+
+`symbolindex.json`/`codeindex.json` are generated artifacts (gitignored, rebuilt per run);
+only `docs/codeindex-hotspots.md` (human-readable hotspot list) is committed. The
+blast-radius gate (`scripts/gate_blast_radius.py`) scores changed files against it —
+check hotspots before touching a high-blast file (`scheduler.sh`, `entrypoint.sh`,
+`workflows/`).
+
+## Further reading
+
+- `docs/domain.md` — domain language and factory/target boundary
+- `docs/dark-factory-memory-contract.md` — memory schema, lifecycle, scoping for `.archon/memory/*`
+- `docs/dark-factory-token-optimization.md` — context budgets, packs, slices runbook
+- `docs/triage-labels.md` — triage role vocabulary
+- `docs/cutover-markethawk.md` — how this repo was extracted from MarketHawk (issue-number mapping)
+
 ## Hard limits
 
 - Never modify `deploy/instances/**` or `.github/workflows/publish.yml` (adapter
