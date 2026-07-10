@@ -116,9 +116,15 @@ def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
 # ".json"/".local.json" — the source patterns regex-escape those dots
 # (e.g. r"settings\.json$"), which breaks a plain unescaped-dot substring
 # match; "settings" and "mcp" alone are unambiguous within this pattern set.
-_SKILL_SECURITY_TOKENS = (
-    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
-)
+#
+# Re-exported from adapter_defaults so this and diff_rank.py's identical
+# classification logic can't drift out of sync.
+try:
+    from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
+except Exception:
+    _SKILL_SECURITY_TOKENS = (
+        "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+    )
 
 
 def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> list:

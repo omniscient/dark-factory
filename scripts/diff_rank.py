@@ -36,7 +36,8 @@ from gate_blast_radius import parse_hotspots  # noqa: E402  # re-exported for te
 # Risk classification constants
 #
 # Canonical signal string values (appear in signals list and diff-ranking.json):
-#   Critical signals: "migration_path", "auth_path", "trading_path", "factory_path", "hotspot"
+#   Critical signals: "migration_path", "auth_path", "trading_path", "factory_path",
+#                     "skill_security_path", "hotspot"
 #   High signals:     "spec_named", "api_endpoint", "dependency", "elevated_blast"
 #   Low signals:      "test_file"
 #   Medium/low:       [] (empty list — no specific signal)
@@ -202,9 +203,15 @@ def _extract_spec_names(spec_file: str) -> set:
 # trailing ".json"/".local.json" — the source patterns regex-escape those
 # dots (e.g. r"settings\.json$"), which breaks a plain unescaped-dot
 # substring match; "settings" and "mcp" alone are unambiguous here.
-_SKILL_SECURITY_TOKENS = (
-    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
-)
+#
+# Re-exported from adapter_defaults so this and gate_blast_radius.py's
+# identical classification logic can't drift out of sync.
+try:
+    from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
+except Exception:
+    _SKILL_SECURITY_TOKENS = (
+        "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+    )
 
 
 def _safety_signal(path: str, clone_dir: str | None = None) -> str:

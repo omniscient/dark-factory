@@ -1,4 +1,14 @@
 """Default adapter = MarketHawk's current constants. Parity: no adapter file == today."""
+
+# Shared substring tokens used by both scripts/diff_rank.py::_safety_signal() and
+# scripts/gate_blast_radius.py::classify_file() to sub-classify a critical_diff_paths /
+# migration_seed_auth_patterns match as the Claude Skills / settings / hooks / plugin /
+# MCP surface (#46) rather than a generic migration/auth/trading/factory match. Kept as
+# a single source of truth here so the two gates can't drift out of sync.
+SKILL_SECURITY_TOKENS = (
+    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+)
+
 DEFAULTS = {
     "schema_version": 1,
     "components": {
