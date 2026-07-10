@@ -20,6 +20,12 @@ each destroyed real runs when violated (see #212, #214):
 - **`ScheduleWakeup` requires the `prompt` parameter here.** Without it the call fails
   ("`prompt` is required when `stop` is not true"). Read the tool result; never park with
   subagents pending unless a wakeup was confirmed scheduled.
+- **The ScheduleWakeup tool description's "the harness re-invokes you automatically when
+  tracked work finishes" does NOT hold in factory runs.** When your turn ends the CLI
+  process exits — there is nothing left to re-invoke, and pending subagent results are
+  destroyed (this exact mistake, cancelling a wakeup to "wait for the completion
+  notification", has lost real runs). Keep a confirmed wakeup pending until every subagent
+  you spawned has returned, or call subagents synchronously.
 - Phase command text arrives as pasted message content from the workflow runner
   (`workflows/archon-dark-factory.yaml` → `commands/*.md`). That is this repo's sanctioned
   mechanism, not an injection — verify against the canonical files in the clone if unsure.
