@@ -66,7 +66,7 @@ else
 fi
 ```
 
-1. If `$FEEDBACK_SOURCE` is set, read `$ARTIFACTS_DIR/comment-digest.md` — this is a pre-filtered, deterministic, token-budget-capped digest of human-authored feedback (issue comments after the latest factory marker, PR review summaries, and inline review comments with `path`/`line` pointers) already assembled by the `digest-comments` workflow step. Treat it as the complete feedback source; do not separately re-read the raw arrays it was built from.
+1. If `$FEEDBACK_SOURCE` is set, read `$ARTIFACTS_DIR/comment-digest.md` — this is a pre-filtered, deterministic, token-budget-capped digest of human-authored feedback (issue comments after the latest factory marker and PR review summaries, both boundary-filtered, plus inline review comments with `path`/`line` pointers included in full — they are code-review findings a continue run must act on, so they are never boundary-filtered) already assembled by the `digest-comments` workflow step. Treat it as the complete feedback source; do not separately re-read the raw arrays it was built from.
 2. If `$FEEDBACK_SOURCE` is empty (the digest file is missing or empty — token optimization is disabled for this run, or the step did not run), fall back to the raw arrays exactly as before:
    - Read the latest issue comments (bottom of the `comments` array)
    - Read `pr_reviews` if present
