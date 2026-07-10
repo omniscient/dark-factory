@@ -109,6 +109,18 @@ def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
     return MIGRATION_SEED_AUTH_PATTERNS
 
 
+# Sub-classifies a migration_seed_auth_patterns match by matched-pattern source
+# text (mirroring diff_rank.py::_safety_signal()'s technique) so a skill/
+# settings/hooks/plugin/MCP match is never hidden inside the generic
+# "migration-seed" bucket (spec Q3/A3). Tokens deliberately omit the trailing
+# ".json"/".local.json" — the source patterns regex-escape those dots
+# (e.g. r"settings\.json$"), which breaks a plain unescaped-dot substring
+# match; "settings" and "mcp" alone are unambiguous within this pattern set.
+_SKILL_SECURITY_TOKENS = (
+    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+)
+
+
 def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> list:
     """Return list of triggered categories for a single file path."""
     cats = []
@@ -116,7 +128,11 @@ def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> li
         cats.append("hotspot")
     for pat in _migration_seed_auth_patterns(clone_dir):
         if pat.search(fpath):
-            cats.append("migration-seed")
+            src = pat.pattern
+            if any(tok in src for tok in _SKILL_SECURITY_TOKENS):
+                cats.append("skill-security")
+            else:
+                cats.append("migration-seed")
             break
     return cats
 
@@ -159,7 +175,12 @@ def main() -> None:
     trigger_label = "none"
     if hard_trigger:
         cats_all = [c for _, cats in triggered for c in cats]
-        trigger_label = "hotspot" if "hotspot" in cats_all else "migration-seed"
+        if "hotspot" in cats_all:
+            trigger_label = "hotspot"
+        elif "skill-security" in cats_all:
+            trigger_label = "skill-security"
+        else:
+            trigger_label = "migration-seed"
     elif size_trigger:
         trigger_label = "size"
 
