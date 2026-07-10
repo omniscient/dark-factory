@@ -269,6 +269,59 @@ def test_architecture_md_fallback_status_when_component_unknown(tmp_path):
     assert sec["fallback_reason"] == "component_unresolved"
 
 
+# ── issue_text auto-derive contract ───────────────────────────────────────────
+
+def test_architecture_md_resolves_component_from_issue_text_auto_derive(tmp_path):
+    """issue_text defaults to None, meaning auto-derive title+body from issue_json."""
+    make_arch_file(tmp_path)
+    issue_json = tmp_path / "issue.json"
+    issue_json.write_text(json.dumps({
+        "title": "Fix bug",
+        "body": "The problem is in backend/app/routers/scanner.py.",
+        "comments": [],
+    }))
+    out_path = str(tmp_path / "context-budget.json")
+    cb.build_budget(
+        scenario="implement",
+        issue_num=664,
+        run_id="test-run-text",
+        artifacts_dir=str(tmp_path),
+        clone_dir=str(tmp_path),
+        out=out_path,
+        issue_json=str(issue_json),
+    )
+    result = json.loads(Path(out_path).read_text())
+    sec = result["sections"]["architecture_md"]
+    assert sec["component"] == "backend"
+    assert sec["fallback"] is False
+
+
+def test_architecture_md_issue_text_override_suppresses_auto_derive(tmp_path):
+    """An explicit issue_text='' override suppresses auto-derivation from issue_json."""
+    make_arch_file(tmp_path)
+    issue_json = tmp_path / "issue.json"
+    issue_json.write_text(json.dumps({
+        "title": "Fix bug",
+        "body": "The problem is in backend/app/routers/scanner.py.",
+        "comments": [],
+    }))
+    out_path = str(tmp_path / "context-budget.json")
+    cb.build_budget(
+        scenario="implement",
+        issue_num=664,
+        run_id="test-run-suppress",
+        artifacts_dir=str(tmp_path),
+        clone_dir=str(tmp_path),
+        out=out_path,
+        issue_json=str(issue_json),
+        issue_text="",
+    )
+    result = json.loads(Path(out_path).read_text())
+    sec = result["sections"]["architecture_md"]
+    assert sec["fallback"] is True
+    assert sec["fallback_reason"] == "component_unresolved"
+
+
 # ── memory_context cap counts from trace ─────────────────────────────────────
 
 import json as _json
