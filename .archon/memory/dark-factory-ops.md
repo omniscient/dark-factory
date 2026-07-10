@@ -87,3 +87,26 @@ Entries are advisory. If an entry conflicts with CLAUDE.md or ARCHITECTURE.md, f
 - [PATTERN] `context_budget.py::build_budget()` and `context_pack.py::assemble_pack()` take an `issue_text` param defaulting to `None` ("auto-derive title+body from `issue_json`"); pass an explicit `""` to suppress derivation (falsy-guard in `architecture_slice.infer_component()`). Any caller that must keep a forced-unresolved baseline isolated from the shared `issue_json` (e.g. `evals/token_opt_eval.py`'s `suppress_issue_text`) must pass `""`, not omit the arg. <!-- issue:#18 date:2026-07-10 expires:2027-01-10 source:implement path:scripts/context_budget.py,scripts/context_pack.py -->
 - [PATTERN] `evals/token_opt_eval.py::run_eval()` unconditionally reads `<clone-dir>/dark-factory/bench/suite.json` even when `--issues` overrides the corpus, and that path is stale in the post-P3-cutover extracted `dark-factory` repo (its own `bench/suite.json` now lives at top-level `bench/`, not nested under `dark-factory/`). Stage a `dark-factory/bench/suite.json` shim (copy of the real `bench/suite.json`) in the target `--clone-dir` before invoking the eval from this repo, or it fails with `FileNotFoundError` even on `--dry-run`. <!-- issue:#18 date:2026-07-10 expires:2027-01-10 source:implement path:evals/token_opt_eval.py -->
 - [PATTERN] `.archon/commands/` is NOT checked into this repo — `entrypoint.sh:503-525` copies it from the Docker-baked `/opt/dark-factory/commands` (itself built from `commands/*.md`) into the clone only when absent, then calls `_exclude_in_clone ".archon/commands/"` to append it to `.git/info/exclude`. `commands/*.md` is the sole tracked source of truth; edit only it. Do NOT `git add -f`/commit `.archon/commands/*.md` even if a plan calls it a "checked-in mirror" — doing so would defeat the `if [ ! -d ... ]` refresh-on-absence guard for future clones. Picking up a `commands/` edit into a *live* clone's `.archon/commands/` requires either deleting that directory (so entrypoint.sh repopulates it from the freshly-rebuilt image) or a genuinely fresh clone. <!-- issue:#43 date:2026-07-10 expires:2027-01-10 source:implement -->
+
+
+## Docker Volume Sharing
+
+## Container Root and Mounts
+
+- [PATTERN] Copy shared entrypoint scripts to `/entrypoint.sh` (outside `/app`) in `backend/Dockerfile` — not to `./entrypoint.sh` or `/app/entrypoint.sh`. The `docker-compose.override.yml` local-dev bind-mount `./backend:/app:ro` shadows the entire `/app` directory, so any file placed inside `/app` is invisible at runtime in dev; files outside `/app` are unaffected. <!-- issue:#289 date:2026-06-12 expires:2026-12-12 source:implement -->
+
+## Diff Computation
+
+## Scheduler Architecture
+
+## Docker Port Hardening
+
+- [PATTERN] All host-facing port bindings in `docker-compose.yml` should use the `"127.0.0.1:HOST:CONTAINER"` format to prevent inadvertent exposure on public interfaces even without a reverse proxy — defense-in-depth independent of whether a TLS profile is active. <!-- issue:#202 date:2026-06-05 expires:2026-12-05 source:implement -->
+
+- [PATTERN] Profile-gated infra services (Caddy, forecaster, scheduler) follow the same restart pattern in `deploy.yml`: `docker compose --profile <name> up -d <service>`. Guard the Caddy step with `[ -n "${DOMAIN:-}" ]` so a missing `DOMAIN` emits a clear message rather than starting Caddy with an empty hostname. <!-- issue:#202 date:2026-06-07 expires:2026-12-07 source:implement -->
+
+- [PATTERN] `caddy/Caddyfile` must use `{$DOMAIN}` (no `:default` fallback) — adding `{$DOMAIN:localhost}` causes Caddy to silently serve via a self-signed local-CA cert on real deploys where `DOMAIN` is unset, producing broken TLS without an obvious error. <!-- issue:#202 date:2026-06-07 expires:2026-12-07 source:implement -->
+
+## Refine-Branch Pre-Implementation
+
+## Conflict Resolution
