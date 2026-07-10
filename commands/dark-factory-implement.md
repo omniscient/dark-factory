@@ -1,11 +1,23 @@
 ---
 description: Implement a feature or fix from a GitHub issue inside the dark factory
-argument-hint: (no arguments - reads issue context from workflow)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json)
 ---
 
 # Dark Factory — Implement
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue and PR context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, comments, and PR review fields.
 
 ---
 
@@ -24,12 +36,14 @@ sub-issues, ignore them. Focus exclusively on the single resolved issue you were
 Read the project rules:
 1. Read `CLAUDE.md` for all development rules, architecture, and validation requirements.
 2. Read `ARCHITECTURE.md` for service topology and module map.
-3. The issue context has been fetched by the workflow. It is available in the conversation.
-4. **Check the `intent` field** in the issue context: `"new"` or `"continue"`.
+3. Read `$ARTIFACTS_DIR/issue.json`; this is the authoritative issue context artifact.
+4. **Check the `intent` field** in `$ARTIFACTS_DIR/issue.json`: `"new"` or `"continue"`.
 5. Compute the affected file set and load memory context:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
+ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
+INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
 MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" implement)  # TARGET-PATH
 ```
 

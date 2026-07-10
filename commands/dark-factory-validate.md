@@ -1,11 +1,23 @@
 ---
 description: Validate the implementation against the running preview stack
-argument-hint: (no arguments - reads from workflow context)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json)
 ---
 
 # Dark Factory — Validate
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, and comments.
 
 ---
 
@@ -21,7 +33,7 @@ print(str(d.get('blast_radius', {}).get('enabled', True)).lower())
 " 2>/dev/null || echo "true")
 ```
 
-Derive the issue number from the artifacts dir:
+Derive the issue number from the persisted issue artifact:
 
 ```bash
 ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")

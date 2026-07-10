@@ -1,11 +1,23 @@
 ---
 description: AI code review of the implementation diff — blocks the PR on critical/high findings, inline-comments the rest (Gate 3)
-argument-hint: (no arguments - reads issue/PR context from the workflow)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json and PR metadata)
 ---
 
 # Dark Factory — Code Review
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue and PR context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, comments, and PR review fields.
 
 ---
 
@@ -15,6 +27,7 @@ argument-hint: (no arguments - reads issue/PR context from the workflow)
 REPO_ROOT=$(git rev-parse --show-toplevel)
 source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 AGENT_ID="${AGENT_ID_CODE_REVIEW}"
+ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 ```
 
 1. Read the `code_review` block from `.claude/skills/refinement/config.yaml`.
@@ -30,7 +43,7 @@ AGENT_ID="${AGENT_ID_CODE_REVIEW}"
    SEVERITY_ORDER_CSV=$(yq '.code_review.severity_order | join(",")' "$CONFIG_YAML" 2>/dev/null || true)
    SEVERITY_ORDER_CSV="${SEVERITY_ORDER_CSV:-low,medium,high,critical}"
    ```
-6. Determine `ISSUE_NUM` (from workflow context, or `git branch --show-current | grep -oP 'issue-\K\d+'`).
+6. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
 7. Determine `PR_NUM`:
    ```bash
    BRANCH=$(git branch --show-current)

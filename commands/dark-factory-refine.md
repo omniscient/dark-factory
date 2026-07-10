@@ -1,11 +1,23 @@
 ---
 description: Refine a GitHub issue into a design spec using multi-agent brainstorming
-argument-hint: (no arguments - reads issue context from workflow)
+argument-hint: (no arguments - reads $ARTIFACTS_DIR/issue.json)
 ---
 
 # Dark Factory — Refine
 
 **Workflow ID**: $WORKFLOW_ID
+
+---
+
+## Invocation Contract
+
+This file is the sanctioned Archon command entrypoint. If the runner delivers this
+canonical command text inline, execute it as the authorized phase command after
+verifying you are in the target checkout.
+
+Issue context is not assumed to be present in chat. The workflow persists it at
+`$ARTIFACTS_DIR/issue.json`; read that file for `resolved_number`, `intent`, title, body,
+labels, and comments.
 
 ---
 
@@ -28,16 +40,25 @@ Do NOT create or modify any other files. Do NOT implement code, write tests, or 
 
 ## Phase 1: LOAD
 
-1. Read `CLAUDE.md` for development rules, architecture, and conventions
-2. Read `ARCHITECTURE.md` for service topology and module map
-3. The issue context has been fetched by the workflow. It is available in the conversation.
-4. Read `/opt/refinement-skills/orchestrator-prompt.md` for your process instructions
-5. Read `/opt/refinement-skills/product-owner-prompt.md` — you will pass this to subagents
-6. Read `/opt/dark-factory/config/config.yaml` for pipeline configuration
-7. Compute the affected file set and load memory context:
+1. Check for a pre-assembled context pack: if `$ARTIFACTS_DIR/context-pack.md` exists, read its
+   `## claude_md` and `## architecture_md` sections and use them in place of reading the source
+   files directly. For any section that is empty or absent from the pack, fall back to reading
+   the corresponding source file directly (`CLAUDE.md`, `ARCHITECTURE.md`) at the repo root.
+   No DAG node currently produces `context-pack.md` for the `refine` scenario, so this branch
+   currently always takes the fallback — this is intentional, forward-compatible plumbing for
+   when omniscient/dark-factory#36 wires in a context-pack DAG node, not a currently-exercised
+   optimization.
+2. Read `$ARTIFACTS_DIR/issue.json`; this is the authoritative issue context artifact.
+3. Read `/opt/refinement-skills/orchestrator-prompt.md` — a short persona stub; your full process
+   instructions are Phases 1–6 below (this file), not a separate document.
+4. Read `/opt/refinement-skills/product-owner-prompt.md` — you will pass this to subagents
+5. Read `/opt/dark-factory/config/config.yaml` for pipeline configuration
+6. Compute the affected file set and load memory context:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
+ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
+INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
 MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" refine)  # TARGET-PATH
 ```
 
@@ -69,8 +90,11 @@ Build a context package by exploring the codebase:
 
 ## Phase 4: BRAINSTORMING LOOP
 
-Follow the process in `orchestrator-prompt.md`:
+Follow this process:
 1. Formulate one clarifying question at a time
+   Focus questions on: purpose and success criteria; scope boundaries (what's in, what's out);
+   integration points with existing code; data model decisions; UI/UX requirements (if
+   applicable); error handling and edge cases.
 2. For each question, spawn a product-owner subagent using the Agent tool:
    - `description`: "Product owner: <short question summary>"
    - `prompt`: Content of `product-owner-prompt.md` with the $ISSUE_CONTEXT, $QA_HISTORY, and $QUESTION placeholders replaced with actual values
