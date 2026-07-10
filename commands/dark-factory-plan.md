@@ -33,11 +33,19 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
 
 ## Phase 1: LOAD
 
-1. Read `CLAUDE.md` for development rules, architecture, and conventions
+1. Check for a pre-assembled context pack: if `$ARTIFACTS_DIR/context-pack.md` exists, read its
+   `## claude_md` section in place of reading `CLAUDE.md` directly, and its `## spec` section in
+   place of the spec-file discovery glob below. For any section that is empty or absent from the
+   pack, fall back to the existing behavior: read `CLAUDE.md` directly, and discover/read the spec
+   via steps 4-5. No DAG node currently produces `context-pack.md` for the `plan` scenario, so this
+   branch currently always takes the fallback — the same forward-compatible, currently-fallback-only
+   plumbing as `dark-factory-refine.md`.
 2. Read `$ARTIFACTS_DIR/issue.json`; this is the authoritative issue context artifact.
 3. Read `/opt/refinement-skills/architect-prompt.md` — you will pass this to the review subagent
-4. Find the spec file: look in `docs/superpowers/specs/` for a file matching this issue's topic, or check the issue comments for a "Refinement Pipeline — Spec Generated" report that names the spec path
-5. Read the spec file
+4. Find the spec file (fallback branch of step 1): look in `docs/superpowers/specs/` for a file
+   matching this issue's topic, or check the issue comments for a "Refinement Pipeline — Spec
+   Generated" report that names the spec path
+5. Read the spec file (fallback branch of step 1, if `## spec` was absent or empty from the pack)
 6. Compute the affected file set and load memory context:
 
 ```bash
