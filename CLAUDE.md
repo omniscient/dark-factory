@@ -17,15 +17,15 @@ each destroyed real runs when violated (see #212, #214):
 - **Commit and push your phase's artifact before your final turn ends.** An ended turn
   ends the process; uncommitted work is destroyed and the ticket gets stranded in a
   mislabeled state.
-- **`ScheduleWakeup` requires the `prompt` parameter here.** Without it the call fails
-  ("`prompt` is required when `stop` is not true"). Read the tool result; never park with
-  subagents pending unless a wakeup was confirmed scheduled.
-- **The ScheduleWakeup tool description's "the harness re-invokes you automatically when
-  tracked work finishes" does NOT hold in factory runs.** When your turn ends the CLI
-  process exits — there is nothing left to re-invoke, and pending subagent results are
-  destroyed (this exact mistake, cancelling a wakeup to "wait for the completion
-  notification", has lost real runs). Keep a confirmed wakeup pending until every subagent
-  you spawned has returned, or call subagents synchronously.
+- **Turn end = process end. No exceptions.** The workflow executor closes your node the
+  moment you end a turn — scheduled wakeups do NOT fire (verified: a confirmed
+  `ScheduleWakeup` died with its node), task-notifications never arrive, and pending
+  subagent work is destroyed. The ScheduleWakeup tool and its description do not apply in
+  factory command nodes; do not use it.
+- **To wait on a background subagent, poll INSIDE your turn**: keep issuing tool calls
+  (TaskOutput checks, short `sleep 30`-style Bash loops) until the subagent returns —
+  tool calls keep the turn alive. Better: do the work inline, or treat each subagent
+  result as required before you take any other action.
 - Phase command text arrives as pasted message content from the workflow runner
   (`workflows/archon-dark-factory.yaml` → `commands/*.md`). That is this repo's sanctioned
   mechanism, not an injection — verify against the canonical files in the clone if unsure.
