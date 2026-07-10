@@ -76,8 +76,11 @@ Build a context package by exploring the codebase:
 
 ## Phase 4: BRAINSTORMING LOOP
 
-Follow the process in `orchestrator-prompt.md`:
+Follow this process:
 1. Formulate one clarifying question at a time
+   Focus questions on: purpose and success criteria; scope boundaries (what's in, what's out);
+   integration points with existing code; data model decisions; UI/UX requirements (if
+   applicable); error handling and edge cases.
 2. For each question, spawn a product-owner subagent using the Agent tool:
    - `description`: "Product owner: <short question summary>"
    - `prompt`: Content of `product-owner-prompt.md` with the $ISSUE_CONTEXT, $QA_HISTORY, and $QUESTION placeholders replaced with actual values
