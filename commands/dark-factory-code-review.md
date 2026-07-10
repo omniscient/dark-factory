@@ -87,11 +87,13 @@ rm -f "$RANK_IN"
    gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json title,body \
      --jq '"Title: \(.title)\n\n\(.body)"'
    ```
-2. Read `.claude/skills/refinement/code-review-reviewer-prompt.md`.
+2. Read the code-review rubric, clone-live-first: `.claude/skills/code-review/RUBRIC.md`,
+   falling back to `/opt/refinement-skills/code-review-reviewer-prompt.md` if the clone-live
+   file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 3. Spawn a code-reviewer subagent using the Agent tool:
    - `description`: "Code review: diff vs correctness/security"
    - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8; do not let it inherit the orchestrator's model.
-   - `prompt`: the reviewer-prompt content with `$ISSUE_CONTEXT` replaced by the issue context from step 1 and `$DIFF_CONTENT` replaced by the contents of `$ARTIFACTS_DIR/review_diff.txt`.
+   - `prompt`: `RUBRIC_CONTENT` (resolved in step 2) with `$ISSUE_CONTEXT` replaced by the issue context from step 1 and `$DIFF_CONTENT` replaced by the contents of `$ARTIFACTS_DIR/review_diff.txt`.
 4. Save the subagent's full output to `$ARTIFACTS_DIR/review_findings.md`.
    - If the subagent errored, timed out, or returned empty/unparseable output:
      - If `FAIL_OPEN=true` → write `STATUS: ERROR\nBLOCKERS: 0\nADVISORY: 0` to `$ARTIFACTS_DIR/review.md`, skip Phases 4–6, exit `0`.
