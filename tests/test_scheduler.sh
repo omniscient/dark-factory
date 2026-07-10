@@ -878,6 +878,33 @@ _N_BODY="See \`Depends on: #999\` for the old format."
 dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
 assert_eq "N11: inline code span → returns 0 (no real dep)" "0" "$_N_RET"
 
+# N12: bold label, bold wraps label+colon — **Depends on:** #200
+_N_BODY="**Depends on:** #200"
+> "$STUB_LOG"
+_N_OUTPUT=$(dependencies_met "100" "$_BOARD_200_WIP" 2>&1) && _N_RET=0 || _N_RET=1
+assert_eq "N12: bold label (**Depends on:**) → returns 1" "1" "$_N_RET"
+assert_eq "N12: bold label → dep_gate logged" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'dep_gate' || true)"
+
+# N13: bold label, bold wraps only the word — **Depends on**: #200
+_N_BODY="**Depends on**: #200"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_WIP" && _N_RET=0 || _N_RET=1
+assert_eq "N13: bold label (**Depends on**:) → returns 1" "1" "$_N_RET"
+
+# N14: plain label, bold ref — Depends on: **#200**
+_N_BODY="Depends on: **#200**"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_WIP" && _N_RET=0 || _N_RET=1
+assert_eq "N14: bold ref (Depends on: **#200**) → returns 1" "1" "$_N_RET"
+
+# N15: multi-ref line — Depends on: #200, #201 blocks on both (mirrors N7)
+_N_BODY="Depends on: #200, #201"
+_N_DEP201_STATE="OPEN"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
+assert_eq "N15: multi-ref line, second off-board OPEN → returns 1" "1" "$_N_RET"
+
 # N20: body fetch fails → returns 0 (pre-existing behaviour)
 # Override gh so body call for issue 100 returns non-zero
 gh() {

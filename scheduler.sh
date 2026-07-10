@@ -627,8 +627,15 @@ _scan_body_for_deps() {
     /^```/ { in_fence = !in_fence; next }
     in_fence { next }
     { print }
-  ' | sed -E 's/`[^`]*`//g')
-  printf '%s\n' "$stripped" | grep -oP 'Depends on:\s*#\K\d+' || true
+  ' | sed -E 's/`[^`]*`//g' | tr -d '*')
+
+  local plain_deps
+  plain_deps=$(printf '%s\n' "$stripped" \
+    | grep -inE 'depends[[:space:]]+on[[:space:]]*:' \
+    | sed -E 's/.*depends[[:space:]]+on[[:space:]]*://I' \
+    | grep -oP '#\K[0-9]+' || true)
+
+  printf '%s\n' "$plain_deps"
 }
 
 dependencies_met() {
