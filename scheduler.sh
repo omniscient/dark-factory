@@ -630,14 +630,24 @@ get_column_limit() {
 #                       text is "Blocked by", followed by -/*/+ bullets, each
 #                       possibly containing multiple #NNN refs, until the next
 #                       heading of any level
-# Text inside fenced code blocks (```) or inline code spans (`...`) is never
-# scanned — quoted/illustrative refs must not be treated as real dependencies.
-# An unclosed fence is treated as open through end-of-body (fail closed).
+# Text inside fenced code blocks (``` or ~~~, optionally indented) or inline
+# code spans (`...`) is never scanned — quoted/illustrative refs must not be
+# treated as real dependencies. An unclosed fence is treated as open through
+# end-of-body (fail closed).
 _scan_body_for_deps() {
   local body="$1"
   local stripped
   stripped=$(printf '%s\n' "$body" | awk '
-    /^```/ { in_fence = !in_fence; next }
+    /^[[:space:]]*```/ {
+      if (in_fence == 1) { in_fence = 0 }
+      else if (in_fence == 0) { in_fence = 1 }
+      next
+    }
+    /^[[:space:]]*~~~/ {
+      if (in_fence == 2) { in_fence = 0 }
+      else if (in_fence == 0) { in_fence = 2 }
+      next
+    }
     in_fence { next }
     { print }
   ' | sed -E 's/`[^`]*`//g' | tr -d '*')
@@ -650,8 +660,8 @@ _scan_body_for_deps() {
 
   local blocked_deps
   blocked_deps=$(printf '%s\n' "$stripped" | awk '
-    /^#{1,6}[[:space:]]*/ {
-      if (tolower($0) ~ /^#{1,6}[[:space:]]*blocked by/) { insec = 1 } else { insec = 0 }
+    /^#{1,6}([[:space:]]|$)/ {
+      if (tolower($0) ~ /^#{1,6}[[:space:]]*blocked by[[:space:]]*:?[[:space:]]*$/) { insec = 1 } else { insec = 0 }
       next
     }
     insec { print }
