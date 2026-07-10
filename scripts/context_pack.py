@@ -27,8 +27,8 @@ from context_budget import (
     DIFF_LINE_CAP,
     _read_text,
     _derive_issue_text,
-    _SKILL_PROMPT_DIR,
     _SKILL_PROMPT_FILES,
+    _resolve_skill_prompt,
 )
 
 
@@ -47,10 +47,10 @@ def _dropped(reason: str) -> tuple[dict, None]:
     return {"status": "dropped", "tokens": 0, "reason": reason}, None
 
 
-def _read_skill_prompts() -> tuple[dict, str | None]:
+def _read_skill_prompts(clone_dir: str) -> tuple[dict, str | None]:
     parts = []
-    for name in _SKILL_PROMPT_FILES:
-        txt = _read_text(os.path.join(_SKILL_PROMPT_DIR, name))
+    for baked_name, clone_relpath in _SKILL_PROMPT_FILES:
+        txt = _resolve_skill_prompt(clone_dir, baked_name, clone_relpath)
         if txt:
             parts.append(txt)
     if not parts:
@@ -227,7 +227,7 @@ def assemble_pack(
                 source_hashes["ARCHITECTURE.md"] = h
 
         elif sec == "skill_prompts":
-            status_entry, content = _read_skill_prompts()
+            status_entry, content = _read_skill_prompts(clone_dir)
 
         elif sec == "issue_context":
             status_entry, content = _read_issue_context(issue_json)

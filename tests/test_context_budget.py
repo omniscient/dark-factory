@@ -532,3 +532,51 @@ class TestDiffRankFeatureDisabled:
         cfg.write_text("token_optimization:\n  diff:\n    enabled: false\n    max_review_tokens: 6000\nblast_radius:\n  hotspot_score_floor: 5.0\n")
         _, _, diff_enabled = dr.load_config(str(cfg))
         assert diff_enabled is False
+
+
+# ── skill_prompts clone-live-first / baked-fallback resolution ───────────────
+
+def test_skill_prompts_resolves_clone_live_rubric_before_baked(tmp_path, monkeypatch):
+    clone_dir = tmp_path / "clone"
+    skill_dir = clone_dir / ".claude" / "skills" / "conformance"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "RUBRIC.md").write_text("CLONE-LIVE conformance content")
+
+    # baked dir has a DIFFERENT conformance prompt present — clone-live must win
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    (baked_dir / "conformance-reviewer-prompt.md").write_text("BAKED conformance content")
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+
+    result = cb._probe_skill_prompts(str(clone_dir))
+    assert result["status"] == "included"
+    assert result["tokens"] == cb.te.estimate_tokens("CLONE-LIVE conformance content"), (
+        "clone-live RUBRIC.md must be used even when a baked copy also exists"
+    )
+
+
+def test_skill_prompts_falls_back_to_baked_when_clone_live_missing(tmp_path, monkeypatch):
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    (baked_dir / "conformance-reviewer-prompt.md").write_text("BAKED conformance content")
+    (baked_dir / "code-review-reviewer-prompt.md").write_text("BAKED code-review content")
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+
+    clone_dir = tmp_path / "clone"  # no .claude/skills/ present at all
+    clone_dir.mkdir()
+
+    result = cb._probe_skill_prompts(str(clone_dir))
+    assert result["status"] == "included"
+    assert result["tokens"] == cb.te.estimate_tokens("BAKED conformance content\nBAKED code-review content")
+
+
+def test_skill_prompts_dropped_when_nothing_resolves(tmp_path, monkeypatch):
+    baked_dir = tmp_path / "baked_empty"
+    baked_dir.mkdir()
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+    clone_dir = tmp_path / "clone_empty"
+    clone_dir.mkdir()
+
+    result = cb._probe_skill_prompts(str(clone_dir))
+    assert result["status"] == "dropped"
+    assert result["reason"] == "container_mounted_not_found"

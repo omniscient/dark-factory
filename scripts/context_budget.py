@@ -33,12 +33,15 @@ _SECTION_REGISTRY: dict[str, list[str]] = {
 }
 
 _SKILL_PROMPT_DIR = "/opt/refinement-skills"
+# Each entry: (baked filename under _SKILL_PROMPT_DIR, clone-live path relative to
+# <clone_dir>/.claude/skills/, or None). Only the two files #44 migrates get a
+# clone-live candidate; orchestrator/product-owner/architect stay baked-only until #43.
 _SKILL_PROMPT_FILES = [
-    "orchestrator-prompt.md",
-    "product-owner-prompt.md",
-    "architect-prompt.md",
-    "conformance-reviewer-prompt.md",
-    "code-review-reviewer-prompt.md",
+    ("orchestrator-prompt.md", None),
+    ("product-owner-prompt.md", None),
+    ("architect-prompt.md", None),
+    ("conformance-reviewer-prompt.md", "conformance/RUBRIC.md"),
+    ("code-review-reviewer-prompt.md", "code-review/RUBRIC.md"),
 ]
 
 
@@ -91,10 +94,18 @@ def _derive_issue_text(issue_json: str | None) -> str:
     return f"{title}\n{body}"
 
 
-def _probe_skill_prompts() -> dict:
+def _resolve_skill_prompt(clone_dir: str, baked_name: str, clone_relpath: str | None) -> str | None:
+    if clone_relpath:
+        txt = _read_text(os.path.join(clone_dir, ".claude", "skills", clone_relpath))
+        if txt:
+            return txt
+    return _read_text(os.path.join(_SKILL_PROMPT_DIR, baked_name))
+
+
+def _probe_skill_prompts(clone_dir: str) -> dict:
     parts = []
-    for name in _SKILL_PROMPT_FILES:
-        txt = _read_text(os.path.join(_SKILL_PROMPT_DIR, name))
+    for baked_name, clone_relpath in _SKILL_PROMPT_FILES:
+        txt = _resolve_skill_prompt(clone_dir, baked_name, clone_relpath)
         if txt:
             parts.append(txt)
     if not parts:
@@ -240,7 +251,7 @@ def build_budget(
                 source_hashes["ARCHITECTURE.md"] = h
 
         elif sec == "skill_prompts":
-            sections[sec] = _probe_skill_prompts()
+            sections[sec] = _probe_skill_prompts(clone_dir)
 
         elif sec == "issue_context":
             sections[sec] = _probe_issue_context(issue_json)
