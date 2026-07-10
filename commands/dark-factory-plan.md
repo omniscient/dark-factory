@@ -113,14 +113,16 @@ Read the `conformance` block from `.claude/skills/refinement/config.yaml`.
 
 If `conformance.enabled` is `false`, skip this phase entirely and proceed to Phase 4. Record `CONFORMANCE_SKIPPED=true` for Phase 4.
 
-1. Read `/opt/refinement-skills/conformance-reviewer-prompt.md`
+1. Read the conformance rubric, clone-live-first: `.claude/skills/conformance/RUBRIC.md`,
+   falling back to `/opt/refinement-skills/conformance-reviewer-prompt.md` if the clone-live
+   file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 2. Determine `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
 3. Set `CONFORMANCE_DIALOGUE=""` and `CONFORMANCE_CYCLE=0`
 4. Build the artifact content: the plan document text is `$PLAN_CONTENT`
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
    - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (applies to every reconcile re-spawn too; do not let it inherit the orchestrator's model)
-   - `prompt`: Content of `conformance-reviewer-prompt.md` with:
+   - `prompt`: `RUBRIC_CONTENT` (resolved in step 1) with:
      - `$ARTIFACT_KIND` replaced with `PLAN`
      - `$SPEC_CONTENT` replaced with the spec file contents
      - `$ARTIFACT_CONTENT` replaced with `$PLAN_CONTENT`
