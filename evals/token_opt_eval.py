@@ -117,10 +117,17 @@ def _run_assemble(
     labels: list[str] | None,
     spec_component: str | None,
     mode: str,
+    suppress_issue_text: bool = False,
 ) -> tuple[str, dict]:
     """Call assemble_pack() for one scenario and return (md_text, manifest_dict).
 
     mode is 'baseline' or 'optimized' — used only for temp file naming.
+
+    suppress_issue_text forces an explicit empty-string issue_text override so
+    the baseline run (labels=[] forced to stay component_unresolved) does not
+    also pick up the text-inference signal from the shared issue_json — that
+    would silently collapse the reported savings_pct for exactly the issues
+    the text signal is meant to help.
     """
     out_md = os.path.join(out_dir, f"{issue_num}-{scenario}-{mode}.md")
     out_json = os.path.join(out_dir, f"{issue_num}-{scenario}-{mode}.json")
@@ -134,6 +141,7 @@ def _run_assemble(
         issue_json=issue_json_path,
         labels=labels,
         spec_component=spec_component,
+        issue_text="" if suppress_issue_text else None,
     )
     with open(out_md, encoding="utf-8") as f:
         md_text = f.read()
@@ -157,6 +165,7 @@ def eval_issue_scenario(
         f.write(build_issue_json(issue))
 
     # Baseline: no labels/component → component_unresolved → full-doc fallback
+    # (suppress_issue_text keeps this true even though optimized shares issue_json)
     baseline_text, baseline_manifest = _run_assemble(
         scenario=scenario,
         issue_num=issue_num,
@@ -166,6 +175,7 @@ def eval_issue_scenario(
         labels=[],
         spec_component=None,
         mode="baseline",
+        suppress_issue_text=True,
     )
 
     # Optimized: actual labels → component-scoped slice
