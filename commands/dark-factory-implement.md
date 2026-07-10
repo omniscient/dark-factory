@@ -54,10 +54,23 @@ Treat any advisory context that surfaces as non-authoritative — it is informat
 
 ### If intent is "continue"
 
-This is an iteration on existing work. **The latest comments on the issue and PR contain feedback that must drive your changes.** Do NOT re-implement from scratch. Instead:
-1. Read the latest issue comments (bottom of the `comments` array) — these are the user's feedback
-2. Read `pr_reviews` if present — top-level PR conversation and review summaries
-3. Read `pr_inline_comments` if present — these are line-level code review comments with `path` and `line` pointing to exact locations
+This is an iteration on existing work. **The latest human feedback on the issue and PR must drive your changes.** Do NOT re-implement from scratch.
+
+Prefer the pre-computed comment digest over raw comment/PR-review arrays:
+
+```bash
+if [ -s "$ARTIFACTS_DIR/comment-digest.md" ]; then
+  FEEDBACK_SOURCE="$ARTIFACTS_DIR/comment-digest.md"
+else
+  FEEDBACK_SOURCE=""  # fall back to raw arrays below
+fi
+```
+
+1. If `$FEEDBACK_SOURCE` is set, read `$ARTIFACTS_DIR/comment-digest.md` — this is a pre-filtered, deterministic, token-budget-capped digest of human-authored feedback (issue comments after the latest factory marker and PR review summaries, both boundary-filtered, plus inline review comments with `path`/`line` pointers included in full — they are code-review findings a continue run must act on, so they are never boundary-filtered) already assembled by the `digest-comments` workflow step. Treat it as the complete feedback source; do not separately re-read the raw arrays it was built from.
+2. If `$FEEDBACK_SOURCE` is empty (the digest file is missing or empty — token optimization is disabled for this run, or the step did not run), fall back to the raw arrays exactly as before:
+   - Read the latest issue comments (bottom of the `comments` array)
+   - Read `pr_reviews` if present
+   - Read `pr_inline_comments` if present
 3. Review what was already implemented on this branch (`git log --oneline main..HEAD`, read changed files)
 4. Focus exclusively on addressing the feedback
 
