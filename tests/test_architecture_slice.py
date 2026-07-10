@@ -266,6 +266,103 @@ def test_infer_component_from_spec_file():
     ) == "dark-factory"
 
 
+# ── 4b: Issue-text inference (lowest-confidence signal, candidate #1) ────────
+
+def test_infer_component_from_text_tier_a_path_match():
+    """Tier A: a literal _FILE_PREFIX_MAP prefix substring in the issue text resolves."""
+    assert aslice.infer_component_from_text(
+        "The bug lives in backend/app/routers/scanner.py, please fix it."
+    ) == "backend"
+    assert aslice.infer_component_from_text(
+        "Update frontend/src/components/Scanner.tsx to show the new column."
+    ) == "frontend"
+    assert aslice.infer_component_from_text(
+        "This touches dark-factory/scripts/context_budget.py directly."
+    ) == "dark-factory"
+    assert aslice.infer_component_from_text(
+        "We need to bump docker-compose.yml for the new service."
+    ) == "infrastructure"
+
+
+def test_infer_component_from_text_tier_b_keyword_fallback():
+    """Tier B: no path-shaped substring, but keyword tokens resolve the component."""
+    assert aslice.infer_component_from_text(
+        "The scanner API is returning stale data from the database."
+    ) == "backend"
+    assert aslice.infer_component_from_text(
+        "The React page component doesn't render the new UI correctly."
+    ) == "frontend"
+    assert aslice.infer_component_from_text(
+        "The refine pipeline scheduler needs to plan this ticket."
+    ) == "dark-factory"
+    assert aslice.infer_component_from_text(
+        "Prometheus and grafana dashboards need a new infrastructure panel."
+    ) == "infrastructure"
+
+
+def test_infer_component_from_text_tier_a_ambiguous_falls_to_tier_b():
+    """>=2 distinct Tier A path matches is ambiguous; falls through to Tier B.
+
+    Since Tier B reuses the same vocabulary, a literal two-path mention is
+    ambiguous in both tiers (each prefix's own word is also a Tier B keyword),
+    so the net result is None — the fall-through happened, it just didn't
+    find a fresh resolution. This exercises the ambiguous-falls-to-Tier-B
+    code path distinctly from a pure-keyword Tier B ambiguity.
+    """
+    text = (
+        "Touches both backend/app/routers/scanner.py and "
+        "dark-factory/scripts/architecture_slice.py."
+    )
+    assert aslice.infer_component_from_text(text) is None
+
+
+def test_infer_component_from_text_tier_b_ambiguous_returns_none():
+    """>=2 distinct Tier B keyword matches with no Tier A match -> None, never guess."""
+    text = "The backend scanner API and the frontend react ui page component both need work."
+    assert aslice.infer_component_from_text(text) is None
+
+
+def test_infer_component_from_text_no_signal_returns_none():
+    assert aslice.infer_component_from_text("Just a plain english sentence with no clues.") is None
+    assert aslice.infer_component_from_text(None) is None
+    assert aslice.infer_component_from_text("") is None
+
+
+def test_infer_component_precedence_changed_files_beats_issue_text():
+    """issue_text is the lowest-confidence signal — changed_files/spec_file/labels always win."""
+    assert aslice.infer_component(
+        spec_file=None,
+        changed_files=["frontend/src/App.tsx"],
+        labels=[],
+        issue_text="This is really about backend/app/routers/scanner.py.",
+    ) == "frontend"
+
+
+def test_infer_component_precedence_labels_beat_issue_text():
+    assert aslice.infer_component(
+        spec_file=None,
+        changed_files=[],
+        labels=["backend"],
+        issue_text="frontend/src/App.tsx needs a fix.",
+    ) == "backend"
+
+
+def test_infer_component_issue_text_only_fires_when_others_fail():
+    """issue_text resolves the component only once changed_files/spec_file/labels are exhausted."""
+    assert aslice.infer_component(
+        spec_file=None,
+        changed_files=[],
+        labels=[],
+        issue_text="Fix backend/app/routers/scanner.py please.",
+    ) == "backend"
+    assert aslice.infer_component(
+        spec_file=None,
+        changed_files=[],
+        labels=[],
+        issue_text=None,
+    ) is None
+
+
 # ── 5: Slice metadata ─────────────────────────────────────────────────────────
 
 def test_slice_has_html_comment_header(arch_file, tmp_path):
