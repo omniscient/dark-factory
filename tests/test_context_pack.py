@@ -218,3 +218,30 @@ def test_nonexistent_files_produce_dropped_with_reason(tmp_path):
     assert "reason" in manifest["sections"]["issue_context"]
     assert manifest["sections"]["memory_context"]["status"] == "dropped"
     assert "reason" in manifest["sections"]["memory_context"]
+
+
+# ── issue_text auto-derive contract ───────────────────────────────────────────
+
+def make_arch_file(tmp_path):
+    p = tmp_path / "ARCHITECTURE.md"
+    p.write_text(
+        "# Architecture\n\n"
+        "## Backend Module Map\n\nBackend content.\n\n"
+        "## Frontend Architecture\n\nFrontend content.\n\n"
+    )
+    return str(p)
+
+
+def test_architecture_md_resolves_component_from_issue_text_auto_derive(tmp_path):
+    """assemble_pack()'s issue_text defaults to None, auto-deriving title+body from issue_json."""
+    make_arch_file(tmp_path)
+    issue_json = tmp_path / "issue.json"
+    issue_json.write_text(json.dumps({
+        "title": "Fix bug",
+        "body": "The problem is in backend/app/routers/scanner.py.",
+        "comments": [],
+    }))
+    manifest, _ = run_pack(tmp_path, "implement", issue_json=str(issue_json))
+    sec = manifest["sections"]["architecture_md"]
+    assert sec["component"] == "backend"
+    assert sec["fallback"] is False

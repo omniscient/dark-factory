@@ -26,6 +26,7 @@ from context_budget import (
     BUDGET_TOKENS,
     DIFF_LINE_CAP,
     _read_text,
+    _derive_issue_text,
     _SKILL_PROMPT_DIR,
     _SKILL_PROMPT_FILES,
 )
@@ -151,11 +152,17 @@ def assemble_pack(
     changed_files: list[str] | None = None,
     labels: list[str] | None = None,
     comment_digest_file: str | None = None,
+    issue_text: str | None = None,
 ) -> None:
     active = _SECTION_REGISTRY.get(scenario, [])
     sections: dict[str, dict] = {}
     source_hashes: dict[str, str] = {}
     md_parts: list[str] = []
+
+    # issue_text: None means "auto-derive from issue_json"; an explicit ""
+    # (or any string) is used verbatim, allowing callers to suppress derivation.
+    if issue_text is None:
+        issue_text = _derive_issue_text(issue_json)
 
     for sec in active:
         status_entry: dict
@@ -178,6 +185,7 @@ def assemble_pack(
                 changed_files=changed_files,
                 labels=labels,
                 clone_dir=clone_dir,
+                issue_text=issue_text,
             )
             # Detect comment-only fallback text (e.g. "<!-- ... -->" with no real content).
             _raw = result.text or ""

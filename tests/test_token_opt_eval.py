@@ -1,6 +1,7 @@
 """Smoke tests for token_opt_eval.py — issue #672 / #718."""
 import glob
 import importlib.util
+import json
 import os
 import sys
 
@@ -190,6 +191,77 @@ def test_calibrate_issue_returns_per_budget_rows():
         assert budgets == {22000, 30000}
     finally:
         mod._BUDGET_ENFORCE_AVAILABLE = orig
+
+
+def test_run_assemble_suppress_issue_text_keeps_baseline_unresolved(tmp_path):
+    """The eval's baseline call must stay component_unresolved even when the issue
+    body names a component path — otherwise the labels=[]-forced baseline would
+    silently pick up the new text signal and corrupt the reported savings_pct
+    for exactly the issues this ticket is meant to help."""
+    mod = _load_module()
+    arch_path = tmp_path / "ARCHITECTURE.md"
+    arch_path.write_text(
+        "# Architecture\n\n## Backend Module Map\n\nBackend content.\n\n"
+        "## Frontend Architecture\n\nFrontend content.\n\n"
+    )
+    issue_json_path = tmp_path / "issue.json"
+    issue_json_path.write_text(json.dumps({
+        "number": 1,
+        "title": "Fix bug",
+        "body": "The problem is in backend/app/routers/scanner.py.",
+        "comments": [],
+        "labels": [],
+    }))
+
+    _, baseline_manifest = mod._run_assemble(
+        scenario="implement",
+        issue_num=1,
+        clone_dir=str(tmp_path),
+        issue_json_path=str(issue_json_path),
+        out_dir=str(tmp_path),
+        labels=[],
+        spec_component=None,
+        mode="baseline",
+        suppress_issue_text=True,
+    )
+    baseline_sec = baseline_manifest["sections"]["architecture_md"]
+    assert baseline_sec["fallback"] is True
+    assert baseline_sec["fallback_reason"] == "component_unresolved"
+
+    _, opt_manifest = mod._run_assemble(
+        scenario="implement",
+        issue_num=1,
+        clone_dir=str(tmp_path),
+        issue_json_path=str(issue_json_path),
+        out_dir=str(tmp_path),
+        labels=[],
+        spec_component=None,
+        mode="optimized",
+    )
+    opt_sec = opt_manifest["sections"]["architecture_md"]
+    assert opt_sec["fallback"] is False
+    assert opt_sec["component"] == "backend"
+
+
+def test_eval_issue_scenario_optimized_resolves_via_issue_text(tmp_path):
+    """eval_issue_scenario's optimized run auto-derives issue_text and resolves a
+    component even when the issue carries no labels, while the baseline stays
+    unresolved — this is the ticket's headline hit-rate improvement."""
+    mod = _load_module()
+    arch_path = tmp_path / "ARCHITECTURE.md"
+    arch_path.write_text(
+        "# Architecture\n\n## Backend Module Map\n\nBackend content.\n\n"
+        "## Frontend Architecture\n\nFrontend content.\n\n"
+    )
+    issue = {
+        "number": 4242,
+        "title": "Fix bug",
+        "body": "The problem is in backend/app/routers/scanner.py.",
+        "labels": [],
+    }
+    result = mod.eval_issue_scenario(issue, "implement", str(tmp_path), str(tmp_path))
+    assert result["component"] == "backend"
+    assert result["fallback"] is False
 
 
 def test_opt_manifest_in_eval_result_shape():

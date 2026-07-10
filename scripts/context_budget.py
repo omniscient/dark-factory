@@ -81,6 +81,16 @@ def _read_json(path: str | None) -> dict | None:
     return parsed
 
 
+def _derive_issue_text(issue_json: str | None) -> str:
+    """Derive issue title+body text from issue_json for component text-inference."""
+    data = _read_json(issue_json)
+    if not data:
+        return ""
+    title = data.get("title") or ""
+    body = data.get("body") or ""
+    return f"{title}\n{body}"
+
+
 def _probe_skill_prompts() -> dict:
     parts = []
     for name in _SKILL_PROMPT_FILES:
@@ -173,10 +183,16 @@ def build_budget(
     changed_files: list[str] | None = None,
     labels: list[str] | None = None,
     comment_digest_file: str | None = None,
+    issue_text: str | None = None,
 ) -> None:
     active = _SECTION_REGISTRY.get(scenario, [])
     sections: dict[str, dict] = {}
     source_hashes: dict[str, str] = {}
+
+    # issue_text: None means "auto-derive from issue_json"; an explicit ""
+    # (or any string) is used verbatim, allowing callers to suppress derivation.
+    if issue_text is None:
+        issue_text = _derive_issue_text(issue_json)
 
     for sec in active:
         if sec == "claude_md":
@@ -196,6 +212,7 @@ def build_budget(
                 changed_files=changed_files,
                 labels=labels,
                 clone_dir=clone_dir,
+                issue_text=issue_text,
             )
             status = "included" if result.fallback else "included_slice"
             tokens = te.estimate_tokens(result.text)

@@ -244,10 +244,36 @@ def _parse_sections(path: str) -> dict[str, str]:
 
 # ── Component inference ────────────────────────────────────────────────────────
 
+def infer_component_from_text(issue_text: str | None) -> str | None:
+    """Lowest-confidence signal: infer component from issue title+body prose.
+
+    Tier A (path-shaped): literal substring match against _FILE_PREFIX_MAP prefixes.
+    Tier B (keyword-token): tried only when Tier A resolves to zero or >=2 distinct
+    components — reuses _SPEC_KEYWORD_MAP verbatim (no new vocabulary).
+
+    A tier match set of >=2 distinct components is ambiguous: Tier A ambiguity
+    falls through to Tier B; Tier B ambiguity returns None. Never guess.
+    """
+    if not issue_text:
+        return None
+
+    tier_a_matches = {component for prefix, component in _FILE_PREFIX_MAP if prefix in issue_text}
+    if len(tier_a_matches) == 1:
+        return next(iter(tier_a_matches))
+
+    tokens = set(re.findall(r"[a-z0-9]+", issue_text.lower()))
+    tier_b_matches = {component for keyword_set, component in _SPEC_KEYWORD_MAP if tokens & keyword_set}
+    if len(tier_b_matches) == 1:
+        return next(iter(tier_b_matches))
+
+    return None
+
+
 def infer_component(
     spec_file: str | None,
     changed_files: list[str] | None,
     labels: list[str] | None,
+    issue_text: str | None = None,
 ) -> str | None:
     """Infer architecture component from available signals; returns None if unresolved."""
     files = changed_files or []
@@ -275,6 +301,11 @@ def infer_component(
         for key, component in _LABEL_COMPONENT_MAP.items():
             if key in label_text:
                 return component
+
+    # 4. Issue title+body text (lowest confidence; only if all above are silent)
+    component = infer_component_from_text(issue_text)
+    if component:
+        return component
 
     return None
 
@@ -369,6 +400,7 @@ def slice_architecture(
     changed_files: list[str] | None = None,
     labels: list[str] | None = None,
     clone_dir: str | None = None,
+    issue_text: str | None = None,
 ) -> SliceResult:
     """Return a SliceResult with a component-scoped or full-doc ARCHITECTURE.md slice."""
     changed_files = changed_files or []
@@ -384,7 +416,7 @@ def slice_architecture(
                                 scenario, None, "feature_disabled")
 
     # 1. Resolve component
-    component = spec_component or infer_component(spec_file, changed_files, labels)
+    component = spec_component or infer_component(spec_file, changed_files, labels, issue_text)
 
     # 2. Safety fallback check (fires even when component is resolved)
     if component is not None:
@@ -487,6 +519,9 @@ def main() -> None:
     parser.add_argument("--changed-files", nargs="*", default=[])
     parser.add_argument("--labels", nargs="*", default=[])
     parser.add_argument("--clone-dir", default=None)
+    parser.add_argument("--issue-text", default=None,
+                        help="Issue title+body text, used as the lowest-confidence "
+                             "component-inference signal when other signals are silent")
     parser.add_argument("--out-json", default=None, help="Write SliceResult metadata sidecar")
     args = parser.parse_args()
 
@@ -498,6 +533,7 @@ def main() -> None:
         changed_files=args.changed_files,
         labels=args.labels,
         clone_dir=args.clone_dir,
+        issue_text=args.issue_text,
     )
 
     print(result.text, end="")
