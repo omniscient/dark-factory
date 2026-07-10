@@ -34,7 +34,9 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 2. If `conformance.enabled` is `false`:
    - Write `$ARTIFACTS_DIR/conformance.md` with content: `STATUS: SKIPPED\nREASON: conformance.enabled=false`
    - Exit cleanly (proceed to push-and-pr)
-3. Read `/opt/refinement-skills/conformance-reviewer-prompt.md`
+3. Read the conformance rubric, clone-live-first: `.claude/skills/conformance/RUBRIC.md`,
+   falling back to `/opt/refinement-skills/conformance-reviewer-prompt.md` if the clone-live
+   file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 4. Read `$ARTIFACTS_DIR/implementation.md` for what was implemented (may be missing if validate wrote nothing — continue anyway)
 5. Extract `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
 6. Extract `BLOCK_ON_MATERIAL` from `conformance.block_on_material` (default: true)
@@ -218,7 +220,7 @@ fi
 4. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: code vs spec"
    - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (applies to every reconcile re-spawn in Phase 3.5 too; do not let it inherit the orchestrator's model)
-   - `prompt`: Content of `/opt/refinement-skills/conformance-reviewer-prompt.md` with:
+   - `prompt`: `RUBRIC_CONTENT` (resolved in Phase 1 step 3) with:
      - `$ARTIFACT_KIND` replaced with `IMPLEMENTATION`
      - `$SPEC_CONTENT` replaced with the spec file contents (or issue body if `NO_SPEC=true`)
      - `$ARTIFACT_CONTENT` replaced with the artifact content from Step 3.1
@@ -450,7 +452,7 @@ if [ "${CONFORMANCE_CYCLE:-0}" -gt 0 ]; then
 
   # Extract (VIOLATION_FILE, VIOLATION_TEXT) pairs from $CONFORMANCE_DIALOGUE.
   # $CONFORMANCE_DIALOGUE is the free-form output of the conformance reviewer subagent.
-  # Read /opt/refinement-skills/conformance-reviewer-prompt.md to understand the reviewer's
+  # Read the conformance rubric (RUBRIC_CONTENT, resolved in Phase 1 step 3) to understand the reviewer's
   # exact output format, then parse $CONFORMANCE_DIALOGUE to build BLOCKING_VIOLATIONS as
   # newline-separated "FILE|TEXT" pairs where:
   #   FILE — the file path of the violation (e.g. backend/app/routers/scanner.py)
