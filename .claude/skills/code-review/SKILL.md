@@ -22,5 +22,5 @@ Not invoked directly. `dark-factory-code-review.md` resolves this rubric clone-l
 ## Contents
 
 - `RUBRIC.md` — severity vocabulary (`critical|high|medium|low`), category vocabulary, and the
-  pipe-delimited `### Findings` output contract that `dark-factory/scripts/code_review_payload.py`
+  pipe-delimited `### Findings` output contract that `scripts/code_review_payload.py`
   parses via `_FINDING_RE`.
