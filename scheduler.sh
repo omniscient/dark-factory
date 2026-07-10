@@ -620,6 +620,19 @@ get_column_limit() {
 }
 
 # --- Dependency checking ---
+# Accepted dependency declaration formats (see #204):
+#   - Plain:            Depends on: #123
+#   - Bold/italic:      **Depends on:** #123 / **Depends on**: #123 /
+#                       Depends on: **#123** / *Depends on:* #123
+#                       (any placement of * around the label/colon/ref)
+#   - Multi-ref line:   Depends on: #123, #124
+#   - Blocked-by block: a heading (any level #-######, case-insensitive) whose
+#                       text is "Blocked by", followed by -/*/+ bullets, each
+#                       possibly containing multiple #NNN refs, until the next
+#                       heading of any level
+# Text inside fenced code blocks (```) or inline code spans (`...`) is never
+# scanned — quoted/illustrative refs must not be treated as real dependencies.
+# An unclosed fence is treated as open through end-of-body (fail closed).
 _scan_body_for_deps() {
   local body="$1"
   local stripped
@@ -635,7 +648,16 @@ _scan_body_for_deps() {
     | sed -E 's/.*depends[[:space:]]+on[[:space:]]*://I' \
     | grep -oP '#\K[0-9]+' || true)
 
-  printf '%s\n' "$plain_deps"
+  local blocked_deps
+  blocked_deps=$(printf '%s\n' "$stripped" | awk '
+    /^#{1,6}[[:space:]]*/ {
+      if (tolower($0) ~ /^#{1,6}[[:space:]]*blocked by/) { insec = 1 } else { insec = 0 }
+      next
+    }
+    insec { print }
+  ' | grep -oP '#\K[0-9]+' || true)
+
+  printf '%s\n%s\n' "$plain_deps" "$blocked_deps" | grep -v '^$' || true
 }
 
 dependencies_met() {
