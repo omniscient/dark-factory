@@ -860,7 +860,25 @@ _N_DEP201_STATE="CLOSED"
 dependencies_met "100" "$_BOARD_200_DONE_201_ABSENT" && _N_RET=0 || _N_RET=1
 assert_eq "N8: two deps, second off-board CLOSED → returns 0" "0" "$_N_RET"
 
-# N9: body fetch fails → returns 0 (pre-existing behaviour)
+# N9: fenced fake dep — closed fence does not count as a dependency
+_N_BODY="$(printf '```\nDepends on: #999\n```\n')"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N9: fenced fake dep → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N10: unclosed fence — everything after an unclosed ``` is dropped
+_N_BODY="$(printf 'Some notes.\n```\nDepends on: #999\n')"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N10: unclosed fence → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N11: inline code span — backtick-quoted example does not count
+_N_BODY="See \`Depends on: #999\` for the old format."
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N11: inline code span → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N20: body fetch fails → returns 0 (pre-existing behaviour)
 # Override gh so body call for issue 100 returns non-zero
 gh() {
   echo "gh $*" >> "$STUB_LOG"
@@ -872,7 +890,7 @@ gh() {
 export -f gh
 > "$STUB_LOG"
 dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
-assert_eq "N9: body fetch fails → returns 0" "0" "$_N_RET"
+assert_eq "N20: body fetch fails → returns 0" "0" "$_N_RET"
 
 # Restore global gh stub
 gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }

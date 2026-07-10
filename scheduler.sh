@@ -620,13 +620,24 @@ get_column_limit() {
 }
 
 # --- Dependency checking ---
+_scan_body_for_deps() {
+  local body="$1"
+  local stripped
+  stripped=$(printf '%s\n' "$body" | awk '
+    /^```/ { in_fence = !in_fence; next }
+    in_fence { next }
+    { print }
+  ' | sed -E 's/`[^`]*`//g')
+  printf '%s\n' "$stripped" | grep -oP 'Depends on:\s*#\K\d+' || true
+}
+
 dependencies_met() {
   local issue_num="$1"
   local board_items="$2"
   local body
   body=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json body -q '.body' 2>/dev/null) || return 0
   local deps
-  deps=$(echo "$body" | grep -oP 'Depends on:\s*#\K\d+' || true)
+  deps=$(_scan_body_for_deps "$body")
   if [ -z "$deps" ]; then
     return 0
   fi
