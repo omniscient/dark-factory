@@ -267,5 +267,6 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [Extraction plan](https://github.com/omniscient/markethawk/blob/main/docs/superpowers/plans/2026-07-03-dark-factory-extraction-p0-p1.md) — P0 extract + P1 generalize design
 - [`docs/dark-factory-token-optimization.md`](docs/dark-factory-token-optimization.md) — token optimization operator guide
 - [`docs/dark-factory-memory-contract.md`](docs/dark-factory-memory-contract.md) — memory schema and lifecycle
+- [`docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md) — Claude Skills naming, safety, and tool-permission policy
 - [`config/config.yaml`](config/config.yaml) — all policy knobs with inline documentation
 - [`bench/baseline.md`](bench/baseline.md) — replay benchmark task manifest and scoring formula
