@@ -114,7 +114,7 @@ The git-tracked top-level layout is `commands/`, `workflows/`, `refinement-skill
 `config/`, `entrypoint.sh` — these get `COPY`'d into the Docker image at build time (see
 `Dockerfile` lines 111–127) at `/opt/dark-factory/{scripts,workflows,commands}` and
 `/opt/refinement-skills/`. But every phase command, the workflow YAML, and `entrypoint.sh` itself
-still reference a `dark-factory/scripts/...` path prefix (42 occurrences) and a
+still reference a `dark-factory/scripts/...` path prefix (41 occurrences) and a
 `.claude/skills/refinement/config.yaml` config path (18 occurrences) — both are the **pre-cutover
 MarketHawk nested-repo convention**, not this repo's own top-level layout. This is not a bug:
 `entrypoint.sh` (lines 509–523) deliberately materializes `$CLONE_DIR/dark-factory/scripts` (copied
@@ -252,6 +252,15 @@ implementation issue, most naturally scoped under #42 (Claude Skills conventions
 - Token estimates use `floor(len(text) / 4)` via `scripts/token_estimate.py`, computed 2026-07-10;
   re-run before citing exact numbers in implementation tickets, since several files (memory,
   config) mutate on every factory run.
+- Re-verified 2026-07-10 (plan phase) against every row in Table 1 and its aggregate footnote,
+  not a sample: 33 of 35 rows had drifted by small amounts (most 0.3%-2%; the largest were
+  `scripts/architecture_slice.py`, `scripts/memory_retrieve.py`, the `gate-support`/`ci-utils`
+  script bundles, and the `docs-reference` bundle, which had a second bug — its stated total was
+  actually the combined docs+memory-file figure, not the 7-file subtotal) and were corrected in
+  place, along with the footnote's five category totals. One prose occurrence count
+  (`dark-factory/scripts` path prefix: 42 → 41) was also corrected. The
+  `.claude/skills/refinement/config.yaml` occurrence count, all Table 2 qualitative claims, and
+  the #36/#40 issue cross-references were re-checked and found accurate — no changes made.
 - The "effective in-prompt" (post-slicing/post-capping) token figures reported in the 2026-07-01
   MarketHawk-repo spec (refine ~11,900 / plan ~10,300 / implement ~11,600 / conformance ~6,900 /
   code-review ~3,000 / validate ~5,900) are not re-verified here — they depend on live
