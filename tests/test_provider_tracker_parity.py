@@ -148,3 +148,51 @@ def test_resolve_item_matches_smoke_gate_close(monkeypatch):
         "gh", "issue", "close", "77", "--repo", identity.SLUG,
         "--comment", "main smoke gate passed — closing regression ticket.",
     ]
+
+
+def test_list_work_items_single_page_query_matches_scheduler_fetch_board_items(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _ok(stdout=json.dumps({
+            "data": {"node": {"items": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [
+                    {"fieldValueByName": {"name": "Ready"},
+                     "content": {"number": 42, "title": "t", "labels": {"nodes": [{"name": "ready-for-agent"}]}}},
+                    {"fieldValueByName": {"name": "Done"},
+                     "content": {"number": 43, "title": "t2", "labels": {"nodes": []}}},
+                ],
+            }}}
+        }))
+    monkeypatch.setattr(subprocess, "run", fake)
+    items = GitHubTracker().list_work_items(["ready"])
+    expected_query = (
+        '\n      query {\n        node(id: "' + identity.PROJECT_ID + '") {\n'
+        '          ... on ProjectV2 {\n            items(first: 100) {\n'
+        '              pageInfo { hasNextPage endCursor }\n              nodes {\n'
+        '                fieldValueByName(name: "Status") {\n'
+        '                  ... on ProjectV2ItemFieldSingleSelectValue { name }\n                }\n'
+        '                content {\n                  ... on Issue {\n                    number\n'
+        '                    title\n                    labels(first: 10) { nodes { name } }\n'
+        '                  }\n                }\n              }\n            }\n          }\n        }\n      }\n    '
+    )
+    assert calls[0] == ["gh", "api", "graphql", "-f", "query=" + expected_query]
+    assert [i["id"] for i in items] == ["42"]
+    assert items[0]["status"] == "ready"
+
+
+def test_list_work_items_filters_by_label(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout=json.dumps({
+        "data": {"node": {"items": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [
+                {"fieldValueByName": {"name": "Ready"},
+                 "content": {"number": 1, "title": "a", "labels": {"nodes": [{"name": "ready-for-agent"}]}}},
+                {"fieldValueByName": {"name": "Ready"},
+                 "content": {"number": 2, "title": "b", "labels": {"nodes": []}}},
+            ],
+        }}}
+    })))
+    items = GitHubTracker().list_work_items(["ready"], labels=["ready-for-agent"])
+    assert [i["id"] for i in items] == ["1"]

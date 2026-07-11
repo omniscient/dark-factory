@@ -11,6 +11,36 @@ from factory_core.providers.tracker.base import Tracker
 
 _DEFAULT_GET_ITEM_FIELDS = ("title", "body", "labels", "comments")
 
+_CANONICAL_STATUS_NAMES = {
+    "ready": "Ready", "in_progress": "In progress", "in_review": "In review",
+    "blocked": "Blocked", "done": "Done", "backlog": "Backlog", "refined": "Refined",
+}
+_STATUS_NAME_TO_CANONICAL = {v: k for k, v in _CANONICAL_STATUS_NAMES.items()}
+
+_BOARD_ITEMS_QUERY_TEMPLATE = '''
+      query {
+        node(id: "%s") {
+          ... on ProjectV2 {
+            items(first: 100%s) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                fieldValueByName(name: "Status") {
+                  ... on ProjectV2ItemFieldSingleSelectValue { name }
+                }
+                content {
+                  ... on Issue {
+                    number
+                    title
+                    labels(first: 10) { nodes { name } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    '''
+
 
 class GitHubTracker(Tracker):
     def get_item(self, id: str, fields: tuple | None = None) -> dict:
@@ -66,7 +96,46 @@ class GitHubTracker(Tracker):
     # implementation — search for the matching `raise NotImplementedError  #
     # Task N` line when editing.
     def list_work_items(self, statuses: list, labels: list | None = None) -> list:
-        raise NotImplementedError  # Task 10
+        wanted_names = {_CANONICAL_STATUS_NAMES.get(s, s) for s in statuses}
+        cursor = ""
+        results = []
+        while True:
+            after_arg = f', after: "{cursor}"' if cursor else ""
+            query = _BOARD_ITEMS_QUERY_TEMPLATE % (identity.PROJECT_ID, after_arg)
+            r = subprocess.run(
+                ["gh", "api", "graphql", "-f", "query=" + query],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                break
+            try:
+                page = json.loads(r.stdout)["data"]["node"]["items"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                break
+            for node in page.get("nodes", []):
+                content = node.get("content") or {}
+                number = content.get("number")
+                if number is None:
+                    continue
+                status_name = (node.get("fieldValueByName") or {}).get("name")
+                if status_name not in wanted_names:
+                    continue
+                item_labels = [n["name"] for n in (content.get("labels") or {}).get("nodes", [])]
+                if labels and not set(labels).issubset(item_labels):
+                    continue
+                results.append({
+                    "id": str(number),
+                    "title": content.get("title"),
+                    "labels": item_labels,
+                    "status": _STATUS_NAME_TO_CANONICAL.get(status_name, status_name),
+                })
+            page_info = page.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor") or ""
+            if not cursor:
+                break
+        return results
 
     def set_status(self, id: str, canonical: str) -> None:
         item_id = board._find_item_by_number(id)
