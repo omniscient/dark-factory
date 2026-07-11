@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from . import identity
+from .providers import get_tracker
 
 _DEFAULT_STATE = Path(
     os.environ.get("STATE_FILE", "/var/lib/dark-factory/scheduler-state.json")
@@ -78,12 +79,12 @@ def trip_to_blocked(
 
     set_board_status(issue_num, STATUS_BLOCKED)
 
+    # #249: routed through get_tracker() — owner/repo params are always identity.OWNER/
+    # REPO in practice (the only caller, factory_core/cli.py's breaker-trip, never
+    # overrides them), matching GitHubTracker.add_label's identity.SLUG-only argv.
+    tracker = get_tracker()
     for label in ("needs-discussion", "factory-regression"):
-        subprocess.run(
-            ["gh", "issue", "edit", str(issue_num),
-             "--repo", f"{owner}/{repo}", "--add-label", label],
-            capture_output=True,
-        )
+        tracker.add_label(str(issue_num), label)
 
     body = (
         f"## Scheduler — Circuit-Breaker Tripped (`{phase}`)\n\n"
