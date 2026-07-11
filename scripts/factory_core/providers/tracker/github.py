@@ -69,7 +69,10 @@ class GitHubTracker(Tracker):
         raise NotImplementedError  # Task 10
 
     def set_status(self, id: str, canonical: str) -> None:
-        raise NotImplementedError  # Task 6
+        item_id = board._find_item_by_number(id)
+        if not item_id:
+            return
+        board._item_edit_status(item_id, identity.STATUS[canonical])
 
     def add_label(self, id: str, name: str) -> None:
         raise NotImplementedError  # Task 7

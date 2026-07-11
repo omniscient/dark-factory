@@ -52,3 +52,31 @@ def test_get_children_matches_epic_autopilot_sub_issue_numbers(monkeypatch):
         % (identity.OWNER, identity.REPO)
     )
     assert calls[0] == ["gh", "api", "graphql", "-f", "query=" + expected_query]
+
+
+def test_set_status_resolves_canonical_and_calls_item_edit(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "item-list" in cmd:
+            return _ok(stdout=json.dumps(
+                {"items": [{"id": "ITEM42", "content": {"number": 42, "type": "Issue"}}]}
+            ))
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    GitHubTracker().set_status("42", "in_review")
+    edit = next(c for c in calls if "item-edit" in c)
+    assert edit == [
+        "gh", "project", "item-edit",
+        "--project-id", identity.PROJECT_ID,
+        "--id", "ITEM42",
+        "--field-id", identity.STATUS_FIELD,
+        "--single-select-option-id", identity.STATUS["in_review"],
+    ]
+
+
+def test_set_status_opaque_id_never_reaches_int(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout='{"items": []}'))[1])
+    GitHubTracker().set_status("PROJ-123", "blocked")  # must not raise ValueError from int()
+    assert not any("item-edit" in c for c in calls)
