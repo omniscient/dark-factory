@@ -770,6 +770,7 @@ _N_BODY=""
 _N_DEP200_STATE=""
 _N_DEP200_GH_EXIT=0
 _N_DEP201_STATE=""
+_N_DEP202_STATE=""
 
 # gh stub: routes by issue number; body call → _N_BODY; state call → per-dep state var
 gh() {
@@ -779,6 +780,9 @@ gh() {
   fi
   if echo "$*" | grep -qE "view 201( |$)"; then
     printf '%s\n' "$_N_DEP201_STATE"; return 0
+  fi
+  if echo "$*" | grep -qE "view 202( |$)"; then
+    printf '%s\n' "$_N_DEP202_STATE"; return 0
   fi
   if echo "$*" | grep -qE "view 200( |$)"; then
     printf '%s\n' "$_N_DEP200_STATE"; return $_N_DEP200_GH_EXIT
@@ -860,7 +864,83 @@ _N_DEP201_STATE="CLOSED"
 dependencies_met "100" "$_BOARD_200_DONE_201_ABSENT" && _N_RET=0 || _N_RET=1
 assert_eq "N8: two deps, second off-board CLOSED → returns 0" "0" "$_N_RET"
 
-# N9: body fetch fails → returns 0 (pre-existing behaviour)
+# N9: fenced fake dep — closed fence does not count as a dependency
+_N_BODY="$(printf '```\nDepends on: #999\n```\n')"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N9: fenced fake dep → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N10: unclosed fence — everything after an unclosed ``` is dropped
+_N_BODY="$(printf 'Some notes.\n```\nDepends on: #999\n')"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N10: unclosed fence → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N11: inline code span — backtick-quoted example does not count
+_N_BODY="See \`Depends on: #999\` for the old format."
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N11: inline code span → returns 0 (no real dep)" "0" "$_N_RET"
+
+# N12: bold label, bold wraps label+colon — **Depends on:** #200
+_N_BODY="**Depends on:** #200"
+> "$STUB_LOG"
+_N_OUTPUT=$(dependencies_met "100" "$_BOARD_200_WIP" 2>&1) && _N_RET=0 || _N_RET=1
+assert_eq "N12: bold label (**Depends on:**) → returns 1" "1" "$_N_RET"
+assert_eq "N12: bold label → dep_gate logged" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'dep_gate' || true)"
+
+# N13: bold label, bold wraps only the word — **Depends on**: #200
+_N_BODY="**Depends on**: #200"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_WIP" && _N_RET=0 || _N_RET=1
+assert_eq "N13: bold label (**Depends on**:) → returns 1" "1" "$_N_RET"
+
+# N14: plain label, bold ref — Depends on: **#200**
+_N_BODY="Depends on: **#200**"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_WIP" && _N_RET=0 || _N_RET=1
+assert_eq "N14: bold ref (Depends on: **#200**) → returns 1" "1" "$_N_RET"
+
+# N15: multi-ref line — Depends on: #200, #201 blocks on both (mirrors N7)
+_N_BODY="Depends on: #200, #201"
+_N_DEP201_STATE="OPEN"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
+assert_eq "N15: multi-ref line, second off-board OPEN → returns 1" "1" "$_N_RET"
+
+# N16: Blocked-by section, all three bullet markers (-, *, +), mixed
+# resolution paths — proves each marker is scanned and refs are checked
+_N_BODY="$(printf '## Blocked by\n- #200\n* #201\n+ #202\n')"
+_N_DEP201_STATE="CLOSED"
+_N_DEP202_STATE="OPEN"
+> "$STUB_LOG"
+_N_OUTPUT=$(dependencies_met "100" "$_BOARD_200_DONE" 2>&1) && _N_RET=0 || _N_RET=1
+assert_eq "N16: Blocked-by (-/*/+  markers) → returns 1" "1" "$_N_RET"
+assert_eq "N16: Blocked-by → blocked_by=#202 logged" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'blocked_by=#202' || true)"
+
+# N17: lowercase, deeper heading level — ### blocked by
+_N_BODY="$(printf '### blocked by\n- #200\n')"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_WIP" && _N_RET=0 || _N_RET=1
+assert_eq "N17: lowercase '### blocked by' heading → returns 1" "1" "$_N_RET"
+
+# N18: a following heading of any level ends the section
+_N_BODY="$(printf '## Blocked by\n- #200\n## Other\n- #201\n')"
+_N_DEP201_STATE="OPEN"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
+assert_eq "N18: heading ends Blocked-by section → returns 0 (#201 not scanned)" "0" "$_N_RET"
+
+# N19: multi-ref bullet under Blocked by — mirrors N7 shape
+_N_BODY="$(printf '## Blocked by\n- #200, #201\n')"
+_N_DEP201_STATE="OPEN"
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
+assert_eq "N19: multi-ref bullet, second off-board OPEN → returns 1" "1" "$_N_RET"
+
+# N20: body fetch fails → returns 0 (pre-existing behaviour)
 # Override gh so body call for issue 100 returns non-zero
 gh() {
   echo "gh $*" >> "$STUB_LOG"
@@ -872,7 +952,7 @@ gh() {
 export -f gh
 > "$STUB_LOG"
 dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
-assert_eq "N9: body fetch fails → returns 0" "0" "$_N_RET"
+assert_eq "N20: body fetch fails → returns 0" "0" "$_N_RET"
 
 # Restore global gh stub
 gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }

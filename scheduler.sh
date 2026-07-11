@@ -620,13 +620,63 @@ get_column_limit() {
 }
 
 # --- Dependency checking ---
+# Accepted dependency declaration formats (see #204):
+#   - Plain:            Depends on: #123
+#   - Bold/italic:      **Depends on:** #123 / **Depends on**: #123 /
+#                       Depends on: **#123** / *Depends on:* #123
+#                       (any placement of * around the label/colon/ref)
+#   - Multi-ref line:   Depends on: #123, #124
+#   - Blocked-by block: a heading (any level #-######, case-insensitive) whose
+#                       text is "Blocked by", followed by -/*/+ bullets, each
+#                       possibly containing multiple #NNN refs, until the next
+#                       heading of any level
+# Text inside fenced code blocks (``` or ~~~, optionally indented) or inline
+# code spans (`...`) is never scanned — quoted/illustrative refs must not be
+# treated as real dependencies. An unclosed fence is treated as open through
+# end-of-body (fail closed).
+_scan_body_for_deps() {
+  local body="$1"
+  local stripped
+  stripped=$(printf '%s\n' "$body" | awk '
+    /^[[:space:]]*```/ {
+      if (in_fence == 1) { in_fence = 0 }
+      else if (in_fence == 0) { in_fence = 1 }
+      next
+    }
+    /^[[:space:]]*~~~/ {
+      if (in_fence == 2) { in_fence = 0 }
+      else if (in_fence == 0) { in_fence = 2 }
+      next
+    }
+    in_fence { next }
+    { print }
+  ' | sed -E 's/`[^`]*`//g' | tr -d '*')
+
+  local plain_deps
+  plain_deps=$(printf '%s\n' "$stripped" \
+    | grep -inE 'depends[[:space:]]+on[[:space:]]*:' \
+    | sed -E 's/.*depends[[:space:]]+on[[:space:]]*://I' \
+    | grep -oP '#\K[0-9]+' || true)
+
+  local blocked_deps
+  blocked_deps=$(printf '%s\n' "$stripped" | awk '
+    /^#{1,6}([[:space:]]|$)/ {
+      if (tolower($0) ~ /^#{1,6}[[:space:]]*blocked by[[:space:]]*:?[[:space:]]*$/) { insec = 1 } else { insec = 0 }
+      next
+    }
+    insec { print }
+  ' | grep -oP '#\K[0-9]+' || true)
+
+  printf '%s\n%s\n' "$plain_deps" "$blocked_deps" | grep -v '^$' || true
+}
+
 dependencies_met() {
   local issue_num="$1"
   local board_items="$2"
   local body
   body=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json body -q '.body' 2>/dev/null) || return 0
   local deps
-  deps=$(echo "$body" | grep -oP 'Depends on:\s*#\K\d+' || true)
+  deps=$(_scan_body_for_deps "$body")
   if [ -z "$deps" ]; then
     return 0
   fi
