@@ -172,3 +172,50 @@ class GitHubTracker(Tracker):
         if comment:
             cmd += ["--comment", comment]
         subprocess.run(cmd, capture_output=True)
+
+    def get_status_limits(self) -> dict:
+        query = '''
+    query {
+      node(id: "%s") {
+        ... on ProjectV2 {
+          field(name: "Status") {
+            ... on ProjectV2SingleSelectField {
+              options { id name description }
+            }
+          }
+        }
+      }
+    }
+  ''' % identity.PROJECT_ID
+        r = subprocess.run(
+            ["gh", "api", "graphql", "-f", "query=" + query],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return {name: 999 for name in identity.STATUS}
+        try:
+            options = json.loads(r.stdout)["data"]["node"]["field"]["options"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return {name: 999 for name in identity.STATUS}
+        by_id = {o["id"]: (o.get("description") or "") for o in options}
+        limits = {}
+        for canonical, option_id in identity.STATUS.items():
+            m = re.search(r"limit:\s*(\d+)", by_id.get(option_id, ""))
+            limits[canonical] = int(m.group(1)) if m else 999
+        return limits
+
+    def get_rate_budget(self) -> dict:
+        r = subprocess.run(
+            ["gh", "api", "rate_limit", "--jq", ".resources.graphql"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return {"remaining": None, "reset": None, "used": None, "limit": None}
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return {"remaining": None, "reset": None, "used": None, "limit": None}
+        return {
+            "remaining": data.get("remaining"), "reset": data.get("reset"),
+            "used": data.get("used"), "limit": data.get("limit"),
+        }

@@ -196,3 +196,45 @@ def test_list_work_items_filters_by_label(monkeypatch):
     })))
     items = GitHubTracker().list_work_items(["ready"], labels=["ready-for-agent"])
     assert [i["id"] for i in items] == ["1"]
+
+
+def test_get_status_limits_query_matches_scheduler_fetch_wip_limits(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        options = [
+            {"id": identity.STATUS["in_progress"], "name": "In progress", "description": "limit: 3"},
+            {"id": identity.STATUS["in_review"], "name": "In review", "description": "no limit token here"},
+        ]
+        return _ok(stdout=json.dumps({"data": {"node": {"field": {"options": options}}}}))
+    monkeypatch.setattr(subprocess, "run", fake)
+    limits = GitHubTracker().get_status_limits()
+    # Transcribed verbatim (incl. whitespace) from scheduler.sh:591-608's fetch_wip_limits
+    # heredoc, with $FACTORY_PROJECT_ID substituted — byte/argv equality, not substring checks.
+    expected_query = (
+        '\n    query {\n      node(id: "' + identity.PROJECT_ID + '") {\n'
+        '        ... on ProjectV2 {\n          field(name: "Status") {\n'
+        '            ... on ProjectV2SingleSelectField {\n'
+        '              options { id name description }\n            }\n          }\n'
+        '        }\n      }\n    }\n  '
+    )
+    assert calls[0] == ["gh", "api", "graphql", "-f", "query=" + expected_query]
+    assert limits["in_progress"] == 3
+    assert limits["in_review"] == 999  # scheduler.sh's documented fallback
+
+
+def test_get_rate_budget_matches_scheduler_check_rate_limit(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _ok(stdout=json.dumps({"remaining": 150, "reset": 1999999999, "used": 4850, "limit": 5000}))
+    monkeypatch.setattr(subprocess, "run", fake)
+    budget = GitHubTracker().get_rate_budget()
+    assert calls[0] == ["gh", "api", "rate_limit", "--jq", ".resources.graphql"]
+    assert budget == {"remaining": 150, "reset": 1999999999, "used": 4850, "limit": 5000}
+
+
+def test_get_rate_budget_degrades_safely_on_failure(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=1))
+    budget = GitHubTracker().get_rate_budget()
+    assert budget == {"remaining": None, "reset": None, "used": None, "limit": None}
