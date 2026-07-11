@@ -80,3 +80,23 @@ def test_set_status_opaque_id_never_reaches_int(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout='{"items": []}'))[1])
     GitHubTracker().set_status("PROJ-123", "blocked")  # must not raise ValueError from int()
     assert not any("item-edit" in c for c in calls)
+
+
+def test_add_label_matches_breaker_trip_to_blocked(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().add_label("42", "needs-discussion")
+    assert calls[0] == [
+        "gh", "issue", "edit", "42", "--repo", identity.SLUG,
+        "--add-label", "needs-discussion",
+    ]
+
+
+def test_remove_label_matches_scheduler_advance_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().remove_label("42", "spec-pending-review")
+    assert calls[0] == [
+        "gh", "issue", "edit", "42", "--repo", identity.SLUG,
+        "--remove-label", "spec-pending-review",
+    ]

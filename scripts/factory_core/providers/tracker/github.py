@@ -75,10 +75,16 @@ class GitHubTracker(Tracker):
         board._item_edit_status(item_id, identity.STATUS[canonical])
 
     def add_label(self, id: str, name: str) -> None:
-        raise NotImplementedError  # Task 7
+        subprocess.run(
+            ["gh", "issue", "edit", id, "--repo", identity.SLUG, "--add-label", name],
+            capture_output=True,
+        )
 
     def remove_label(self, id: str, name: str) -> None:
-        raise NotImplementedError  # Task 7
+        subprocess.run(
+            ["gh", "issue", "edit", id, "--repo", identity.SLUG, "--remove-label", name],
+            capture_output=True,
+        )
 
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
         raise NotImplementedError  # Task 8
