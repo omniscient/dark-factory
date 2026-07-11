@@ -151,18 +151,6 @@ def test_codehost_update_body(monkeypatch, tmp_path):
     assert seen == {"id": "7", "body": "Closes #42\n\nold body"}
 
 
-def test_codehost_close_keyword_prints_string(monkeypatch, capsys):
-    import factory_core.providers.cli as cli_mod
-
-    class _FakeCodeHost:
-        def close_keyword(self, issue_id):
-            return f"Closes #{issue_id}"
-    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
-    monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "close-keyword", "--id", "42"])
-    cli_mod.main()
-    assert capsys.readouterr().out.strip() == "Closes #42"
-
-
 def test_codehost_verbs_pass_repo_through(monkeypatch):
     import factory_core.providers.cli as cli_mod
 

@@ -62,8 +62,6 @@ def trip_to_blocked(
     phase: str,
     reason: str,
     state_file: Path = _DEFAULT_STATE,
-    owner: str = identity.OWNER,
-    repo: str = identity.REPO,
 ) -> None:
     from .board import set_board_status, STATUS_BLOCKED
 
@@ -79,9 +77,9 @@ def trip_to_blocked(
 
     set_board_status(issue_num, STATUS_BLOCKED)
 
-    # #249: routed through get_tracker() — owner/repo params are always identity.OWNER/
-    # REPO in practice (the only caller, factory_core/cli.py's breaker-trip, never
-    # overrides them), matching GitHubTracker.add_label's identity.SLUG-only argv.
+    # #249: routed through get_tracker(), which always targets identity.SLUG (matching
+    # GitHubTracker.add_label's identity.SLUG-only argv) — the trip comment below now
+    # targets the same fixed repo so label and comment can never diverge.
     tracker = get_tracker()
     for label in ("needs-discussion", "factory-regression"):
         tracker.add_label(str(issue_num), label)
@@ -104,7 +102,7 @@ def trip_to_blocked(
     )
     subprocess.run(
         ["gh", "issue", "comment", str(issue_num),
-         "--repo", f"{owner}/{repo}", "--body", body],
+         "--repo", identity.SLUG, "--body", body],
         capture_output=True,
     )
 

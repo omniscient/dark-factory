@@ -249,10 +249,13 @@ def test_get_rate_budget_matches_scheduler_check_rate_limit(monkeypatch):
     assert budget == {"remaining": 150, "reset": 1999999999, "used": 4850, "limit": 5000}
 
 
-def test_get_rate_budget_degrades_safely_on_failure(monkeypatch):
+def test_get_rate_budget_raises_on_gh_failure(monkeypatch):
+    # A failed `gh api rate_limit` call must be observable (nonzero CLI exit) rather
+    # than silently degrading to a null budget with exit 0 — see issue #249 follow-up:
+    # callers' `|| return 0` / `|| BUDGET="?"` guards only fire on a real failure signal.
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=1))
-    budget = GitHubTracker().get_rate_budget()
-    assert budget == {"remaining": None, "reset": None, "used": None, "limit": None}
+    with pytest.raises(RuntimeError):
+        GitHubTracker().get_rate_budget()
 
 
 _TRACKER_ID_CASES = ["42", "PROJ-123"]

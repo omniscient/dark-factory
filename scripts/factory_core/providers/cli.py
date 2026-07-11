@@ -117,11 +117,7 @@ def _codehost_inline_comments(args):
 
 def _codehost_update_body(args):
     body = Path(args.body_file).read_text(encoding="utf-8")
-    get_codehost().update_change_body(args.id, body)
-
-
-def _codehost_close_keyword(args):
-    _print(get_codehost().close_keyword(args.id))
+    _print(get_codehost().update_change_body(args.id, body))
 
 
 def main():
@@ -240,10 +236,6 @@ def main():
     cub.add_argument("--id", required=True)
     cub.add_argument("--body-file", required=True)
     cub.set_defaults(func=_codehost_update_body)
-
-    cck = csub.add_parser("close-keyword")
-    cck.add_argument("--id", required=True)
-    cck.set_defaults(func=_codehost_close_keyword)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

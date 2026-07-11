@@ -1060,7 +1060,10 @@ nodes:
         if ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
           _BACKFILL_BODY_FILE=$(mktemp)
           printf 'Closes #%s\n\n%s' "$ISSUE" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
-          if python3 "$_PCLI" codehost update-body --id "$EXISTING_PR" --body-file "$_BACKFILL_BODY_FILE"; then
+          # update-body always exits 0 (its Python process never raises on a failed
+          # edit) — update_change_body's own bool return is the real signal, so check stdout.
+          UPDATE_BODY_OK=$(python3 "$_PCLI" codehost update-body --id "$EXISTING_PR" --body-file "$_BACKFILL_BODY_FILE")
+          if [ "$UPDATE_BODY_OK" = "true" ]; then
             echo "Added 'Closes #${ISSUE}' to PR #${EXISTING_PR} body"
           else
             echo "WARNING: could not backfill closing keyword on PR #${EXISTING_PR}" >&2

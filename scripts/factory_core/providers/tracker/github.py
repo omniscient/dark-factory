@@ -207,7 +207,7 @@ class GitHubTracker(Tracker):
             capture_output=True, text=True,
         )
         if r.returncode != 0:
-            return {"remaining": None, "reset": None, "used": None, "limit": None}
+            raise RuntimeError(f"gh api rate_limit failed: {r.stderr.strip()}")
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError:

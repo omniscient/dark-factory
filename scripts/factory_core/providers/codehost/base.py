@@ -22,7 +22,7 @@ class CodeHost(ABC):
         """Create a PR/MR; returns its opaque id."""
 
     @abstractmethod
-    def update_change_body(self, id: str, body: str) -> None:
+    def update_change_body(self, id: str, body: str) -> bool:
         ...
 
     @abstractmethod
