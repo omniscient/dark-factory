@@ -28,6 +28,19 @@ def test_get_item_default_fields_matches_run_dag_fetch_issue_node(monkeypatch):
     ]
 
 
+def test_get_item_custom_single_field_matches_run_dag_state_check(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _ok(stdout=json.dumps({"state": "OPEN"}))
+    monkeypatch.setattr(subprocess, "run", fake)
+    GitHubTracker().get_item("42", fields=("state",))
+    assert calls[0] == [
+        "gh", "issue", "view", "42", "--repo", identity.SLUG,
+        "--json", "state",
+    ]
+
+
 def test_get_comments_matches_scheduler_get_new_comments(monkeypatch):
     calls = []
     def fake(cmd, **kw):
