@@ -96,3 +96,78 @@ def test_mark_ready_matches_rescue_py(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
     GitHubCodeHost().mark_ready("7", repo=identity.SLUG)
     assert calls[0] == ["gh", "pr", "ready", "7", "--repo", identity.SLUG]
+
+
+def test_merge_change_matches_run_dag_close_preview(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(returncode=0))[1])
+    ok = GitHubCodeHost().merge_change("9")
+    assert calls[0] == ["gh", "pr", "merge", "9", "--merge", "--delete-branch"]
+    assert ok is True
+
+
+def test_merge_change_matches_main_red_fixer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(returncode=0))[1])
+    GitHubCodeHost().merge_change("9", repo=identity.SLUG)
+    assert calls[0] == ["gh", "pr", "merge", "9", "--repo", identity.SLUG, "--merge", "--delete-branch"]
+
+
+def test_get_change_checks_matches_scheduler_failing_checks_for_pr(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubCodeHost().get_change_checks("9", fields="name,bucket,link", repo=identity.SLUG)
+    assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "name,bucket,link"]
+
+
+def test_get_change_checks_matches_rescue_py(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubCodeHost().get_change_checks("9", fields="bucket", repo=identity.SLUG)
+    assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "bucket"]
+
+
+def test_get_change_mergeable_matches_scheduler_check_pr_mergeable(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="MERGEABLE\n"))[1])
+    state = GitHubCodeHost().get_change_mergeable("9", repo=identity.SLUG)
+    assert calls[0] == [
+        "gh", "pr", "view", "9", "--repo", identity.SLUG,
+        "--json", "mergeable", "--jq", ".mergeable",
+    ]
+    assert state == "MERGEABLE"
+
+
+def test_get_change_mergeable_defaults_unknown_on_failure(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=1))
+    assert GitHubCodeHost().get_change_mergeable("9") == "UNKNOWN"
+
+
+def test_get_change_reviews_matches_scheduler_end_gate_check(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="APPROVED\n"))[1])
+    state = GitHubCodeHost().get_change_reviews("9", repo=identity.SLUG)
+    assert calls[0] == [
+        "gh", "pr", "view", "9", "--repo", identity.SLUG, "--json", "reviews", "--jq",
+        '[.reviews[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | last | .state // ""',
+    ]
+    assert state == "APPROVED"
+
+
+def test_get_change_inline_comments_matches_run_dag_fetch_issue(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubCodeHost().get_change_inline_comments("9", repo=identity.SLUG)
+    assert calls[0] == [
+        "gh", "api", f"repos/{identity.SLUG}/pulls/9/comments",
+        "--jq", "[.[] | {path: .path, line: .line, body: .body, created_at: .created_at}]",
+    ]
+
+
+def test_close_keyword_matches_run_dag_and_main_red_fixer():
+    kw = GitHubCodeHost().close_keyword("42")
+    assert kw == "Closes #42"
+
+
+def test_close_keyword_opaque_id_passthrough():
+    assert GitHubCodeHost().close_keyword("PROJ-123") == "Closes #PROJ-123"

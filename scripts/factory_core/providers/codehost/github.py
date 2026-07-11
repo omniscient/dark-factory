@@ -3,6 +3,7 @@ Most current CodeHost-shaped operations live as inline strings in
 workflows/archon-dark-factory.yaml and entrypoint.sh, not any factory_core Python
 module — that YAML/bash text is the golden baseline these argv constants are
 transcribed from (spec Architecture section, "CodeHost: no existing Python home")."""
+import json
 import os
 import re
 import subprocess
@@ -63,20 +64,61 @@ class GitHubCodeHost(CodeHost):
     # real implementation.
     def merge_change(self, id: str, strategy: str = "merge", delete_branch: bool = True,
                       repo: str | None = None) -> bool:
-        raise NotImplementedError  # Task 13
+        cmd = ["gh", "pr", "merge", id]
+        if repo:
+            cmd += ["--repo", repo]
+        cmd.append(f"--{strategy}")
+        if delete_branch:
+            cmd.append("--delete-branch")
+        r = subprocess.run(cmd, capture_output=True)
+        return r.returncode == 0
 
     def get_change_checks(self, id: str, fields: str = "name,bucket,link",
                            repo: str | None = None) -> list:
-        raise NotImplementedError  # Task 13
+        cmd = ["gh", "pr", "checks", id]
+        if repo:
+            cmd += ["--repo", repo]
+        cmd += ["--json", fields]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            return []
+        try:
+            data = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return []
+        return data if isinstance(data, list) else []
 
     def get_change_mergeable(self, id: str, repo: str | None = None) -> str:
-        raise NotImplementedError  # Task 13
+        cmd = ["gh", "pr", "view", id]
+        if repo:
+            cmd += ["--repo", repo]
+        cmd += ["--json", "mergeable", "--jq", ".mergeable"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        result = r.stdout.strip() if r.returncode == 0 else ""
+        return result or "UNKNOWN"
 
     def get_change_reviews(self, id: str, repo: str | None = None) -> str:
-        raise NotImplementedError  # Task 13
+        cmd = ["gh", "pr", "view", id]
+        if repo:
+            cmd += ["--repo", repo]
+        cmd += ["--json", "reviews", "--jq",
+                '[.reviews[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | last | .state // ""']
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else ""
 
     def get_change_inline_comments(self, id: str, repo: str | None = None) -> list:
-        raise NotImplementedError  # Task 13
+        slug = repo or identity.SLUG
+        r = subprocess.run(
+            ["gh", "api", f"repos/{slug}/pulls/{id}/comments",
+             "--jq", "[.[] | {path: .path, line: .line, body: .body, created_at: .created_at}]"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return []
+        try:
+            return json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return []
 
     def close_keyword(self, issue_id: str) -> str:
-        raise NotImplementedError  # Task 13
+        return f"Closes #{issue_id}"
