@@ -118,3 +118,33 @@ def test_upsert_comment_opaque_id_passthrough(monkeypatch):
     GitHubTracker().upsert_comment("PROJ-123", "<!-- marker -->", "body")
     lookup = calls[0]
     assert f"repos/{identity.OWNER}/{identity.REPO}/issues/PROJ-123/comments" in lookup
+
+
+def test_create_item_matches_smoke_gate_regression_ticket(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _ok(stdout=f"https://github.com/{identity.SLUG}/issues/77\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    new_id = GitHubTracker().create_item(
+        title="main is red: tsc/python import failure",
+        body="failure body",
+        labels=["regression"],
+    )
+    assert calls[0] == [
+        "gh", "issue", "create", "--repo", identity.SLUG,
+        "--label", "regression",
+        "--title", "main is red: tsc/python import failure",
+        "--body", "failure body",
+    ]
+    assert new_id == "77"
+
+
+def test_resolve_item_matches_smoke_gate_close(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().resolve_item("77", comment="main smoke gate passed — closing regression ticket.")
+    assert calls[0] == [
+        "gh", "issue", "close", "77", "--repo", identity.SLUG,
+        "--comment", "main smoke gate passed — closing regression ticket.",
+    ]

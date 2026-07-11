@@ -90,7 +90,16 @@ class GitHubTracker(Tracker):
         board.post_or_update_comment(id, marker, body)
 
     def create_item(self, title: str, body: str, labels: list | None = None) -> str:
-        raise NotImplementedError  # Task 9
+        cmd = ["gh", "issue", "create", "--repo", identity.SLUG]
+        for label in (labels or []):
+            cmd += ["--label", label]
+        cmd += ["--title", title, "--body", body]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        m = re.search(r"(\d+)\s*$", (r.stdout or "").strip())
+        return m.group(1) if m else ""
 
-    def resolve_item(self, id: str) -> None:
-        raise NotImplementedError  # Task 9
+    def resolve_item(self, id: str, comment: str | None = None) -> None:
+        cmd = ["gh", "issue", "close", id, "--repo", identity.SLUG]
+        if comment:
+            cmd += ["--comment", comment]
+        subprocess.run(cmd, capture_output=True)
