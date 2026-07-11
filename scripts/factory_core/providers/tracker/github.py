@@ -71,6 +71,11 @@ class GitHubTracker(Tracker):
             return []
 
     def get_children(self, epic_id: str) -> list:
+        # Reject characters that could break out of the GraphQL query string
+        # (quotes/braces/whitespace) while still allowing opaque non-GitHub
+        # ids (e.g. "PROJ-123") to flow through unmodified.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(epic_id)):
+            return []
         query = (
             'query { repository(owner:"%s", name:"%s") { issue(number:%s) { '
             'subIssues(first:50) { nodes { number state labels(first:20){nodes{name}} } } } } }'
@@ -87,14 +92,6 @@ class GitHubTracker(Tracker):
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
 
-    # --- Stubs for not-yet-implemented Tracker ops ---
-    # A stub override removes a method from Tracker.__abstractmethods__, so
-    # GitHubTracker is instantiable starting now (needed for this task's own
-    # tests, and every later task's tests through Task 11, to call
-    # `GitHubTracker()` without TypeError: Can't instantiate abstract class).
-    # Tasks 6-10 each replace one or more stubs below with a real
-    # implementation — search for the matching `raise NotImplementedError  #
-    # Task N` line when editing.
     def list_work_items(self, statuses: list, labels: list | None = None) -> list:
         wanted_names = {_CANONICAL_STATUS_NAMES.get(s, s) for s in statuses}
         cursor = ""

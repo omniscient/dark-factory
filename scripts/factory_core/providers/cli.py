@@ -9,6 +9,7 @@ ticket's plan, "Design decisions" #4.
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -62,7 +63,8 @@ def _tracker_children(args):
 
 
 def _codehost_remote_url(args):
-    _print(get_codehost().remote_url())
+    url = get_codehost().remote_url()
+    _print(re.sub(r"://[^@/]+@", "://***@", url))
 
 
 def _codehost_find_change(args):
@@ -166,7 +168,7 @@ def main():
     cm = csub.add_parser("merge")
     cm.add_argument("--id", required=True)
     cm.add_argument("--strategy", default="merge")
-    cm.add_argument("--delete-branch", action="store_true", default=True)
+    cm.add_argument("--delete-branch", action=argparse.BooleanOptionalAction, default=True)
     cm.set_defaults(func=_codehost_merge)
 
     cc = csub.add_parser("checks")

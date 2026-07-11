@@ -56,12 +56,6 @@ class GitHubCodeHost(CodeHost):
             cmd += ["--repo", repo]
         subprocess.run(cmd, capture_output=True)
 
-    # --- Stubs for not-yet-implemented CodeHost ops ---
-    # Same rationale as GitHubTracker's Task 5 stubs: a stub override removes
-    # a method from CodeHost.__abstractmethods__, so GitHubCodeHost is
-    # instantiable starting now (needed for this task's own tests, which call
-    # `GitHubCodeHost()` directly). Task 13 replaces every stub below with a
-    # real implementation.
     def merge_change(self, id: str, strategy: str = "merge", delete_branch: bool = True,
                       repo: str | None = None) -> bool:
         cmd = ["gh", "pr", "merge", id]
