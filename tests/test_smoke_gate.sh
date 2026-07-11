@@ -47,13 +47,20 @@ python() {
   return 0
 }
 # shellcheck disable=SC2317
-python3() { python "$@"; }
+# tracker create (the regression-ticket creation, issue #249) is stubbed here rather
+# than let through to the real providers CLI, since that CLI would shell out to a real
+# `gh` binary directly (bash function stubs are invisible to a Python subprocess).
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  if echo "$*" | grep -q "tracker create"; then
+    echo "999"
+    return 0
+  fi
+  python "$@"
+}
 # shellcheck disable=SC2317
 gh() {
   echo "gh $*" >> "$STUB_LOG"
-  if echo "$*" | grep -q "issue create"; then
-    echo "https://github.com/omniscient/markethawk/issues/999"
-  fi
   return 0
 }
 # Functions that must NOT be called on red main
@@ -97,13 +104,13 @@ rm -f "${SMOKE_STATE_DIR}/main-is-red" "${SMOKE_STATE_DIR}/main-is-red-issue"
 assert_file_exists "sentinel file created" "${SMOKE_STATE_DIR}/main-is-red"
 assert_file_exists "issue number file created" "${SMOKE_STATE_DIR}/main-is-red-issue"
 assert_file_exists "recheck throttle stamp created on red (#365)" "${SMOKE_STATE_DIR}/main-red-last-recheck"
-GH_CREATES=$(grep -c "gh.*issue create" "$STUB_LOG" 2>/dev/null || true)
-assert_eq "gh issue create called once on first red" "1" "$GH_CREATES"
+PY_CREATES=$(grep -c "python3.*tracker create" "$STUB_LOG" 2>/dev/null || true)
+assert_eq "tracker create called once on first red" "1" "$PY_CREATES"
 
 # Idempotency: second gate pass on same red main → update comment, not a second create
 (run_smoke_gate) || true
-GH_CREATES2=$(grep -c "gh.*issue create" "$STUB_LOG" 2>/dev/null || true)
-assert_eq "idempotency: only one gh issue create after two red passes" "1" "$GH_CREATES2"
+PY_CREATES2=$(grep -c "python3.*tracker create" "$STUB_LOG" 2>/dev/null || true)
+assert_eq "idempotency: only one tracker create after two red passes" "1" "$PY_CREATES2"
 GH_COMMENTS=$(grep -c "gh.*issue comment" "$STUB_LOG" 2>/dev/null || true)
 assert_eq "idempotency: update comment posted on second red pass" "1" "$GH_COMMENTS"
 
