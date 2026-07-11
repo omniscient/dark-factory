@@ -100,3 +100,21 @@ def test_remove_label_matches_scheduler_advance_path(monkeypatch):
         "gh", "issue", "edit", "42", "--repo", identity.SLUG,
         "--remove-label", "spec-pending-review",
     ]
+
+
+def test_upsert_comment_delegates_to_board_post_or_update_comment(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    GitHubTracker().upsert_comment("42", "<!-- marker -->", "body text")
+    assert any("issue" in c and "comment" in c for c in calls)
+
+
+def test_upsert_comment_opaque_id_passthrough(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().upsert_comment("PROJ-123", "<!-- marker -->", "body")
+    lookup = calls[0]
+    assert f"repos/{identity.OWNER}/{identity.REPO}/issues/PROJ-123/comments" in lookup

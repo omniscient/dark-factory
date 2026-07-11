@@ -87,7 +87,7 @@ class GitHubTracker(Tracker):
         )
 
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
-        raise NotImplementedError  # Task 8
+        board.post_or_update_comment(id, marker, body)
 
     def create_item(self, title: str, body: str, labels: list | None = None) -> str:
         raise NotImplementedError  # Task 9
