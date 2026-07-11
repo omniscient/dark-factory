@@ -5,6 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import pytest
+
 from factory_core import identity
 from factory_core.providers.tracker.github import GitHubTracker
 
@@ -238,3 +240,39 @@ def test_get_rate_budget_degrades_safely_on_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=1))
     budget = GitHubTracker().get_rate_budget()
     assert budget == {"remaining": None, "reset": None, "used": None, "limit": None}
+
+
+_TRACKER_ID_CASES = ["42", "PROJ-123"]
+
+
+@pytest.mark.parametrize("opaque_id", _TRACKER_ID_CASES)
+def test_tracker_methods_pass_opaque_id_through_unchanged(monkeypatch, opaque_id):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="{}"))[1])
+    GitHubTracker().get_item(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubTracker().get_comments(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="{}"))[1])
+    GitHubTracker().get_children(opaque_id)
+    assert opaque_id in calls[-1][4]  # embedded in the GraphQL query string, not a separate argv element
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().add_label(opaque_id, "some-label")
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().remove_label(opaque_id, "some-label")
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubTracker().resolve_item(opaque_id)
+    assert opaque_id in calls[-1]

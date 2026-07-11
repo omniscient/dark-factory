@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import pytest
+
 from factory_core import identity
 from factory_core.providers.codehost.github import GitHubCodeHost
 
@@ -171,3 +173,46 @@ def test_close_keyword_matches_run_dag_and_main_red_fixer():
 
 def test_close_keyword_opaque_id_passthrough():
     assert GitHubCodeHost().close_keyword("PROJ-123") == "Closes #PROJ-123"
+
+
+_CODEHOST_ID_CASES = ["42", "PROJ-123"]
+
+
+@pytest.mark.parametrize("opaque_id", _CODEHOST_ID_CASES)
+def test_codehost_methods_pass_opaque_id_through_unchanged(monkeypatch, opaque_id):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubCodeHost().update_change_body(opaque_id, "body")
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubCodeHost().mark_ready(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    GitHubCodeHost().merge_change(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubCodeHost().get_change_checks(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout=""))[1])
+    GitHubCodeHost().get_change_mergeable(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout=""))[1])
+    GitHubCodeHost().get_change_reviews(opaque_id)
+    assert opaque_id in calls[-1]
+
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    GitHubCodeHost().get_change_inline_comments(opaque_id)
+    assert opaque_id in calls[-1][2]  # embedded in the REST path string
+
+    assert GitHubCodeHost().close_keyword(opaque_id) == f"Closes #{opaque_id}"
