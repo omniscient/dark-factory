@@ -45,7 +45,8 @@ nodes:
       N=$parse-intent.output.issue_number
       INTENT=$parse-intent.output.intent
       EPIC_N=""
-      ISSUE_DATA=$(gh issue view "$N" --json title,body,labels,comments)
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      ISSUE_DATA=$(python3 "$_PCLI" tracker get --id "$N")
 
       # --- Epic resolution: never implement an epic monolithically ---
       IS_EPIC=$(echo "$ISSUE_DATA" | jq -r 'if [.labels[].name] | index("epic") then "yes" else "no" end')
@@ -62,12 +63,12 @@ nodes:
 
         RESOLVED=""
         for SUB in $SUB_ISSUES; do
-          STATE=$(gh issue view "$SUB" --json state --jq '.state')
+          STATE=$(python3 "$_PCLI" tracker get --id "$SUB" --fields state | jq -r '.state')
           if [ "$STATE" != "OPEN" ]; then
             echo "  #$SUB — closed, skipping" >&2
             continue
           fi
-          HAS_PR=$(gh pr list --search "head:feat/issue-${SUB}-" --json number --jq '.[0].number // empty')
+          HAS_PR=$(python3 "$_PCLI" codehost find-change --branch "feat/issue-${SUB}-")
           if ([ "$INTENT" = "continue" ] || [ "$INTENT" = "close" ]) && [ -n "$HAS_PR" ]; then
             echo "  #$SUB — has open PR, picking for $INTENT" >&2
             RESOLVED="$SUB"
@@ -84,7 +85,7 @@ nodes:
         # Fallback for continue/close: if no sub-issue has a PR, pick first open one
         if [ -z "$RESOLVED" ] && ([ "$INTENT" = "continue" ] || [ "$INTENT" = "close" ]); then
           for SUB in $SUB_ISSUES; do
-            STATE=$(gh issue view "$SUB" --json state --jq '.state')
+            STATE=$(python3 "$_PCLI" tracker get --id "$SUB" --fields state | jq -r '.state')
             if [ "$STATE" = "OPEN" ]; then
               echo "  Fallback: picking first open sub-issue #$SUB" >&2
               RESOLVED="$SUB"
@@ -101,15 +102,17 @@ nodes:
         echo "Resolved epic #$N → sub-issue #$RESOLVED" >&2
         EPIC_N="$N"
         N="$RESOLVED"
-        ISSUE_DATA=$(gh issue view "$N" --json title,body,labels,comments)
+        ISSUE_DATA=$(python3 "$_PCLI" tracker get --id "$N")
       fi
 
       # --- Fetch PR review comments if a PR exists for this issue ---
-      PR_NUM=$(gh pr list --search "head:feat/issue-${N}-" --json number --jq '.[0].number // empty')
+      PR_NUM=$(python3 "$_PCLI" codehost find-change --branch "feat/issue-${N}-")
       if [ -n "$PR_NUM" ]; then
+        # Not migrated: gh pr view --json reviews,comments,reviewRequests has no matching
+        # CodeHost method — get_change_reviews collapses to a single last-state string,
+        # not the raw reviews/comments/reviewRequests object this context assembly needs.
         PR_COMMENTS=$(gh pr view "$PR_NUM" --json reviews,comments,reviewRequests)
-        INLINE_COMMENTS=$(gh api "repos/${FACTORY_REPO_SLUG}/pulls/$PR_NUM/comments" \
-          --jq '[.[] | {path: .path, line: .line, body: .body, created_at: .created_at}]' 2>/dev/null || echo '[]')
+        INLINE_COMMENTS=$(python3 "$_PCLI" codehost inline-comments --id "$PR_NUM" 2>/dev/null || echo '[]')
         ISSUE_DATA=$(echo "$ISSUE_DATA" \
           | jq --argjson pr "$PR_COMMENTS" --argjson inline "$INLINE_COMMENTS" \
             '. + {pr_reviews: $pr, pr_inline_comments: $inline}')
@@ -199,6 +202,7 @@ nodes:
     bash: |
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       EPIC_NUM=$(jq -r '.epic_number // empty' "$ARTIFACTS_DIR/issue.json")
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
 
       echo "Tearing down mh-preview-${ISSUE}..."
       docker compose -p "mh-preview-${ISSUE}" down -v 2>/dev/null || echo "No preview stack found"
@@ -213,16 +217,15 @@ nodes:
       echo "close-preview: teardown verified — no mh-preview-${ISSUE} containers remain"
 
       # Find the PR (branch includes a slug suffix, so use search prefix match)
-      PR_NUM=$(gh pr list --search "head:feat/issue-${ISSUE}-" --json number --jq '.[0].number // empty')
+      PR_NUM=$(python3 "$_PCLI" codehost find-change --branch "feat/issue-${ISSUE}-" --repo "$FACTORY_REPO_SLUG")
       if [ -z "$PR_NUM" ]; then
         echo "ERROR: No PR found for issue #$ISSUE"
         exit 1
       fi
 
       # Refuse auto-merge if a blast-radius block (or any other gate block) is still active
-      HAS_NEEDS_DISCUSSION=$(gh issue view "$ISSUE" \
-        --repo "$FACTORY_REPO_SLUG" \
-        --json labels --jq '.labels[].name' \
+      HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
+        | jq -r '.labels[].name' \
         | grep -c 'needs-discussion' || true)
       if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
         echo "close-preview: BLOCKED — needs-discussion label present on issue #$ISSUE"
@@ -231,25 +234,20 @@ nodes:
         exit 1
       fi
 
-      # Mark ready (factory creates PRs as drafts) then merge to main
-      gh pr ready "$PR_NUM" 2>/dev/null || true
-      if ! gh pr merge "$PR_NUM" --merge --delete-branch; then
+      # Mark ready (factory creates PRs as drafts) then merge to main.
+      # codehost merge always exits 0 (its Python process never raises on a failed
+      # merge) — merge_change's own bool return is the real signal, so check stdout.
+      python3 "$_PCLI" codehost mark-ready --id "$PR_NUM" 2>/dev/null || true
+      MERGE_OK=$(python3 "$_PCLI" codehost merge --id "$PR_NUM")
+      if [ "$MERGE_OK" != "true" ]; then
         echo "ERROR: PR #$PR_NUM could not be merged (check approval status or conflicts)"
         exit 1
       fi
       echo "PR #$PR_NUM merged successfully"
 
       # Move the sub-issue to Done (never the epic — it stays In Progress)
-      ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-        | jq -r ".items[] | select(.content.number == $ISSUE and .content.type == \"Issue\") | .id")
-      if [ -n "$ITEM_ID" ]; then
-        gh project item-edit \
-          --project-id "$FACTORY_PROJECT_ID" \
-          --id "$ITEM_ID" \
-          --field-id "$FACTORY_STATUS_FIELD" \
-          --single-select-option-id "$FACTORY_STATUS_DONE"
-        echo "Moved issue #$ISSUE to Done"
-      fi
+      python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done
+      echo "Moved issue #$ISSUE to Done"
       gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete."
       echo "CLOSED"
     depends_on: [parse-intent, fetch-issue]
@@ -447,7 +445,8 @@ nodes:
       BRANCH=$(git branch --show-current)
 
       git push -u origin "$BRANCH"
-      gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" --add-label spec-pending-review
+      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        tracker label --id "$ISSUE" --add spec-pending-review
       echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
     depends_on: [refine]
     when: "$parse-intent.output.intent == 'refine'"
@@ -464,7 +463,8 @@ nodes:
       BRANCH=$(git branch --show-current)
 
       git push -u origin "$BRANCH"
-      gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" --add-label plan-pending-review
+      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        tracker label --id "$ISSUE" --add plan-pending-review
       echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
     depends_on: [plan]
     when: "$parse-intent.output.intent == 'plan'"
@@ -958,8 +958,8 @@ nodes:
         echo "ERROR: branch '$BRANCH' is not on origin after push — aborting" >&2
         exit 1
       fi
-      PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" \
-        --json number --jq '.[0].number // empty')
+      PR_NUM=$(python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        codehost find-change --branch "$BRANCH" --repo "$FACTORY_REPO_SLUG" --exact)
       echo "Pushed branch ${BRANCH} to PR #${PR_NUM:-unknown}"
       echo "PR_NUM=${PR_NUM:-}"
     depends_on: [validate]
@@ -1049,17 +1049,26 @@ nodes:
       - Backend API: ${PREVIEW_BACKEND}/docs"
       fi
 
-      EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      EXISTING_PR=$(python3 "$_PCLI" codehost find-change --branch "$BRANCH" --exact)
       if [ -n "$EXISTING_PR" ]; then
         echo "PR #${EXISTING_PR} already exists, updated with latest push."
         # Backfill the closing keyword on PRs created before it was added — without
         # "Closes #N" GitHub never attaches the PR to the issue's Development sidebar.
+        # Not migrated: gh pr view --json body has no matching CodeHost read method.
         EXISTING_BODY=$(gh pr view "$EXISTING_PR" --json body --jq '.body')
         if ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
-          gh pr edit "$EXISTING_PR" --body "Closes #${ISSUE}
-
-      ${EXISTING_BODY}" && echo "Added 'Closes #${ISSUE}' to PR #${EXISTING_PR} body" \
-            || echo "WARNING: could not backfill closing keyword on PR #${EXISTING_PR}" >&2
+          _BACKFILL_BODY_FILE=$(mktemp)
+          printf 'Closes #%s\n\n%s' "$ISSUE" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
+          # update-body always exits 0 (its Python process never raises on a failed
+          # edit) — update_change_body's own bool return is the real signal, so check stdout.
+          UPDATE_BODY_OK=$(python3 "$_PCLI" codehost update-body --id "$EXISTING_PR" --body-file "$_BACKFILL_BODY_FILE")
+          if [ "$UPDATE_BODY_OK" = "true" ]; then
+            echo "Added 'Closes #${ISSUE}' to PR #${EXISTING_PR} body"
+          else
+            echo "WARNING: could not backfill closing keyword on PR #${EXISTING_PR}" >&2
+          fi
+          rm -f "$_BACKFILL_BODY_FILE"
         fi
         echo "$EXISTING_PR"
       else
@@ -1068,9 +1077,8 @@ nodes:
           EPIC_LINE="
       **Epic:** #${EPIC_NUM}"
         fi
-        PR_URL=$(gh pr create \
-          --title "$(gh issue view $ISSUE --json title --jq '.title')" \
-          --body "Closes #${ISSUE}
+        ISSUE_TITLE=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields title | jq -r '.title')
+        _PR_BODY="Closes #${ISSUE}
 
       ## Summary
       Automated implementation for issue #${ISSUE}.${EPIC_LINE}
@@ -1088,14 +1096,18 @@ nodes:
       \`\`\`
       ${BLAST_SECTION}
       ---
-      *Generated by ${FACTORY_PRODUCT_NAME} Dark Factory*" \
-          --draft)
-        # gh pr create prints the PR URL on success; empty output means creation failed.
-        if [ -z "$PR_URL" ]; then
-          echo "ERROR: gh pr create produced no URL — PR was not created." >&2
+      *Generated by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+        _PR_BODY_FILE=$(mktemp)
+        printf '%s' "$_PR_BODY" > "$_PR_BODY_FILE"
+        PR_NUM_NEW=$(python3 "$_PCLI" codehost open-change \
+          --title "$ISSUE_TITLE" --body-file "$_PR_BODY_FILE" --draft)
+        rm -f "$_PR_BODY_FILE"
+        # open-change prints the opaque PR id on success; empty output means creation failed.
+        if [ -z "$PR_NUM_NEW" ]; then
+          echo "ERROR: codehost open-change produced no PR id — PR was not created." >&2
           exit 1
         fi
-        echo "Created PR: $PR_URL"
+        echo "Created PR #$PR_NUM_NEW"
       fi
     depends_on: [conformance]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
@@ -1170,18 +1182,9 @@ nodes:
         exit 0
       fi
       echo "Moving issue #${ISSUE} to In Review..."
-      ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-        | jq -r ".items[] | select(.content.number == $ISSUE and .content.type == \"Issue\") | .id")
-      if [ -n "$ITEM_ID" ]; then
-        gh project item-edit \
-          --project-id "$FACTORY_PROJECT_ID" \
-          --id "$ITEM_ID" \
-          --field-id "$FACTORY_STATUS_FIELD" \
-          --single-select-option-id "$FACTORY_STATUS_IN_REVIEW"
-        echo "Moved issue #$ISSUE to In Review"
-      else
-        echo "WARNING: Issue #$ISSUE not found on project board"
-      fi
+      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        tracker set-status --id "$ISSUE" --status in_review
+      echo "Moved issue #$ISSUE to In Review"
     depends_on: [push-and-pr, push-resolve, code-review, revise-advisory]
     # OR-join: push-and-pr/code-review/revise-advisory (new/continue) vs push-resolve (resolve) are
     # mutually exclusive. Tolerate skipped siblings; still skip if a real upstream failed.
@@ -1203,7 +1206,8 @@ nodes:
       BRANCH=$(git branch --show-current)
       echo "Posting summary to issue #${ISSUE}..."
 
-      PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+      PR_NUM=$(python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        codehost find-change --branch "$BRANCH" --exact)
       PR_LINE=""
       [ -n "$PR_NUM" ] && PR_LINE="**PR:** #${PR_NUM}"
 

@@ -11,7 +11,25 @@ STUB_LOG=$(mktemp /tmp/sched-test-stubs-XXXXXX.log)
 gh()               { echo "gh $*"               >> "$STUB_LOG"; return 0; }
 docker()           { echo "docker $*"           >> "$STUB_LOG"; return 0; }
 set_board_status() { echo "set_board_status $*" >> "$STUB_LOG"; return 0; }
-export -f gh docker set_board_status
+# Default python3 stub (#249): calls into the new providers CLI are logged and never
+# let through for real — that CLI shells out to a real `gh` binary directly (bash
+# function stubs are invisible to a Python subprocess), unlike the old
+# factory_core/cli.py breaker-*/board-move commands exercised elsewhere in this file,
+# which are network-free and safe to delegate to the real interpreter. Sections that
+# need specific providers-cli stdout set PROVIDERS_CLI_OUTPUT first; reset_python3_stub
+# restores the silent default.
+_REAL_PY3="$(command -v python3)"
+export _REAL_PY3
+PROVIDERS_CLI_OUTPUT=""
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+reset_python3_stub() { PROVIDERS_CLI_OUTPUT=""; }
+export -f gh docker set_board_status python3
 
 # ---- Source scheduler helpers only ----
 # Point the state dir at a temp dir BEFORE sourcing: scheduler.sh derives STATE_FILE
@@ -87,14 +105,9 @@ echo ""
 echo "--- B: trip_to_blocked ---"
 echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
 
-# Tee python3 invocations into STUB_LOG while still running the real interpreter (so
-# the real breaker-trip resets the counter on the temp state file). Capture the real
-# path BEFORE defining the wrapper, and export both so command-substitution subshells
-# (e.g. get_retry_count) resolve them.
-export _REAL_PY3="$(command -v python3)"
-python3() { echo "python3 $*" >> "$STUB_LOG"; "$_REAL_PY3" "$@"; }
-export -f python3
-
+# python3 (the global default stub, top of file) tees into STUB_LOG while still
+# running the real interpreter for non-providers-cli calls — breaker-trip's real
+# logic resets the counter on the temp state file.
 increment_retry "99:plan"
 increment_retry "99:plan"
 increment_retry "99:plan"
@@ -115,8 +128,6 @@ echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
 increment_retry "77"
 trip_to_blocked "77" "implement" "test"
 assert_eq "bare implement counter reset" "0" "$(get_retry_count "77")"
-
-unset -f python3
 
 # ==========================================
 # C: dispatch() exit-code capture (fails until Task 3)
@@ -185,10 +196,7 @@ echo "--- F: elapsed_minutes_since_marker ---"
 _MARKER_EPOCH=$(( $(date -u +%s) - 35*60 ))
 _MARKER_TS=$(date -u -d "@${_MARKER_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)
 
-gh() {
-  printf '[{"body":"Refinement Pipeline — Plan Generated","createdAt":"%s"}]\n' "$_MARKER_TS"
-}
-export -f gh
+PROVIDERS_CLI_OUTPUT=$(printf '[{"body":"Refinement Pipeline — Plan Generated","createdAt":"%s"}]' "$_MARKER_TS")
 
 _ELAPSED=$(elapsed_minutes_since_marker "55" "Refinement Pipeline")
 [ -n "$_ELAPSED" ] && [ "$_ELAPSED" -ge 34 ] \
@@ -196,14 +204,11 @@ _ELAPSED=$(elapsed_minutes_since_marker "55" "Refinement Pipeline")
   || assert_eq "elapsed ≥ 34 for 35-min-old marker" "0" "1"
 
 # No matching comment → returns ""
-gh() { printf '[{"body":"some other comment","createdAt":"%s"}]\n' "$_MARKER_TS"; }
-export -f gh
+PROVIDERS_CLI_OUTPUT=$(printf '[{"body":"some other comment","createdAt":"%s"}]' "$_MARKER_TS")
 _ELAPSED2=$(elapsed_minutes_since_marker "55" "Refinement Pipeline")
 assert_eq "no matching marker returns empty" "" "$_ELAPSED2"
 
-# Restore original gh stub
-gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
-export -f gh
+reset_python3_stub
 
 # ==========================================
 # G: Spec auto-advance (direct-to-pr)
@@ -226,7 +231,7 @@ export -f has_new_comment_after_report elapsed_minutes_since_marker dispatch
 
 spec_advance_check 20 "$_ITEM_DTP_SPR"
 assert_eq "G1: re-refine: remove-label called" \
-  "1" "$(grep -c -- '--remove-label spec-pending-review' "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c -- '--remove spec-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "G1: re-refine: Refine dispatched" \
   "1" "$(grep -c 'dispatch Refine issue #20' "$STUB_LOG" || echo 0)"
 
@@ -239,7 +244,7 @@ export -f has_new_comment_after_report elapsed_minutes_since_marker
 
 spec_advance_check 20 "$_ITEM_DTP_SPR"
 assert_eq "G2: advance: remove-label called" \
-  "1" "$(grep -c -- '--remove-label spec-pending-review' "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c -- '--remove spec-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "G2: advance: set_board_status REFINED" \
   "1" "$(grep -c "set_board_status 20 ${STATUS_REFINED}" "$STUB_LOG" || echo 0)"
 
@@ -331,7 +336,7 @@ export -f has_new_comment_after_report dispatch
 
 plan_advance_check 40 "$_ITEM_DTP_PPR"
 assert_eq "I1: re-plan: remove-label called" \
-  "1" "$(grep -c -- '--remove-label plan-pending-review' "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c -- '--remove plan-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "I1: re-plan: Plan dispatched" \
   "1" "$(grep -c 'dispatch Plan issue #40' "$STUB_LOG" || echo 0)"
 
@@ -344,7 +349,7 @@ export -f has_new_comment_after_report elapsed_minutes_since_marker
 
 plan_advance_check 40 "$_ITEM_DTP_PPR"
 assert_eq "I2: advance: remove-label called" \
-  "1" "$(grep -c -- '--remove-label plan-pending-review' "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c -- '--remove plan-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "I2: advance: set_board_status READY" \
   "1" "$(grep -c "set_board_status 40 ${STATUS_READY}" "$STUB_LOG" || echo 0)"
 
@@ -399,15 +404,9 @@ _ITEM_NODTP_REVIEW='{"content":{"number":51},"labels":[],"status":"In review"}'
 
 # J1: flag + APPROVED → Close dispatched
 get_pr_for_issue() { echo "99"; }
-gh() {
-  case "$*" in
-    *"pr view"*) echo "APPROVED" ;;
-    *) echo "gh $*" >> "$STUB_LOG" ;;
-  esac
-  return 0
-}
+PROVIDERS_CLI_OUTPUT="APPROVED"
 dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
-export -f get_pr_for_issue gh dispatch
+export -f get_pr_for_issue dispatch
 
 end_gate_check 50 "$_ITEM_DTP_REVIEW"
 assert_eq "J1: APPROVED → Close dispatched" \
@@ -415,14 +414,7 @@ assert_eq "J1: APPROVED → Close dispatched" \
 
 > "$STUB_LOG"
 # J2: flag + CHANGES_REQUESTED → Continue dispatched
-gh() {
-  case "$*" in
-    *"pr view"*) echo "CHANGES_REQUESTED" ;;
-    *) echo "gh $*" >> "$STUB_LOG" ;;
-  esac
-  return 0
-}
-export -f gh
+PROVIDERS_CLI_OUTPUT="CHANGES_REQUESTED"
 
 end_gate_check 50 "$_ITEM_DTP_REVIEW"
 assert_eq "J2: CHANGES_REQUESTED → Continue dispatched" \
@@ -430,14 +422,7 @@ assert_eq "J2: CHANGES_REQUESTED → Continue dispatched" \
 
 > "$STUB_LOG"
 # J3: flag + no actionable review → no dispatch (fall through)
-gh() {
-  case "$*" in
-    *"pr view"*) echo "" ;;
-    *) echo "gh $*" >> "$STUB_LOG" ;;
-  esac
-  return 0
-}
-export -f gh
+PROVIDERS_CLI_OUTPUT=""
 
 end_gate_check 50 "$_ITEM_DTP_REVIEW" || true
 assert_eq "J3: no review → no dispatch" \
@@ -445,21 +430,14 @@ assert_eq "J3: no review → no dispatch" \
 
 > "$STUB_LOG"
 # J4: no flag → no end-gate dispatch (regression guard)
-gh() {
-  case "$*" in
-    *"pr view"*) echo "APPROVED" ;;
-    *) echo "gh $*" >> "$STUB_LOG" ;;
-  esac
-  return 0
-}
-export -f gh
+PROVIDERS_CLI_OUTPUT="APPROVED"
 
 end_gate_check 51 "$_ITEM_NODTP_REVIEW" || true
 assert_eq "J4: no-flag: no end-gate dispatch" \
   "0" "$(grep -c 'dispatch Close' "$STUB_LOG" || true)"
 
 # Restore
-gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
+reset_python3_stub
 get_pr_for_issue() { echo ""; }
 dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
 export -f gh get_pr_for_issue dispatch
@@ -633,17 +611,13 @@ echo "{\"60:resolve\": $MAX_RETRIES}" > "$STATE_FILE"
 ISSUE=$(get_issue_number "$_ITEM_REVIEW_A")
 RETRIES=$(get_retry_count "${ISSUE}:resolve")
 
-# Tee python3 so we can observe the breaker-trip delegation (the board-move to
-# Blocked itself runs in breaker.py and is covered by test_factory_core_breaker.py).
-export _REAL_PY3="$(command -v python3)"
-python3() { echo "python3 $*" >> "$STUB_LOG"; "$_REAL_PY3" "$@"; }
-export -f python3
+# python3 (the global default stub) tees the breaker-trip delegation (the board-move
+# to Blocked itself runs in breaker.py and is covered by test_factory_core_breaker.py).
 if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
   trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
 else
   dispatch "Deconflict issue #${ISSUE}" || true
 fi
-unset -f python3
 assert_eq "K9: delegates to breaker-trip CLI (resolve)" \
   "1" "$(grep -c 'breaker-trip --issue 60 --phase resolve' "$STUB_LOG" || echo 0)"
 assert_eq "K9: no dispatch on trip" \
@@ -772,24 +746,25 @@ _N_DEP200_GH_EXIT=0
 _N_DEP201_STATE=""
 _N_DEP202_STATE=""
 
-# gh stub: routes by issue number; body call → _N_BODY; state call → per-dep state var
-gh() {
-  echo "gh $*" >> "$STUB_LOG"
-  if echo "$*" | grep -qE "view 100( |$)"; then
-    printf '%s\n' "$_N_BODY"; return 0
-  fi
-  if echo "$*" | grep -qE "view 201( |$)"; then
-    printf '%s\n' "$_N_DEP201_STATE"; return 0
-  fi
-  if echo "$*" | grep -qE "view 202( |$)"; then
-    printf '%s\n' "$_N_DEP202_STATE"; return 0
-  fi
-  if echo "$*" | grep -qE "view 200( |$)"; then
-    printf '%s\n' "$_N_DEP200_STATE"; return $_N_DEP200_GH_EXIT
-  fi
-  return 0
+# python3 stub: routes by --id; body call (issue 100) → _N_BODY; state calls → per-dep
+# state var. _N_DEP200_GH_EXIT=1 simulates the underlying gh failure that
+# GitHubTracker.get_item swallows internally and returns as {} (no state key).
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *"--id 100 --fields body"*)
+      jq -n --arg body "$_N_BODY" '{body:$body}' ;;
+    *"--id 200 --fields state"*)
+      if [ "$_N_DEP200_GH_EXIT" -ne 0 ]; then echo '{}'; else jq -n --arg state "$_N_DEP200_STATE" '{state:$state}'; fi ;;
+    *"--id 201 --fields state"*)
+      jq -n --arg state "$_N_DEP201_STATE" '{state:$state}' ;;
+    *"--id 202 --fields state"*)
+      jq -n --arg state "$_N_DEP202_STATE" '{state:$state}' ;;
+    *providers/cli.py*) return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
 }
-export -f gh
+export -f python3
 
 _BOARD_EMPTY='{"items":[]}'
 _BOARD_200_DONE='{"items":[{"content":{"number":200},"status":"Done"}]}'
@@ -941,22 +916,22 @@ dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
 assert_eq "N19: multi-ref bullet, second off-board OPEN → returns 1" "1" "$_N_RET"
 
 # N20: body fetch fails → returns 0 (pre-existing behaviour)
-# Override gh so body call for issue 100 returns non-zero
-gh() {
-  echo "gh $*" >> "$STUB_LOG"
-  if echo "$*" | grep -qE "view 100"; then
-    return 1
-  fi
-  return 0
+# Override python3 so the body call for issue 100 returns non-zero
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *"--id 100 --fields body"*) return 1 ;;
+    *providers/cli.py*) return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
 }
-export -f gh
+export -f python3
 > "$STUB_LOG"
 dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
 assert_eq "N20: body fetch fails → returns 0" "0" "$_N_RET"
 
-# Restore global gh stub
-gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
-export -f gh
+# Restore default python3 stub
+reset_python3_stub
 
 # ==========================================
 # O: fetch_board_items paginates project items

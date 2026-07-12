@@ -306,6 +306,7 @@ import os  # noqa: E402
 import subprocess  # noqa: E402
 import urllib.request  # noqa: E402
 from . import identity  # noqa: E402
+from .providers import get_tracker  # noqa: E402
 
 OWNER = identity.SLUG
 PROJECT_ID = identity.PROJECT_ID
@@ -389,7 +390,14 @@ def _load_exclude_paths(clone_dir: str | None = None) -> list:
 
 
 def _ready_epics() -> list:
-    """Ready-column epics as [{number, title, labels, board_order}], board order preserved."""
+    """Ready-column epics as [{number, title, labels, board_order}], board order preserved.
+
+    Not routed through GitHubTracker.list_work_items (#249): that method paginates
+    (this query deliberately fetches only the first 100, matching the epic-selector's
+    low-volume assumption) and fetches labels(first:10) vs this query's labels(first:20)
+    — different argv, and list_work_items returns items pre-filtered/reshaped without the
+    positional board_order this function's docstring promises.
+    """
     q = ('query { node(id: "%s") { ... on ProjectV2 { items(first:100) { nodes { '
          'fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue { name } } '
          'content { ... on Issue { number title labels(first:20){nodes{name}} } } } } } } }') % PROJECT_ID
@@ -409,7 +417,12 @@ def _ready_epics() -> list:
 
 
 def _open_child_numbers(epic: int) -> list:
-    """All OPEN sub-issue numbers of an epic (any label)."""
+    """All OPEN sub-issue numbers of an epic (any label).
+
+    Not routed through GitHubTracker.get_children (#249): that method's query also
+    fetches labels(first:20){nodes{name}}, which this function's query omits — different
+    argv for a field this call never reads.
+    """
     q = ('query { repository(owner:"%s", name:"%s") { issue(number:%d) { '
          'subIssues(first:50) { nodes { number state } } } } }' % (identity.OWNER, identity.REPO, epic))
     data = _gh_json(["api", "graphql", "-f", "query=" + q])
@@ -421,7 +434,11 @@ def _open_child_numbers(epic: int) -> list:
 
 
 def _in_progress_epics() -> list:
-    """Issue numbers of epics whose board Status is 'In progress'."""
+    """Issue numbers of epics whose board Status is 'In progress'.
+
+    Not routed through GitHubTracker.list_work_items (#249): same reasons as
+    _ready_epics above (no pagination here by design, labels(first:20) vs first:10).
+    """
     q = ('query { node(id: "%s") { ... on ProjectV2 { items(first:100) { nodes { '
          'fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue { name } } '
          'content { ... on Issue { number labels(first:20){nodes{name}} } } } } } } }') % PROJECT_ID
@@ -439,13 +456,12 @@ def _in_progress_epics() -> list:
 
 
 def _sub_issue_numbers(epic: int) -> list:
-    q = ('query { repository(owner:"%s", name:"%s") { issue(number:%d) { '
-         'subIssues(first:50) { nodes { number state labels(first:20){nodes{name}} } } } } }' % (identity.OWNER, identity.REPO, epic))
-    data = _gh_json(["api", "graphql", "-f", "query=" + q])
-    if not data:
-        return []
+    # #249: routed through get_tracker().get_children — its query is byte-identical
+    # to this function's former inline GraphQL (owner/name/number/subIssues(first:50)
+    # {number state labels(first:20)}), so this is argv-parity-safe.
+    nodes = get_tracker().get_children(str(epic))
     out = []
-    for s in data.get("data", {}).get("repository", {}).get("issue", {}).get("subIssues", {}).get("nodes", []):
+    for s in nodes:
         labels = [x["name"].lower() for x in (s.get("labels") or {}).get("nodes", [])]
         if s.get("state") == "OPEN" and any(g in labels for g in _GATING_LABELS):
             out.append(s["number"])
@@ -453,7 +469,12 @@ def _sub_issue_numbers(epic: int) -> list:
 
 
 def _fetch_spec_doc(comment_body: str) -> str:
-    """Best-effort: pull the linked spec/plan markdown file (path + ref) from a comment."""
+    """Best-effort: pull the linked spec/plan markdown file (path + ref) from a comment.
+
+    Not routed through the providers CLI/Tracker (#249): the Contents API read
+    (repos/{owner}/contents/{path}) has no home in the frozen Tracker/CodeHost ABCs
+    (#248 §5.1/§6.1) — neither contract models fetching an arbitrary repo file.
+    """
     m = re.search(r"/blob/([^/]+)/(\S+?\.md)", comment_body or "")
     if not m:
         return ""
@@ -469,7 +490,9 @@ def _fetch_spec_doc(comment_body: str) -> str:
 
 
 def _build_candidate(num: int) -> dict:
-    info = _gh_json(["issue", "view", str(num), "--repo", OWNER, "--json", "title,body,labels,comments"])
+    # #249: routed through get_tracker().get_item — its default fields tuple
+    # ("title","body","labels","comments") is byte-identical to this call's --json arg.
+    info = get_tracker().get_item(str(num))
     if not info:
         return {}
     labels = [x["name"] for x in info.get("labels", [])]
@@ -510,10 +533,13 @@ class LiveIO:
             return ""
 
     def advance(self, issue: int) -> None:
-        subprocess.run(["gh", "issue", "edit", str(issue), "--repo", OWNER,
-                        "--add-label", "direct-to-pr"], check=False)
+        get_tracker().add_label(str(issue), "direct-to-pr")
 
     def comment(self, issue: int, body: str) -> None:
+        # Not routed through get_tracker() (#249): this posts a plain, non-idempotent
+        # comment (unlike board.post_or_update_comment) — Tracker's frozen ABC (#248
+        # §5.1) has only upsert_comment (marker-based), which would change idempotency
+        # semantics here (multiple advance/hold comments over a ticket's lifetime).
         subprocess.run(["gh", "issue", "comment", str(issue), "--repo", OWNER, "--body", body], check=False)
 
     def fetch_ready_epics(self) -> list:
@@ -522,9 +548,9 @@ class LiveIO:
     def promote_epic(self, epic: int) -> None:
         from factory_core.board import set_board_status, STATUS_IN_PROGRESS
         set_board_status(epic, STATUS_IN_PROGRESS)
+        tracker = get_tracker()
         for child in _open_child_numbers(epic):
-            subprocess.run(["gh", "issue", "edit", str(child), "--repo", OWNER,
-                            "--add-label", "ready-for-agent"], check=False)
+            tracker.add_label(str(child), "ready-for-agent")
 
     def notify(self, title: str, body: str, severity: str, dedupe_key) -> None:
         token = os.environ.get("INTERNAL_API_TOKEN", "")
