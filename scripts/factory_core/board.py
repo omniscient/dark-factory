@@ -19,9 +19,7 @@ STATUS_BACKLOG = identity.STATUS["backlog"]
 STATUS_REFINED = identity.STATUS["refined"]
 
 
-def _find_item_by_number(number: str) -> str:
-    """Project-item lookup by issue number, compared as strings so an opaque
-    Tracker id (e.g. "PROJ-123") never needs int() coercion to reach this call."""
+def find_board_item(issue_num: int) -> str:
     r = subprocess.run(
         ["gh", "project", "item-list", str(PROJECT_NUMBER),
          "--owner", OWNER, "--format", "json", "--limit", "200"],
@@ -32,14 +30,17 @@ def _find_item_by_number(number: str) -> str:
     try:
         for item in json.loads(r.stdout).get("items", []):
             c = item.get("content", {})
-            if str(c.get("number")) == number and c.get("type") == "Issue":
+            if c.get("number") == issue_num and c.get("type") == "Issue":
                 return item["id"]
     except (json.JSONDecodeError, KeyError):
         pass
     return ""
 
 
-def _item_edit_status(item_id: str, option_id: str) -> None:
+def set_board_status(issue_num: int, option_id: str) -> None:
+    item_id = find_board_item(issue_num)
+    if not item_id:
+        return
     subprocess.run(
         ["gh", "project", "item-edit",
          "--project-id", PROJECT_ID,
@@ -48,17 +49,6 @@ def _item_edit_status(item_id: str, option_id: str) -> None:
          "--single-select-option-id", option_id],
         capture_output=True,
     )
-
-
-def find_board_item(issue_num: int) -> str:
-    return _find_item_by_number(str(issue_num))
-
-
-def set_board_status(issue_num: int, option_id: str) -> None:
-    item_id = _find_item_by_number(str(issue_num))
-    if not item_id:
-        return
-    _item_edit_status(item_id, option_id)
 
 
 def post_or_update_comment(issue_num: int, marker: str, body: str) -> None:

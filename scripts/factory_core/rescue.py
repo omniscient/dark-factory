@@ -19,7 +19,6 @@ import json
 import subprocess
 
 from factory_core import board, identity
-from factory_core.providers import get_codehost
 
 OWNER = board.OWNER
 REPO = board.REPO
@@ -37,10 +36,6 @@ def pr_for_issue(issue_num: int) -> dict | None:
 
     Returns the first match with the fields rescue needs. ``gh`` is run with
     ``--repo`` because the scheduler executes outside a git checkout.
-
-    Not routed through GitHubCodeHost.find_change_for (#249): that method always
-    applies ``--jq '.[0].number // empty'``, discarding the isDraft/mergeable fields
-    this function needs alongside the PR number in one call.
     """
     r = subprocess.run(
         ["gh", "pr", "list", "--repo", _repo(),
@@ -65,10 +60,6 @@ def pr_check_buckets(pr_num: int) -> list:
     ``gh pr checks`` exits non-zero when any check is failing or pending, but still
     prints valid JSON on stdout, so the return code is ignored and stdout is parsed
     defensively (empty / non-array ⇒ []).
-
-    Not routed through GitHubCodeHost.get_change_checks (#249): that method returns
-    [] whenever gh's exit code is nonzero, discarding exactly the failing/pending
-    check data this function needs to read.
     """
     r = subprocess.run(
         ["gh", "pr", "checks", str(pr_num), "--repo", _repo(), "--json", "bucket"],
@@ -137,7 +128,10 @@ def rescue_blocked(issue_num: int) -> str:
 
     pr = pr_for_issue(issue_num)
     if pr and pr.get("isDraft"):
-        get_codehost().mark_ready(str(pr_num), repo=_repo())
+        subprocess.run(
+            ["gh", "pr", "ready", str(pr_num), "--repo", _repo()],
+            capture_output=True,
+        )
 
     board.set_board_status(issue_num, board.STATUS_IN_REVIEW)
     board.post_or_update_comment(issue_num, RESCUE_MARKER, _comment_body(issue_num, int(pr_num)))

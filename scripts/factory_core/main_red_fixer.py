@@ -13,7 +13,6 @@ import re
 import subprocess
 
 from . import identity
-from .providers import get_codehost
 
 # Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
 try:
@@ -205,19 +204,15 @@ class LiveIO:
             raise RuntimeError(f"git push failed for {branch}: {push.stderr.strip()}")
         body = (f"Closes #{issue}\n\nAutonomous main-red recovery. Reproduced failure:\n\n"
                 f"```\n{failure[:4000]}\n```\n\n---\n{identity.marker('main_red')}")
-        pr_str = get_codehost().open_change(
-            branch, "main", f"fix: main-red recovery (#{issue})", body,
-            draft=False, repo=OWNER)
-        if not pr_str.isdigit():
-            raise RuntimeError(f"could not parse PR number from gh output: {pr_str}")
-        return int(pr_str)
+        r = _run(["gh", "pr", "create", "--repo", OWNER, "--base", "main",
+                  "--head", branch, "--title", f"fix: main-red recovery (#{issue})",
+                  "--body", body])
+        m = re.search(r"/pull/(\d+)", r.stdout or "")
+        if not m:
+            raise RuntimeError(f"could not parse PR number from gh output: {(r.stdout or r.stderr).strip()}")
+        return int(m.group(1))
 
     def poll_ci(self, pr):
-        # Not routed through GitHubCodeHost.get_change_checks (#249): that method
-        # returns [] whenever gh's exit code is nonzero, but `gh pr checks` legitimately
-        # exits nonzero exactly while checks are pending/failing — the case this loop
-        # most needs to see (ci_status treats "no checks parsed" as pending, so blindly
-        # discarding stdout here would spin the full ci_wait_minutes on every poll).
         import time
         deadline = self.cfg.get("ci_wait_minutes", 20) * 60
         waited, step = 0, 30
@@ -236,7 +231,8 @@ class LiveIO:
         return "pending"
 
     def merge(self, pr):
-        return get_codehost().merge_change(str(pr), repo=OWNER)
+        r = _run(["gh", "pr", "merge", str(pr), "--repo", OWNER, "--merge", "--delete-branch"])
+        return r.returncode == 0
 
     def comment(self, issue, body):
         _run(["gh", "issue", "comment", str(issue), "--repo", OWNER, "--body", body])

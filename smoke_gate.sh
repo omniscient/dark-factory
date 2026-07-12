@@ -10,7 +10,6 @@ source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 
 SMOKE_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
 SMOKE_MARKER="<!-- df-main-red -->"
-PROVIDERS_CLI="$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/factory_core/providers/cli.py"
 
 # Runs tsc + python import on origin/main. Returns 0 on full pass, non-zero on first failure.
 _smoke_check_main() {
@@ -59,23 +58,21 @@ _smoke_on_red() {
       --body "main still red at $(date -u +%FT%TZ) — factory implementation runs remain paused." \
       2>/dev/null || true
   else
-    local BODY_FILE
-    BODY_FILE=$(mktemp /tmp/smoke-gate-regression-XXXXXX.md)
-    cat > "$BODY_FILE" << EOF
-${SMOKE_MARKER}
+    local REGR_URL
+    REGR_URL=$(gh issue create \
+      --repo "$FACTORY_REPO_SLUG" \
+      --label regression \
+      --title "main is red: tsc/python import failure" \
+      --body "${SMOKE_MARKER}
 
 **main smoke check failed at $(date -u +%FT%TZ).**
 
 The dark factory is pausing all implementation dispatches (Priority 1.5/2/3) until \`origin/main\` compiles cleanly.
 
-This ticket closes automatically on the next green gate pass.
-EOF
+This ticket closes automatically on the next green gate pass." \
+      2>/dev/null || true)
     local REGR_NUM
-    REGR_NUM=$(python3 "$PROVIDERS_CLI" tracker create \
-      --title "main is red: tsc/python import failure" \
-      --body-file "$BODY_FILE" \
-      --labels regression 2>/dev/null || true)
-    rm -f "$BODY_FILE"
+    REGR_NUM=$(echo "$REGR_URL" | grep -oE '[0-9]+$' || true)
     [ -n "$REGR_NUM" ] && echo "$REGR_NUM" > "$ISSUE_FILE"
   fi
 
