@@ -47,8 +47,9 @@ class GitHubCodeHost(CodeHost):
         m = re.search(r"/pull/(\d+)", r.stdout or "")
         return m.group(1) if m else (r.stdout or "").strip()
 
-    def update_change_body(self, id: str, body: str) -> None:
-        subprocess.run(["gh", "pr", "edit", id, "--body", body], capture_output=True)
+    def update_change_body(self, id: str, body: str) -> bool:
+        r = subprocess.run(["gh", "pr", "edit", id, "--body", body], capture_output=True)
+        return r.returncode == 0
 
     def mark_ready(self, id: str, repo: str | None = None) -> None:
         cmd = ["gh", "pr", "ready", id]

@@ -110,27 +110,21 @@ if [ "$RUNNING" -ge "$FACTORY_WIP_LIMIT" ]; then
   exit 1
 fi
 
-# --- Helper: look up project board item for this issue ---
-find_board_item() {
-  gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-    | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id"
-}
-
-# --- Helper: move issue to a board status ---
+# --- Helper: move issue to a board status (canonical name: ready|in_progress|in_review|
+# blocked|done|backlog|refined) — thin adapter over factory_core.providers' Tracker,
+# replacing the bash-native item-list/item-edit reimplementation of board.py's logic.
+# Runs pre-clone (the very first call below fires before "git clone" at line ~497), so
+# it always uses the baked /opt copy, never $CLONE_DIR — see the TARGET-PATH convention
+# used post-clone elsewhere in this file.
 set_board_status() {
-  local OPTION_ID="$1"
-  local ITEM_ID
-  ITEM_ID=$(find_board_item)
-  if [ -n "$ITEM_ID" ]; then
-    gh project item-edit --project-id "$FACTORY_PROJECT_ID" --id "$ITEM_ID" \
-      --field-id "$FACTORY_STATUS_FIELD" --single-select-option-id "$OPTION_ID"
-  fi
+  python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
+    tracker set-status --id "$ISSUE_NUM" --status "$1"
 }
 
 # --- Move to "In Progress" immediately (skip for close) ---
 if [ -n "$ISSUE_NUM" ] && [ "$INTENT" != "close" ] && [ "$INTENT" != "refine" ] && [ "$INTENT" != "plan" ] && [ "$INTENT" != "deconflict" ]; then
   echo "Moving issue #$ISSUE_NUM to In Progress..."
-  set_board_status "$FACTORY_STATUS_IN_PROGRESS" || echo "WARNING: Could not update project board"
+  set_board_status "in_progress" || echo "WARNING: Could not update project board"
 fi
 
 # --- Helper: post or update cost report on issue ---
@@ -139,21 +133,18 @@ REFINE_FAILURE_MARKER="<!-- df-refine-failure -->"
 FACTORY_FAILURE_MARKER="<!-- df-factory-failure -->"
 DF_POST_MORTEM_MARKER="<!-- df-post-mortem -->"
 
+# Idempotent marker-comment upsert — thin adapter over factory_core.providers' Tracker
+# (find-by-marker + PATCH/create, same semantics as board.py's post_or_update_comment).
+# Uses the baked /opt copy, matching set_board_status above: on_failure (this function's
+# main caller) is reachable via the ERR trap before "git clone" ever completes.
 post_or_update_comment() {
   local marker="$1"
   local body="$2"
-  local COMMENT_ID
-  COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
-    --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty" 2>/dev/null || true)
   local TMPFILE
   TMPFILE=$(mktemp /tmp/failure-comment-XXXXXX.md)
   echo "$body" > "$TMPFILE"
-  if [ -n "$COMMENT_ID" ]; then
-    gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-      --method PATCH -F "body=@${TMPFILE}" >/dev/null 2>&1 || true
-  else
-    gh issue comment "$ISSUE_NUM" --body-file "$TMPFILE" 2>/dev/null || true
-  fi
+  python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
+    tracker comment --id "$ISSUE_NUM" --marker "$marker" --body-file "$TMPFILE" 2>/dev/null || true
   rm -f "$TMPFILE"
 }
 
@@ -235,10 +226,13 @@ ${post_mortem_text}
     local JSONL_PATH="${ARTIFACTS_DIR}/factory-failures.jsonl"
     local excerpt
     excerpt=$(echo "$post_mortem_text" | head -c 500 | tr '\n' ' ')
+    local title_json
+    title_json=$(python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
+      tracker get --id "${ISSUE_NUM}" --fields title 2>/dev/null || echo '{}')
     local record
     record=$(printf '{"issue":%s,"title":"%s","phase":"%s","exit_code":%s,"postmortem":"%s","promoted_at":"%s"}\n' \
       "${ISSUE_NUM}" \
-      "$(gh issue view "${ISSUE_NUM}" --repo "$FACTORY_REPO_SLUG" --json title --jq '.title' 2>/dev/null | sed 's/"/\\"/g' || echo "unknown")" \
+      "$(echo "$title_json" | jq -r '.title // "unknown"' | sed 's/"/\\"/g')" \
       "${INTENT:-fix}" \
       "${exit_code}" \
       "$(echo "$excerpt" | sed 's/"/\\"/g')" \
@@ -447,7 +441,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
     else
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "" || true
-      set_board_status "$FACTORY_STATUS_BLOCKED" 2>/dev/null || true
+      set_board_status "blocked" 2>/dev/null || true
       post_or_update_comment "$FACTORY_FAILURE_MARKER" \
         "${FACTORY_FAILURE_MARKER}
 ## Dark Factory Run — Failed
@@ -681,7 +675,7 @@ if [ "$INTENT" = "deconflict" ]; then
   git push origin "$FEATURE_BRANCH" 2>&1
 
   # --- Move board back to In Review ---
-  set_board_status "$FACTORY_STATUS_IN_REVIEW" 2>/dev/null || true
+  set_board_status "in_review" 2>/dev/null || true
 
   # --- Write artifact ---
   cat > "$ARTIFACTS_DIR/conflict_resolution.md" << EOF

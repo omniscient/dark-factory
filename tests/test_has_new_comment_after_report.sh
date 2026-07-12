@@ -31,6 +31,17 @@ gh() {
   esac
 }
 
+# --- python3 stub (#249): has_new_comment_after_report now routes through
+# `tracker get-comments` (providers CLI) instead of a direct gh call — that CLI shells
+# out to a real gh binary directly, invisible to this bash-level gh() stub, so
+# providers/cli.py calls must be intercepted here instead.
+python3() {
+  case "$*" in
+    *"providers/cli.py"*"get-comments"*) printf '%s' "$MOCK_COMMENTS" ;;
+    *) return 0 ;;
+  esac
+}
+
 REPORT_MARKER="Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline"
 PASS=0
 FAIL=0
