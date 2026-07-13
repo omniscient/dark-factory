@@ -41,7 +41,8 @@ def render_report(rows: list[dict], generated_at: str) -> str:
 
 # ── Tier-gated rollout ladder (spec §6, Requirement #6) ───────────────────────
 _DEFAULT_ON_IMPROVEMENT = 0.10  # after_rate must drop by >= 10pp vs before to earn default-on
-_ADVISORY_FLAT_BAND = 0.05      # within 5pp either way counts as "flat" (advisory-only)
+_ADVISORY_FLAT_BAND = 0.05      # delta in [-5pp, +10pp) counts as "flat" (advisory-only); worse
+                                 # than -5pp is a regression (no-go), >= +10pp earns default-on
 
 
 def blocked_rate(population: dict) -> float:
@@ -78,12 +79,31 @@ _TIER2_CONFOUND_NOTE = (
 )
 
 
+_TIER1_SCENARIOS = ("conformance", "code_review")
+_TIER2_SCENARIOS = ("refine", "plan_narrative", "continue")
+
+
 def build_rows(population: dict) -> list[dict]:
     """population is skill_flow_eval.run()'s report dict (self-target only; cross_repo_widening,
     if present, is not consumed here — it only widens the N used upstream in a future iteration,
-    not the per-scenario row shape). plan_phase_3_5 is folded into conformance's row per spec §6."""
+    not the per-scenario row shape). plan_phase_3_5 is folded into conformance's row per spec §6.
+
+    Validates the expected scenario/before/after keys up front and raises a clear ValueError
+    (rather than a bare KeyError deep in the loop) if the population dict is incomplete."""
+    missing_scenarios = [s for s in (*_TIER1_SCENARIOS, *_TIER2_SCENARIOS) if s not in population]
+    if missing_scenarios:
+        raise ValueError(f"population is missing required scenario key(s): {missing_scenarios}")
+    missing_buckets = [
+        f"{s}.{bucket}"
+        for s in _TIER1_SCENARIOS
+        for bucket in ("before", "after")
+        if bucket not in population[s]
+    ]
+    if missing_buckets:
+        raise ValueError(f"population is missing required 'before'/'after' bucket(s): {missing_buckets}")
+
     rows = []
-    for scenario in ("conformance", "code_review"):
+    for scenario in _TIER1_SCENARIOS:
         pop = population[scenario]
         before_rate = blocked_rate(pop["before"])
         after_rate = blocked_rate(pop["after"])
@@ -94,8 +114,7 @@ def build_rows(population: dict) -> list[dict]:
             "rollout": recommend_rollout(1, before_rate, after_rate),
             "confounds": "",
         })
-    for scenario in ("refine", "plan_narrative", "continue"):
-        pop = population[scenario]
+    for scenario in _TIER2_SCENARIOS:
         rows.append({
             "scenario": scenario,
             "tier": 2,

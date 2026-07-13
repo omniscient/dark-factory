@@ -111,9 +111,16 @@ class BudgetTracker:
         self.cap_usd = cap_usd
         self.spent_usd = 0.0
 
-    def check(self, additional_usd: float) -> bool:
-        self.spent_usd += additional_usd
+    def add(self, cost_usd: float) -> None:
+        self.spent_usd += cost_usd
+
+    def is_under_cap(self) -> bool:
         return self.spent_usd <= self.cap_usd
+
+    def check(self, additional_usd: float) -> bool:
+        """Back-compat convenience: add then report whether still under cap."""
+        self.add(additional_usd)
+        return self.is_under_cap()
 
 
 # ── Real issue/diff context fetching (gh/git via argv, no shell) ─────────────
@@ -185,21 +192,27 @@ def run_spotcheck(manifest: dict, dry_run: bool, budget_usd: float, model: str, 
     resolved_repo = repo or _resolve_repo(repo_root)
     tracker = BudgetTracker(budget_usd)
     results = []
+    budget_exceeded = False
     for pair in pairs:
+        if budget_exceeded:
+            break
         ctx = fetch_pair_context(repo_root, pair["issue"], pair["merge_sha"], resolved_repo)
         for gate, (rubric_path, baked_path, render) in _GATES.items():
+            if budget_exceeded:
+                break
             rubric_text = _read_if_exists(os.path.join(repo_root, rubric_path))
             baked_text = _read_if_exists(baked_path)
             for arm, active_rubric in (("skill_modularized", rubric_text), ("current_flow", baked_text)):
-                if not tracker.check(0.0):  # cap already exceeded by a prior call this run
+                if not tracker.is_under_cap():  # cap already exceeded by a prior call this run
                     print(f"[skill-flow-spotcheck] budget cap (${budget_usd:.2f}) reached — skipping remaining pairs", file=sys.stderr)
+                    budget_exceeded = True
                     break
                 if gate == "conformance":
                     prompt = render(active_rubric, artifact_kind="IMPLEMENTATION", spec_content="", artifact_content=ctx["diff_content"])
                 else:
                     prompt = render(active_rubric, issue_context=ctx["issue_context"], diff_content=ctx["diff_content"])
                 arm_result = run_one_arm(prompt, gate=gate, model=model)
-                tracker.check(arm_result["cost_usd"])
+                tracker.add(arm_result["cost_usd"])
                 results.append({"issue": pair["issue"], "pr": pair["pr"], "gate": gate, "arm": arm, **arm_result})
 
     return {"repo": resolved_repo, "budget_usd": budget_usd, "spent_usd": tracker.spent_usd, "results": results}
