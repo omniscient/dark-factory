@@ -16,6 +16,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+import aiohttp
+from aiohttp import web
+
 LEDGER_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
 )
@@ -193,3 +196,163 @@ def sweep_raw_artifacts() -> None:
                 run_dir.rmdir()
         except OSError:
             continue  # best-effort — a sweep failure must never crash the proxy
+
+
+_TOKEN_RE = re.compile(rb'"input_tokens"\s*:\s*(\d+)|"output_tokens"\s*:\s*(\d+)')
+
+
+def _extract_usage_from_bytes(data: bytes) -> dict:
+    """Best-effort scan for token usage in a (possibly streamed) SSE/JSON body.
+
+    Non-streaming responses are fully parsed as JSON by the caller; this is the
+    fallback used for SSE bodies, where we must not buffer/parse the full stream.
+    Returns the LAST matches seen (Anthropic emits running usage updates).
+    """
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    for m in _TOKEN_RE.finditer(data):
+        if m.group(1):
+            usage["input_tokens"] = int(m.group(1))
+        elif m.group(2):
+            usage["output_tokens"] = int(m.group(2))
+    return usage
+
+
+def _measure_request(body_bytes: bytes) -> dict:
+    tool_count = tool_bytes = system_bytes = 0
+    largest_tools = []
+    try:
+        parsed = json.loads(body_bytes) if body_bytes else {}
+        tools = parsed.get("tools") or []
+        tool_count = len(tools)
+        tool_sizes = [
+            {"name": t.get("name", "?"), "bytes": len(json.dumps(t))} for t in tools
+        ]
+        tool_bytes = sum(t["bytes"] for t in tool_sizes)
+        largest_tools = sorted(tool_sizes, key=lambda t: t["bytes"], reverse=True)[:5]
+        system = parsed.get("system", "")
+        system_bytes = len(system) if isinstance(system, str) else len(json.dumps(system))
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return {
+        "tool_count": tool_count,
+        "tool_bytes": tool_bytes,
+        "system_bytes": system_bytes,
+        "largest_tools": largest_tools,
+    }
+
+
+async def handle_proxy(request: web.Request) -> web.StreamResponse:
+    start = time.monotonic()
+    body_bytes = await request.read()
+    measurements = _measure_request(body_bytes)
+    model = ""
+    try:
+        model = (json.loads(body_bytes) if body_bytes else {}).get("model", "")
+    except json.JSONDecodeError:
+        pass
+
+    correlation = read_current_run()
+    upstream_url = f"{UPSTREAM.rstrip('/')}{request.path_qs}"
+    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+
+    session = request.app["client_session"]
+    try:
+        async with session.request(
+            request.method, upstream_url, headers=fwd_headers, data=body_bytes,
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
+        ) as upstream_resp:
+            response = web.StreamResponse(
+                status=upstream_resp.status, headers=upstream_resp.headers
+            )
+            await response.prepare(request)
+            usage_scan = bytearray()
+            async for chunk in upstream_resp.content.iter_any():
+                await response.write(chunk)
+                usage_scan.extend(chunk)
+            await response.write_eof()
+    except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        error_body = {
+            "error": {
+                "type": "factory_model_proxy_upstream_error",
+                "message": f"upstream request failed: {exc}",
+            }
+        }
+        row = build_ledger_row(
+            endpoint=request.path, method=request.method, model=model, status=504,
+            duration_ms=duration_ms, input_tokens=0, output_tokens=0,
+            cache_read_tokens=0, cache_creation_tokens=0, streamed=False,
+            request_bytes=len(body_bytes), **measurements,
+            run_id=correlation["run_id"], issue_number=correlation["issue_number"],
+            intent=correlation["intent"], stage=correlation["stage"],
+        )
+        append_ledger(row)
+        post_seq_ledger(row)
+        return web.json_response(error_body, status=504)
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    is_streamed = "text/event-stream" in upstream_resp.headers.get("Content-Type", "")
+    if is_streamed:
+        usage = _extract_usage_from_bytes(bytes(usage_scan))
+    else:
+        try:
+            usage = json.loads(bytes(usage_scan)).get("usage", {})
+            usage = {
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+            }
+        except json.JSONDecodeError:
+            usage = {"input_tokens": 0, "output_tokens": 0}
+
+    row = build_ledger_row(
+        endpoint=request.path, method=request.method, model=model,
+        status=upstream_resp.status, duration_ms=duration_ms,
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cache_read_tokens=0, cache_creation_tokens=0, streamed=is_streamed,
+        request_bytes=len(body_bytes), **measurements,
+        run_id=correlation["run_id"], issue_number=correlation["issue_number"],
+        intent=correlation["intent"], stage=correlation["stage"],
+    )
+    append_ledger(row)
+    post_seq_ledger(row)
+
+    if RAW_ARTIFACT_CAPTURE:
+        seq = int(time.time() * 1000)
+        write_raw_artifact(
+            correlation["run_id"], seq,
+            {
+                "request_headers": redact_headers(dict(request.headers)),
+                "request_path": request.path,
+                "request_body": body_bytes.decode("utf-8", errors="replace"),
+                "response_status": upstream_resp.status,
+                "response_headers": redact_headers(dict(upstream_resp.headers)),
+                # usage_scan already holds the full forwarded response bytes (it was
+                # populated alongside response.write(chunk) above, at no extra upstream
+                # cost) — requirement 6 asks for request/response artifacts, so persist
+                # both sides, not request-only.
+                "response_body": bytes(usage_scan).decode("utf-8", errors="replace"),
+            },
+        )
+    return response
+
+
+def create_app() -> web.Application:
+    app = web.Application()
+    app["client_session"] = aiohttp.ClientSession()
+    app.router.add_route("*", "/{tail:.*}", handle_proxy)
+
+    async def _cleanup(app):
+        await app["client_session"].close()
+
+    app.on_cleanup.append(_cleanup)
+    return app
+
+
+def main() -> None:
+    sweep_raw_artifacts()
+    web.run_app(create_app(), port=PORT)
+
+
+if __name__ == "__main__":
+    main()

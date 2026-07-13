@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -5,6 +6,8 @@ import time
 from pathlib import Path
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import model_proxy as mp
@@ -186,3 +189,116 @@ def test_sweep_raw_artifacts_removes_stale_dirs(tmp_path, monkeypatch):
 
     assert not stale_dir.exists()
     assert fresh_dir.exists()
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+async def _make_upstream(handler):
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    server = TestServer(app)
+    await server.start_server()
+    return server
+
+
+def test_proxy_forwards_non_streaming_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+
+    async def upstream_handler(request):
+        body = await request.json()
+        assert body["model"] == "claude-sonnet-4-6-20251101"
+        return web.json_response(
+            {"usage": {"input_tokens": 10, "output_tokens": 5}}, status=200
+        )
+
+    async def scenario():
+        upstream = await _make_upstream(upstream_handler)
+        monkeypatch.setattr(mp, "UPSTREAM", f"http://{upstream.host}:{upstream.port}")
+        app = mp.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        resp = await client.post(
+            "/v1/messages",
+            json={"model": "claude-sonnet-4-6-20251101", "tools": [], "messages": []},
+            headers={"x-api-key": "secret-key"},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["usage"]["input_tokens"] == 10
+        await client.close()
+        await upstream.close()
+
+    _run(scenario())
+
+    lines = (tmp_path / "ledger.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["status"] == 200
+    assert row["model"] == "claude-sonnet-4-6-20251101"
+    assert row["gen_ai.usage.input_tokens"] == 10
+    assert row["gen_ai.usage.output_tokens"] == 5
+
+
+def test_proxy_redacts_headers_before_persisting(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", tmp_path / "artifacts")
+
+    captured_upstream_headers = {}
+
+    async def upstream_handler(request):
+        captured_upstream_headers.update(request.headers)
+        return web.json_response({"usage": {}}, status=200)
+
+    async def scenario():
+        upstream = await _make_upstream(upstream_handler)
+        monkeypatch.setattr(mp, "UPSTREAM", f"http://{upstream.host}:{upstream.port}")
+        app = mp.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        await client.post(
+            "/v1/messages", json={"model": "m"}, headers={"x-api-key": "super-secret"}
+        )
+        await client.close()
+        await upstream.close()
+
+    _run(scenario())
+
+    # The real secret still reached upstream (redaction is persistence-only)
+    assert captured_upstream_headers.get("x-api-key") == "super-secret"
+
+    artifact_files = list((tmp_path / "artifacts").rglob("*.json"))
+    assert len(artifact_files) == 1
+    persisted = json.loads(artifact_files[0].read_text())
+    assert persisted["request_headers"]["x-api-key"] == "[REDACTED]"
+    # Requirement 6 covers request AND response artifacts — assert both sides land.
+    assert '"usage"' in persisted["response_body"]
+
+
+def test_proxy_fails_closed_on_upstream_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+    monkeypatch.setattr(mp, "UPSTREAM", "http://127.0.0.1:1")  # nothing listens here
+
+    async def scenario():
+        app = mp.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        resp = await client.post("/v1/messages", json={"model": "m"})
+        assert resp.status in (502, 504)
+        body = await resp.json()
+        assert body["error"]["type"] == "factory_model_proxy_upstream_error"
+        await client.close()
+
+    _run(scenario())
+
+    lines = (tmp_path / "ledger.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["status"] in (502, 504)
