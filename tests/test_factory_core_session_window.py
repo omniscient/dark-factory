@@ -113,3 +113,45 @@ def test_check_and_pause_returns_none_and_writes_nothing_when_no_match(tmp_path)
     epoch = check_and_pause("unrelated", tmp_path, 1_000_000, 5, 30)
     assert epoch is None
     assert not (tmp_path / "session-window-paused").exists()
+
+
+import subprocess
+import sys as _sys
+
+
+def test_cli_session_window_check_matched(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("429 too many requests, session limit reached")
+    state_dir = tmp_path / "state"
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "session-window-check",
+         "--tmp-out", str(tmp_out),
+         "--state-dir", str(state_dir),
+         "--buffer-minutes", "5",
+         "--fallback-minutes", "30"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "matched=true" in result.stdout
+    assert (state_dir / "session-window-paused").exists()
+
+
+def test_cli_session_window_check_unmatched(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("unrelated stack trace")
+    state_dir = tmp_path / "state"
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "session-window-check",
+         "--tmp-out", str(tmp_out),
+         "--state-dir", str(state_dir),
+         "--buffer-minutes", "5",
+         "--fallback-minutes", "30"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "matched=false" in result.stdout
+    assert not (state_dir / "session-window-paused").exists()
