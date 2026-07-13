@@ -47,3 +47,85 @@ def test_extract_code_review_verdict_pass_when_no_high_or_critical():
 
 def test_extract_code_review_verdict_pass_on_no_findings():
     assert sfsc.extract_code_review_verdict("No findings.") == "PASS"
+
+
+import json
+import subprocess
+
+
+def test_run_one_arm_parses_usage_from_output_json(monkeypatch):
+    fake_response = json.dumps({
+        "type": "result", "is_error": False, "result": "**Verdict:** ✅ Conforms\n",
+        "duration_ms": 4200, "total_cost_usd": 0.0123,
+        "usage": {"input_tokens": 5000, "output_tokens": 300},
+    })
+
+    def fake_run(cmd, input=None, capture_output=True, text=True, timeout=None):
+        assert cmd[:2] == ["claude", "-p"]
+        assert "--output-format" in cmd and "json" in cmd
+        assert input is not None  # prompt goes via stdin, never interpolated into cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=fake_response, stderr="")
+
+    monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
+
+    result = sfsc.run_one_arm(prompt="the prompt", gate="conformance", model="claude-opus-4-8")
+
+    assert result["verdict"] == "CONFORMS_OR_MINOR"
+    assert result["input_tokens"] == 5000
+    assert result["output_tokens"] == 300
+    assert result["duration_ms"] == 4200
+    assert result["cost_usd"] == 0.0123
+    assert result["error"] is None
+
+
+def test_run_one_arm_records_error_without_raising(monkeypatch):
+    def fake_run(cmd, input=None, capture_output=True, text=True, timeout=None):
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({
+            "type": "result", "is_error": True, "result": "Not logged in", "duration_ms": 100,
+            "total_cost_usd": 0, "usage": {"input_tokens": 0, "output_tokens": 0},
+        }), stderr="")
+
+    monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
+    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-4-8")
+    assert result["error"] == "Not logged in"
+    assert result["verdict"] == "UNPARSEABLE"
+
+
+def test_run_one_arm_handles_non_json_stdout_without_raising(monkeypatch):
+    def fake_run(cmd, input=None, capture_output=True, text=True, timeout=None):
+        return subprocess.CompletedProcess(cmd, 1, stdout="not json", stderr="boom")
+
+    monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
+    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-4-8")
+    assert result["error"] is not None
+    assert result["verdict"] == "UNPARSEABLE"
+
+
+def test_budget_tracker_stops_after_cap():
+    tracker = sfsc.BudgetTracker(cap_usd=1.00)
+    assert tracker.check(0.40) is True   # 0.40 <= 1.00, ok
+    assert tracker.check(0.55) is True   # 0.95 <= 1.00, ok
+    assert tracker.check(0.10) is False  # 1.05 > 1.00, over cap
+
+
+def test_build_spotcheck_arg_parser_defaults():
+    parser = sfsc.build_arg_parser()
+    args = parser.parse_args([])
+    assert args.manifest == "evals/skill_flow_spotchecks.json"
+    assert args.budget_usd == 5.00
+    assert args.dry_run is False
+
+
+def test_dry_run_prints_plan_without_calling_subprocess(monkeypatch, capsys):
+    called = {"n": 0}
+
+    def fake_run(*a, **k):
+        called["n"] += 1
+        raise AssertionError("must not be called in --dry-run")
+
+    monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
+    manifest = {"pairs": [{"issue": 46, "pr": 229, "merge_sha": "abc123", "title": "t"}]}
+    sfsc.run_spotcheck(manifest, dry_run=True, budget_usd=5.00, model="claude-opus-4-8", repo_root=".")
+    out = capsys.readouterr().out
+    assert called["n"] == 0
+    assert "#46" in out
