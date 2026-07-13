@@ -132,3 +132,40 @@ def append_ledger(row: dict) -> None:
             fh.write(json.dumps(row) + "\n")
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def post_seq_ledger(row: dict) -> None:
+    payload = {
+        "Events": [
+            {
+                "Timestamp": row.get("timestamp", _timestamp()),
+                "Level": "Information",
+                "MessageTemplate": "factory.model_proxy.request endpoint={Endpoint} status={Status}",
+                "Properties": {
+                    "gen_ai.system": "dark-factory-model-proxy",
+                    "gen_ai.operation.name": "model_proxy.request",
+                    "gen_ai.usage.input_tokens": row.get("gen_ai.usage.input_tokens", 0),
+                    "gen_ai.usage.output_tokens": row.get("gen_ai.usage.output_tokens", 0),
+                    "Endpoint": row.get("endpoint", ""),
+                    "Model": row.get("model", ""),
+                    "Status": row.get("status", 0),
+                    "DurationMs": row.get("duration_ms", 0),
+                    "RunId": row.get("run_id", ""),
+                    "IssueNumber": row.get("issue_number", 0),
+                    "Intent": row.get("intent", ""),
+                    "ToolCount": row.get("tool_count", 0),
+                    "ToolBytes": row.get("tool_bytes", 0),
+                    "SystemBytes": row.get("system_bytes", 0),
+                    "RequestBytes": row.get("request_bytes", 0),
+                },
+            }
+        ]
+    }
+    endpoint = f"{SEQ_URL.rstrip('/')}/api/events/raw"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(endpoint, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except Exception:
+        pass  # non-fatal: ledger file was already written

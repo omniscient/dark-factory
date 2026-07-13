@@ -135,3 +135,14 @@ def test_append_ledger_rotation_keeps_backup_count(tmp_path, monkeypatch):
     assert path.exists()
     assert (tmp_path / "request-ledger.jsonl.1").exists()
     assert not (tmp_path / "request-ledger.jsonl.2").exists()
+
+
+def test_post_seq_ledger_is_nonfatal(monkeypatch):
+    monkeypatch.setattr(mp, "SEQ_URL", "http://unreachable-host-99999:5341")
+    row = mp.build_ledger_row(
+        endpoint="/v1/messages", method="POST", model="m", status=200,
+        duration_ms=1, input_tokens=1, output_tokens=1, cache_read_tokens=0,
+        cache_creation_tokens=0, tool_count=0, tool_bytes=0, system_bytes=0,
+        request_bytes=0, largest_tools=[], streamed=False,
+    )
+    mp.post_seq_ledger(row)  # must not raise
