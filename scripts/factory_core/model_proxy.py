@@ -107,3 +107,28 @@ def build_ledger_row(
         # "Retry/fallback metadata" note and the rollout doc.
         "retry_count": 0,
     }
+
+
+def _rotate_if_needed(path: pathlib.Path) -> None:
+    if not path.exists() or path.stat().st_size < MAX_LEDGER_BYTES:
+        return
+    for i in range(BACKUP_COUNT - 1, 0, -1):
+        src = path.with_suffix(path.suffix + f".{i}")
+        dst = path.with_suffix(path.suffix + f".{i + 1}")
+        if src.exists():
+            src.rename(dst)
+    oldest = path.with_suffix(path.suffix + f".{BACKUP_COUNT}")
+    if oldest.exists():
+        oldest.unlink()
+    path.rename(path.with_suffix(path.suffix + ".1"))
+
+
+def append_ledger(row: dict) -> None:
+    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_if_needed(LEDGER_PATH)
+    with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(json.dumps(row) + "\n")
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)

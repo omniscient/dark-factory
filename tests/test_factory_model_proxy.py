@@ -96,3 +96,42 @@ def test_build_ledger_row_defaults_when_correlation_missing():
     assert row["issue_number"] == 0
     assert row["intent"] == "unknown"
     assert row["stage"] == "unknown"
+
+
+def test_append_ledger_writes_line(tmp_path, monkeypatch):
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    row = {"a": 1}
+    mp.append_ledger(row)
+    lines = path.read_text().strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"a": 1}
+
+
+def test_append_ledger_rotates_at_max_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", 50)
+    monkeypatch.setattr(mp, "BACKUP_COUNT", 2)
+
+    for i in range(10):
+        mp.append_ledger({"i": i, "pad": "x" * 20})
+
+    assert path.exists()
+    assert (tmp_path / "request-ledger.jsonl.1").exists()
+    # rotation caps backups — no unbounded growth of rotation files
+    assert not (tmp_path / "request-ledger.jsonl.3").exists()
+
+
+def test_append_ledger_rotation_keeps_backup_count(tmp_path, monkeypatch):
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", 10)
+    monkeypatch.setattr(mp, "BACKUP_COUNT", 1)
+
+    for i in range(20):
+        mp.append_ledger({"i": i})
+
+    assert path.exists()
+    assert (tmp_path / "request-ledger.jsonl.1").exists()
+    assert not (tmp_path / "request-ledger.jsonl.2").exists()
