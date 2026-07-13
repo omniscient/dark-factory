@@ -51,6 +51,32 @@ services:
       - dark-factory-net
     profiles:
       - factory
+    depends_on:
+      factory-model-proxy:
+        condition: service_started
+        required: false
+
+  # Opt-in transparent Anthropic-traffic proxy + request ledger (#208). Only
+  # started when scheduler.sh dispatches with --profile factory-model-proxy
+  # (gated on FACTORY_MODEL_PROXY_ENABLED in .archon/.env) — see
+  # docs/dark-factory-model-proxy-rollout.md. `required: false` above means
+  # the dark-factory service starts fine whether or not this profile is active.
+  factory-model-proxy:
+    image: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+    entrypoint: ["python3", "-m", "factory_core.model_proxy"]
+    environment:
+      PYTHONPATH: /opt/dark-factory/scripts
+      MODEL_PROXY_PORT: "8787"
+      MODEL_PROXY_UPSTREAM: https://api.anthropic.com
+      RAW_ARTIFACT_CAPTURE: ${RAW_ARTIFACT_CAPTURE:-false}
+      RAW_ARTIFACT_RETENTION_DAYS: ${RAW_ARTIFACT_RETENTION_DAYS:-7}
+      SEQ_URL: ${SEQ_URL:-http://seq:5341}
+    volumes:
+      - scheduler_state:/var/lib/dark-factory
+    networks:
+      - dark-factory-net
+    profiles:
+      - factory-model-proxy
 
 networks:
   dark-factory-net:
