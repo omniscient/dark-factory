@@ -242,6 +242,17 @@ def test_mine_cross_repo_population_degrades_gracefully_on_failure(monkeypatch):
     assert sfe.fsc.REPO == "omniscient/dark-factory"  # restored even on failure
 
 
+import json
+
+
+def test_spotcheck_manifest_has_3_to_5_pairs_all_post_boundary():
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "evals" / "skill_flow_spotchecks.json").read_text())
+    pairs = manifest["pairs"]
+    assert 3 <= len(pairs) <= 5
+    for pair in pairs:
+        assert {"issue", "pr", "merge_sha", "title"} <= pair.keys()
+
+
 def test_build_arg_parser_defaults():
     parser = sfe.build_arg_parser()
     args = parser.parse_args([])
