@@ -5,6 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import pytest
+
 CLI = str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "providers" / "cli.py")
 
 
@@ -195,3 +197,26 @@ def test_codehost_verbs_pass_repo_through(monkeypatch):
         "get_change_mergeable": ("7", "o/r"),
         "get_change_reviews": ("7", "o/r"),
     }
+
+
+def test_preflight_ok_prints_ok_and_exits_0(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "preflight", lambda: [])
+    monkeypatch.setattr(sys, "argv", ["cli.py", "preflight"])
+    cli_mod.main()
+    assert capsys.readouterr().out.strip() == "providers preflight: OK"
+
+
+def test_preflight_failure_prints_every_problem_and_exits_1(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "preflight", lambda: [
+        "GH_TOKEN is not set. Add it to .archon/.env",
+        "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env",
+    ])
+    monkeypatch.setattr(sys, "argv", ["cli.py", "preflight"])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR: GH_TOKEN is not set. Add it to .archon/.env" in err
+    assert "ERROR: Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env" in err
