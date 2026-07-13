@@ -64,3 +64,29 @@ def test_recommend_rollout_handles_zero_denominator_population():
 def test_blocked_rate_from_population_handles_zero_n():
     assert sfs.blocked_rate({"n": 0, "blocked": 0}) == 0.0
     assert sfs.blocked_rate({"n": 4, "blocked": 1}) == 0.25
+
+
+def test_build_rows_folds_plan_phase_3_5_into_conformance():
+    population = {
+        "conformance": {"before": {"n": 10, "blocked": 3}, "after": {"n": 10, "blocked": 1}},
+        "code_review": {"before": {"n": 10, "blocked": 2}, "after": {"n": 10, "blocked": 2}},
+        "refine": {"before": {"n": 5, "factory_regression": 2, "scope_spillover": 0, "needs_discussion": 1},
+                   "after": {"n": 5, "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0}},
+        "plan_narrative": {"before": {"n": 5, "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0},
+                            "after": {"n": 5, "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0}},
+        "continue": {"before": {"n": 5, "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0},
+                     "after": {"n": 5, "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0}},
+    }
+    rows = sfs.build_rows(population)
+    scenarios = {r["scenario"] for r in rows}
+    assert "plan_phase_3_5" not in scenarios  # folded into conformance per spec §6
+    assert "conformance" in scenarios
+
+    conformance_row = next(r for r in rows if r["scenario"] == "conformance")
+    assert conformance_row["tier"] == 1
+    assert conformance_row["rollout"] == "default-on"  # 30% -> 10% is a >=10pp improvement
+
+    refine_row = next(r for r in rows if r["scenario"] == "refine")
+    assert refine_row["tier"] == 2
+    assert refine_row["rollout"] == "advisory-readiness"
+    assert "confounded" in refine_row["confounds"].lower()

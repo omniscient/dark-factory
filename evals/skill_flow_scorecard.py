@@ -66,3 +66,41 @@ def recommend_rollout(tier: int, before_blocked_rate: float, after_blocked_rate:
     if delta >= _DEFAULT_ON_IMPROVEMENT:
         return "default-on"
     return "advisory-only"
+
+
+# ── Assemble scorecard rows from a skill_flow_eval.run() population report ────
+_TIER1_MECHANISM = "toggle A/B on same issue/diff (live spot-check) + mined verdict-rate before/after boundary"
+_TIER2_MECHANISM = "before/after merge-boundary commit, mined label incidence (confounded — see Confounds)"
+_TIER2_CONFOUND_NOTE = (
+    "Observational, confounded: different issues, complexity, and unrelated intervening commits "
+    "landed in the same before/after window; see evals/factory-failures.jsonl for known one-off "
+    "incidents that could skew a bucket."
+)
+
+
+def build_rows(population: dict) -> list[dict]:
+    """population is skill_flow_eval.run()'s report dict (self-target only; cross_repo_widening,
+    if present, is not consumed here — it only widens the N used upstream in a future iteration,
+    not the per-scenario row shape). plan_phase_3_5 is folded into conformance's row per spec §6."""
+    rows = []
+    for scenario in ("conformance", "code_review"):
+        pop = population[scenario]
+        before_rate = blocked_rate(pop["before"])
+        after_rate = blocked_rate(pop["after"])
+        rows.append({
+            "scenario": scenario,
+            "tier": 1,
+            "mechanism": _TIER1_MECHANISM,
+            "rollout": recommend_rollout(1, before_rate, after_rate),
+            "confounds": "",
+        })
+    for scenario in ("refine", "plan_narrative", "continue"):
+        pop = population[scenario]
+        rows.append({
+            "scenario": scenario,
+            "tier": 2,
+            "mechanism": _TIER2_MECHANISM,
+            "rollout": recommend_rollout(2, 0.0, 0.0),  # Tier 2 always advisory-readiness regardless of rates
+            "confounds": _TIER2_CONFOUND_NOTE,
+        })
+    return rows
