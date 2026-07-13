@@ -268,5 +268,6 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [`docs/dark-factory-token-optimization.md`](docs/dark-factory-token-optimization.md) — token optimization operator guide
 - [`docs/dark-factory-memory-contract.md`](docs/dark-factory-memory-contract.md) — memory schema and lifecycle
 - [`docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md) — Claude Skills naming, safety, and tool-permission policy
+- [`docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md) — Claude Skills rollout-status runbook: per-scenario advisory state and rollback steps
 - [`config/config.yaml`](config/config.yaml) — all policy knobs with inline documentation
 - [`bench/baseline.md`](bench/baseline.md) — replay benchmark task manifest and scoring formula
