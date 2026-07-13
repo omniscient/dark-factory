@@ -90,9 +90,21 @@ SCENARIO_MAP = [
 NOT_EVALUATED = ["implement_new"]
 
 # ── §4 Dimension applicability (spec §4 table) ────────────────────────────────
-# No durable per-run cost artifact survives past a run's ephemeral container, and no cost-report
-# is posted to the issue/PR by any phase command today (see Architecture "Known gap" above).
-_TIER2_TOKEN_GAP = "not measurable from mined data — no durable per-run cost artifact"
+# entrypoint.sh's post_cost_report() (added 2026-05-27) posts a durable, cumulative
+# `<!-- dark-factory-cost-report -->` comment with a per-node token/cost/duration table to every
+# completed run's GitHub issue — mine_cost_report_population() mines it for token_count/runtime.
+# Coverage is real but incomplete: omniscient/dark-factory#64 means some runs never get a
+# cost-report comment posted at all, so this must never be presented as 100%-reliable. The
+# cost-report table has no tool-call/step-count column at all (Step | Model | In tokens |
+# Out tokens | Cost | Duration) — that dimension genuinely has no durable mined artifact.
+_TIER2_TOKEN_MINED = (
+    "measured from mined cost-report comments (before/after merge boundary); "
+    "coverage may be partial — see #64"
+)
+_TIER2_TOKEN_GAP = (
+    "not measurable from mined data — cost-report comments record tokens/cost/duration per node, "
+    "not tool-call/step counts; no durable per-run artifact captures that dimension"
+)
 _TIER1_TOKEN_DIM = "measured directly from toggle-pair API usage only (not mineable from historical PR data)"
 
 DIMENSION_APPLICABILITY: dict[str, dict[str, str]] = {
@@ -127,9 +139,9 @@ DIMENSION_APPLICABILITY: dict[str, dict[str, str]] = {
         "skill_over_under_triggering": "N/A — deterministic resolution",
     },
     "refine": {
-        "token_count": _TIER2_TOKEN_GAP,
+        "token_count": _TIER2_TOKEN_MINED,
         "tool_call_count": _TIER2_TOKEN_GAP,
-        "runtime": _TIER2_TOKEN_GAP,
+        "runtime": _TIER2_TOKEN_MINED,
         "spec_plan_quality": "measured qualitatively (self-target only)",
         "implementation_correctness": "N/A (refine does not implement)",
         "conformance_review_safety": "N/A (refine is not a review gate)",
@@ -137,9 +149,9 @@ DIMENSION_APPLICABILITY: dict[str, dict[str, str]] = {
         "skill_over_under_triggering": "N/A — no model-mediated skill routing",
     },
     "plan_narrative": {
-        "token_count": _TIER2_TOKEN_GAP,
+        "token_count": _TIER2_TOKEN_MINED,
         "tool_call_count": _TIER2_TOKEN_GAP,
-        "runtime": _TIER2_TOKEN_GAP,
+        "runtime": _TIER2_TOKEN_MINED,
         "spec_plan_quality": "measured qualitatively (self-target only)",
         "implementation_correctness": "N/A (plan does not implement)",
         "conformance_review_safety": "N/A (plan's own narrative is not a review gate)",
@@ -147,9 +159,9 @@ DIMENSION_APPLICABILITY: dict[str, dict[str, str]] = {
         "skill_over_under_triggering": "N/A — no model-mediated skill routing",
     },
     "continue": {
-        "token_count": _TIER2_TOKEN_GAP,
+        "token_count": _TIER2_TOKEN_MINED,
         "tool_call_count": _TIER2_TOKEN_GAP,
-        "runtime": _TIER2_TOKEN_GAP,
+        "runtime": _TIER2_TOKEN_MINED,
         "spec_plan_quality": "N/A (continue-intent implements against an existing plan; produces no new spec/plan)",
         "implementation_correctness": "measured for continue via post-fix test outcomes where available",
         "conformance_review_safety": "N/A (continue is not a review gate)",
@@ -261,11 +273,165 @@ def _label_counts(prs: list[dict]) -> dict:
     return counts
 
 
+_COST_MARKER = "<!-- dark-factory-cost-report -->"
+_COST_RUN_HEADER_RE = re.compile(
+    r"^### Run: .*?\((?P<intent>[^,()]+),\s*(?P<status>[^)]+)\)\s*$", re.MULTILINE
+)
+_COST_ROW_RE = re.compile(
+    r"^\|\s*(?P<step>[^|]+?)\s*\|\s*(?P<model>[^|]*?)\s*\|\s*(?P<intok>[^|]+?)\s*\|"
+    r"\s*(?P<outtok>[^|]+?)\s*\|\s*(?P<cost>[^|]+?)\s*\|\s*(?P<dur>[^|]+?)\s*\|\s*$",
+    re.MULTILINE,
+)
+
+
+def _parse_fmt_tokens(raw: str) -> float:
+    """Reverse entrypoint.sh post_cost_report's jq fmt_tokens: '332' -> 332, '20.3K' -> 20300,
+    '1.2M' -> 1200000."""
+    s = raw.strip()
+    if s.endswith("M"):
+        return float(s[:-1]) * 1_000_000
+    if s.endswith("K"):
+        return float(s[:-1]) * 1_000
+    return float(s) if s else 0.0
+
+
+def _parse_fmt_dur(raw: str) -> float:
+    """Reverse entrypoint.sh post_cost_report's jq fmt_dur: '953ms' -> 953, '6.6s' -> 6600,
+    '6m 48s' -> 408000 (all in milliseconds)."""
+    s = raw.strip()
+    m = re.match(r"^(\d+)m\s+(\d+)s$", s)
+    if m:
+        return int(m.group(1)) * 60_000 + int(m.group(2)) * 1_000
+    if s.endswith("ms"):
+        return float(s[:-2])
+    if s.endswith("s"):
+        return float(s[:-1]) * 1_000
+    return float(s) if s else 0.0
+
+
+def _parse_fmt_cost(raw: str) -> float:
+    """Reverse entrypoint.sh post_cost_report's jq fmt_cost: '$0.0166' -> 0.0166, '$0' -> 0.0."""
+    s = raw.strip().lstrip("$")
+    return float(s) if s else 0.0
+
+
+def _cost_report_sections(body: str) -> list[tuple[str, str]]:
+    """Split a cost-report comment body into (intent, section_text) pairs, one per
+    '### Run: <date> (<intent>, <status>)' header — the comment is cumulative and may hold
+    multiple Run sections (one per historical run of that issue)."""
+    matches = list(_COST_RUN_HEADER_RE.finditer(body))
+    sections = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        sections.append((m.group("intent").strip(), body[m.end():end]))
+    return sections
+
+
+def _cost_report_node_rows(body: str, node_id: str, intent_filter: str | None) -> list[dict]:
+    """Parse every Step-table row for node_id from every Run section (optionally filtered to
+    intent_filter) in one cost-report comment body. Returns one dict per matching row with raw
+    (non-formatted) numeric values. The header row, the dashed separator row, and the bolded
+    **Subtotal** rollup row are all skipped — they are not per-node data."""
+    if _COST_MARKER not in body:
+        return []
+    rows: list[dict] = []
+    for intent, section in _cost_report_sections(body):
+        if intent_filter is not None and intent != intent_filter:
+            continue
+        for m in _COST_ROW_RE.finditer(section):
+            step = m.group("step").strip()
+            if not step or step == "Step" or step.startswith("**") or set(step) <= {"-"}:
+                continue
+            if step != node_id:
+                continue
+            rows.append({
+                "input_tokens": _parse_fmt_tokens(m.group("intok")),
+                "output_tokens": _parse_fmt_tokens(m.group("outtok")),
+                "cost_usd": _parse_fmt_cost(m.group("cost")),
+                "duration_ms": _parse_fmt_dur(m.group("dur")),
+            })
+    return rows
+
+
+def _cost_report_pr_stats(prs: list[dict], repo: str, node_id: str, intent_filter: str | None) -> dict:
+    """Mine one before/after bucket's cost-report population for node_id. Degrades gracefully:
+    a PR with no linked issue, no cost-report comment, or no parseable node_id row is silently
+    skipped (not crashed on) — coverage is reported honestly via n_with_data vs n_total rather
+    than assumed complete (see omniscient/dark-factory#64: cost reports don't post for every run)."""
+    n_total = len(prs)
+    per_pr_avgs: list[dict] = []
+    for pr in prs:
+        issue = fsc.linked_issue_number(pr.get("headRefName", ""))
+        if issue is None:
+            continue
+        comments = _fetch_issue_comments(repo, issue)
+        cost_comment = next((c for c in comments if _COST_MARKER in (c.get("body") or "")), None)
+        if cost_comment is None:
+            continue
+        rows = _cost_report_node_rows(cost_comment["body"], node_id, intent_filter)
+        if not rows:
+            continue
+        per_pr_avgs.append({
+            "input_tokens": sum(r["input_tokens"] for r in rows) / len(rows),
+            "output_tokens": sum(r["output_tokens"] for r in rows) / len(rows),
+            "cost_usd": sum(r["cost_usd"] for r in rows) / len(rows),
+            "duration_ms": sum(r["duration_ms"] for r in rows) / len(rows),
+        })
+
+    n_with_data = len(per_pr_avgs)
+    if n_with_data == 0:
+        return {
+            "n_total": n_total, "n_with_data": 0,
+            "avg_input_tokens": None, "avg_output_tokens": None,
+            "avg_duration_ms": None, "avg_cost_usd": None,
+        }
+    return {
+        "n_total": n_total,
+        "n_with_data": n_with_data,
+        "avg_input_tokens": sum(p["input_tokens"] for p in per_pr_avgs) / n_with_data,
+        "avg_output_tokens": sum(p["output_tokens"] for p in per_pr_avgs) / n_with_data,
+        "avg_duration_ms": sum(p["duration_ms"] for p in per_pr_avgs) / n_with_data,
+        "avg_cost_usd": sum(p["cost_usd"] for p in per_pr_avgs) / n_with_data,
+    }
+
+
+def mine_cost_report_population(
+    repo: str, prs: list[dict], boundary: datetime, node_id: str, intent_filter: str | None = None,
+) -> dict:
+    """Tier 2 quantitative population mining (issue #48, spec Requirement #3): before/after
+    merge-boundary token/cost/duration deltas for a workflow node_id (e.g. 'refine', 'plan',
+    'implement'), mined from the durable `<!-- dark-factory-cost-report -->` comment
+    entrypoint.sh's post_cost_report() posts to every completed run's GitHub issue. intent_filter
+    restricts which Run sections count (e.g. 'continue', so the continue scenario's numbers come
+    only from continue-intent runs' implement rows, not fix/feat runs sharing the same node_id).
+    Coverage is real but incomplete (omniscient/dark-factory#64: cost reports don't post for every
+    run) — callers must read n_with_data/n_total, not assume 100% coverage."""
+    factory_prs = [pr for pr in prs if fsc.is_factory_pr(pr)]
+    buckets = bucket_prs_by_boundary(factory_prs, boundary)
+    return {
+        "before": _cost_report_pr_stats(buckets["before"], repo, node_id, intent_filter),
+        "after": _cost_report_pr_stats(buckets["after"], repo, node_id, intent_filter),
+    }
+
+
+# scenario -> (workflow node_id, intent_filter) for mine_cost_report_population's run() wiring.
+# node_ids match workflows/archon-dark-factory.yaml's `- id: <name>` entries: refine's own node,
+# plan's own node, and continue-intent runs of implement (continue does not get its own workflow
+# node — commands/dark-factory-implement.md handles both 'fix' and 'continue' intents inside the
+# same `implement` node, hence the intent_filter to isolate continue-intent runs' rows).
+_TIER2_COST_REPORT_NODE: dict[str, tuple[str, str | None]] = {
+    "refine": ("refine", None),
+    "plan_narrative": ("plan", None),
+    "continue": ("implement", "continue"),
+}
+
+
 def mine_label_incidence(prs: list[dict], boundary: datetime) -> dict:
     """Tier 2 qualitative proxy: factory-regression / scope-spillover / needs-discussion label
-    incidence before vs. after a merge boundary. This is the only Tier-2 signal that is both
-    durable (survives past the ephemeral per-run container) and cheaply mineable via gh — token/
-    tool-call/runtime are not (see DIMENSION_APPLICABILITY's _TIER2_TOKEN_GAP)."""
+    incidence before vs. after a merge boundary. Durable and cheaply mineable via gh's PR labels
+    directly (no per-issue comment fetch needed). Token count and runtime have their own mined
+    quantitative signal via mine_cost_report_population (cost-report comments); tool-call/step
+    count still has no durable mined artifact (see DIMENSION_APPLICABILITY's _TIER2_TOKEN_GAP)."""
     factory_prs = [pr for pr in prs if fsc.is_factory_pr(pr)]
     buckets = bucket_prs_by_boundary(factory_prs, boundary)
     return {
@@ -364,7 +530,13 @@ def run(args, write_json: bool = False) -> dict:
         elif scenario == "code_review":
             report[scenario] = mine_code_review_population(args.repo, windowed_prs, boundary)
         else:  # tier 2: refine, plan_narrative, continue
-            report[scenario] = mine_label_incidence(windowed_prs, boundary)
+            node_id, intent_filter = _TIER2_COST_REPORT_NODE[scenario]
+            report[scenario] = {
+                "labels": mine_label_incidence(windowed_prs, boundary),
+                "quantitative": mine_cost_report_population(
+                    args.repo, windowed_prs, boundary, node_id, intent_filter=intent_filter
+                ),
+            }
 
     if not args.no_cross_repo:
         conformance_boundary = merge_boundary_date(
