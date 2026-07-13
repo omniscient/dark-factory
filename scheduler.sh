@@ -97,15 +97,8 @@ read_config() {
   echo "[config] loaded from ${cfg}"
 }
 
-# --- Validate required environment ---
-if [ -z "${GH_TOKEN:-}" ]; then
-  echo "ERROR: GH_TOKEN is not set. Add it to .archon/.env" >&2
-  exit 1
-fi
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env" >&2
-  exit 1
-fi
+# --- Validate required environment (provider-aware; parent spec §4) ---
+python3 "$FACTORY_PROVIDERS_CLI" preflight
 
 # --- Provision the dispatch env file ---
 # The dispatch runs `docker compose -f /opt/dark-factory/docker-compose.yml run dark-factory`,

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from factory_core.providers import get_codehost, get_tracker  # noqa: E402
+from factory_core.providers import get_codehost, get_tracker, preflight  # noqa: E402
 
 
 def _print(value):
@@ -118,6 +118,15 @@ def _codehost_inline_comments(args):
 def _codehost_update_body(args):
     body = Path(args.body_file).read_text(encoding="utf-8")
     _print(get_codehost().update_change_body(args.id, body))
+
+
+def _preflight(args):
+    problems = preflight()
+    if problems:
+        for p in problems:
+            print(f"ERROR: {p}", file=sys.stderr)
+        sys.exit(1)
+    print("providers preflight: OK")
 
 
 def main():
@@ -236,6 +245,9 @@ def main():
     cub.add_argument("--id", required=True)
     cub.add_argument("--body-file", required=True)
     cub.set_defaults(func=_codehost_update_body)
+
+    pf = top.add_parser("preflight")
+    pf.set_defaults(func=_preflight)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

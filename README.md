@@ -104,6 +104,26 @@ your project board IDs.
 
 Per-instance configs live under `deploy/instances/` (markethawk: see [`docs/cutover-markethawk.md`](docs/cutover-markethawk.md)).
 
+### Provider selection (optional)
+
+Three env vars select the tracker/code-host/model-endpoint providers,
+each defaulting to today's behavior when unset:
+
+```bash
+FACTORY_TRACKER=github          # ticket tracker (only "github" implemented today)
+FACTORY_CODEHOST=github         # code host (only "github" implemented today)
+FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | openai
+```
+
+`databricks`/`openai` are recognized but not yet implemented (the model
+gateway is a later step); an unknown value for any of the three, or
+missing provider-specific required env, fails startup loudly via
+`providers preflight` — run it directly to check your configuration:
+
+```bash
+python3 scripts/factory_core/providers/cli.py preflight
+```
+
 ### 3. Point PROJECT_DIR at your target repo
 
 ```bash

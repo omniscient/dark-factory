@@ -175,6 +175,10 @@ def test_close_keyword_opaque_id_passthrough():
     assert GitHubCodeHost().close_keyword("PROJ-123") == "Closes #PROJ-123"
 
 
+def test_required_env_returns_gh_token():
+    assert GitHubCodeHost.required_env() == ["GH_TOKEN"]
+
+
 _CODEHOST_ID_CASES = ["42", "PROJ-123"]
 
 

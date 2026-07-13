@@ -4,21 +4,15 @@ set -euo pipefail
 # --- Instance identity (env-overridable; defaults = MarketHawk parity) ---
 source /opt/dark-factory/scripts/identity.sh
 
+# --- Validate required environment (provider-aware; parent spec §4) ---
+FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
+python3 "$FACTORY_PROVIDERS_CLI" preflight
+
 # --- Configuration ---
 REPO_URL="https://${GH_TOKEN}@github.com/${FACTORY_REPO_SLUG}.git"
 CLONE_DIR="$FACTORY_CLONE_DIR"
 FACTORY_NAME="${FACTORY_PRODUCT_NAME} Factory"
 FACTORY_EMAIL="factory@${FACTORY_REPO}"
-
-# --- Validate required environment ---
-if [ -z "${GH_TOKEN:-}" ]; then
-  echo "ERROR: GH_TOKEN is not set. Add it to .archon/.env" >&2
-  exit 1
-fi
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env" >&2
-  exit 1
-fi
 
 # --- Git identity ---
 git config --global user.name "$FACTORY_NAME"
