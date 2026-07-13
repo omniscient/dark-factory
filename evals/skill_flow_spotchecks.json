@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "description": "Tier 1 live toggle spot-check pairs for issue #48 — RUBRIC.md present (skill-modularized arm) vs. forced-absent (current-flow arm), same diff held constant.",
+  "pairs": [
+    {"issue": 46, "pr": 229, "merge_sha": "bfc02393832c9ae29d52d9e9db1b6f73207f47be", "title": "Add factory review guardrails for Claude Skills"},
+    {"issue": 45, "pr": 231, "merge_sha": "666da3db9cf035690bba0b629e550c9cc12069d9", "title": "Wire Claude Skills dynamic context injection to #36"},
+    {"issue": 47, "pr": 233, "merge_sha": "88b233be3bb0248034f9af93e6ecf91f2e06fbac", "title": "Teach Dark Factory run and verify recipes"},
+    {"issue": 204, "pr": 228, "merge_sha": "06f21e16e58abf7f7273269f93153e8e4bcd9891", "title": "scheduler: dependencies_met() misses bold Depends on"}
+  ]
+}

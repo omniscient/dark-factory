@@ -12,6 +12,7 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
+FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
 REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review,plan-pending-review"
@@ -131,7 +132,7 @@ fi
 # --- Rate limit guard ---
 check_rate_limit() {
   local rate_json
-  rate_json=$(gh api rate_limit --jq '.resources.graphql' 2>/dev/null) || return 0
+  rate_json=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-rate-budget 2>/dev/null) || return 0
   local remaining reset_at
   remaining=$(echo "$rate_json" | jq -r '.remaining')
   reset_at=$(echo "$rate_json" | jq -r '.reset')
@@ -302,8 +303,8 @@ elapsed_minutes_since_marker() {
   local issue_num="$1"
   local marker_re="$2"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" \
-    --json comments -q '.comments' 2>/dev/null) || { echo ""; return; }
+  comments=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-comments --id "$issue_num" 2>/dev/null) \
+    || { echo ""; return; }
   local created_at
   created_at=$(echo "$comments" | jq -r --arg m "$marker_re" \
     '[.[] | select(.body | test($m))] | last | .createdAt // ""')
@@ -322,8 +323,8 @@ spec_advance_check() {
   has_new=$(has_new_comment_after_report "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:refine"
-    gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
-      --remove-label "spec-pending-review" 2>/dev/null || true
+    python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+      --remove "spec-pending-review" 2>/dev/null || true
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running with new feedback.
 
@@ -340,8 +341,8 @@ spec_advance_check() {
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$SPEC_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
-      gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
-        --remove-label "spec-pending-review" 2>/dev/null || true
+      python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+        --remove "spec-pending-review" 2>/dev/null || true
       set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" || true
     else
       echo "[$(date -u +%FT%TZ)] spec_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${SPEC_GRACE_MINUTES}m action=waiting"
@@ -357,8 +358,8 @@ plan_advance_check() {
   has_new=$(has_new_comment_after_report "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:plan"
-    gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
-      --remove-label "plan-pending-review" 2>/dev/null || true
+    python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+      --remove "plan-pending-review" 2>/dev/null || true
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running plan with new feedback.
 
@@ -380,8 +381,8 @@ plan_advance_check() {
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$PLAN_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
-      gh issue edit "$issue_num" --repo "$FACTORY_REPO_SLUG" \
-        --remove-label "plan-pending-review" 2>/dev/null || true
+      python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+        --remove "plan-pending-review" 2>/dev/null || true
       set_board_status "$issue_num" "$FACTORY_STATUS_READY" || true
     else
       echo "[$(date -u +%FT%TZ)] plan_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${PLAN_GRACE_MINUTES}m action=waiting"
@@ -397,9 +398,8 @@ end_gate_check() {
   pr_num=$(get_pr_for_issue "$issue_num")
   [ -z "$pr_num" ] && return 1
   local review_state
-  review_state=$(gh pr view "$pr_num" --repo "$FACTORY_REPO_SLUG" --json reviews \
-    --jq '[.reviews[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | last | .state // ""' \
-    2>/dev/null) || review_state=""
+  review_state=$(python3 "$FACTORY_PROVIDERS_CLI" codehost reviews \
+    --id "$pr_num" --repo "$FACTORY_REPO_SLUG" 2>/dev/null) || review_state=""
   case "$review_state" in
     APPROVED)
       echo "[$(date -u +%FT%TZ)] end_gate issue=#${issue_num} pr=#${pr_num} state=APPROVED action=Close"
@@ -428,7 +428,8 @@ has_new_comment_after_report() {
   local issue_num="$1"
   local report_marker="$2"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json comments -q '.comments' 2>/dev/null) || { echo "no"; return; }
+  comments=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-comments --id "$issue_num" 2>/dev/null) \
+    || { echo "no"; return; }
 
   # A comment counts as reviewer feedback only if it appears AFTER the last spec report
   # AND is not one of our own automated comments. The dark factory posts its cost report
@@ -488,8 +489,8 @@ trip_to_blocked() {
 check_pr_mergeable() {
   local pr_num="$1"
   local result
-  result=$(gh pr view "$pr_num" --repo "$FACTORY_REPO_SLUG" --json mergeable \
-    --jq '.mergeable' 2>/dev/null) || true
+  result=$(python3 "$FACTORY_PROVIDERS_CLI" codehost mergeable \
+    --id "$pr_num" --repo "$FACTORY_REPO_SLUG" 2>/dev/null) || true
   echo "${result:-UNKNOWN}"
 }
 
@@ -501,7 +502,8 @@ check_pr_mergeable() {
 # from aborting the loop under `set -e` (callers assign the result with $(...), which
 # would otherwise propagate gh's non-zero exit).
 get_pr_for_issue() {
-  gh pr list --repo "$FACTORY_REPO_SLUG" --search "head:feat/issue-${1}-" --json number --jq '.[0].number // empty' 2>/dev/null || true
+  python3 "$FACTORY_PROVIDERS_CLI" codehost find-change \
+    --branch "feat/issue-${1}-" --repo "$FACTORY_REPO_SLUG" 2>/dev/null || true
 }
 
 # --- CI status: JSON array of definitively-failing checks (bucket == "fail") for a PR ---
@@ -514,6 +516,10 @@ failing_checks_for_pr() {
   local pr_num="$1"
   local checks
   # --repo required for the same reason as get_pr_for_issue (scheduler runs outside a checkout).
+  # NOT migrated to `codehost checks` (providers CLI, #249): GitHubCodeHost.get_change_checks
+  # returns [] whenever `gh`'s exit code is nonzero, but `gh pr checks` legitimately exits
+  # nonzero exactly when a check is failing/pending — the case this function most needs to see.
+  # Routing through it would silently blind the CI gate. See out-of-scope.md.
   checks=$(gh pr checks "$pr_num" --repo "$FACTORY_REPO_SLUG" --json name,bucket,link 2>/dev/null) || true
   echo "$checks" | jq -e 'type == "array"' >/dev/null 2>&1 || checks='[]'
   echo "$checks" | jq -c '[.[] | select(.bucket == "fail")]'
@@ -587,36 +593,15 @@ get_issue_number() {
   echo "$item" | jq -r '.content.number'
 }
 
-# --- WIP limits ---
+# --- WIP limits (thin adapter — logic lives in GitHubTracker.get_status_limits) ---
 fetch_wip_limits() {
-  local result
-  result=$(gh api graphql -f query='
-    query {
-      node(id: "'"$FACTORY_PROJECT_ID"'") {
-        ... on ProjectV2 {
-          field(name: "Status") {
-            ... on ProjectV2SingleSelectField {
-              options { id name description }
-            }
-          }
-        }
-      }
-    }
-  ' 2>/dev/null) || true
-  echo "$result"
+  python3 "$FACTORY_PROVIDERS_CLI" tracker get-status-limits 2>/dev/null || echo '{}'
 }
 
 get_column_limit() {
   local wip_data="$1"
-  local option_id="$2"
-  local desc
-  desc=$(echo "$wip_data" | jq -r --arg id "$option_id" \
-    '.data.node.field.options[] | select(.id == $id) | .description // ""' 2>/dev/null)
-  if echo "$desc" | grep -qoP 'limit:\s*\K\d+'; then
-    echo "$desc" | grep -oP 'limit:\s*\K\d+'
-  else
-    echo "999"
-  fi
+  local canonical="$2"
+  echo "$wip_data" | jq -r --arg k "$canonical" '.[$k] // 999'
 }
 
 # --- Dependency checking ---
@@ -674,7 +659,8 @@ dependencies_met() {
   local issue_num="$1"
   local board_items="$2"
   local body
-  body=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json body -q '.body' 2>/dev/null) || return 0
+  body=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get --id "$issue_num" --fields body 2>/dev/null \
+    | jq -r '.body // ""') || return 0
   local deps
   deps=$(_scan_body_for_deps "$body")
   if [ -z "$deps" ]; then
@@ -687,7 +673,8 @@ dependencies_met() {
       # Dep not found on board (archived or beyond fetch window) — fall back to issue state
       local dep_state
       local dep_gh_exit=0
-      dep_state=$(gh issue view "$dep_num" --repo "$FACTORY_REPO_SLUG" --json state -q '.state' 2>/dev/null) || dep_gh_exit=$?
+      dep_state=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get --id "$dep_num" --fields state 2>/dev/null \
+        | jq -r '.state // ""') || dep_gh_exit=$?
       if [ "$dep_state" = "CLOSED" ]; then
         echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} resolved=closed_off_board"
         continue
@@ -711,7 +698,8 @@ dependencies_met() {
 get_new_comments() {
   local issue_num="$1"
   local comments
-  comments=$(gh issue view "$issue_num" --repo "$FACTORY_REPO_SLUG" --json comments -q '.comments' 2>/dev/null) || { echo "[]"; return; }
+  comments=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-comments --id "$issue_num" 2>/dev/null) \
+    || { echo "[]"; return; }
 
   local factory_idx
   factory_idx=$(echo "$comments" | jq --arg pat "Posted by ${FACTORY_PRODUCT_NAME} Dark Factory" 'map(.body) | to_entries | map(select(.value | test($pat))) | last | .key // -1')
@@ -806,8 +794,8 @@ trap '_sched_err_trap' ERR
 
 # --- Fetch WIP limits once at startup (cached until restart) ---
 WIP_DATA=$(fetch_wip_limits)
-MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "$FACTORY_STATUS_IN_PROGRESS")
-MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "$FACTORY_STATUS_IN_REVIEW")
+MAX_IN_PROGRESS=$(get_column_limit "$WIP_DATA" "in_progress")
+MAX_IN_REVIEW=$(get_column_limit "$WIP_DATA" "in_review")
 echo "WIP limits: in_progress=${MAX_IN_PROGRESS} in_review=${MAX_IN_REVIEW} factory=${FACTORY_WIP_LIMIT}"
 
 # --- Startup probe: verify factory image is available locally ---
@@ -1071,8 +1059,8 @@ This issue was left in **In progress** with no running factory container — the
       if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
         if ! has_above_ceiling_label "$item"; then
           echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
-          gh issue edit "$ISSUE" --repo "$FACTORY_REPO_SLUG" \
-            --add-label "$ABOVE_CEILING_LABEL" 2>/dev/null || true
+          python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
+            --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
           set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
           gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
 "## Scheduler — Above Dispatch Ceiling
@@ -1224,7 +1212,8 @@ To proceed:
   fi
 
   # --- Log cycle summary ---
-  BUDGET=$(gh api rate_limit --jq '.resources.graphql | "\(.used)/\(.limit)"' 2>/dev/null) || BUDGET="?"
+  BUDGET=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-rate-budget 2>/dev/null \
+    | jq -r '"\(.used)/\(.limit)"' 2>/dev/null) || BUDGET="?"
   if [ -n "$DISPATCHED" ]; then
     echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} dispatched=\"${DISPATCHED}\" main_red=${MAIN_IS_RED} graphql=${BUDGET}"
   else
