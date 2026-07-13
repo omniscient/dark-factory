@@ -203,3 +203,72 @@ def bucket_prs_by_boundary(prs: list[dict], boundary: datetime) -> dict[str, lis
         else:
             buckets["after"].append(pr)
     return buckets
+
+
+# ── Tier 1 verdict-rate population mining (issue #48) ─────────────────────────
+def _fetch_issue_comments(repo: str, issue_number: int) -> list[dict]:
+    """Thin wrapper over gh so tests can monkeypatch without touching the network."""
+    raw = fsc._gh("api", f"repos/{repo}/issues/{issue_number}/comments?per_page=100", paginate=True)
+    return [{"body": c.get("body", "")} for c in raw]
+
+
+def _bucket_verdict_stats(prs: list[dict], repo: str, classify, blocked_values: tuple[str, ...]) -> dict:
+    n = len(prs)
+    blocked = 0
+    for pr in prs:
+        issue = fsc.linked_issue_number(pr.get("headRefName", ""))
+        if issue is None:
+            continue
+        comments = _fetch_issue_comments(repo, issue)
+        if classify(comments) in blocked_values:
+            blocked += 1
+    return {"n": n, "blocked": blocked}
+
+
+def mine_conformance_population(repo: str, prs: list[dict], boundary: datetime) -> dict:
+    factory_prs = [pr for pr in prs if fsc.is_factory_pr(pr)]
+    buckets = bucket_prs_by_boundary(factory_prs, boundary)
+    return {
+        "before": _bucket_verdict_stats(buckets["before"], repo, classify_conformance_verdict, ("MATERIAL_BLOCKED",)),
+        "after": _bucket_verdict_stats(buckets["after"], repo, classify_conformance_verdict, ("MATERIAL_BLOCKED",)),
+    }
+
+
+def mine_code_review_population(repo: str, prs: list[dict], boundary: datetime) -> dict:
+    factory_prs = [pr for pr in prs if fsc.is_factory_pr(pr)]
+    buckets = bucket_prs_by_boundary(factory_prs, boundary)
+    return {
+        "before": _bucket_verdict_stats(buckets["before"], repo, classify_code_review_verdict, ("BLOCKED",)),
+        "after": _bucket_verdict_stats(buckets["after"], repo, classify_code_review_verdict, ("BLOCKED",)),
+    }
+
+
+# ── Tier 2 population mining: label incidence (issue #48) ────────────────────
+_TIER2_LABELS = {
+    "factory_regression": fsc.REGRESSION_LABEL,
+    "scope_spillover": "scope-spillover",
+    "needs_discussion": "needs-discussion",
+}
+
+
+def _label_counts(prs: list[dict]) -> dict:
+    counts = {"n": len(prs), "factory_regression": 0, "scope_spillover": 0, "needs_discussion": 0}
+    for pr in prs:
+        names = {lbl["name"] for lbl in pr.get("labels", [])}
+        for key, label_name in _TIER2_LABELS.items():
+            if label_name in names:
+                counts[key] += 1
+    return counts
+
+
+def mine_label_incidence(prs: list[dict], boundary: datetime) -> dict:
+    """Tier 2 qualitative proxy: factory-regression / scope-spillover / needs-discussion label
+    incidence before vs. after a merge boundary. This is the only Tier-2 signal that is both
+    durable (survives past the ephemeral per-run container) and cheaply mineable via gh — token/
+    tool-call/runtime are not (see DIMENSION_APPLICABILITY's _TIER2_TOKEN_GAP)."""
+    factory_prs = [pr for pr in prs if fsc.is_factory_pr(pr)]
+    buckets = bucket_prs_by_boundary(factory_prs, boundary)
+    return {
+        "before": _label_counts(buckets["before"]),
+        "after": _label_counts(buckets["after"]),
+    }

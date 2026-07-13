@@ -137,3 +137,55 @@ def test_merge_boundary_date_reads_commit_date(monkeypatch, tmp_path):
     monkeypatch.setattr(sfe.fsc, "_git", fake_git)
     dt = sfe.merge_boundary_date(str(tmp_path), "f72738f8beb3e079335bc4daf9b1da85a198b2ef")
     assert dt == datetime.fromisoformat("2026-07-10T11:57:54-04:00")
+
+
+def test_mine_conformance_population_classifies_and_buckets(monkeypatch):
+    prs = [
+        {"number": 1, "headRefName": "feat/issue-46-x", "mergedAt": "2026-07-10T18:00:00Z", "state": "MERGED", "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []},
+        {"number": 2, "headRefName": "feat/issue-47-y", "mergedAt": "2026-07-10T21:00:00Z", "state": "MERGED", "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []},
+    ]
+    comments_by_issue = {
+        46: [{"body": "## Spec Conformance — Blocked\n..."}],
+        47: [{"body": "no findings"}],
+    }
+
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: comments_by_issue[num])
+
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    result = sfe.mine_conformance_population("omniscient/dark-factory", prs, boundary)
+
+    assert result["before"]["n"] == 0
+    assert result["after"]["n"] == 2
+    assert result["after"]["blocked"] == 1
+
+
+def test_mine_code_review_population_classifies_and_buckets(monkeypatch):
+    prs = [{"number": 1, "headRefName": "feat/issue-46-x", "mergedAt": "2026-07-10T18:00:00Z", "state": "MERGED", "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []}]
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": "## Code Review — Blocked\n..."}])
+
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    result = sfe.mine_code_review_population("omniscient/dark-factory", prs, boundary)
+    assert result["after"] == {"n": 1, "blocked": 1}
+
+
+def test_mine_label_incidence_counts_regression_and_needs_discussion(monkeypatch):
+    prs = [
+        {"number": 1, "mergedAt": "2026-07-10T05:00:00Z", "state": "MERGED",
+         "commits": [{"authors": [{"email": "factory@dark-factory"}]}],
+         "labels": [{"name": "factory-regression"}]},
+        {"number": 2, "mergedAt": "2026-07-10T09:00:00Z", "state": "MERGED",
+         "commits": [{"authors": [{"email": "factory@dark-factory"}]}],
+         "labels": [{"name": "needs-discussion"}, {"name": "scope-spillover"}]},
+        {"number": 3, "mergedAt": "2026-07-10T09:30:00Z", "state": "MERGED",
+         "commits": [{"authors": [{"email": "factory@dark-factory"}]}],
+         "labels": []},
+    ]
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    boundary = datetime(2026, 7, 10, 8, 0, 0, tzinfo=timezone.utc)
+
+    result = sfe.mine_label_incidence(prs, boundary)
+
+    assert result["before"] == {"n": 1, "factory_regression": 1, "scope_spillover": 0, "needs_discussion": 0}
+    assert result["after"] == {"n": 2, "factory_regression": 0, "scope_spillover": 1, "needs_discussion": 1}
