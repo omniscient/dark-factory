@@ -92,6 +92,27 @@ services:
     #     gelf-address: "udp://host.docker.internal:12201"
     #     tag: "backlog-scheduler"
 
+  # --- Optional: persistent factory-model-proxy (alternative to the per-run
+  # profile-gated service in run-compose.yml) ---
+  # Uncomment for a single long-lived proxy shared across every dispatched run
+  # instead of the default per-run opt-in (run-compose.yml's factory-model-proxy
+  # service, gated by FACTORY_MODEL_PROXY_ENABLED). Trade-off: this file is
+  # critical_diff_paths-flagged (higher review scrutiny) and affects every
+  # operator's running stack, which is why it is NOT the default — see
+  # docs/dark-factory-model-proxy-rollout.md.
+  # factory-model-proxy:
+  #   image: ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}
+  #   container_name: ${FACTORY_INSTANCE:-dark-factory}-model-proxy
+  #   restart: unless-stopped
+  #   entrypoint: ["python3", "-m", "factory_core.model_proxy"]
+  #   environment:
+  #     PYTHONPATH: /opt/dark-factory/scripts
+  #     MODEL_PROXY_PORT: "8787"
+  #   volumes:
+  #     - dark_factory_state:/var/lib/dark-factory
+  #   networks:
+  #     - dark-factory-net
+
 networks:
   dark-factory-net:
     driver: bridge
