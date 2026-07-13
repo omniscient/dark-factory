@@ -111,3 +111,29 @@ def test_classify_verdict_ignores_body_none():
     # rather than crashing the mining pass on one malformed comment.
     comments = [{"body": None}, {"body": "## Spec Conformance — Blocked\n..."}]
     assert sfe.classify_conformance_verdict(comments) == "MATERIAL_BLOCKED"
+
+
+from datetime import datetime, timezone
+
+
+def test_bucket_prs_by_boundary_splits_before_after():
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    prs = [
+        {"number": 1, "mergedAt": "2026-07-10T10:00:00Z"},
+        {"number": 2, "mergedAt": "2026-07-10T14:00:00Z"},
+        {"number": 3, "mergedAt": None},
+    ]
+    buckets = sfe.bucket_prs_by_boundary(prs, boundary)
+    assert [p["number"] for p in buckets["before"]] == [1]
+    assert [p["number"] for p in buckets["after"]] == [2]
+    assert [p["number"] for p in buckets["unmerged"]] == [3]
+
+
+def test_merge_boundary_date_reads_commit_date(monkeypatch, tmp_path):
+    def fake_git(repo_root, *args):
+        assert args[:2] == ("log", "-1")
+        return "2026-07-10T11:57:54-04:00\n"
+
+    monkeypatch.setattr(sfe.fsc, "_git", fake_git)
+    dt = sfe.merge_boundary_date(str(tmp_path), "f72738f8beb3e079335bc4daf9b1da85a198b2ef")
+    assert dt == datetime.fromisoformat("2026-07-10T11:57:54-04:00")

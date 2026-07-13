@@ -181,3 +181,25 @@ def classify_code_review_verdict(comments: list[dict]) -> str:
         if _CODE_REVIEW_BLOCKED_RE.search(c.get("body") or ""):
             return "BLOCKED"
     return "PASS"
+
+
+# ── Before/after-commit boundary bucketing (Tier 1 corroboration + Tier 2) ───
+def merge_boundary_date(repo_root: str, sha: str) -> datetime:
+    out = fsc._git(repo_root, "log", "-1", "--format=%cI", sha).strip()
+    return datetime.fromisoformat(out)
+
+
+def bucket_prs_by_boundary(prs: list[dict], boundary: datetime) -> dict[str, list[dict]]:
+    """Split factory PRs into before/after the boundary commit's merge date, by PR mergedAt.
+    Unmerged PRs (open/closed-without-merge) go to 'unmerged' — excluded from before/after
+    deltas, same denominator convention as fetch_scorecard.build_scorecard's merged_in_window."""
+    buckets: dict[str, list[dict]] = {"before": [], "after": [], "unmerged": []}
+    for pr in prs:
+        merged_at = fsc._dt(pr.get("mergedAt"))
+        if merged_at is None:
+            buckets["unmerged"].append(pr)
+        elif merged_at < boundary:
+            buckets["before"].append(pr)
+        else:
+            buckets["after"].append(pr)
+    return buckets
