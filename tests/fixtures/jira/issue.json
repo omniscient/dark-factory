@@ -1,0 +1,9 @@
+{
+  "key": "PROJ-1",
+  "fields": {
+    "summary": "First ticket",
+    "description": "Ticket body text.",
+    "labels": ["ready-for-agent"],
+    "status": {"name": "Ready"}
+  }
+}

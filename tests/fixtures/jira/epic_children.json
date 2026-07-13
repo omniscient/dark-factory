@@ -1,0 +1,22 @@
+{
+  "issues": [
+    {
+      "key": "PROJ-10",
+      "fields": {
+        "summary": "Child A",
+        "description": "",
+        "labels": ["ready-for-agent"],
+        "status": {"name": "Ready"}
+      }
+    },
+    {
+      "key": "PROJ-11",
+      "fields": {
+        "summary": "Child B",
+        "description": "",
+        "labels": [],
+        "status": {"name": "In progress"}
+      }
+    }
+  ]
+}

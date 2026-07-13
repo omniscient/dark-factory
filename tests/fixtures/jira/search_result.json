@@ -1,0 +1,22 @@
+{
+  "issues": [
+    {
+      "key": "PROJ-1",
+      "fields": {
+        "summary": "First ticket",
+        "description": "Ticket body text.",
+        "labels": ["ready-for-agent"],
+        "status": {"name": "Ready"}
+      }
+    },
+    {
+      "key": "PROJ-2",
+      "fields": {
+        "summary": "Second ticket",
+        "description": "",
+        "labels": [],
+        "status": {"name": "Done"}
+      }
+    }
+  ]
+}

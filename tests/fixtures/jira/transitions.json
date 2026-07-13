@@ -1,0 +1,11 @@
+{
+  "transitions": [
+    {"id": "11", "name": "Move to Backlog", "to": {"id": "1", "name": "Backlog"}},
+    {"id": "21", "name": "Move to Ready", "to": {"id": "2", "name": "Ready"}},
+    {"id": "31", "name": "Start Progress", "to": {"id": "3", "name": "In progress"}},
+    {"id": "41", "name": "Send to Review", "to": {"id": "4", "name": "In review"}},
+    {"id": "51", "name": "Block", "to": {"id": "5", "name": "Blocked"}},
+    {"id": "61", "name": "Resolve", "to": {"id": "6", "name": "Done"}},
+    {"id": "71", "name": "Refine", "to": {"id": "7", "name": "Refined"}}
+  ]
+}
