@@ -157,3 +157,27 @@ DIMENSION_APPLICABILITY: dict[str, dict[str, str]] = {
         "skill_over_under_triggering": "N/A — no model-mediated skill routing",
     },
 }
+
+
+# ── Verdict mining from durable GitHub signals ────────────────────────────────
+_CONFORMANCE_BLOCKED_RE = re.compile(r"^## Spec Conformance — Blocked", re.MULTILINE)
+_CODE_REVIEW_BLOCKED_RE = re.compile(r"^## Code Review — Blocked", re.MULTILINE)
+
+
+def classify_conformance_verdict(comments: list[dict]) -> str:
+    """Conformance is silent on PASS/MINOR (commands/dark-factory-conformance.md Phase 4); the
+    only durable signal is the Phase 5 / plan-Phase-3.5 'Blocked' comment header."""
+    for c in comments:
+        if _CONFORMANCE_BLOCKED_RE.search(c.get("body") or ""):
+            return "MATERIAL_BLOCKED"
+    return "CONFORMS_OR_MINOR"
+
+
+def classify_code_review_verdict(comments: list[dict]) -> str:
+    """code-review posts an inline PR review on any finding but only comments on the issue when
+    BLOCKED (commands/dark-factory-code-review.md Phase 6) — the issue-comment header is the cheap
+    durable signal; PASS-with-advisory is not distinguished from PASS-clean here."""
+    for c in comments:
+        if _CODE_REVIEW_BLOCKED_RE.search(c.get("body") or ""):
+            return "BLOCKED"
+    return "PASS"

@@ -76,3 +76,38 @@ def test_dimension_applicability_implementation_correctness_scenario_specific():
     assert sfe.DIMENSION_APPLICABILITY["continue"]["implementation_correctness"].startswith("measured")
     assert sfe.DIMENSION_APPLICABILITY["refine"]["implementation_correctness"].startswith("N/A")
     assert sfe.DIMENSION_APPLICABILITY["plan_narrative"]["implementation_correctness"].startswith("N/A")
+
+
+def test_classify_conformance_verdict_blocked():
+    comments = [
+        {"body": "some other comment"},
+        {"body": "## Spec Conformance — Blocked\n\nmaterial divergence..."},
+    ]
+    assert sfe.classify_conformance_verdict(comments) == "MATERIAL_BLOCKED"
+
+
+def test_classify_conformance_verdict_plan_variant_blocked():
+    comments = [{"body": "## Spec Conformance — Blocked (Plan)\n\n..."}]
+    assert sfe.classify_conformance_verdict(comments) == "MATERIAL_BLOCKED"
+
+
+def test_classify_conformance_verdict_pass_when_silent():
+    comments = [{"body": "🧠 Refinement Pipeline — Starting"}]
+    assert sfe.classify_conformance_verdict(comments) == "CONFORMS_OR_MINOR"
+
+
+def test_classify_code_review_verdict_blocked():
+    comments = [{"body": "## Code Review — Blocked\n\nThe AI code reviewer found 2 blocking issue(s)"}]
+    assert sfe.classify_code_review_verdict(comments) == "BLOCKED"
+
+
+def test_classify_code_review_verdict_pass_when_silent():
+    comments = [{"body": "unrelated"}]
+    assert sfe.classify_code_review_verdict(comments) == "PASS"
+
+
+def test_classify_verdict_ignores_body_none():
+    # gh's REST comment objects always have a body string, but be defensive against a None value
+    # rather than crashing the mining pass on one malformed comment.
+    comments = [{"body": None}, {"body": "## Spec Conformance — Blocked\n..."}]
+    assert sfe.classify_conformance_verdict(comments) == "MATERIAL_BLOCKED"
