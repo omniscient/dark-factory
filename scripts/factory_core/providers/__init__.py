@@ -35,8 +35,9 @@ def get_codehost():
     return cls()
 
 
-def _missing_env(required: list[str]) -> list[str]:
-    return [f"{var} is not set. Add it to .archon/.env" for var in required if not os.environ.get(var)]
+# Shared with model.py, which defines the canonical implementation to avoid drift
+# between the two preflight paths.
+_missing_env = model._missing
 
 
 def preflight() -> list[str]:
