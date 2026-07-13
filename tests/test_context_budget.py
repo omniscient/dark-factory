@@ -580,3 +580,71 @@ def test_skill_prompts_dropped_when_nothing_resolves(tmp_path, monkeypatch):
     result = cb._probe_skill_prompts(str(clone_dir))
     assert result["status"] == "dropped"
     assert result["reason"] == "container_mounted_not_found"
+
+
+def test_conformance_scenario_labels_skill_prompts_included_on_baked_fallback(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    (baked_dir / "conformance-reviewer-prompt.md").write_text("BAKED conformance content")
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+    # run_dir has no .claude/skills/conformance/RUBRIC.md -> clone-live absent
+
+    result = run_budget(run_dir, "conformance")
+
+    assert result["scenario"] == "conformance"
+    assert result["sections"]["skill_prompts"]["status"] == "included", (
+        "baked-fallback must still report skill_prompts as included, not dropped, for the "
+        "conformance scenario"
+    )
+
+
+def test_conformance_scenario_labels_skill_prompts_included_on_clone_live(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+    skill_dir = run_dir / ".claude" / "skills" / "conformance"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "RUBRIC.md").write_text("CLONE-LIVE conformance content")
+
+    result = run_budget(run_dir, "conformance")
+
+    assert result["scenario"] == "conformance"
+    assert result["sections"]["skill_prompts"]["status"] == "included"
+
+
+def test_code_review_scenario_labels_skill_prompts_included_on_baked_fallback(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    (baked_dir / "code-review-reviewer-prompt.md").write_text("BAKED code-review content")
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+    # run_dir has no .claude/skills/code-review/RUBRIC.md -> clone-live absent
+
+    result = run_budget(run_dir, "code-review")
+
+    assert result["scenario"] == "code-review"
+    assert result["sections"]["skill_prompts"]["status"] == "included", (
+        "baked-fallback must still report skill_prompts as included, not dropped, for the "
+        "code-review scenario"
+    )
+
+
+def test_code_review_scenario_labels_skill_prompts_included_on_clone_live(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    baked_dir = tmp_path / "baked"
+    baked_dir.mkdir()
+    monkeypatch.setattr(cb, "_SKILL_PROMPT_DIR", str(baked_dir))
+    skill_dir = run_dir / ".claude" / "skills" / "code-review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "RUBRIC.md").write_text("CLONE-LIVE code-review content")
+
+    result = run_budget(run_dir, "code-review")
+
+    assert result["scenario"] == "code-review"
+    assert result["sections"]["skill_prompts"]["status"] == "included"
