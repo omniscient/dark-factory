@@ -315,3 +315,88 @@ def mine_cross_repo_verdict_population(
         print(f"[skill-flow-eval] cross-repo population unavailable ({cross_repo}): {e}", file=sys.stderr)
         result["cross_repo"] = "unavailable"
     return result
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+def build_arg_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", default="omniscient/dark-factory")
+    parser.add_argument("--cross-repo", default="omniscient/markethawk")
+    parser.add_argument("--no-cross-repo", action="store_true",
+                         help="skip the cross-repo verdict-rate widening pass (Task 5)")
+    parser.add_argument("--repo-root", default=".")
+    parser.add_argument("--output-dir", default="evals")
+    parser.add_argument("--since", default="2026-05-01")
+    parser.add_argument("--until", default=None)
+    return parser
+
+
+def run(args, write_json: bool = False) -> dict:
+    """Mine the self-target population (required) for all six scenarios, date-windowed and
+    boundary-bucketed, plus the cross-repo verdict-rate widening pass (Task 5) unless
+    --no-cross-repo. Never raises on a missing/unreachable cross-repo population — that source is
+    marked 'unavailable' instead (spec: harness must degrade gracefully)."""
+    since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+    until = (
+        datetime.fromisoformat(args.until).replace(tzinfo=timezone.utc)
+        if args.until
+        else datetime.now(timezone.utc)
+    )
+
+    # fetch_scorecard's fetch_prs()/fetch_issues() read module globals, not an argument —
+    # reassign them exactly as fetch_scorecard.py's own __main__ --repo handling does.
+    fsc.REPO = fsc._OWNER_REPO = args.repo
+    fsc.FACTORY_EMAIL = f"factory@{args.repo.split('/')[-1]}"
+
+    all_prs = fsc.fetch_prs()
+    windowed_prs = [pr for pr in all_prs if fsc.in_window(pr.get("createdAt"), since, until)]
+
+    report: dict = {"repo": args.repo, "since": since.isoformat(), "until": until.isoformat()}
+    for row in SCENARIO_MAP:
+        scenario = row["scenario"]
+        if scenario == "plan_phase_3_5":
+            continue  # folded into conformance's population per spec §6 — no separate key
+        boundary = merge_boundary_date(args.repo_root, row["boundary_sha"])
+        if scenario == "conformance":
+            report[scenario] = mine_conformance_population(args.repo, windowed_prs, boundary)
+        elif scenario == "code_review":
+            report[scenario] = mine_code_review_population(args.repo, windowed_prs, boundary)
+        else:  # tier 2: refine, plan_narrative, continue
+            report[scenario] = mine_label_incidence(windowed_prs, boundary)
+
+    if not args.no_cross_repo:
+        conformance_boundary = merge_boundary_date(
+            args.repo_root, next(r["boundary_sha"] for r in SCENARIO_MAP if r["scenario"] == "conformance")
+        )
+        # Reuse the conformance/code_review populations the loop above already mined for
+        # self_repo — mining them a second time inside mine_cross_repo_verdict_population would
+        # double the gh API calls for no new information (Task 5's precomputed_self_target param
+        # exists exactly for this caller).
+        report["cross_repo_widening"] = mine_cross_repo_verdict_population(
+            args.repo, windowed_prs, args.cross_repo, conformance_boundary,
+            precomputed_self_target={"conformance": report["conformance"], "code_review": report["code_review"]},
+        )
+
+    if write_json:
+        import json
+
+        results_dir = os.path.join(args.output_dir, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        out_path = os.path.join(results_dir, f"skill-flow-population-{args.repo.split('/')[-1]}-{date_str}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"Wrote {out_path}", file=sys.stderr)
+
+    return report
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    run(args, write_json=True)
+
+
+if __name__ == "__main__":
+    main()

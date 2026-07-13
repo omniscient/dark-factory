@@ -240,3 +240,92 @@ def test_mine_cross_repo_population_degrades_gracefully_on_failure(monkeypatch):
 
     assert result["cross_repo"] == "unavailable"
     assert sfe.fsc.REPO == "omniscient/dark-factory"  # restored even on failure
+
+
+def test_build_arg_parser_defaults():
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args([])
+    assert args.repo == "omniscient/dark-factory"
+    assert args.cross_repo == "omniscient/markethawk"
+    assert args.output_dir == "evals"
+
+
+def test_build_arg_parser_overrides():
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args(["--repo", "omniscient/other", "--output-dir", "/tmp/out"])
+    assert args.repo == "omniscient/other"
+    assert args.output_dir == "/tmp/out"
+
+
+def test_run_reassigns_fetch_scorecard_repo_globals_before_fetching(monkeypatch):
+    # Regression guard: run() must reassign fsc.REPO/_OWNER_REPO/FACTORY_EMAIL before
+    # fetch_prs()/fetch_issues() (which read those globals, not a repo argument) — otherwise
+    # --repo silently fetches from fetch_scorecard's own default instead.
+    seen_repo_at_fetch = {}
+
+    def fake_fetch_prs():
+        seen_repo_at_fetch["repo"] = sfe.fsc.REPO
+        seen_repo_at_fetch["owner_repo"] = sfe.fsc._OWNER_REPO
+        return []
+
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", fake_fetch_prs)
+    monkeypatch.setattr(sfe.fsc, "_git", lambda repo_root, *a: "2026-07-10T11:57:54-04:00\n")
+
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args(["--repo", "omniscient/dark-factory", "--no-cross-repo"])
+    sfe.run(args)
+
+    assert seen_repo_at_fetch["repo"] == "omniscient/dark-factory"
+    assert seen_repo_at_fetch["owner_repo"] == "omniscient/dark-factory"
+    assert sfe.fsc.FACTORY_EMAIL == "factory@dark-factory"
+
+
+def test_run_windows_prs_by_created_at(monkeypatch):
+    in_window_prs = [{"number": 1, "createdAt": "2026-07-05T00:00:00Z", "headRefName": "feat/issue-46-x",
+                       "mergedAt": "2026-07-05T00:00:00Z", "state": "MERGED",
+                       "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []}]
+    out_of_window_prs = [{"number": 2, "createdAt": "2026-06-01T00:00:00Z", "headRefName": "feat/issue-47-y",
+                           "mergedAt": "2026-06-01T00:00:00Z", "state": "MERGED",
+                           "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []}]
+
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", lambda: in_window_prs + out_of_window_prs)
+    monkeypatch.setattr(sfe.fsc, "_git", lambda repo_root, *a: "2026-07-01T00:00:00+00:00\n")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": "no findings"}])
+
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args(["--since", "2026-07-01", "--until", "2026-07-10", "--no-cross-repo"])
+    result = sfe.run(args)
+
+    assert result["conformance"]["before"]["n"] + result["conformance"]["after"]["n"] == 1
+
+
+def test_run_includes_all_six_scenarios(monkeypatch):
+    prs = [{"number": 1, "headRefName": "feat/issue-46-x", "createdAt": "2026-07-10T05:00:00Z",
+            "mergedAt": "2026-07-10T05:00:00Z", "state": "MERGED",
+            "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []}]
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", lambda: prs)
+    monkeypatch.setattr(sfe.fsc, "_git", lambda repo_root, *a: "2026-07-01T00:00:00+00:00\n")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": "no findings"}])
+
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args(["--since", "2026-07-01", "--no-cross-repo"])
+    result = sfe.run(args)
+
+    for scenario in ("refine", "plan_narrative", "continue", "conformance", "code_review"):
+        assert scenario in result
+    # plan_phase_3_5 shares conformance's population per spec §6 — no separate top-level key.
+    assert "plan_phase_3_5" not in result
+
+
+def test_run_writes_results_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", lambda: [])
+    monkeypatch.setattr(sfe.fsc, "_git", lambda repo_root, *a: "2026-07-01T00:00:00+00:00\n")
+
+    parser = sfe.build_arg_parser()
+    args = parser.parse_args(["--output-dir", str(tmp_path), "--no-cross-repo"])
+    sfe.run(args, write_json=True)
+
+    written = list((tmp_path / "results").glob("skill-flow-population-*.json"))
+    assert len(written) == 1
