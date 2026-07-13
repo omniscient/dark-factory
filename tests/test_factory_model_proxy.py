@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -146,3 +148,41 @@ def test_post_seq_ledger_is_nonfatal(monkeypatch):
         request_bytes=0, largest_tools=[], streamed=False,
     )
     mp.post_seq_ledger(row)  # must not raise
+
+
+def test_write_raw_artifact_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", False)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", tmp_path)
+    mp.write_raw_artifact("run1", 1, {"foo": "bar"})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_raw_artifact_enabled_writes_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", tmp_path)
+    mp.write_raw_artifact("run1", 1, {"foo": "bar"})
+    out = tmp_path / "run1" / "1.json"
+    assert out.exists()
+    assert json.loads(out.read_text()) == {"foo": "bar"}
+
+
+def test_sweep_raw_artifacts_removes_stale_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", tmp_path)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_RETENTION_DAYS", 7)
+
+    stale_dir = tmp_path / "old-run"
+    stale_dir.mkdir()
+    stale_file = stale_dir / "1.json"
+    stale_file.write_text("{}")
+    old_time = time.time() - (8 * 86400)
+    os.utime(stale_file, (old_time, old_time))
+    os.utime(stale_dir, (old_time, old_time))
+
+    fresh_dir = tmp_path / "new-run"
+    fresh_dir.mkdir()
+    (fresh_dir / "1.json").write_text("{}")
+
+    mp.sweep_raw_artifacts()
+
+    assert not stale_dir.exists()
+    assert fresh_dir.exists()

@@ -169,3 +169,27 @@ def post_seq_ledger(row: dict) -> None:
             resp.read()
     except Exception:
         pass  # non-fatal: ledger file was already written
+
+
+def write_raw_artifact(run_id: str, seq: int, payload: dict) -> None:
+    if not RAW_ARTIFACT_CAPTURE:
+        return
+    run_dir = RAW_ARTIFACT_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / f"{seq}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def sweep_raw_artifacts() -> None:
+    if not RAW_ARTIFACT_DIR.exists():
+        return
+    cutoff = time.time() - (RAW_ARTIFACT_RETENTION_DAYS * 86400)
+    for run_dir in RAW_ARTIFACT_DIR.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            if run_dir.stat().st_mtime < cutoff:
+                for f in run_dir.iterdir():
+                    f.unlink()
+                run_dir.rmdir()
+        except OSError:
+            continue  # best-effort — a sweep failure must never crash the proxy
