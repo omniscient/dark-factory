@@ -189,3 +189,54 @@ def test_mine_label_incidence_counts_regression_and_needs_discussion(monkeypatch
 
     assert result["before"] == {"n": 1, "factory_regression": 1, "scope_spillover": 0, "needs_discussion": 0}
     assert result["after"] == {"n": 2, "factory_regression": 0, "scope_spillover": 1, "needs_discussion": 1}
+
+
+def test_mine_cross_repo_population_widens_conformance(monkeypatch):
+    dfx_prs = [{"number": 1, "headRefName": "feat/issue-46-x", "mergedAt": "2026-07-10T18:00:00Z", "state": "MERGED", "commits": [{"authors": [{"email": "factory@dark-factory"}]}], "labels": []}]
+    mh_prs = [{"number": 5, "headRefName": "feat/issue-9-y", "mergedAt": "2026-07-10T19:00:00Z", "state": "MERGED", "commits": [{"authors": [{"email": "factory@markethawk"}]}], "labels": []}]
+
+    def fake_fetch_prs():
+        return mh_prs if sfe.fsc.REPO == "omniscient/markethawk" else dfx_prs
+
+    # Self-target arm: is_factory_pr reads fsc.FACTORY_EMAIL at call time, and
+    # mine_cross_repo_verdict_population's self_target mining runs with whatever email is
+    # ambient *before* the cross-repo reassignment — set it explicitly per the hermetic-test
+    # convention tests/test_fetch_scorecard.py's own header documents (never depend on ambient env).
+    # tests/conftest.py scrubs every FACTORY_* env var before any test imports, so fsc.REPO
+    # otherwise defaults to fetch_scorecard's own "omniscient/markethawk" default (not
+    # dark-factory) — set both explicitly so the "restored after" assertion below is meaningful.
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe.fsc, "REPO", "omniscient/dark-factory")
+    monkeypatch.setattr(sfe.fsc, "_OWNER_REPO", "omniscient/dark-factory")
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", fake_fetch_prs)
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": "no findings"}])
+
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    result = sfe.mine_cross_repo_verdict_population(
+        "omniscient/dark-factory", dfx_prs, "omniscient/markethawk", boundary
+    )
+
+    assert result["self_target"]["conformance"]["after"]["n"] == 1
+    assert result["cross_repo"]["conformance"]["after"]["n"] == 1
+    assert sfe.fsc.REPO == "omniscient/dark-factory"  # restored after the cross-repo fetch
+
+
+def test_mine_cross_repo_population_degrades_gracefully_on_failure(monkeypatch):
+    dfx_prs = []
+
+    def raising_fetch_prs():
+        if sfe.fsc.REPO == "omniscient/markethawk":
+            raise RuntimeError("gh: no credentials for omniscient/markethawk")
+        return dfx_prs
+
+    monkeypatch.setattr(sfe.fsc, "REPO", "omniscient/dark-factory")
+    monkeypatch.setattr(sfe.fsc, "_OWNER_REPO", "omniscient/dark-factory")
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", raising_fetch_prs)
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    result = sfe.mine_cross_repo_verdict_population(
+        "omniscient/dark-factory", dfx_prs, "omniscient/markethawk", boundary
+    )
+
+    assert result["cross_repo"] == "unavailable"
+    assert sfe.fsc.REPO == "omniscient/dark-factory"  # restored even on failure

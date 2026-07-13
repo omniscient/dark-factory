@@ -272,3 +272,46 @@ def mine_label_incidence(prs: list[dict], boundary: datetime) -> dict:
         "before": _label_counts(buckets["before"]),
         "after": _label_counts(buckets["after"]),
     }
+
+
+# ── Cross-repo verdict-rate widening (issue #48, spec Requirement #3) ────────
+def _mine_verdict_population(repo: str, boundary: datetime) -> dict:
+    """Fetch + mine one repo's conformance/code-review verdict-rate population. Reassigns
+    fsc.REPO/_OWNER_REPO/FACTORY_EMAIL for the duration of the fetch, exactly as
+    fetch_scorecard.py's own --repo handling does, then restores them — callers must not see a
+    changed fsc.REPO after this returns, win or lose."""
+    prev_repo, prev_owner_repo, prev_email = fsc.REPO, fsc._OWNER_REPO, fsc.FACTORY_EMAIL
+    try:
+        fsc.REPO = fsc._OWNER_REPO = repo
+        fsc.FACTORY_EMAIL = f"factory@{repo.split('/')[-1]}"
+        prs = fsc.fetch_prs()
+        return {
+            "conformance": mine_conformance_population(repo, prs, boundary),
+            "code_review": mine_code_review_population(repo, prs, boundary),
+        }
+    finally:
+        fsc.REPO, fsc._OWNER_REPO, fsc.FACTORY_EMAIL = prev_repo, prev_owner_repo, prev_email
+
+
+def mine_cross_repo_verdict_population(
+    self_repo: str, self_prs: list[dict], cross_repo: str, boundary: datetime,
+    precomputed_self_target: dict | None = None,
+) -> dict:
+    """self_target is required (always reachable — we run inside self_repo); cross_repo widens the
+    verdict-rate sample for quantitative volume and degrades to 'unavailable' rather than raising
+    if the second repo can't be reached (spec Assumptions: harness must not crash on an
+    unreachable target population). precomputed_self_target lets a caller that already mined the
+    self-target population (e.g. run()'s per-scenario loop) pass it in rather than mining it a
+    second time here."""
+    result: dict = {
+        "self_target": precomputed_self_target or {
+            "conformance": mine_conformance_population(self_repo, self_prs, boundary),
+            "code_review": mine_code_review_population(self_repo, self_prs, boundary),
+        }
+    }
+    try:
+        result["cross_repo"] = _mine_verdict_population(cross_repo, boundary)
+    except Exception as e:
+        print(f"[skill-flow-eval] cross-repo population unavailable ({cross_repo}): {e}", file=sys.stderr)
+        result["cross_repo"] = "unavailable"
+    return result
