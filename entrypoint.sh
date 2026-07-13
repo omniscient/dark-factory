@@ -87,6 +87,27 @@ ARTIFACTS_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs/${
 export ARTIFACTS_DIR
 mkdir -p "$ARTIFACTS_DIR"
 
+# --- Model-proxy correlation pointer (best-effort; consumed by factory-model-proxy
+# when FACTORY_MODEL_PROXY_ENABLED — see model_proxy.py's read_current_run()). Written
+# unconditionally and cheaply; the proxy is a no-op reader when disabled.
+#
+# RUN_STAGE: single-phase intents (refine/plan/deconflict/close/fix-main/recheck) map
+# 1:1 to the phase the whole container run performs, so the ledger can attribute every
+# request in the run to that exact stage. Multi-phase intents (fix/continue traverse
+# implement -> conformance -> code-review -> merge inside one container run) cannot be
+# placed this way — investigated during planning: neither `archon workflow get --json`
+# nor `archon workflow runs --json` expose per-node/per-step timestamps for this
+# workflow's node style, so "unknown" is the honest, investigated answer for those two
+# intents, not an assumption. ---
+case "${INTENT:-unknown}" in
+  refine|plan|deconflict|close|fix-main|recheck) RUN_STAGE="${INTENT}" ;;
+  *) RUN_STAGE="unknown" ;;
+esac
+mkdir -p /var/lib/dark-factory 2>/dev/null || true
+printf '{"run_id":"%s","issue_number":%s,"intent":"%s","stage":"%s","started_at":"%s"}\n' \
+  "$RUN_ID" "${ISSUE_NUM:-0}" "${INTENT:-unknown}" "$RUN_STAGE" "$RUN_STARTED_AT" \
+  > /var/lib/dark-factory/current-run.json 2>/dev/null || true
+
 # --- Concurrency guard: cap factory containers at FACTORY_WIP_LIMIT ---
 # RUNNING counts OTHER run containers (self excluded), so at-capacity is
 # RUNNING >= limit. Must stay in sync with the scheduler's capacity guard —
