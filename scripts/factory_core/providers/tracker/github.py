@@ -43,6 +43,10 @@ _BOARD_ITEMS_QUERY_TEMPLATE = '''
 
 
 class GitHubTracker(Tracker):
+    @classmethod
+    def required_env(cls) -> list[str]:
+        return ["GH_TOKEN"]
+
     def get_item(self, id: str, fields: tuple | None = None) -> dict:
         fields = fields or _DEFAULT_GET_ITEM_FIELDS
         r = subprocess.run(

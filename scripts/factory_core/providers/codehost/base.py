@@ -54,3 +54,8 @@ class CodeHost(ABC):
     def close_keyword(self, issue_id: str) -> str:
         """Body snippet that auto-closes issue_id on merge — only meaningful when
         tracker == code host (parent spec §6.4); '' otherwise."""
+
+    @classmethod
+    def required_env(cls) -> list[str]:
+        """Env vars this adapter needs present at boot. Degradable: [] by default."""
+        return []

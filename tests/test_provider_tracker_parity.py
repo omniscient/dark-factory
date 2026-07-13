@@ -258,6 +258,10 @@ def test_get_rate_budget_raises_on_gh_failure(monkeypatch):
         GitHubTracker().get_rate_budget()
 
 
+def test_required_env_returns_gh_token():
+    assert GitHubTracker.required_env() == ["GH_TOKEN"]
+
+
 _TRACKER_ID_CASES = ["42", "PROJ-123"]
 
 

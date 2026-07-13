@@ -37,3 +37,4 @@ def test_tracker_degradable_ops_have_safe_defaults():
     bare = _Bare()
     assert bare.get_status_limits() == {}
     assert bare.get_rate_budget() == {"remaining": None, "reset": None, "used": None, "limit": None}
+    assert _Bare.required_env() == []

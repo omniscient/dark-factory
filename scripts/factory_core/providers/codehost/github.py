@@ -13,6 +13,10 @@ from factory_core.providers.codehost.base import CodeHost
 
 
 class GitHubCodeHost(CodeHost):
+    @classmethod
+    def required_env(cls) -> list[str]:
+        return ["GH_TOKEN"]
+
     def remote_url(self) -> str:
         token = os.environ.get("GH_TOKEN", "")
         return f"https://{token}@github.com/{identity.SLUG}.git"

@@ -57,3 +57,8 @@ class Tracker(ABC):
     def get_rate_budget(self) -> dict:
         """Throttle signal for the poll loop. Degradable: safe default is 'unknown'."""
         return {"remaining": None, "reset": None, "used": None, "limit": None}
+
+    @classmethod
+    def required_env(cls) -> list[str]:
+        """Env vars this adapter needs present at boot. Degradable: [] by default."""
+        return []
