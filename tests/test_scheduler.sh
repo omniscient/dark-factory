@@ -40,9 +40,6 @@ export SCHEDULER_STATE_DIR
 STATE_FILE=$(mktemp /tmp/sched-test-state-XXXXXX.json)
 echo '{}' > "$STATE_FILE"
 export STATE_FILE
-# Stub credentials to satisfy the validation block (which runs before SCHEDULER_SOURCE_ONLY guard)
-export GH_TOKEN="${GH_TOKEN:-stub-token}"
-export CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-stub-token}"
 # Set all config-driven vars explicitly: read_config runs after SCHEDULER_SOURCE_ONLY guard
 # so these values won't be populated by config.yaml during test sourcing.
 export POLL_INTERVAL=60
@@ -60,6 +57,10 @@ export DISPATCH_CEILING_ENABLED=true
 export ABOVE_CEILING_LABEL=above-ceiling
 export ABOVE_CEILING_KEYWORDS="migration|migrate|performance|perf|architectur|refactor"
 SCHEDULER_SOURCE_ONLY=1 source "$SCHED"
+# Preserve the sourcing-time log: every section below truncates $STUB_LOG for its own
+# assertions, so the one-time preflight call made during sourcing (before the
+# SCHEDULER_SOURCE_ONLY guard) would otherwise be gone by the time section P checks it.
+SOURCE_TIME_LOG=$(cat "$STUB_LOG")
 
 # Re-stub set_board_status — scheduler.sh defines its own, overriding the export above
 set_board_status() { echo "set_board_status $*" >> "$STUB_LOG"; return 0; }
@@ -961,6 +962,40 @@ assert_eq "fetch_board_items requests the cursor page" "1" "$(grep -c 'after: "C
 
 gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
 export -f gh
+
+# ==========================================
+# P: Provider preflight gate (#250)
+# ==========================================
+echo ""
+echo "--- P: Provider preflight gate ---"
+
+assert_eq "sourcing calls providers preflight before the poll loop" \
+  "1" "$(echo "$SOURCE_TIME_LOG" | grep -c 'providers/cli.py preflight' || echo 0)"
+
+# Isolated subshell (must not run in-process — a preflight failure trips
+# `set -e` inside scheduler.sh, which would kill this test runner if sourced
+# directly): stub python3 to fail the preflight call and confirm sourcing
+# aborts non-zero, matching the legacy inline `exit 1` behavior.
+set +e
+PREFLIGHT_FAIL_OUT=$(bash -c '
+  set -uo pipefail
+  python3() {
+    case "$*" in
+      *providers/cli.py\ preflight*) echo "ERROR: GH_TOKEN is not set. Add it to .archon/.env" >&2; return 1 ;;
+      *) command python3 "$@" ;;
+    esac
+  }
+  export -f python3
+  export SCHEDULER_STATE_DIR=$(mktemp -d /tmp/sched-test-statedir-XXXXXX)
+  SCHEDULER_SOURCE_ONLY=1 source "'"$SCHED"'"
+  echo "SHOULD_NOT_REACH_HERE"
+' 2>&1)
+PREFLIGHT_FAIL_EXIT=$?
+set -e
+assert_eq "preflight failure aborts sourcing (non-zero exit)" \
+  "1" "$([ "$PREFLIGHT_FAIL_EXIT" -ne 0 ] && echo 1 || echo 0)"
+assert_eq "preflight failure never reaches past validation" \
+  "0" "$(echo "$PREFLIGHT_FAIL_OUT" | grep -c 'SHOULD_NOT_REACH_HERE')"
 
 # ==========================================
 # Cleanup
