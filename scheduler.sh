@@ -451,8 +451,12 @@ has_new_comment_after_report() {
 dispatch() {
   local command="$1"
   local exit_code=0
+  local -a profile_flags=(--profile factory)
+  if [ "${FACTORY_MODEL_PROXY_ENABLED:-false}" = "true" ]; then
+    profile_flags+=(--profile factory-model-proxy)
+  fi
   echo "[$(date -u +%FT%TZ)] dispatch command=\"${command}\""
-  docker compose -f /opt/dark-factory/docker-compose.yml --profile factory run \
+  docker compose -f /opt/dark-factory/docker-compose.yml "${profile_flags[@]}" run \
     -d --rm dark-factory "$command" || exit_code=$?
   if [ "$exit_code" -ne 0 ]; then
     echo "[$(date -u +%FT%TZ)] dispatch_error command=\"${command}\" exit=${exit_code}" >&2

@@ -155,6 +155,28 @@ docker() { echo "docker $*" >> "$STUB_LOG"; return 0; }
 export -f docker
 
 # ==========================================
+# C2: dispatch() adds --profile factory-model-proxy only when the flag is set (#208)
+# ==========================================
+echo ""
+echo "--- C2: dispatch() model-proxy profile flag ---"
+> "$STUB_LOG"
+
+docker() { echo "docker $*" >> "$STUB_LOG"; return 0; }
+export -f docker
+
+unset FACTORY_MODEL_PROXY_ENABLED
+dispatch "Fix issue #2"
+assert_eq "profile flag absent when FACTORY_MODEL_PROXY_ENABLED unset" \
+  "0" "$(grep -c -- '--profile factory-model-proxy' "$STUB_LOG" || true)"
+
+> "$STUB_LOG"
+export FACTORY_MODEL_PROXY_ENABLED=true
+dispatch "Fix issue #2"
+assert_eq "profile flag present when FACTORY_MODEL_PROXY_ENABLED=true" \
+  "1" "$(grep -c -- '--profile factory-model-proxy' "$STUB_LOG" || true)"
+unset FACTORY_MODEL_PROXY_ENABLED
+
+# ==========================================
 # D: Opt-in label gate (fails until Task 8)
 # ==========================================
 echo ""
