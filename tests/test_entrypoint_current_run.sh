@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test: entrypoint.sh writes /var/lib/dark-factory/current-run.json after RUN_ID
+# Test: entrypoint.sh writes $CURRENT_RUN_DIR/current-run.json after RUN_ID
 # generation, for factory-model-proxy correlation (issue #208).
 set -uo pipefail
 
@@ -26,13 +26,11 @@ export -f docker
 SCRATCH_STATE=$(mktemp -d /tmp/208-state-XXXXXX)
 mkdir -p "$SCRATCH_STATE"
 
-# entrypoint.sh hardcodes /var/lib/dark-factory for this write (matches the
-# shared-volume convention used by runs.jsonl / the main-red sentinel), so this
-# test asserts against that path directly and cleans it up afterward — it does
-# not create the dir if absent, and removes only the file it wrote.
-PRE_EXISTED=0
-[ -f /var/lib/dark-factory/current-run.json ] && PRE_EXISTED=1
-[ "$PRE_EXISTED" = "1" ] && cp /var/lib/dark-factory/current-run.json /tmp/208-backup.json
+# entrypoint.sh honors CURRENT_RUN_DIR (default /var/lib/dark-factory, which is
+# unwritable on CI runners) for the current-run.json write — point it at a
+# scratch dir so this test never touches the real shared path.
+CURRENT_RUN_DIR=$(mktemp -d /tmp/208-run-XXXXXX)
+export CURRENT_RUN_DIR
 
 ARTIFACTS_DIR=$(mktemp -d /tmp/208-artifacts-XXXXXX)
 export ARTIFACTS_DIR
@@ -44,7 +42,7 @@ assert_true() {
   else echo "  FAIL: $desc" >&2; FAILED=$((FAILED + 1)); fi
 }
 stage_of() {
-  python3 -c "import json; print(json.load(open('/var/lib/dark-factory/current-run.json')).get('stage','missing'))" 2>/dev/null
+  python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('stage','missing'))" 2>/dev/null
 }
 
 echo "=== #208: entrypoint writes current-run.json ==="
@@ -58,12 +56,12 @@ ENTRYPOINT_SOURCE_ONLY=1 ARGUMENTS="Plan issue #208" \
 trap - ERR
 set +e; set +u; set +o pipefail
 
-assert_true "current-run.json exists" "[ -f /var/lib/dark-factory/current-run.json ]"
+assert_true "current-run.json exists" "[ -f '$CURRENT_RUN_DIR/current-run.json' ]"
 
-ISSUE_FIELD=$(python3 -c "import json; print(json.load(open('/var/lib/dark-factory/current-run.json')).get('issue_number','missing'))" 2>/dev/null)
+ISSUE_FIELD=$(python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('issue_number','missing'))" 2>/dev/null)
 assert_true "issue_number is 208" "[ '$ISSUE_FIELD' = '208' ]"
 
-RUN_ID_FIELD=$(python3 -c "import json; print(json.load(open('/var/lib/dark-factory/current-run.json')).get('run_id','missing'))" 2>/dev/null)
+RUN_ID_FIELD=$(python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('run_id','missing'))" 2>/dev/null)
 assert_true "run_id is non-empty" "[ -n '$RUN_ID_FIELD' ] && [ '$RUN_ID_FIELD' != 'missing' ]"
 
 STAGE_FIELD=$(stage_of)
@@ -84,14 +82,8 @@ set +e; set +u; set +o pipefail
 STAGE_FIELD=$(stage_of)
 assert_true "multi-phase intent 'fix' -> stage='unknown'" "[ '$STAGE_FIELD' = 'unknown' ]"
 
-# Cleanup — restore prior state instead of leaving the scratch write behind
-if [ "$PRE_EXISTED" = "1" ]; then
-  cp /tmp/208-backup.json /var/lib/dark-factory/current-run.json
-  rm -f /tmp/208-backup.json
-else
-  rm -f /var/lib/dark-factory/current-run.json
-fi
-rm -rf "$ARTIFACTS_DIR" "$SCRATCH_STATE"
+# Cleanup — nothing outside scratch dirs was ever touched
+rm -rf "$ARTIFACTS_DIR" "$SCRATCH_STATE" "$CURRENT_RUN_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"

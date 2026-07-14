@@ -23,7 +23,8 @@ LEDGER_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
 )
 CURRENT_RUN_PATH = pathlib.Path(
-    os.environ.get("MODEL_PROXY_CURRENT_RUN_PATH", "/var/lib/dark-factory/current-run.json")
+    os.environ.get("MODEL_PROXY_CURRENT_RUN_PATH")
+    or f"{os.environ.get('CURRENT_RUN_DIR', '/var/lib/dark-factory')}/current-run.json"
 )
 RAW_ARTIFACT_DIR = pathlib.Path(
     os.environ.get("RAW_ARTIFACT_DIR", "/var/lib/dark-factory/request-artifacts")

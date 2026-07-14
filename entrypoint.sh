@@ -111,10 +111,11 @@ case "${INTENT:-unknown}" in
   refine|plan|deconflict|close|fix-main|recheck) RUN_STAGE="${INTENT}" ;;
   *) RUN_STAGE="unknown" ;;
 esac
-mkdir -p /var/lib/dark-factory 2>/dev/null || true
+CURRENT_RUN_DIR="${CURRENT_RUN_DIR:-/var/lib/dark-factory}"
+mkdir -p "$CURRENT_RUN_DIR" 2>/dev/null || true
 printf '{"run_id":"%s","issue_number":%s,"intent":"%s","stage":"%s","started_at":"%s"}\n' \
   "$RUN_ID" "${ISSUE_NUM:-0}" "${INTENT:-unknown}" "$RUN_STAGE" "$RUN_STARTED_AT" \
-  > /var/lib/dark-factory/current-run.json 2>/dev/null || true
+  > "$CURRENT_RUN_DIR/current-run.json" 2>/dev/null || true
 
 # --- Concurrency guard: cap factory containers at FACTORY_WIP_LIMIT ---
 # RUNNING counts OTHER run containers (self excluded), so at-capacity is
