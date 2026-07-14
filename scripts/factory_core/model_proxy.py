@@ -8,6 +8,7 @@ docs/superpowers/specs/2026-07-11-transparent-model-proxy-design.md.
 """
 import asyncio
 import fcntl
+import gzip
 import json
 import os
 import pathlib
@@ -15,6 +16,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 
 import aiohttp
@@ -304,12 +306,26 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         return web.json_response(error_body, status=504)
 
     duration_ms = int((time.monotonic() - start) * 1000)
+    # The session runs auto_decompress=False (see _startup), so usage_scan holds raw
+    # wire bytes — decompress a local copy for usage parsing and raw artifacts; the
+    # client already received the untouched compressed stream.
+    scan_bytes = bytes(usage_scan)
+    encoding = upstream_resp.headers.get("Content-Encoding", "").lower()
+    if encoding in ("gzip", "deflate"):
+        try:
+            scan_bytes = (
+                gzip.decompress(scan_bytes)
+                if encoding == "gzip"
+                else zlib.decompress(scan_bytes)
+            )
+        except (OSError, zlib.error):
+            pass  # ledger falls back to zero-usage rather than failing the request
     is_streamed = "text/event-stream" in upstream_resp.headers.get("Content-Type", "")
     if is_streamed:
-        usage = _extract_usage_from_bytes(bytes(usage_scan))
+        usage = _extract_usage_from_bytes(scan_bytes)
     else:
         try:
-            usage = json.loads(bytes(usage_scan)).get("usage", {})
+            usage = json.loads(scan_bytes).get("usage", {})
             usage = {
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
@@ -339,11 +355,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 "request_body": body_bytes.decode("utf-8", errors="replace"),
                 "response_status": upstream_resp.status,
                 "response_headers": redact_headers(dict(upstream_resp.headers)),
-                # usage_scan already holds the full forwarded response bytes (it was
-                # populated alongside response.write(chunk) above, at no extra upstream
-                # cost) — requirement 6 asks for request/response artifacts, so persist
-                # both sides, not request-only.
-                "response_body": bytes(usage_scan).decode("utf-8", errors="replace"),
+                # scan_bytes holds the full forwarded response (decompressed locally when
+                # the upstream was gzip/deflate; the client got the raw wire bytes) —
+                # requirement 6 asks for request/response artifacts, so persist both
+                # sides, not request-only.
+                "response_body": scan_bytes.decode("utf-8", errors="replace"),
             },
         )
     return response
@@ -358,7 +374,11 @@ def create_app() -> web.Application:
         # Must be built here, not in create_app() itself: create_app() runs
         # synchronously in main() before web.run_app() creates and starts its
         # own event loop, so a session built eagerly binds to the wrong loop.
-        app["client_session"] = aiohttp.ClientSession()
+        # auto_decompress=False: upstream headers (Content-Encoding/Content-Length)
+        # are forwarded verbatim, so the body must stay the raw wire bytes too —
+        # otherwise compressed non-streaming responses reach the client as
+        # plaintext under a gzip header with the compressed length.
+        app["client_session"] = aiohttp.ClientSession(auto_decompress=False)
 
     async def _cleanup(app):
         if app["client_session"] is not None:

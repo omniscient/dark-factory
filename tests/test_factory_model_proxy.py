@@ -388,3 +388,66 @@ def test_proxy_fails_closed_on_upstream_unreachable(tmp_path, monkeypatch):
     lines = (tmp_path / "ledger.jsonl").read_text().strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["status"] in (502, 504)
+
+
+def test_proxy_passes_gzip_response_through_untouched_and_still_ledgers_usage(
+    tmp_path, monkeypatch
+):
+    """Regression for the auto_decompress finding on PR #270: a gzip upstream
+    response must reach the client as the raw compressed bytes with its
+    Content-Encoding header intact (no plaintext-under-gzip-header mismatch),
+    while the ledger still extracts usage tokens from a locally decompressed
+    scan copy."""
+    import gzip as _gzip
+
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+
+    payload = json.dumps(
+        {"usage": {"input_tokens": 42, "output_tokens": 7}}
+    ).encode()
+    compressed = _gzip.compress(payload)
+
+    async def upstream_handler(request):
+        return web.Response(
+            body=compressed,
+            status=200,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+            },
+        )
+
+    async def scenario():
+        upstream = await _make_upstream(upstream_handler)
+        monkeypatch.setattr(mp, "UPSTREAM", f"http://{upstream.host}:{upstream.port}")
+        app = mp.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        # auto_decompress=False on the test client: we want to assert on the raw
+        # wire bytes the proxy actually sent, not on aiohttp's client-side inflate.
+        raw_session = aiohttp.ClientSession(auto_decompress=False)
+        try:
+            url = client.make_url("/v1/messages")
+            async with raw_session.post(
+                url, json={"model": "claude-sonnet-4-6-20251101", "messages": []}
+            ) as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Content-Encoding") == "gzip"
+                body = await resp.read()
+                assert body == compressed, "proxy must forward raw wire bytes"
+                assert json.loads(_gzip.decompress(body))["usage"]["input_tokens"] == 42
+        finally:
+            await raw_session.close()
+        ledger_path = tmp_path / "ledger.jsonl"
+        await _wait_for(lambda: ledger_path.exists() and ledger_path.stat().st_size > 0)
+        await client.close()
+        await upstream.close()
+
+    _run(scenario())
+
+    row = json.loads((tmp_path / "ledger.jsonl").read_text().strip().splitlines()[0])
+    assert row["status"] == 200
+    assert row["gen_ai.usage.input_tokens"] == 42
+    assert row["gen_ai.usage.output_tokens"] == 7
