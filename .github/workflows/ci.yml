@@ -9,13 +9,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install pytest pyyaml
+      - run: pip install pytest pyyaml aiohttp
       - run: python -m pytest tests/ -v
         env: { PYTHONPATH: scripts }
       - run: bash tests/test_identity.sh
       - run: bash tests/test_hooks.sh
       - run: bash tests/test_smoke_gate.sh
       - run: bash tests/test_run_compose.sh
+      - run: bash tests/test_model_proxy_compose.sh
+      - run: bash tests/test_model_proxy_smoke.sh
+      - run: bash tests/test_entrypoint_current_run.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:
