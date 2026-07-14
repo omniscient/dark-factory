@@ -291,3 +291,4 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [`docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md) — Claude Skills rollout-status runbook: per-scenario advisory state and rollback steps
 - [`config/config.yaml`](config/config.yaml) — all policy knobs with inline documentation
 - [`bench/baseline.md`](bench/baseline.md) — replay benchmark task manifest and scoring formula
+- [`docs/adapter-authoring-guide.md`](docs/adapter-authoring-guide.md) — how to write a tracker, code-host, or model-endpoint adapter
