@@ -10,8 +10,9 @@ import os
 from factory_core.providers import model
 from factory_core.providers.codehost.github import GitHubCodeHost
 from factory_core.providers.tracker.github import GitHubTracker
+from factory_core.providers.tracker.jira import JiraTracker
 
-_TRACKERS = {"github": GitHubTracker}    # extended by later tickets (jira, ...)
+_TRACKERS = {"github": GitHubTracker, "jira": JiraTracker}
 _CODEHOSTS = {"github": GitHubCodeHost}  # extended by later tickets (gitlab, ...)
 
 

@@ -1020,6 +1020,32 @@ assert_eq "preflight failure never reaches past validation" \
   "0" "$(echo "$PREFLIGHT_FAIL_OUT" | grep -c 'SHOULD_NOT_REACH_HERE')"
 
 # ==========================================
+# Q: get_items_by_status case-insensitive matching (#275)
+# ==========================================
+echo ""
+echo "--- Q: get_items_by_status case-insensitive matching ---"
+
+_Q_FIXTURE='{"items":[
+  {"status":"In Review","content":{"number":501,"title":"review item","type":"Issue"}},
+  {"status":"In Progress","content":{"number":502,"title":"progress item","type":"Issue"}}
+]}'
+
+_Q_IN_REVIEW=$(get_items_by_status "$_Q_FIXTURE" "In review")
+assert_eq "Q1: get_items_by_status: call-site 'In review' matches board's 'In Review'" \
+  "1" "$(echo "$_Q_IN_REVIEW" | jq 'length')"
+
+_Q_IN_PROGRESS=$(get_items_by_status "$_Q_FIXTURE" "In progress")
+assert_eq "Q2: get_items_by_status: call-site 'In progress' matches board's 'In Progress'" \
+  "1" "$(echo "$_Q_IN_PROGRESS" | jq 'length')"
+
+export -f get_items_by_status
+_Q_FIXTURE_NULL='{"items":[{"status":null,"content":{"number":503,"title":"unassigned item","type":"Issue"}}]}'
+_Q_NULL_OUT=$(bash -c 'set -euo pipefail; get_items_by_status "$1" "$2"' _ "$_Q_FIXTURE_NULL" "In review" 2>&1)
+_Q_NULL_EXIT=$?
+assert_eq "Q3: get_items_by_status: null status does not raise under set -e" "0" "$_Q_NULL_EXIT"
+assert_eq "Q4: get_items_by_status: null status excluded from bucket" "0" "$(echo "$_Q_NULL_OUT" | jq 'length')"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
