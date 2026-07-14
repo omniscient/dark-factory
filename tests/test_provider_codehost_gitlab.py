@@ -72,3 +72,33 @@ def test_validate_change_id_rejects_non_string():
 
     with pytest.raises(ValueError):
         _validate_change_id(42)
+
+
+@pytest.mark.parametrize("method_name,args", [
+    ("update_change_body", ("group/project!42", "body")),
+    ("mark_ready", ("group/project!42",)),
+    ("merge_change", ("group/project!42",)),
+    ("get_change_checks", ("group/project!42",)),
+    ("get_change_mergeable", ("group/project!42",)),
+    ("get_change_reviews", ("group/project!42",)),
+    ("get_change_inline_comments", ("group/project!42",)),
+])
+def test_id_taking_http_methods_raise_not_implemented_on_opaque_id(method_name, args):
+    from factory_core.providers.codehost.gitlab import GitLabCodeHost
+
+    with pytest.raises(NotImplementedError):
+        getattr(GitLabCodeHost(), method_name)(*args)
+
+
+def test_find_change_for_raises_not_implemented():
+    from factory_core.providers.codehost.gitlab import GitLabCodeHost
+
+    with pytest.raises(NotImplementedError):
+        GitLabCodeHost().find_change_for("feat/issue-1-x")
+
+
+def test_open_change_raises_not_implemented():
+    from factory_core.providers.codehost.gitlab import GitLabCodeHost
+
+    with pytest.raises(NotImplementedError):
+        GitLabCodeHost().open_change(None, None, "title", "body", draft=True)
