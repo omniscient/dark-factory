@@ -36,6 +36,11 @@ def parse_structured_reset_epoch(text: str) -> Optional[int]:
         resets_at = event.get("resetsAt")
         if not resets_at:
             continue
+        # Handle an epoch (int/float, seconds since epoch) resetsAt in addition to the
+        # documented ISO-8601 string, so a differently-shaped payload doesn't silently
+        # no-op the structured path and fall back to the 30-min default (#35 review).
+        if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+            return int(resets_at)
         try:
             dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
         except ValueError:

@@ -948,6 +948,29 @@ This issue was left in **In progress** with no running factory container — the
 *Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
   done < <(echo "$IN_PROGRESS" | jq -c '.[]')
 
+  # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
+  # Claude Max session-window exhaustion, #35) — self-clearing, no recheck dispatch
+  # needed since the resume time is already known from the embedded epoch. Read
+  # BEFORE the main-is-red block below so main_red_recheck_check/main_red_fixer_check
+  # can also honor the pause (they must not dispatch "Recheck main"/"Fix main" into an
+  # exhausted window). ---
+  SESSION_WINDOW_PAUSED=false
+  if [ -f "${SCHEDULER_STATE_DIR}/session-window-paused" ]; then
+    SW_RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null || echo 0)
+    if ! echo "${SW_RESUME_EPOCH:-0}" | grep -qE '^[0-9]+$'; then
+      echo "[$(date -u +%FT%TZ)] session_window_gate=corrupt_sentinel action=clear"
+      rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+      SW_RESUME_EPOCH=0
+    fi
+    if [ "$(date +%s)" -lt "${SW_RESUME_EPOCH:-0}" ]; then
+      SESSION_WINDOW_PAUSED=true
+      SW_RESUME_ISO=$(date -u -d "@${SW_RESUME_EPOCH}" +%FT%TZ 2>/dev/null || echo "unknown")
+      echo "[$(date -u +%FT%TZ)] session_window_gate=active resume_at=${SW_RESUME_ISO}"
+    else
+      rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+    fi
+  fi
+
   # --- Read main-is-red sentinel (written by smoke_gate.sh in dispatched containers) ---
   # When present, skip Priority 1.5/2/3 (implementation dispatches); 1/4/5 continue,
   # and a throttled "Recheck main" run gives the gate a chance to self-clear (#365).
@@ -955,22 +978,11 @@ This issue was left in **In progress** with no running factory container — the
   [ -f "${SCHEDULER_STATE_DIR}/main-is-red" ] && MAIN_IS_RED=true
   if [ "$MAIN_IS_RED" = "true" ]; then
     echo "[$(date -u +%FT%TZ)] main_red_gate=active action=skip_implement_dispatch"
-    main_red_recheck_check
-    main_red_fixer_check
-  fi
-
-  # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
-  # Claude Max session-window exhaustion, #35) — self-clearing, no recheck dispatch
-  # needed since the resume time is already known from the embedded epoch. ---
-  SESSION_WINDOW_PAUSED=false
-  if [ -f "${SCHEDULER_STATE_DIR}/session-window-paused" ]; then
-    SW_RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null || echo 0)
-    if [ "$(date +%s)" -lt "${SW_RESUME_EPOCH:-0}" ]; then
-      SESSION_WINDOW_PAUSED=true
-      SW_RESUME_ISO=$(date -u -d "@${SW_RESUME_EPOCH}" +%FT%TZ 2>/dev/null || echo "unknown")
-      echo "[$(date -u +%FT%TZ)] session_window_gate=active resume_at=${SW_RESUME_ISO}"
+    if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+      echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_main_red_recheck_and_fixer"
     else
-      rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+      main_red_recheck_check
+      main_red_fixer_check
     fi
   fi
 

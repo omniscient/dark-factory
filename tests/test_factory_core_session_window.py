@@ -37,6 +37,24 @@ def test_parse_structured_reset_epoch_none_when_absent():
     assert parse_structured_reset_epoch("no structured line here") is None
 
 
+def test_parse_structured_reset_epoch_real_claude_rate_limit_event_payload():
+    # Pinned to the payload shape documented in
+    # docs/archive/2026-07-13-scheduler-session-window-backoff-design.md — the
+    # structured log line the Claude Code runner emits into the captured run output.
+    text = ('some claude output\n'
+            '{"event":"claude.rate_limit_event","resetsAt":"2026-07-13T23:10:00Z"}\n')
+    expected = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp())
+    assert parse_structured_reset_epoch(text) == expected
+
+
+def test_parse_structured_reset_epoch_handles_epoch_int_resetsat():
+    # A differently-shaped payload (epoch seconds instead of an ISO-8601 string) must
+    # not silently no-op and fall back to the 30-min default (#35 review).
+    epoch = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp())
+    text = f'{{"event":"claude.rate_limit_event","resetsAt":{epoch}}}'
+    assert parse_structured_reset_epoch(text) == epoch
+
+
 def test_parse_structured_reset_epoch_none_when_malformed_json():
     assert parse_structured_reset_epoch('{"event":"claude.rate_limit_event", broken') is None
 

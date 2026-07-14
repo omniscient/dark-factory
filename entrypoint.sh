@@ -252,14 +252,19 @@ _handle_session_window_pause() {
   local tmp_out="$1"
   [ "${SESSION_WINDOW_BACKOFF_ENABLED:-true}" = "true" ] || return 1
 
-  local sw_result
+  local sw_result sw_rc
   # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
   # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-check \
     --tmp-out "$tmp_out" \
     --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
     --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}" \
-    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" 2>/dev/null) || return 1
+    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" 2>&1)
+  sw_rc=$?
+  if [ "$sw_rc" -ne 0 ]; then
+    echo "WARNING: session-window-check failed (exit ${sw_rc}) — path/import likely broken, falling through to legacy detection: ${sw_result}" >&2
+    return 1
+  fi
 
   local matched resume_epoch
   matched=$(echo "$sw_result" | grep -o 'matched=[a-z]*' | cut -d= -f2)
