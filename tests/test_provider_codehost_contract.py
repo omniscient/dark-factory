@@ -17,11 +17,13 @@ import pytest
 
 from factory_core.providers.codehost.base import CodeHost
 from factory_core.providers.codehost.github import GitHubCodeHost
+from factory_core.providers.codehost.gitlab import GitLabCodeHost
 
 # name -> (implementation class, an opaque id shaped like that host's real ids,
 #          whether its HTTP-backed methods are unimplemented stubs)
 IMPLEMENTATIONS = {
     "github": (GitHubCodeHost, "42", False),
+    "gitlab": (GitLabCodeHost, "group/project!42", True),
 }
 
 HTTP_BACKED_ARGS = {
