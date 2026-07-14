@@ -25,6 +25,13 @@ def test_get_tracker_explicit_github_selection(monkeypatch):
     assert isinstance(get_tracker(), GitHubTracker)
 
 
+def test_get_tracker_explicit_jira_selection(monkeypatch):
+    from factory_core.providers import get_tracker
+    from factory_core.providers.tracker.jira import JiraTracker
+    monkeypatch.setenv("FACTORY_TRACKER", "jira")
+    assert isinstance(get_tracker(), JiraTracker)
+
+
 def test_get_codehost_explicit_github_selection(monkeypatch):
     from factory_core.providers import get_codehost
     from factory_core.providers.codehost.github import GitHubCodeHost
