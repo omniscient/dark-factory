@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -203,6 +204,38 @@ async def _make_upstream(handler):
     return server
 
 
+async def _wait_for(predicate, timeout=2.0, interval=0.01):
+    """Poll `predicate()` until truthy — ledger/artifact persistence now runs in
+    a thread executor after the response is flushed, so callers can't assume
+    it's done the instant client.post() returns; a fixed sleep is flaky under
+    load, so poll with a generous timeout instead."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
+def test_create_app_defers_client_session_to_on_startup():
+    # aiohttp.ClientSession() binds to whatever event loop is current at
+    # construction time. create_app() is called synchronously in main() before
+    # web.run_app() creates and runs its own loop — building the session eagerly
+    # here binds it to the wrong loop, breaking every proxied request. The
+    # session must only be constructed once app.on_startup fires, inside the
+    # loop that will actually serve requests.
+    app = mp.create_app()
+    assert app.get("client_session") is None
+
+    async def scenario():
+        server = TestServer(app)
+        await server.start_server()
+        assert isinstance(app["client_session"], aiohttp.ClientSession)
+        await server.close()
+
+    _run(scenario())
+
+
 def test_proxy_forwards_non_streaming_response(tmp_path, monkeypatch):
     monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
@@ -229,6 +262,11 @@ def test_proxy_forwards_non_streaming_response(tmp_path, monkeypatch):
         assert resp.status == 200
         body = await resp.json()
         assert body["usage"]["input_tokens"] == 10
+        # Ledger persistence runs in a thread executor after the response is
+        # flushed, so client.post() can return before that background write
+        # finishes — wait for it rather than assuming it's already on disk.
+        ledger_path = tmp_path / "ledger.jsonl"
+        await _wait_for(lambda: ledger_path.exists() and ledger_path.stat().st_size > 0)
         await client.close()
         await upstream.close()
 
@@ -265,6 +303,12 @@ def test_proxy_redacts_headers_before_persisting(tmp_path, monkeypatch):
         await client.post(
             "/v1/messages", json={"model": "m"}, headers={"x-api-key": "super-secret"}
         )
+        # Ledger persistence and the raw-artifact write happen after the response
+        # is flushed to the client (persistence is offloaded to a thread executor,
+        # so client.post() can return before that background work finishes) — wait
+        # for the artifact rather than assuming it's already on disk.
+        artifacts_dir = tmp_path / "artifacts"
+        await _wait_for(lambda: any(artifacts_dir.rglob("*.json")) if artifacts_dir.exists() else False)
         await client.close()
         await upstream.close()
 
@@ -281,6 +325,46 @@ def test_proxy_redacts_headers_before_persisting(tmp_path, monkeypatch):
     assert '"usage"' in persisted["response_body"]
 
 
+def test_ledger_persistence_does_not_block_event_loop(tmp_path, monkeypatch):
+    # append_ledger (flock + write) and post_seq_ledger (blocking urlopen) were
+    # previously called directly in the async handler, stalling the whole event
+    # loop — and therefore every other concurrent streaming request — for as
+    # long as those calls took. They must be offloaded to a thread executor.
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda row: time.sleep(0.3))
+
+    async def upstream_handler(request):
+        return web.json_response({"usage": {}}, status=200)
+
+    async def scenario():
+        upstream = await _make_upstream(upstream_handler)
+        monkeypatch.setattr(mp, "UPSTREAM", f"http://{upstream.host}:{upstream.port}")
+        app = mp.create_app()
+        client = TestClient(TestServer(app))
+        await client.start_server()
+
+        ticks = []
+
+        async def ticker():
+            for _ in range(10):
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.03)
+
+        ticker_task = asyncio.ensure_future(ticker())
+        resp = await client.post("/v1/messages", json={"model": "m"})
+        assert resp.status == 200
+        await ticker_task
+
+        await client.close()
+        await upstream.close()
+        return ticks
+
+    ticks = _run(scenario())
+    gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+    assert max(gaps) < 0.15, f"event loop stalled for {max(gaps):.3f}s — blocking call not offloaded"
+
+
 def test_proxy_fails_closed_on_upstream_unreachable(tmp_path, monkeypatch):
     monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
@@ -295,6 +379,8 @@ def test_proxy_fails_closed_on_upstream_unreachable(tmp_path, monkeypatch):
         assert resp.status in (502, 504)
         body = await resp.json()
         assert body["error"]["type"] == "factory_model_proxy_upstream_error"
+        ledger_path = tmp_path / "ledger.jsonl"
+        await _wait_for(lambda: ledger_path.exists() and ledger_path.stat().st_size > 0)
         await client.close()
 
     _run(scenario())

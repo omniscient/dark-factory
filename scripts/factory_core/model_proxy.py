@@ -6,6 +6,7 @@ Anthropic API unchanged (streaming responses forwarded byte-for-byte), while wri
 a compact per-request ledger row and optional raw artifacts. See
 docs/superpowers/specs/2026-07-11-transparent-model-proxy-design.md.
 """
+import asyncio
 import fcntl
 import json
 import os
@@ -242,6 +243,18 @@ def _measure_request(body_bytes: bytes) -> dict:
     }
 
 
+async def _persist_ledger(row: dict) -> None:
+    """Write the ledger row and post it to Seq off the event loop.
+
+    append_ledger does blocking flock/write and post_seq_ledger does a blocking
+    urlopen (timeout=5) — run both in the default thread executor so a slow
+    disk or unreachable Seq never stalls concurrent streaming requests.
+    """
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, append_ledger, row)
+    await loop.run_in_executor(None, post_seq_ledger, row)
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     start = time.monotonic()
     body_bytes = await request.read()
@@ -287,8 +300,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             run_id=correlation["run_id"], issue_number=correlation["issue_number"],
             intent=correlation["intent"], stage=correlation["stage"],
         )
-        append_ledger(row)
-        post_seq_ledger(row)
+        await _persist_ledger(row)
         return web.json_response(error_body, status=504)
 
     duration_ms = int((time.monotonic() - start) * 1000)
@@ -315,8 +327,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         run_id=correlation["run_id"], issue_number=correlation["issue_number"],
         intent=correlation["intent"], stage=correlation["stage"],
     )
-    append_ledger(row)
-    post_seq_ledger(row)
+    await _persist_ledger(row)
 
     if RAW_ARTIFACT_CAPTURE:
         seq = int(time.time() * 1000)
@@ -340,12 +351,20 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
 def create_app() -> web.Application:
     app = web.Application()
-    app["client_session"] = aiohttp.ClientSession()
+    app["client_session"] = None
     app.router.add_route("*", "/{tail:.*}", handle_proxy)
 
-    async def _cleanup(app):
-        await app["client_session"].close()
+    async def _startup(app):
+        # Must be built here, not in create_app() itself: create_app() runs
+        # synchronously in main() before web.run_app() creates and starts its
+        # own event loop, so a session built eagerly binds to the wrong loop.
+        app["client_session"] = aiohttp.ClientSession()
 
+    async def _cleanup(app):
+        if app["client_session"] is not None:
+            await app["client_session"].close()
+
+    app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)
     return app
 
