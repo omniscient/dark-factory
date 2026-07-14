@@ -19,7 +19,7 @@ COMMIT_NOUN="${2:?Usage: oos_excise.sh <allowed-prefixes> <commit-noun>}"
 ISSUE_NUM="${ISSUE_NUM:-}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:?ARTIFACTS_DIR must be set}"
 
-OOS_FILES=$(git diff --name-only origin/main HEAD 2>/dev/null | while read -r f; do
+OOS_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | while read -r f; do
   ALLOWED=false
   for prefix in $ALLOWED_PREFIXES; do
     case "$f" in "$prefix"*) ALLOWED=true; break;; esac
