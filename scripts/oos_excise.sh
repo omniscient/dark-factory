@@ -19,7 +19,7 @@ COMMIT_NOUN="${2:?Usage: oos_excise.sh <allowed-prefixes> <commit-noun>}"
 ISSUE_NUM="${ISSUE_NUM:-}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:?ARTIFACTS_DIR must be set}"
 
-OOS_FILES=$(git diff --name-only origin/main HEAD 2>/dev/null | while read -r f; do
+OOS_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | while read -r f; do
   ALLOWED=false
   for prefix in $ALLOWED_PREFIXES; do
     case "$f" in "$prefix"*) ALLOWED=true; break;; esac
@@ -36,6 +36,9 @@ if [ -n "$OOS_FILES" ]; then
     #   (a) File exists in origin/main → restore it to its origin state (revert modification).
     #   (b) File is new (not in origin/main) → remove it entirely from the index and working tree.
     if git show origin/main:"$f" > /dev/null 2>&1; then
+      # Intentionally restores from origin/main's current tip (not the merge base used
+      # for detection above): lands the file where the branch is headed post-merge,
+      # avoiding a spurious re-diff against main on the next sync.
       git checkout origin/main -- "$f" >/dev/null 2>&1
     else
       git rm -f --cached "$f" >/dev/null 2>&1; rm -f "$f"
