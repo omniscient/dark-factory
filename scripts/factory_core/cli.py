@@ -88,6 +88,24 @@ def _rescue_blocked(args):
     print(rescue_blocked(args.issue))
 
 
+def _session_window_check(args):
+    import time
+    from factory_core.session_window import check_and_pause
+    tmp_out_path = Path(args.tmp_out)
+    text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
+    resume_epoch = check_and_pause(
+        text,
+        Path(args.state_dir),
+        now_epoch=int(time.time()),
+        buffer_minutes=args.buffer_minutes,
+        fallback_minutes=args.fallback_minutes,
+    )
+    if resume_epoch is not None:
+        print(f"matched=true resume_epoch={resume_epoch}")
+    else:
+        print("matched=false resume_epoch=0")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="factory-core")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -136,6 +154,13 @@ def main():
     rb = sub.add_parser("rescue-blocked")
     rb.add_argument("--issue", type=int, required=True)
     rb.set_defaults(func=_rescue_blocked)
+
+    sw = sub.add_parser("session-window-check")
+    sw.add_argument("--tmp-out", required=True)
+    sw.add_argument("--state-dir", default="/var/lib/dark-factory")
+    sw.add_argument("--buffer-minutes", type=int, default=5)
+    sw.add_argument("--fallback-minutes", type=int, default=30)
+    sw.set_defaults(func=_session_window_check)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
