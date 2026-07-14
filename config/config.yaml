@@ -7,6 +7,9 @@ scheduler:
   main_red_recheck_enabled: true # periodically recheck a red main to self-clear (#365); env: MAIN_RED_RECHECK_ENABLED overrides
   main_red_recheck_minutes: 20   # interval between red-main recheck dispatches; env: MAIN_RED_RECHECK_MINUTES overrides
   blocked_rescue_enabled: true   # promote a Blocked ticket whose PR is green+mergeable to In review instead of re-running it; env: BLOCKED_RESCUE_ENABLED overrides
+  session_window_backoff_enabled: true   # env: SESSION_WINDOW_BACKOFF_ENABLED overrides — false = old sleep-forever fallback
+  session_window_buffer_minutes: 5       # added to a parsed resetsAt; env: SESSION_WINDOW_BUFFER_MINUTES overrides
+  session_window_fallback_minutes: 30    # pause length when the reset time can't be parsed; env: SESSION_WINDOW_FALLBACK_MINUTES overrides
 
 refine:
   wip_limit: 2                   # env: REFINE_WIP_LIMIT overrides

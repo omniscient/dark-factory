@@ -26,6 +26,10 @@ echo "GitHub auth: $(gh auth status 2>&1 | head -2 | tail -1 || echo 'using GH_T
 # Bootstrap defaults for pre-clone concurrency guard — overridden by _entrypoint_cfg_apply post-clone.
 FACTORY_WIP_LIMIT="${FACTORY_WIP_LIMIT:-1}"
 CONFLICT_RESOLUTION_AI_TIER="${CONFLICT_RESOLUTION_AI_TIER:-true}"
+SCHEDULER_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+SESSION_WINDOW_BACKOFF_ENABLED="${SESSION_WINDOW_BACKOFF_ENABLED:-true}"
+SESSION_WINDOW_BUFFER_MINUTES="${SESSION_WINDOW_BUFFER_MINUTES:-5}"
+SESSION_WINDOW_FALLBACK_MINUTES="${SESSION_WINDOW_FALLBACK_MINUTES:-30}"
 
 # Read FACTORY_WIP_LIMIT and CONFLICT_RESOLUTION_AI_TIER from config.yaml post-clone.
 # Env overrides are kept and logged; bootstrap defaults above handle pre-clone use.
@@ -54,6 +58,9 @@ _entrypoint_cfg_apply() {
 
   _epcfg FACTORY_WIP_LIMIT          '.scheduler.factory_wip_limit'
   _epcfg CONFLICT_RESOLUTION_AI_TIER '.conflict_resolution.ai_tier'
+  _epcfg SESSION_WINDOW_BACKOFF_ENABLED   '.scheduler.session_window_backoff_enabled'
+  _epcfg SESSION_WINDOW_BUFFER_MINUTES    '.scheduler.session_window_buffer_minutes'
+  _epcfg SESSION_WINDOW_FALLBACK_MINUTES  '.scheduler.session_window_fallback_minutes'
   echo "[entrypoint-config] loaded from ${cfg}"
 }
 
@@ -233,6 +240,47 @@ ${post_mortem_text}
       "$PROMOTED_AT")
     echo "$record" >> "$JSONL_PATH" 2>/dev/null || true
   fi
+}
+
+# Detects a session-window exhaustion in the captured run output via the Python
+# session_window module (structured claude.rate_limit_event preferred, substring/regex
+# fallback otherwise). On match: writes the shared pause sentinel, records a distinct
+# "paused" run-record entry, and returns 0 so the caller exits clean WITHOUT flowing
+# through on_failure or the success-path record assembly. Returns 1 (kill-switch off,
+# or no match at all) so the caller falls through to the existing failure/sleep paths.
+_handle_session_window_pause() {
+  local tmp_out="$1"
+  [ "${SESSION_WINDOW_BACKOFF_ENABLED:-true}" = "true" ] || return 1
+
+  local sw_result sw_rc
+  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
+  # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+  sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-check \
+    --tmp-out "$tmp_out" \
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
+    --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}" \
+    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" 2>&1)
+  sw_rc=$?
+  if [ "$sw_rc" -ne 0 ]; then
+    echo "WARNING: session-window-check failed (exit ${sw_rc}) — path/import likely broken, falling through to legacy detection: ${sw_result}" >&2
+    return 1
+  fi
+
+  local matched resume_epoch
+  matched=$(echo "$sw_result" | grep -o 'matched=[a-z]*' | cut -d= -f2)
+  resume_epoch=$(echo "$sw_result" | grep -o 'resume_epoch=[0-9]*' | cut -d= -f2)
+  [ "$matched" = "true" ] || return 1
+
+  local resume_iso
+  resume_iso=$(date -u -d "@${resume_epoch}" +%FT%TZ 2>/dev/null || echo "unknown")
+  echo "session-window exhausted — dispatch paused until ${resume_iso}"
+  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
+    --run-id "${RUN_ID:-unknown}" \
+    --issue "${ISSUE_NUM:-0}" \
+    --intent "${INTENT:-unknown}" \
+    --stage paused \
+    --verdict paused || true
+  return 0
 }
 
 post_cost_report() {
@@ -710,7 +758,13 @@ while true; do
   set -e
 
   if [ "$EXIT_CODE" -ne 0 ]; then
+    if _handle_session_window_pause "$TMP_OUT"; then
+      rm -f "$TMP_OUT"
+      exit 0
+    fi
     if grep -qiE "usage limit|rate limit|429|credit balance|session limit" "$TMP_OUT"; then
+      # Kill-switch fallback (SESSION_WINDOW_BACKOFF_ENABLED=false): old sleep-forever
+      # behavior, unchanged.
       # Attempt to parse specific reset time from: "You've hit your session limit · resets 11:10pm (America/Toronto)"
       RESET_TIME=$(grep -ioP "resets\s+\K([0-9]{1,2}:[0-9]{2}[a-z]{2})" "$TMP_OUT" | head -1)
       RESET_TZ=$(grep -ioP "resets\s+[0-9]{1,2}:[0-9]{2}[a-z]{2}\s*\(\K([^)]+)" "$TMP_OUT" | head -1)

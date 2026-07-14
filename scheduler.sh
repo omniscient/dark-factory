@@ -948,6 +948,29 @@ This issue was left in **In progress** with no running factory container — the
 *Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
   done < <(echo "$IN_PROGRESS" | jq -c '.[]')
 
+  # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
+  # Claude Max session-window exhaustion, #35) — self-clearing, no recheck dispatch
+  # needed since the resume time is already known from the embedded epoch. Read
+  # BEFORE the main-is-red block below so main_red_recheck_check/main_red_fixer_check
+  # can also honor the pause (they must not dispatch "Recheck main"/"Fix main" into an
+  # exhausted window). ---
+  SESSION_WINDOW_PAUSED=false
+  if [ -f "${SCHEDULER_STATE_DIR}/session-window-paused" ]; then
+    SW_RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null || echo 0)
+    if ! echo "${SW_RESUME_EPOCH:-0}" | grep -qE '^[0-9]+$'; then
+      echo "[$(date -u +%FT%TZ)] session_window_gate=corrupt_sentinel action=clear"
+      rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+      SW_RESUME_EPOCH=0
+    fi
+    if [ "$(date +%s)" -lt "${SW_RESUME_EPOCH:-0}" ]; then
+      SESSION_WINDOW_PAUSED=true
+      SW_RESUME_ISO=$(date -u -d "@${SW_RESUME_EPOCH}" +%FT%TZ 2>/dev/null || echo "unknown")
+      echo "[$(date -u +%FT%TZ)] session_window_gate=active resume_at=${SW_RESUME_ISO}"
+    else
+      rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+    fi
+  fi
+
   # --- Read main-is-red sentinel (written by smoke_gate.sh in dispatched containers) ---
   # When present, skip Priority 1.5/2/3 (implementation dispatches); 1/4/5 continue,
   # and a throttled "Recheck main" run gives the gate a chance to self-clear (#365).
@@ -955,8 +978,12 @@ This issue was left in **In progress** with no running factory container — the
   [ -f "${SCHEDULER_STATE_DIR}/main-is-red" ] && MAIN_IS_RED=true
   if [ "$MAIN_IS_RED" = "true" ]; then
     echo "[$(date -u +%FT%TZ)] main_red_gate=active action=skip_implement_dispatch"
-    main_red_recheck_check
-    main_red_fixer_check
+    if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+      echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_main_red_recheck_and_fixer"
+    else
+      main_red_recheck_check
+      main_red_fixer_check
+    fi
   fi
 
   # --- Priority 1.5: In Review items with merge conflicts (proactive auto-resolve) ---
@@ -964,8 +991,8 @@ This issue was left in **In progress** with no running factory container — the
   # CONFLICTING mergeability state and dispatches a deconflict run before any
   # human comments are processed. Honors SKIP_LABELS, CI_BLOCKED, and is_issue_running.
   # UNKNOWN is skipped — GitHub hasn't computed mergeability yet.
-  if [ "$MAIN_IS_RED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red_gate=skip_deconflict"
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_deconflict"
   elif [ "${CONFLICT_RESOLUTION_ENABLED:-true}" = "true" ]; then
     while IFS= read -r item; do
       [ -n "$DISPATCHED" ] && break
@@ -1034,8 +1061,8 @@ This issue was left in **In progress** with no running factory container — the
   done < <(echo "$IN_REVIEW" | jq -c '.[]')
 
   # --- Priority 2: Ready items (implement what's already refined+planned) ---
-  if [ "$MAIN_IS_RED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red_gate=skip_implement"
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_implement"
   else
     while IFS= read -r item; do
       [ -n "$DISPATCHED" ] && break
@@ -1084,8 +1111,8 @@ To proceed:
   fi
 
   # --- Priority 3: Blocked items (retry stuck work) ---
-  if [ "$MAIN_IS_RED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red_gate=skip_blocked_retry"
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_blocked_retry"
   else
     while IFS= read -r item; do
       [ -n "$DISPATCHED" ] && break
@@ -1122,83 +1149,91 @@ To proceed:
   fi
 
   # --- Priority 4: Refined items (plan generation — advance refined work before pulling new backlog) ---
-  while IFS= read -r item; do
-    [ -n "$DISPATCHED" ] && break
-    ISSUE=$(get_issue_number "$item")
+  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_plan"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
 
-    # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
-    if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
-       && has_direct_to_pr_label "$item"; then
-      if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-        plan_advance_check "$ISSUE" "$item"
+      # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
+      if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
+         && has_direct_to_pr_label "$item"; then
+        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+          plan_advance_check "$ISSUE" "$item"
+        fi
+        continue
       fi
-      continue
-    fi
 
-    if has_refine_skip_label "$item"; then continue; fi
-    if is_issue_running "$ISSUE"; then continue; fi
-    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+      if has_refine_skip_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:plan")
-    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
-      continue
-    fi
+      RETRIES=$(get_retry_count "${ISSUE}:plan")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        continue
+      fi
 
-    increment_retry "${ISSUE}:plan"
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
+      increment_retry "${ISSUE}:plan"
+      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
 
 ---
 *Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
-    if dispatch "Plan issue #${ISSUE}"; then
-      DISPATCHED="Plan issue #${ISSUE}"
-      REFINE_RUNNING=$((REFINE_RUNNING + 1))
-    fi
-  done < <(echo "$REFINED" | jq -c '.[]')
+      if dispatch "Plan issue #${ISSUE}"; then
+        DISPATCHED="Plan issue #${ISSUE}"
+        REFINE_RUNNING=$((REFINE_RUNNING + 1))
+      fi
+    done < <(echo "$REFINED" | jq -c '.[]')
+  fi
 
   # --- Priority 5: Backlog items (refinement — prepare future work) ---
-  while IFS= read -r item; do
-    [ -n "$DISPATCHED" ] && break
-    ISSUE=$(get_issue_number "$item")
+  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_refine"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
 
-    # Handle spec-pending-review items first (before skip-label check would filter them)
-    ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
-    if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
-      if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-        spec_advance_check "$ISSUE" "$item"
+      # Handle spec-pending-review items first (before skip-label check would filter them)
+      ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
+      if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
+        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+          spec_advance_check "$ISSUE" "$item"
+        fi
+        continue
       fi
-      continue
-    fi
 
-    if has_refine_skip_label "$item"; then continue; fi
-    # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
-    # Unlabelled items are left for triage — humans add the label when the issue is ready.
-    if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
-    if is_issue_running "$ISSUE"; then continue; fi
-    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+      if has_refine_skip_label "$item"; then continue; fi
+      # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
+      # Unlabelled items are left for triage — humans add the label when the issue is ready.
+      if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:refine")
-    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
-      continue
-    fi
+      RETRIES=$(get_retry_count "${ISSUE}:refine")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        continue
+      fi
 
-    increment_retry "${ISSUE}:refine"
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+      increment_retry "${ISSUE}:refine"
+      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
 
 ---
 *Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
-    if dispatch "Refine issue #${ISSUE}"; then
-      DISPATCHED="Refine issue #${ISSUE}"
-      REFINE_RUNNING=$((REFINE_RUNNING + 1))
-    fi
-  done < <(echo "$BACKLOG" | jq -c '.[]')
+      if dispatch "Refine issue #${ISSUE}"; then
+        DISPATCHED="Refine issue #${ISSUE}"
+        REFINE_RUNNING=$((REFINE_RUNNING + 1))
+      fi
+    done < <(echo "$BACKLOG" | jq -c '.[]')
+  fi
 
   # --- Priority 6: Epic Autopilot (starved self-unlock, #571) ---
   # Runs ONLY when this cycle dispatched nothing (starved), main is green, and it is
   # enabled. Reviews the refined, below-ceiling children of in-progress epics with Opus
   # and advances the low-risk ones via direct-to-pr. Fail-soft: never abort the loop.
-  if [ -z "$DISPATCHED" ] && [ "$MAIN_IS_RED" = "false" ] && [ "${EPIC_AUTOPILOT_ENABLED:-false}" = "true" ]; then
+  if [ -z "$DISPATCHED" ] && [ "$MAIN_IS_RED" = "false" ] && [ "$SESSION_WINDOW_PAUSED" = "false" ] && [ "${EPIC_AUTOPILOT_ENABLED:-false}" = "true" ]; then
     AP_OUT=$(python3 "$FACTORY_CORE_CLI" epic-autopilot --once 2>&1) || true
     echo "[$(date -u +%FT%TZ)] ${AP_OUT}"
     case "$AP_OUT" in *"autopilot=advanced"*|*"autopilot=epic_started"*) DISPATCHED="$AP_OUT" ;; esac
