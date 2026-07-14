@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # --- Instance identity (env-overridable; defaults = MarketHawk parity) ---
-source /opt/dark-factory/scripts/identity.sh
+IDENTITY_SH="${IDENTITY_SH:-/opt/dark-factory/scripts/identity.sh}"
+source "$IDENTITY_SH"
 
 # --- Validate required environment (provider-aware; parent spec §4) ---
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"

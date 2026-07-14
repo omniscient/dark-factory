@@ -8,6 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export GH_TOKEN="stub-token"
 export CLAUDE_CODE_OAUTH_TOKEN="stub-token"
 
+# entrypoint.sh hardcodes /opt/dark-factory/scripts/* for these two, which only
+# exist in the built container image. Point both at this checkout's own copies
+# so the test runs on a bare CI checkout with no /opt/dark-factory present.
+export IDENTITY_SH="$SCRIPT_DIR/../scripts/identity.sh"
+export FACTORY_PROVIDERS_CLI="$SCRIPT_DIR/../scripts/factory_core/providers/cli.py"
+
 git() { return 0; }
 export -f git
 gh() { echo "stub-title"; return 0; }
