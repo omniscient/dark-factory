@@ -25,6 +25,13 @@ def test_get_tracker_explicit_github_selection(monkeypatch):
     assert isinstance(get_tracker(), GitHubTracker)
 
 
+def test_get_tracker_explicit_jira_selection(monkeypatch):
+    from factory_core.providers import get_tracker
+    from factory_core.providers.tracker.jira import JiraTracker
+    monkeypatch.setenv("FACTORY_TRACKER", "jira")
+    assert isinstance(get_tracker(), JiraTracker)
+
+
 def test_get_codehost_explicit_github_selection(monkeypatch):
     from factory_core.providers import get_codehost
     from factory_core.providers.codehost.github import GitHubCodeHost
@@ -34,8 +41,8 @@ def test_get_codehost_explicit_github_selection(monkeypatch):
 
 def test_get_tracker_unknown_raises(monkeypatch):
     from factory_core.providers import ProviderConfigError, get_tracker
-    monkeypatch.setenv("FACTORY_TRACKER", "jira")
-    with pytest.raises(ProviderConfigError, match="Unknown FACTORY_TRACKER 'jira'"):
+    monkeypatch.setenv("FACTORY_TRACKER", "asana")
+    with pytest.raises(ProviderConfigError, match="Unknown FACTORY_TRACKER 'asana'"):
         get_tracker()
 
 
@@ -73,11 +80,11 @@ def test_preflight_missing_gh_token_flags_both_tracker_and_codehost(monkeypatch)
 
 def test_preflight_unknown_tracker_codehost_model_all_reported(monkeypatch):
     from factory_core.providers import preflight
-    monkeypatch.setenv("FACTORY_TRACKER", "jira")
+    monkeypatch.setenv("FACTORY_TRACKER", "asana")
     monkeypatch.setenv("FACTORY_CODEHOST", "gitlab")
     monkeypatch.setenv("FACTORY_MODEL_PROVIDER", "cohere")
     problems = preflight()
-    assert "Unknown FACTORY_TRACKER 'jira'" in problems
+    assert "Unknown FACTORY_TRACKER 'asana'" in problems
     assert "Unknown FACTORY_CODEHOST 'gitlab'" in problems
     assert "Unknown FACTORY_MODEL_PROVIDER 'cohere'" in problems
 
