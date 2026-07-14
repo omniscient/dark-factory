@@ -223,6 +223,87 @@ class TestOosExciseScript:
         for n in names:
             assert n.startswith("backend/"), f"Unexpected stdout line: {n!r}"
 
+    def test_main_only_new_file_after_fork_not_flagged(self, git_repo, tmp_path):
+        """A file added by an independent commit pushed to origin/main after the
+        branch forked (simulating another ticket merging) must not be flagged as
+        OOS, even though it now differs between origin/main's tip and HEAD."""
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+
+        # Simulate another ticket merging to main after this branch forked: a
+        # second clone of the same bare origin adds a file outside the allowed
+        # prefix and pushes it directly to main.
+        bare_url = git("remote", "get-url", "origin", cwd=str(git_repo)).stdout.strip()
+        other = tmp_path / "other_clone_add"
+        git("clone", bare_url, str(other), cwd=str(tmp_path))
+        git("config", "user.email", "other@test.com", cwd=str(other))
+        git("config", "user.name", "Other", cwd=str(other))
+        other_file = other / "scripts" / "factory_core" / "providers" / "new_provider.py"
+        other_file.parent.mkdir(parents=True, exist_ok=True)
+        other_file.write_text("new provider\n")
+        git("add", "scripts/factory_core/providers/new_provider.py", cwd=str(other))
+        git("commit", "-m", "unrelated: add provider", cwd=str(other))
+        git("push", "origin", "main", cwd=str(other))
+
+        # The working branch fetches the moved origin/main ref (as the container
+        # does) but makes no commit touching the new file itself.
+        git("fetch", "origin", cwd=str(git_repo))
+
+        # The branch's own in-scope commit, unrelated to the new file.
+        (git_repo / "docs").mkdir(exist_ok=True)
+        (git_repo / "docs" / "spec.md").write_text("spec\n")
+        git("add", "docs/spec.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+
+        env = base_env(artifacts)
+        result = run_script("docs/", "refine", env, git_repo)
+        assert result.returncode == 0, result.stderr
+        assert "scripts/factory_core/providers/new_provider.py" not in result.stdout
+        assert not (
+            git_repo / "scripts" / "factory_core" / "providers" / "new_provider.py"
+        ).exists(), "File added only on origin/main should not be pulled into the branch"
+
+    def test_main_only_deletion_after_fork_not_excised_from_branch(self, git_repo, tmp_path):
+        """A file inherited unchanged at the branch's fork point, later deleted by
+        an independent origin/main-only commit, must not be deleted from the
+        working branch. Regression test for the #251/#266 providers/* incident."""
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+
+        # File exists at the fork point (committed and pushed before the branch
+        # or main move any further).
+        inherited = git_repo / "scripts" / "factory_core" / "providers" / "existing_provider.py"
+        inherited.parent.mkdir(parents=True, exist_ok=True)
+        inherited.write_text("existing provider\n")
+        git("add", "scripts/factory_core/providers/existing_provider.py", cwd=str(git_repo))
+        git("commit", "-m", "add existing provider", cwd=str(git_repo))
+        git("push", "origin", "main", cwd=str(git_repo))
+
+        # A separate, later-merging ticket removes the file from main.
+        bare_url = git("remote", "get-url", "origin", cwd=str(git_repo)).stdout.strip()
+        other = tmp_path / "other_clone_delete"
+        git("clone", bare_url, str(other), cwd=str(tmp_path))
+        git("config", "user.email", "other@test.com", cwd=str(other))
+        git("config", "user.name", "Other", cwd=str(other))
+        git("rm", "scripts/factory_core/providers/existing_provider.py", cwd=str(other))
+        git("commit", "-m", "unrelated: remove provider", cwd=str(other))
+        git("push", "origin", "main", cwd=str(other))
+
+        git("fetch", "origin", cwd=str(git_repo))
+
+        # The working branch's own commit, unrelated to that file, outside the
+        # allowed prefix (so the gate has something to legitimately excise too).
+        (git_repo / "docs").mkdir(exist_ok=True)
+        (git_repo / "docs" / "spec.md").write_text("spec\n")
+        git("add", "docs/spec.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+
+        env = base_env(artifacts)
+        result = run_script("docs/", "plan", env, git_repo)
+        assert result.returncode == 0, result.stderr
+        assert "scripts/factory_core/providers/existing_provider.py" not in result.stdout
+        assert inherited.exists(), "Inherited file was wrongly deleted from the working branch"
+
     def test_missing_allowed_prefixes_arg_fails(self, tmp_path):
         """Script must fail when called with no arguments."""
         artifacts = tmp_path / "artifacts"
