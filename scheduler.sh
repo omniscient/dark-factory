@@ -565,7 +565,8 @@ fetch_board_items() {
 get_items_by_status() {
   local items="$1"
   local status_name="$2"
-  echo "$items" | jq -c "[.items[] | select(.status == \"$status_name\") | select(.content.type == \"Issue\")]"
+  echo "$items" | jq -c --arg status_name "$status_name" \
+    '[.items[] | select((.status // "" | ascii_downcase) == ($status_name | ascii_downcase)) | select(.content.type == "Issue")]'
 }
 
 has_skip_label() {
