@@ -443,11 +443,40 @@ nodes:
     bash: |
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       BRANCH=$(git branch --show-current)
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
 
-      git push -u origin "$BRANCH"
-      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
-        tracker label --id "$ISSUE" --add spec-pending-review
-      echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+      SPEC_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/specs/" "$ISSUE")  # TARGET-PATH
+
+      if [ -n "$SPEC_FILE" ]; then
+        git push -u origin "$BRANCH"
+        python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review
+        echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+      else
+        HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
+          | jq -r '.labels[].name' \
+          | grep -c 'needs-discussion' || true)
+        if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
+          echo "refine-push: no committed spec for issue #$ISSUE, but needs-discussion is already applied — clean abort, skipping silently."
+        else
+          echo "refine-push: no committed spec found for issue #$ISSUE and no needs-discussion label — treating as silent death."
+          _FAIL_BODY="<!-- df-refine-failure -->
+      ## Refinement Pipeline — Failed
+
+      The refine agent ended without producing a committed spec (\`docs/superpowers/specs/\`) for this issue. No gate label was applied; this item remains eligible for automatic retry.
+
+      \`\`\`bash
+      # Retry manually if needed
+      docker compose --profile factory run --rm dark-factory \"Refine issue #${ISSUE}\"
+      \`\`\`
+
+      ---
+      *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
+          TMPFILE=$(mktemp /tmp/refine-failure-XXXXXX.md)
+          printf '%s' "$_FAIL_BODY" > "$TMPFILE"
+          python3 "$_PCLI" tracker comment --id "$ISSUE" --marker "<!-- df-refine-failure -->" --body-file "$TMPFILE"
+          rm -f "$TMPFILE"
+        fi
+      fi
     depends_on: [refine]
     when: "$parse-intent.output.intent == 'refine'"
     timeout: 30000
@@ -461,11 +490,40 @@ nodes:
     bash: |
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       BRANCH=$(git branch --show-current)
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
 
-      git push -u origin "$BRANCH"
-      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
-        tracker label --id "$ISSUE" --add plan-pending-review
-      echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+      PLAN_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plans/" "$ISSUE")  # TARGET-PATH
+
+      if [ -n "$PLAN_FILE" ]; then
+        git push -u origin "$BRANCH"
+        python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review
+        echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+      else
+        HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
+          | jq -r '.labels[].name' \
+          | grep -c 'needs-discussion' || true)
+        if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
+          echo "plan-push-and-advance: no committed plan for issue #$ISSUE, but needs-discussion is already applied — clean abort, skipping silently."
+        else
+          echo "plan-push-and-advance: no committed plan found for issue #$ISSUE and no needs-discussion label — treating as silent death."
+          _FAIL_BODY="<!-- df-refine-failure -->
+      ## Refinement Pipeline — Failed
+
+      The plan agent ended without producing a committed implementation plan (\`docs/superpowers/plans/\`) for this issue. No gate label was applied; this item remains eligible for automatic retry.
+
+      \`\`\`bash
+      # Retry manually if needed
+      docker compose --profile factory run --rm dark-factory \"Plan issue #${ISSUE}\"
+      \`\`\`
+
+      ---
+      *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
+          TMPFILE=$(mktemp /tmp/refine-failure-XXXXXX.md)
+          printf '%s' "$_FAIL_BODY" > "$TMPFILE"
+          python3 "$_PCLI" tracker comment --id "$ISSUE" --marker "<!-- df-refine-failure -->" --body-file "$TMPFILE"
+          rm -f "$TMPFILE"
+        fi
+      fi
     depends_on: [plan]
     when: "$parse-intent.output.intent == 'plan'"
     timeout: 30000
