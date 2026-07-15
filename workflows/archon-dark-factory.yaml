@@ -454,7 +454,7 @@ nodes:
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \
-          | grep -c 'needs-discussion' || true)
+          | grep -Fxc 'needs-discussion' || true)
         if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
           echo "refine-push: no committed spec for issue #$ISSUE, but needs-discussion is already applied — clean abort, skipping silently."
         else
@@ -501,7 +501,7 @@ nodes:
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \
-          | grep -c 'needs-discussion' || true)
+          | grep -Fxc 'needs-discussion' || true)
         if [ "$HAS_NEEDS_DISCUSSION" -gt 0 ]; then
           echo "plan-push-and-advance: no committed plan for issue #$ISSUE, but needs-discussion is already applied — clean abort, skipping silently."
         else
