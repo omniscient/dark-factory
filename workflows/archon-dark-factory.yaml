@@ -207,14 +207,22 @@ nodes:
       echo "Tearing down mh-preview-${ISSUE}..."
       docker compose -p "mh-preview-${ISSUE}" down -v 2>/dev/null || echo "No preview stack found"
 
-      # Assert no containers survive teardown
+      # Fail-soft teardown check — mirrors preview-up's preview_fail(): a broken/absent preview
+      # must never block the close intent. Log-and-continue on stale containers instead of exit 1
+      # (was #230: hard-failed close on the self-repo, which never has a live preview stack).
       STALE=$(docker ps -a --filter "label=com.docker.compose.project=mh-preview-${ISSUE}" --format '{{.Names}}' 2>/dev/null || true)
+      TEARDOWN_NOTE=""
       if [ -n "$STALE" ]; then
-        echo "ERROR: Stale preview containers remain after teardown:" >&2
+        echo "WARNING: Stale preview containers remain after teardown (continuing):" >&2
         echo "$STALE" >&2
-        exit 1
+        # Mirror preview-up's preview_fail(): a durable trace beyond stderr, so an operator
+        # can spot a real cleanup bug in the issue history rather than only in run logs.
+        TEARDOWN_NOTE="
+
+      ⚠️ **Stale preview containers remained after teardown** (continuing): \`$(echo "$STALE" | tr '\n' ' ')\`"
+      else
+        echo "close-preview: teardown verified — no mh-preview-${ISSUE} containers remain"
       fi
-      echo "close-preview: teardown verified — no mh-preview-${ISSUE} containers remain"
 
       # Find the PR (branch includes a slug suffix, so use search prefix match)
       PR_NUM=$(python3 "$_PCLI" codehost find-change --branch "feat/issue-${ISSUE}-" --repo "$FACTORY_REPO_SLUG")
@@ -248,7 +256,7 @@ nodes:
       # Move the sub-issue to Done (never the epic — it stays In Progress)
       python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done
       echo "Moved issue #$ISSUE to Done"
-      gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete."
+      gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
       echo "CLOSED"
     depends_on: [parse-intent, fetch-issue]
     when: "$parse-intent.output.intent == 'close'"
