@@ -207,14 +207,16 @@ nodes:
       echo "Tearing down mh-preview-${ISSUE}..."
       docker compose -p "mh-preview-${ISSUE}" down -v 2>/dev/null || echo "No preview stack found"
 
-      # Assert no containers survive teardown
+      # Fail-soft teardown check — mirrors preview-up's preview_fail(): a broken/absent preview
+      # must never block the close intent. Log-and-continue on stale containers instead of exit 1
+      # (was #230: hard-failed close on the self-repo, which never has a live preview stack).
       STALE=$(docker ps -a --filter "label=com.docker.compose.project=mh-preview-${ISSUE}" --format '{{.Names}}' 2>/dev/null || true)
       if [ -n "$STALE" ]; then
-        echo "ERROR: Stale preview containers remain after teardown:" >&2
+        echo "WARNING: Stale preview containers remain after teardown (continuing):" >&2
         echo "$STALE" >&2
-        exit 1
+      else
+        echo "close-preview: teardown verified — no mh-preview-${ISSUE} containers remain"
       fi
-      echo "close-preview: teardown verified — no mh-preview-${ISSUE} containers remain"
 
       # Find the PR (branch includes a slug suffix, so use search prefix match)
       PR_NUM=$(python3 "$_PCLI" codehost find-change --branch "feat/issue-${ISSUE}-" --repo "$FACTORY_REPO_SLUG")
