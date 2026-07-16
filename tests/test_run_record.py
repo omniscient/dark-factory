@@ -684,6 +684,57 @@ def test_build_issue_economics_no_rows_for_issue(tmp_path):
     assert result["runs"] == {}
 
 
+# ---------------------------------------------------------------------------
+# backfill-economics
+# ---------------------------------------------------------------------------
+
+def test_backfill_economics_full_recompute(tmp_path):
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run-record.json").write_text(json.dumps({
+        "run_id": "run-1", "status": "completed",
+        "started_at": "2026-06-12T04:00:00Z", "completed_at": "2026-06-12T04:01:00Z",
+        "stages": [{"stage": "validation", "verdict": "PASS"}],
+        "totals": {"gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 50, "cost_usd": 0.02},
+    }))
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({"run_id": "run-1", "status": 200,
+                                   "gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 50}) + "\n")
+
+    ok = rr._backfill_run_economics("run-1", artifacts_root=tmp_path / "runs", ledger_path=ledger)
+    assert ok is True
+
+    updated = json.loads((run_dir / "run-record.json").read_text())
+    assert "harness_economics" in updated
+    assert updated["harness_economics"]["ledger_available"] is True
+    # "validation" is a gate stage (GATE_STAGE_NAMES, Task 1) with verdict PASS and no
+    # friction signals present -> delivered_clean, not produced_ungated (which requires
+    # zero gate stages).
+    assert updated["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_backfill_economics_ledger_rotated_away_degrades(tmp_path):
+    run_dir = tmp_path / "runs" / "run-2"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run-record.json").write_text(json.dumps({
+        "run_id": "run-2", "status": "completed",
+        "started_at": "2026-06-12T04:00:00Z", "completed_at": "2026-06-12T04:01:00Z",
+        "stages": [], "totals": {"gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "cost_usd": 0.0},
+    }))
+    missing_ledger = tmp_path / "no-such-ledger.jsonl"
+
+    ok = rr._backfill_run_economics("run-2", artifacts_root=tmp_path / "runs", ledger_path=missing_ledger)
+    assert ok is True
+
+    updated = json.loads((run_dir / "run-record.json").read_text())
+    assert updated["harness_economics"]["ledger_available"] is False
+
+
+def test_backfill_economics_missing_run_record_skipped(tmp_path):
+    ok = rr._backfill_run_economics("no-such-run", artifacts_root=tmp_path / "runs", ledger_path=tmp_path / "ledger.jsonl")
+    assert ok is False
+
+
 # ── memory-trace pickup tests (issue #647) ─────────────────────────────────
 
 def test_assemble_picks_up_memory_trace(tmp_path, monkeypatch):

@@ -602,6 +602,42 @@ def cmd_issue_economics(args) -> None:
     print(json.dumps(result, indent=2))
 
 
+def _backfill_run_economics(run_id: str, *, artifacts_root: pathlib.Path, ledger_path: pathlib.Path) -> bool:
+    """Best-effort, degrade-only recompute of harness_economics for a retained run.
+
+    Returns False (skipped, not an error) when the run's run-record.json directory
+    no longer exists — bounded by artifact retention, per the spec's backfill section.
+    """
+    record_path = artifacts_root / run_id / "run-record.json"
+    if not record_path.exists():
+        return False
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    record["harness_economics"] = _compute_harness_economics(
+        run_id=run_id,
+        status=record.get("status", "completed"),
+        stages=record.get("stages", []),
+        totals=record.get("totals", {}),
+        started_at=record.get("started_at", ""),
+        completed_at=record.get("completed_at", ""),
+        ledger_path=ledger_path,
+    )
+    record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return True
+
+
+def cmd_backfill_economics(args) -> None:
+    ok = _backfill_run_economics(
+        args.run_id,
+        artifacts_root=pathlib.Path(args.artifacts_root),
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+    )
+    print(json.dumps({"run_id": args.run_id, "backfilled": ok}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dark factory run record")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -634,6 +670,11 @@ def main() -> None:
     ie.add_argument("--artifacts-root", required=True)
     ie.add_argument("--ledger-path", default=None)
 
+    be = sub.add_parser("backfill-economics", help="Degrade-only historical harness_economics recompute")
+    be.add_argument("--run-id", required=True)
+    be.add_argument("--artifacts-root", required=True)
+    be.add_argument("--ledger-path", default=None)
+
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         cmd_record(parsed)
@@ -641,6 +682,8 @@ def main() -> None:
         cmd_assemble(parsed)
     elif parsed.cmd == "issue-economics":
         cmd_issue_economics(parsed)
+    elif parsed.cmd == "backfill-economics":
+        cmd_backfill_economics(parsed)
 
 
 if __name__ == "__main__":
