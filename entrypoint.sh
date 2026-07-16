@@ -320,6 +320,17 @@ post_cost_report() {
   TOTAL_IN=$(jq -r '.totals["gen_ai.usage.input_tokens"] // 0' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
   TOTAL_OUT=$(jq -r '.totals["gen_ai.usage.output_tokens"] // 0' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
 
+  # Extract harness_economics (absent-tolerant — older run-record.json files predate it)
+  local HE_CPM HE_STATE HE_SCORE ECONOMICS_LINE=""
+  HE_CPM=$(jq -r '.harness_economics.factory_cpm // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
+  HE_STATE=$(jq -r '.harness_economics.outcome.state // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
+  HE_SCORE=$(jq -r '.harness_economics.outcome.score // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
+  if [ -n "$HE_STATE" ]; then
+    local HE_CPM_FMT="n/a"
+    [ -n "$HE_CPM" ] && HE_CPM_FMT=$(printf '%.0f' "$HE_CPM" 2>/dev/null || echo "$HE_CPM")
+    ECONOMICS_LINE="**Factory CPM:** ${HE_CPM_FMT} | **Outcome:** ${HE_STATE} (score ${HE_SCORE:-n/a})"
+  fi
+
   # Build per-node table rows from nodes[] (OTel field names, model pre-stripped)
   local RUN_ROWS TIMESTAMP
   TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
@@ -450,6 +461,8 @@ ${SAVINGS_BLOCK}
 |------|-------|-----------|------------|------|----------|
 ${RUN_ROWS}
 | **Subtotal** | | **$(fmt_tokens "$TOTAL_IN")** | **$(fmt_tokens "$TOTAL_OUT")** | **\$${TOTAL_COST}** | |
+${ECONOMICS_LINE:+
+${ECONOMICS_LINE}}
 
 ---
 *Updated by ${FACTORY_PRODUCT_NAME} Dark Factory*"
@@ -483,6 +496,24 @@ on_failure() {
     --intent "${INTENT:-unknown}" \
     --stage "failed" \
     --verdict "failed" || true
+  # Assemble a full run-record.json on the failure path too, so harness_economics'
+  # outcome.state == "failed" (score 0.0) is actually reachable — previously only the
+  # bare stage event above was written and cmd_assemble never ran on failure.
+  if [ -n "${ARTIFACTS_DIR:-}" ]; then
+    local FAIL_COST_JSON
+    FAIL_COST_JSON=$(mktemp)
+    archon workflow cost --last --json --quiet > "$FAIL_COST_JSON" 2>/dev/null || true
+    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
+      --run-id "${RUN_ID:-unknown}" \
+      --issue "${ISSUE_NUM:-0}" \
+      --intent "${INTENT:-unknown}" \
+      --started-at "${RUN_STARTED_AT:-}" \
+      --artifacts-dir "$ARTIFACTS_DIR" \
+      --archon-cost-json "$FAIL_COST_JSON" \
+      --status failed \
+      --out-file "$ARTIFACTS_DIR/run-record.json" || true
+    rm -f "$FAIL_COST_JSON"
+  fi
   if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
     if [ "$INTENT" = "refine" ] || [ "$INTENT" = "plan" ] || [ "$INTENT" = "deconflict" ]; then
       # No board status change here — the scheduler's trip_to_blocked() handles the
