@@ -1,0 +1,28 @@
+{
+  "id": "failed-command-repeated-01",
+  "category": "failed-command-repeated",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 421,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-20T19:57:31Z", "note": "First fix-phase exit_code=1, transcript unavailable, postmortem speculates a downstream push/validation failure"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-20T19:57:54Z", "note": "push-and-pr non-fast-forward rejection diagnosed: local branch behind remote, needs fetch+rebase before push"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-20T20:27:20Z", "note": "Same non-fast-forward rejection recurs, same fetch/rebase diagnosis, 6th recorded attempt on this issue"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-22T03:00:00Z", "note": "18th and final recorded attempt on this issue in the failures log"}
+  ],
+  "pivot_event_index": 1,
+  "prefix": {
+    "established_state": "The push-and-pr node's non-fast-forward rejection was correctly diagnosed at the second recorded attempt: fetch and rebase/merge remote state before pushing.",
+    "established_at_event_index": 1
+  },
+  "suffix": {
+    "outcome": "The identical rejection recurred across independent attempts through the 18th and final logged attempt for this issue, spanning ~2026-06-20T19:57Z to 2026-06-22T03:00Z — no attempt ever changed the push sequence to fetch first.",
+    "verifier_signal": "evals/factory-failures.jsonl repeated-record count (18) for issue #421, near-verbatim postmortem text recurring across ~10+ of them"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "high",
+    "notes": "One sub-attempt (2026-06-21T20:24:26Z per factory-failures.jsonl) shows a second, nested repeated defect in the same issue: the implement agent repeatedly deleted an unrelated memory [AVOID] entry to satisfy a 30-entry cap it invented — noted here for completeness but not separately fixtured."
+  }
+}

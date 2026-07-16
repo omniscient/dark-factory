@@ -1,0 +1,27 @@
+{
+  "id": "failed-command-repeated-02",
+  "category": "failed-command-repeated",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 394,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-21T07:53:54Z", "note": "de-conflict node fails invoking /dark-factory/scripts/factory_core/cli.py — path doesn't exist in the container; postmortem correctly names this an infra/path issue, not a code issue"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-21T08:08:30Z", "note": "Identical de-conflict failure on the same missing cli.py path, second recorded instance"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-21T08:22:13Z", "note": "Identical de-conflict failure on the same missing cli.py path, third recorded instance"}
+  ],
+  "pivot_event_index": 0,
+  "prefix": {
+    "established_state": "The de-conflict node's failure was correctly diagnosed at the first recorded instance: /dark-factory/scripts/factory_core/cli.py does not exist in the container image.",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "The identical missing-path failure recurred on the same issue's subsequent continue-phase attempts without the path being fixed between them; the substantive implement/validate/conformance/code-review work completed successfully each time regardless, masking the recurring infra defect as harmless.",
+    "verifier_signal": "evals/factory-failures.jsonl: 3 identical de-conflict postmortems for issue #394 between 2026-06-21T07:53Z and 08:22Z"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "high",
+    "notes": "Distinct mechanism from failed-command-repeated-01 (missing file path vs. git push ordering) — a deliberate second instance of the category rather than a duplicate of the first."
+  }
+}
