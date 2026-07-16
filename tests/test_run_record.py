@@ -188,6 +188,103 @@ def test_parse_artifact_missing_returns_none():
 
 
 # ---------------------------------------------------------------------------
+# _compute_outcome
+# ---------------------------------------------------------------------------
+
+def test_outcome_failed_when_status_not_completed():
+    out = rr._compute_outcome("failed", [])
+    assert out["state"] == "failed"
+    assert out["score"] == 0.0
+    assert out["evidence"]["ungated"] is False
+
+
+def test_outcome_blocked_on_validation_fail():
+    stages = [{"stage": "validation", "verdict": "FAIL"}]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "blocked"
+    assert out["score"] == 0.0
+
+
+def test_outcome_blocked_on_conformance_blocked():
+    stages = [
+        {"stage": "validation", "verdict": "PASS"},
+        {"stage": "conformance", "verdict": "BLOCKED", "cycles": 3},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "blocked"
+    assert out["score"] == 0.0
+
+
+def test_outcome_blocked_on_review_blocked():
+    stages = [{"stage": "review", "verdict": "BLOCKED", "blockers": 2}]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "blocked"
+
+
+def test_outcome_produced_ungated_when_no_gate_stages():
+    # e.g. a refine/plan run — conflict_resolution alone is not a gate stage.
+    stages = [{"stage": "conflict_resolution", "verdict": "none"}]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "produced_ungated"
+    assert out["score"] == 1.0
+    assert out["evidence"]["ungated"] is True
+
+
+def test_outcome_delivered_clean_zero_friction():
+    stages = [
+        {"stage": "validation", "verdict": "PASS"},
+        {"stage": "conformance", "verdict": "PASS", "cycles": 0},
+        {"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 0},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "delivered_clean"
+    assert out["score"] == 1.0
+    assert out["evidence"]["penalties"] == []
+
+
+def test_outcome_delivered_with_findings_conformance_cycles():
+    stages = [
+        {"stage": "validation", "verdict": "PASS"},
+        {"stage": "conformance", "verdict": "PASS", "cycles": 2},
+        {"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 0},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "delivered_with_findings"
+    assert out["score"] == pytest.approx(0.80)  # 1.0 - 0.10*2
+    assert out["evidence"]["penalties"] == [
+        {"reason": "conformance_cycles", "count": 2, "delta": -0.20}
+    ]
+
+
+def test_outcome_delivered_with_findings_review_advisory():
+    stages = [
+        {"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 3},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    assert out["state"] == "delivered_with_findings"
+    assert out["score"] == pytest.approx(0.85)  # 1.0 - 0.05*3
+
+
+def test_outcome_score_floor_at_quarter():
+    stages = [
+        {"stage": "conformance", "verdict": "PASS", "cycles": 20},
+        {"stage": "review", "verdict": "PASS", "advisory": 20},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    assert out["score"] == 0.25
+
+
+def test_outcome_evidence_includes_gate_stages_only():
+    stages = [
+        {"stage": "validation", "verdict": "PASS"},
+        {"stage": "conflict_resolution", "verdict": "RESOLVED"},
+    ]
+    out = rr._compute_outcome("completed", stages)
+    names = [s["stage"] for s in out["evidence"]["gate_stages"]]
+    assert names == ["validation"]
+
+
+# ---------------------------------------------------------------------------
 # assemble command
 # ---------------------------------------------------------------------------
 

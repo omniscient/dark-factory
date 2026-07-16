@@ -19,6 +19,17 @@ from datetime import datetime, timezone
 JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
+POLICY_VERSION = "1.0"
+GATE_STAGE_NAMES = ("validation", "conformance", "review")
+_BLOCKING_VERDICTS = {
+    "validation": {"FAIL"},
+    "conformance": {"BLOCKED"},
+    "review": {"BLOCKED"},
+}
+CONFORMANCE_CYCLE_PENALTY = 0.10
+REVIEW_ADVISORY_PENALTY = 0.05
+SCORE_FLOOR = 0.25
+
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -256,6 +267,62 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     result: dict = {"stage": name, "verdict": verdict}
     result.update(detail)
     return result
+
+
+def _compute_outcome(status: str, stages: list) -> dict:
+    """Deterministic outcome.state / outcome.score policy (policy_version 1.0).
+
+    failed/blocked always score 0.0 regardless of token spend — the mechanical
+    enforcement of "don't reward raw token reduction over correctness." See
+    docs/superpowers/specs/2026-07-16-harness-economics-ledger-cpm-design.md
+    "Outcome-score policy".
+    """
+    stage_by_name = {s["stage"]: s for s in stages if s.get("stage") in GATE_STAGE_NAMES}
+    gate_stages = [stage_by_name[name] for name in GATE_STAGE_NAMES if name in stage_by_name]
+
+    if status != "completed":
+        state = "failed"
+    elif any(
+        stage_by_name.get(name, {}).get("verdict") in _BLOCKING_VERDICTS[name]
+        for name in GATE_STAGE_NAMES
+    ):
+        state = "blocked"
+    elif not gate_stages:
+        state = "produced_ungated"
+    else:
+        cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
+        advisory = stage_by_name.get("review", {}).get("advisory") or 0
+        state = "delivered_with_findings" if (cycles or advisory) else "delivered_clean"
+
+    penalties = []
+    if state in ("failed", "blocked"):
+        score = 0.0
+    elif state == "produced_ungated":
+        score = 1.0
+    else:
+        score = 1.0
+        cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
+        if cycles:
+            delta = round(-CONFORMANCE_CYCLE_PENALTY * cycles, 4)
+            score += delta
+            penalties.append({"reason": "conformance_cycles", "count": cycles, "delta": delta})
+        advisory = stage_by_name.get("review", {}).get("advisory") or 0
+        if advisory:
+            delta = round(-REVIEW_ADVISORY_PENALTY * advisory, 4)
+            score += delta
+            penalties.append({"reason": "review_advisory", "count": advisory, "delta": delta})
+        score = max(SCORE_FLOOR, min(1.0, round(score, 4)))
+
+    return {
+        "state": state,
+        "score": score,
+        "evidence": {
+            "status": status,
+            "gate_stages": gate_stages,
+            "penalties": penalties,
+            "ungated": state == "produced_ungated",
+        },
+    }
 
 
 def cmd_assemble(args) -> None:
