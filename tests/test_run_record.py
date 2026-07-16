@@ -393,6 +393,8 @@ class _AssembleArgs:
     intent = "new"
     started_at = "2026-06-12T04:00:00Z"
     archon_cost_json = None
+    status = "completed"
+    ledger_path = None
 
     def __init__(self, artifacts_dir, out_file):
         self.artifacts_dir = str(artifacts_dir)
@@ -402,6 +404,7 @@ class _AssembleArgs:
 def test_assemble_builds_run_record(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     (tmp_path / "validation.md").write_text("STATUS: PASS\n")
     (tmp_path / "conformance.md").write_text("STATUS: PASS\nCYCLES: 1\n")
@@ -428,6 +431,7 @@ def test_assemble_builds_run_record(tmp_path, monkeypatch):
 def test_assemble_missing_artifacts_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     out = tmp_path / "run-record.json"
     args = _AssembleArgs(tmp_path, out)
@@ -441,6 +445,7 @@ def test_assemble_missing_artifacts_skipped(tmp_path, monkeypatch):
 def test_assemble_incorporates_archon_cost(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     cost_json = tmp_path / "cost.json"
     cost_json.write_text(json.dumps({
@@ -466,6 +471,7 @@ def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     jsonl = tmp_path / "runs.jsonl"
     monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     (tmp_path / "validation.md").write_text("STATUS: PASS\n")
     (tmp_path / "conformance.md").write_text("STATUS: PASS\nCYCLES: 0\n")
@@ -481,11 +487,154 @@ def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     assert "conformance" in stages
 
 
+# ---------------------------------------------------------------------------
+# harness_economics (via cmd_assemble)
+# ---------------------------------------------------------------------------
+
+def test_assemble_attaches_harness_economics_ungated(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)  # no validation/conformance/review artifacts
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    he = rec["harness_economics"]
+    assert he["policy_version"] == rr.POLICY_VERSION
+    assert he["outcome"]["state"] == "produced_ungated"
+    assert he["outcome"]["score"] == 1.0
+    assert he["ledger_available"] is False
+    assert he["ledger_rows_correlated"] == 0
+    assert he["ledger_mechanics"] is None
+    assert he["retry_spend"] == {"tokens": None, "request_count": None}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+
+
+def test_assemble_harness_economics_delivered_clean_with_cost(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "validation.md").write_text("STATUS: PASS\n")
+    (tmp_path / "conformance.md").write_text("STATUS: PASS\nCYCLES: 0\n")
+    (tmp_path / "review.md").write_text("STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n")
+
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 800000, "outputTokens": 200000,
+                   "costUsd": 2.5, "durationMs": 1000, "modelUsage": {}}],
+        "totals": {"costUsd": 2.5, "inputTokens": 800000, "outputTokens": 200000},
+    }))
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    he = rec["harness_economics"]
+    assert he["outcome"]["state"] == "delivered_clean"
+    assert he["cost_per_task"] == pytest.approx(2.5)
+    assert he["tokens_per_task"] == 1_000_000
+    assert he["factory_cpm"] == pytest.approx(1.0)  # score 1.0 * 1e6 / 1_000_000 tokens
+
+
+def test_assemble_harness_economics_tokens_zero_cpm_null(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["harness_economics"]["factory_cpm"] is None
+
+
+def test_assemble_harness_economics_status_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.status = "failed"
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["status"] == "failed"
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+    assert rec["harness_economics"]["outcome"]["score"] == 0.0
+
+
+def test_assemble_harness_economics_failure_spend_whole_run_when_blocked(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "validation.md").write_text("STATUS: FAIL\n")
+
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 100, "outputTokens": 50,
+                   "costUsd": 0.01, "durationMs": 1000, "modelUsage": {}}],
+        "totals": {"costUsd": 0.01, "inputTokens": 100, "outputTokens": 50},
+    }))
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    he = rec["harness_economics"]
+    assert he["outcome"]["state"] == "blocked"
+    assert he["failure_spend"] == {"tokens": 150, "basis": "whole_run"}
+
+
+def test_assemble_harness_economics_with_ledger_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(
+        json.dumps({
+            "run_id": "abc123", "status": 200,
+            "gen_ai.usage.input_tokens": 10, "gen_ai.usage.output_tokens": 5,
+            "gen_ai.usage.cache_read_input_tokens": 2, "tool_bytes": 30, "system_bytes": 10,
+            "largest_tools": [],
+        }) + "\n" +
+        json.dumps({
+            "run_id": "abc123", "status": 529,
+            "gen_ai.usage.input_tokens": 7, "gen_ai.usage.output_tokens": 3,
+            "gen_ai.usage.cache_read_input_tokens": 0, "tool_bytes": 20, "system_bytes": 10,
+            "largest_tools": [],
+        }) + "\n"
+    )
+    monkeypatch.setattr(rr, "LEDGER_PATH", ledger)
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    he = rec["harness_economics"]
+    assert he["ledger_available"] is True
+    assert he["ledger_rows_correlated"] == 2
+    assert he["retry_spend"] == {"tokens": 10, "request_count": 1}
+    assert he["ledger_mechanics"]["cache_hit_ratio"] == pytest.approx(2 / 17)
+
+
 # ── memory-trace pickup tests (issue #647) ─────────────────────────────────
 
 def test_assemble_picks_up_memory_trace(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     trace = {
         "schema_version": 1,
@@ -510,6 +659,7 @@ def test_assemble_picks_up_memory_trace(tmp_path, monkeypatch):
 def test_assemble_no_memory_trace_key_when_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     out = tmp_path / "run-record.json"
     args = _AssembleArgs(tmp_path, out)
@@ -522,6 +672,7 @@ def test_assemble_no_memory_trace_key_when_absent(tmp_path, monkeypatch):
 def test_assemble_tolerates_malformed_memory_trace(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     (tmp_path / "memory-trace.json").write_text("not valid json {{{")
 
@@ -536,6 +687,7 @@ def test_assemble_tolerates_malformed_memory_trace(tmp_path, monkeypatch):
 def test_assemble_tolerates_unreadable_memory_trace(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
 
     # Create a directory where the file is expected — causes read failure
     (tmp_path / "memory-trace.json").mkdir()

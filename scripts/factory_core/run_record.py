@@ -408,6 +408,48 @@ def _compute_ledger_mechanics(rows: list) -> dict:
     }
 
 
+def _compute_harness_economics(
+    *, run_id: str, status: str, stages: list, totals: dict,
+    started_at: str, completed_at: str, ledger_path: pathlib.Path,
+) -> dict:
+    tokens_in = totals.get("gen_ai.usage.input_tokens", 0)
+    tokens_out = totals.get("gen_ai.usage.output_tokens", 0)
+    tokens_per_task = tokens_in + tokens_out
+    cost_per_task = totals.get("cost_usd", 0.0)
+
+    outcome = _compute_outcome(status, stages)
+    factory_cpm = (
+        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task > 0 else None
+    )
+
+    rows, ledger_available = _read_ledger_rows(run_id, ledger_path)
+    if ledger_available:
+        retry_spend = _compute_retry_spend(rows)
+        ledger_mechanics = _compute_ledger_mechanics(rows)
+    else:
+        retry_spend = {"tokens": None, "request_count": None}
+        ledger_mechanics = None
+
+    if outcome["state"] in ("failed", "blocked"):
+        failure_spend = {"tokens": tokens_per_task, "basis": "whole_run"}
+    else:
+        failure_spend = {"tokens": retry_spend["tokens"] or 0, "basis": "retry_only"}
+
+    return {
+        "policy_version": POLICY_VERSION,
+        "cost_per_task": cost_per_task,
+        "tokens_per_task": tokens_per_task,
+        "wall_clock_seconds": _wall_clock_seconds(started_at, completed_at),
+        "outcome": outcome,
+        "factory_cpm": factory_cpm,
+        "retry_spend": retry_spend,
+        "failure_spend": failure_spend,
+        "ledger_available": ledger_available,
+        "ledger_rows_correlated": len(rows),
+        "ledger_mechanics": ledger_mechanics,
+    }
+
+
 def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)
@@ -438,7 +480,7 @@ def cmd_assemble(args) -> None:
         "intent": args.intent,
         "started_at": args.started_at or _timestamp(),
         "completed_at": _timestamp(),
-        "status": "completed",
+        "status": args.status,
         "stages": stages,
         "nodes": nodes,
         "artifacts": artifacts,
@@ -448,6 +490,15 @@ def cmd_assemble(args) -> None:
             "cost_usd": totals_cost,
         },
     }
+    run_record["harness_economics"] = _compute_harness_economics(
+        run_id=args.run_id,
+        status=run_record["status"],
+        stages=stages,
+        totals=run_record["totals"],
+        started_at=run_record["started_at"],
+        completed_at=run_record["completed_at"],
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+    )
 
     trace_path = artifacts_dir / "memory-trace.json"
     if trace_path.exists():
@@ -506,6 +557,8 @@ def main() -> None:
     a.add_argument("--artifacts-dir", required=True)
     a.add_argument("--archon-cost-json")
     a.add_argument("--out-file", required=True)
+    a.add_argument("--status", default="completed")
+    a.add_argument("--ledger-path", default=None)
 
     parsed = parser.parse_args()
     if parsed.cmd == "record":
