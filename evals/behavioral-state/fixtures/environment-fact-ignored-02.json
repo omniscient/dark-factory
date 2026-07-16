@@ -1,0 +1,26 @@
+{
+  "id": "environment-fact-ignored-02",
+  "category": "environment-fact-ignored",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 280,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "issue_body", "url": "https://github.com/omniscient/dark-factory/issues/280", "timestamp": "2026-07-14T08:17:43Z", "note": "workflows/archon-dark-factory.yaml's budget-implement node passes --scenario \"$INTENT\" where INTENT includes 'new'; context_budget.py's --scenario choices are refine/plan/implement/continue/conformance/code-review — 'new' was never added, so argparse exits non-zero and context-budget.json is never written."},
+    {"event": "issue_body_note", "url": "https://github.com/omniscient/dark-factory/issues/280", "timestamp": "2026-07-14T08:17:44Z", "note": "The node itself still reports Completed, so token-budget enforcement for the implement phase has silently never run on any intent=new dispatch since the node was added — invisible unless stderr is read."}
+  ],
+  "pivot_event_index": 1,
+  "prefix": {
+    "established_state": "budget-implement's own node body passes --scenario \"$INTENT\" with INTENT able to be 'new' — a fact fixed into the workflow YAML at the moment that node was authored.",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "context_budget.py's --scenario registry was never updated to include 'new', so every first-pass (intent=new) implement dispatch has silently skipped budget enforcement (reserved=0) since the node shipped.",
+    "verifier_signal": "Open issue #280 at time of writing; no fix commit yet — a live, still-unresolved instance rather than a closed-loop one"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "medium",
+    "notes": "Confidence medium rather than high: issue #280 is open (unresolved) at annotation time, so there is no closing verifier commit — the verifier signal here is the issue body's own diagnosis plus the node's still-live, unpatched behavior, not a resolved fix. Re-check this fixture's suffix once #280 closes; if the fix changes the story, bump to version 2."
+  }
+}
