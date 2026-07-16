@@ -325,6 +325,89 @@ def _compute_outcome(status: str, stages: list) -> dict:
     }
 
 
+LEDGER_PATH = pathlib.Path(
+    os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
+)
+
+
+def _wall_clock_seconds(started_at: str, completed_at: str) -> int:
+    try:
+        start = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ")
+        end = datetime.strptime(completed_at, "%Y-%m-%dT%H:%M:%SZ")
+        return max(0, int((end - start).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _iter_ledger_paths(ledger_path: pathlib.Path):
+    yield ledger_path
+    for i in (1, 2, 3):
+        backup = ledger_path.with_suffix(ledger_path.suffix + f".{i}")
+        if backup.exists():
+            yield backup
+
+
+def _read_ledger_rows(run_id: str, ledger_path: pathlib.Path) -> tuple:
+    """Scan the live ledger plus rotation backups for rows matching run_id.
+
+    Returns (rows, ledger_available) — ledger_available distinguishes "the ledger
+    exists and genuinely has zero rows for this run" from "no ledger data at all"
+    (opt-in model-proxy was never enabled). See the spec's "Graceful degradation"
+    section.
+    """
+    rows = []
+    available = False
+    for path in _iter_ledger_paths(ledger_path):
+        if not path.exists():
+            continue
+        available = True
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("run_id") == run_id:
+                    rows.append(row)
+        except OSError:
+            continue
+    return rows, available
+
+
+def _compute_retry_spend(rows: list) -> dict:
+    """Ledger retry_count is always 0 (single-pass forwarder) — retries are
+    reconstructed from rows with a failure status instead. See model_proxy.py's
+    build_ledger_row docstring.
+    """
+    failed = [r for r in rows if isinstance(r.get("status"), int) and r["status"] >= 400]
+    tokens = sum(
+        r.get("gen_ai.usage.input_tokens", 0) + r.get("gen_ai.usage.output_tokens", 0)
+        for r in failed
+    )
+    return {"tokens": tokens, "request_count": len(failed)}
+
+
+def _compute_ledger_mechanics(rows: list) -> dict:
+    total_input = sum(r.get("gen_ai.usage.input_tokens", 0) for r in rows)
+    total_cache_read = sum(r.get("gen_ai.usage.cache_read_input_tokens", 0) for r in rows)
+    cache_hit_ratio = (total_cache_read / total_input) if total_input else None
+    tool_schema_overhead_bytes = sum(r.get("tool_bytes", 0) for r in rows)
+    system_bytes_vals = [r.get("system_bytes", 0) for r in rows if r.get("system_bytes")]
+    largest_tools = []
+    for r in rows:
+        largest_tools.extend(r.get("largest_tools") or [])
+    largest_tools = sorted(largest_tools, key=lambda t: t.get("bytes", 0), reverse=True)[:5]
+    return {
+        "cache_hit_ratio": cache_hit_ratio,
+        "tool_schema_overhead_bytes": tool_schema_overhead_bytes,
+        "system_prompt_bytes": max(system_bytes_vals) if system_bytes_vals else 0,
+        "largest_tools": largest_tools,
+    }
+
+
 def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)

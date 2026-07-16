@@ -285,6 +285,105 @@ def test_outcome_evidence_includes_gate_stages_only():
 
 
 # ---------------------------------------------------------------------------
+# _wall_clock_seconds
+# ---------------------------------------------------------------------------
+
+def test_wall_clock_seconds_basic():
+    secs = rr._wall_clock_seconds("2026-06-12T04:00:00Z", "2026-06-12T04:05:30Z")
+    assert secs == 330
+
+
+def test_wall_clock_seconds_malformed_returns_zero():
+    assert rr._wall_clock_seconds("not-a-date", "2026-06-12T04:00:00Z") == 0
+    assert rr._wall_clock_seconds("", "") == 0
+
+
+def test_wall_clock_seconds_never_negative():
+    # started_at after completed_at (clock skew) must not go negative.
+    secs = rr._wall_clock_seconds("2026-06-12T04:05:00Z", "2026-06-12T04:00:00Z")
+    assert secs == 0
+
+
+# ---------------------------------------------------------------------------
+# _read_ledger_rows
+# ---------------------------------------------------------------------------
+
+def _ledger_row(run_id="run-1", status=200, in_tok=10, out_tok=5):
+    return {
+        "run_id": run_id, "status": status,
+        "gen_ai.usage.input_tokens": in_tok, "gen_ai.usage.output_tokens": out_tok,
+        "gen_ai.usage.cache_read_input_tokens": 0, "gen_ai.usage.cache_creation_input_tokens": 0,
+        "tool_bytes": 100, "system_bytes": 50, "largest_tools": [{"name": "Bash", "bytes": 40}],
+    }
+
+
+def test_read_ledger_rows_missing_file_not_available(tmp_path):
+    rows, available = rr._read_ledger_rows("run-1", tmp_path / "missing.jsonl")
+    assert rows == []
+    assert available is False
+
+
+def test_read_ledger_rows_filters_by_run_id(tmp_path):
+    path = tmp_path / "request-ledger.jsonl"
+    path.write_text(
+        json.dumps(_ledger_row("run-1")) + "\n" + json.dumps(_ledger_row("run-2")) + "\n"
+    )
+    rows, available = rr._read_ledger_rows("run-1", path)
+    assert available is True
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "run-1"
+
+
+def test_read_ledger_rows_includes_rotation_backups(tmp_path):
+    path = tmp_path / "request-ledger.jsonl"
+    path.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    backup = tmp_path / "request-ledger.jsonl.1"
+    backup.write_text(json.dumps(_ledger_row("run-1", in_tok=2)) + "\n")
+    rows, available = rr._read_ledger_rows("run-1", path)
+    assert available is True
+    assert len(rows) == 2
+
+
+def test_read_ledger_rows_skips_malformed_lines(tmp_path):
+    path = tmp_path / "request-ledger.jsonl"
+    path.write_text("not json\n" + json.dumps(_ledger_row("run-1")) + "\n")
+    rows, available = rr._read_ledger_rows("run-1", path)
+    assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# _compute_retry_spend / _compute_ledger_mechanics
+# ---------------------------------------------------------------------------
+
+def test_compute_retry_spend_counts_failed_rows_only():
+    rows = [_ledger_row(status=200, in_tok=10, out_tok=5), _ledger_row(status=529, in_tok=7, out_tok=3)]
+    spend = rr._compute_retry_spend(rows)
+    assert spend == {"tokens": 10, "request_count": 1}
+
+
+def test_compute_retry_spend_zero_when_no_failures():
+    rows = [_ledger_row(status=200)]
+    assert rr._compute_retry_spend(rows) == {"tokens": 0, "request_count": 0}
+
+
+def test_compute_ledger_mechanics_cache_hit_ratio():
+    rows = [
+        {**_ledger_row(in_tok=100), "gen_ai.usage.cache_read_input_tokens": 40},
+    ]
+    mech = rr._compute_ledger_mechanics(rows)
+    assert mech["cache_hit_ratio"] == pytest.approx(0.4)
+    assert mech["tool_schema_overhead_bytes"] == 100
+    assert mech["largest_tools"][0]["name"] == "Bash"
+
+
+def test_compute_ledger_mechanics_empty_rows():
+    mech = rr._compute_ledger_mechanics([])
+    assert mech["cache_hit_ratio"] is None
+    assert mech["tool_schema_overhead_bytes"] == 0
+    assert mech["largest_tools"] == []
+
+
+# ---------------------------------------------------------------------------
 # assemble command
 # ---------------------------------------------------------------------------
 
