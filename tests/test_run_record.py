@@ -371,7 +371,7 @@ def test_compute_ledger_mechanics_cache_hit_ratio():
         {**_ledger_row(in_tok=100), "gen_ai.usage.cache_read_input_tokens": 40},
     ]
     mech = rr._compute_ledger_mechanics(rows)
-    assert mech["cache_hit_ratio"] == pytest.approx(0.4)
+    assert mech["cache_hit_ratio"] == pytest.approx(40 / 140)
     assert mech["tool_schema_overhead_bytes"] == 100
     assert mech["largest_tools"][0]["name"] == "Bash"
 
@@ -626,7 +626,7 @@ def test_assemble_harness_economics_with_ledger_rows(tmp_path, monkeypatch):
     assert he["ledger_available"] is True
     assert he["ledger_rows_correlated"] == 2
     assert he["retry_spend"] == {"tokens": 10, "request_count": 1}
-    assert he["ledger_mechanics"]["cache_hit_ratio"] == pytest.approx(2 / 17)
+    assert he["ledger_mechanics"]["cache_hit_ratio"] == pytest.approx(2 / 19)
 
 
 # ---------------------------------------------------------------------------

@@ -12,9 +12,12 @@ import fcntl
 import json
 import os
 import pathlib
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+from . import model_proxy
 
 JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
@@ -29,6 +32,17 @@ _BLOCKING_VERDICTS = {
 CONFORMANCE_CYCLE_PENALTY = 0.10
 REVIEW_ADVISORY_PENALTY = 0.05
 SCORE_FLOOR = 0.25
+
+# run_id is embedded in an on-disk path (artifacts_root / run_id / "run-record.json");
+# reject anything that isn't a plain path segment before joining, so a crafted run_id
+# (e.g. containing "..", "/") can't traverse outside artifacts_root.
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _run_record_path(artifacts_root: pathlib.Path, run_id: str) -> "pathlib.Path | None":
+    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+        return None
+    return artifacts_root / run_id / "run-record.json"
 
 
 def _timestamp() -> str:
@@ -279,6 +293,8 @@ def _compute_outcome(status: str, stages: list) -> dict:
     """
     stage_by_name = {s["stage"]: s for s in stages if s.get("stage") in GATE_STAGE_NAMES}
     gate_stages = [stage_by_name[name] for name in GATE_STAGE_NAMES if name in stage_by_name]
+    cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
+    advisory = stage_by_name.get("review", {}).get("advisory") or 0
 
     if status != "completed":
         state = "failed"
@@ -290,8 +306,6 @@ def _compute_outcome(status: str, stages: list) -> dict:
     elif not gate_stages:
         state = "produced_ungated"
     else:
-        cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
-        advisory = stage_by_name.get("review", {}).get("advisory") or 0
         state = "delivered_with_findings" if (cycles or advisory) else "delivered_clean"
 
     penalties = []
@@ -301,12 +315,10 @@ def _compute_outcome(status: str, stages: list) -> dict:
         score = 1.0
     else:
         score = 1.0
-        cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
         if cycles:
             delta = round(-CONFORMANCE_CYCLE_PENALTY * cycles, 4)
             score += delta
             penalties.append({"reason": "conformance_cycles", "count": cycles, "delta": delta})
-        advisory = stage_by_name.get("review", {}).get("advisory") or 0
         if advisory:
             delta = round(-REVIEW_ADVISORY_PENALTY * advisory, 4)
             score += delta
@@ -341,7 +353,7 @@ def _wall_clock_seconds(started_at: str, completed_at: str) -> int:
 
 def _iter_ledger_paths(ledger_path: pathlib.Path):
     yield ledger_path
-    for i in (1, 2, 3):
+    for i in range(1, model_proxy.BACKUP_COUNT + 1):
         backup = ledger_path.with_suffix(ledger_path.suffix + f".{i}")
         if backup.exists():
             yield backup
@@ -393,7 +405,9 @@ def _compute_retry_spend(rows: list) -> dict:
 def _compute_ledger_mechanics(rows: list) -> dict:
     total_input = sum(r.get("gen_ai.usage.input_tokens", 0) for r in rows)
     total_cache_read = sum(r.get("gen_ai.usage.cache_read_input_tokens", 0) for r in rows)
-    cache_hit_ratio = (total_cache_read / total_input) if total_input else None
+    total_cache_creation = sum(r.get("gen_ai.usage.cache_creation_input_tokens", 0) for r in rows)
+    cache_denominator = total_input + total_cache_read + total_cache_creation
+    cache_hit_ratio = (total_cache_read / cache_denominator) if cache_denominator else None
     tool_schema_overhead_bytes = sum(r.get("tool_bytes", 0) for r in rows)
     system_bytes_vals = [r.get("system_bytes", 0) for r in rows if r.get("system_bytes")]
     largest_tools = []
@@ -578,8 +592,8 @@ def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, arti
             "outcome_state": None,
             "factory_cpm": None,
         }
-        record_path = artifacts_root / run_id / "run-record.json"
-        if record_path.exists():
+        record_path = _run_record_path(artifacts_root, run_id)
+        if record_path is not None and record_path.exists():
             try:
                 record = json.loads(record_path.read_text(encoding="utf-8"))
                 entry["cost_usd"] = record.get("totals", {}).get("cost_usd")
@@ -608,8 +622,8 @@ def _backfill_run_economics(run_id: str, *, artifacts_root: pathlib.Path, ledger
     Returns False (skipped, not an error) when the run's run-record.json directory
     no longer exists — bounded by artifact retention, per the spec's backfill section.
     """
-    record_path = artifacts_root / run_id / "run-record.json"
-    if not record_path.exists():
+    record_path = _run_record_path(artifacts_root, run_id)
+    if record_path is None or not record_path.exists():
         return False
     try:
         record = json.loads(record_path.read_text(encoding="utf-8"))
