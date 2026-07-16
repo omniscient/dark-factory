@@ -1,0 +1,27 @@
+{
+  "id": "diagnosis-lost-01",
+  "category": "diagnosis-lost",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 360,
+  "source_repo": "omniscient/markethawk",
+  "provenance": [
+    {"event": "conformance_reconcile", "file": ".archon/memory/codebase-patterns.md", "timestamp": "2026-06-13T00:00:00Z", "note": "[AVOID] entry (source:conformance): gating probe_running_postgres() behind POSTGRES_DISCOVERY_ENABLED is a fixture behavior change that violates spec requirement #2; the guard was removed during reconcile"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-13T19:06:56Z", "note": "continue-phase failure: diagnosis states the conflict is unresolvable — conformance cycle 1 required removing the guard, but code-review is BLOCKED because that guard prevents drop_all() from targeting the live stockscanner-db"},
+    {"event": "failure_record", "file": "evals/factory-failures.jsonl", "timestamp": "2026-06-13T19:07:18Z", "note": "Second continue-phase failure, 22 seconds later: near-identical diagnosis restated (spec-conformance paradox between requirement #2 and the safety guard) — the de-conflict phase failed with unresolved merge markers"}
+  ],
+  "pivot_event_index": 1,
+  "prefix": {
+    "established_state": "The root cause was correctly diagnosed at the first failure record: the spec's requirement #2 (no fixture behavior change) directly conflicts with code-review's safety requirement to keep the POSTGRES_DISCOVERY_ENABLED guard, since removing it lets a probe target and drop_all() the live production database.",
+    "established_at_event_index": 1
+  },
+  "suffix": {
+    "outcome": "The same correct diagnosis was restated verbatim 22 seconds later in an independent attempt, but the underlying spec-vs-guard conflict was never escalated to a human or resolved by either updating the spec or re-scoping the guard — the run simply kept failing at de-conflict with unresolved merge markers.",
+    "verifier_signal": "Two near-duplicate diagnosis records 22s apart with no resolving action between them (evals/factory-failures.jsonl)"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "medium",
+    "notes": "Best read as 'diagnosis repeated without uptake' rather than classic forgetting — the diagnosis itself persisted correctly across attempts, but downstream action never used it to escalate or resolve. Fits the category's 'acted as if the diagnosis never happened' framing at the level of resolving action, not recall."
+  }
+}
