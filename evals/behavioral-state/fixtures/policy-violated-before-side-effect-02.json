@@ -1,0 +1,27 @@
+{
+  "id": "policy-violated-before-side-effect-02",
+  "category": "policy-violated-before-side-effect",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 212,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "issue_body", "url": "https://github.com/omniscient/dark-factory/issues/212", "timestamp": "2026-07-10T03:28:52Z", "note": "Issue body names the policy gap directly: spec-pending-review/plan-pending-review labels — defined by CLAUDE.md as applied only after the artifact actually exists — were applied unconditionally by the pre-fix refine-push/plan-push-and-advance workflow nodes, regardless of whether a spec/plan was actually committed"},
+    {"event": "commit", "sha": "cebe413dec34238c2e338c19716c9aa63125e175", "timestamp": "2026-07-15T21:21:55Z", "note": "feat(workflow): add push_gate_check.sh — git-aware spec/plan artifact check"},
+    {"event": "commit", "sha": "a42b0294d91bf187bb50d7a5b8b7f2df9b688caa", "timestamp": "2026-07-15T21:23:06Z", "note": "fix(workflow): gate refine-push/plan-push-and-advance on committed artifact existence (#212)"}
+  ],
+  "pivot_event_index": 0,
+  "prefix": {
+    "established_state": "CLAUDE.md's label semantics define spec-pending-review/plan-pending-review as gate labels applied only after the artifact actually exists on the branch.",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "The pre-fix workflow nodes applied those same labels unconditionally, regardless of artifact existence — a policy (the label's own defined semantics) violated before the side effect (a stranded ticket carrying a review-pending label with nothing to review) rather than a data-loss side effect.",
+    "verifier_signal": "Fixed by push_gate_check.sh (cebe413) wired into both nodes (a42b029), gating the label application on a real git-committed-file check"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "medium",
+    "notes": "Same source issue as phase-handoff-loses-state-01 but a distinct lens: that fixture's pivot is the spec/plan artifact failing to reach the next phase; this fixture's pivot is the gate-label policy itself being applied without checking the condition it claims to attest to. Confidence medium because the 'side effect' here (a mislabeled ticket) is milder than #360's near-miss."
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "phase-handoff-loses-state-01",
+  "category": "phase-handoff-loses-state",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 212,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "issue_comment", "url": "https://github.com/omniscient/dark-factory/issues/212#issuecomment-4931758381", "timestamp": "2026-07-10T03:39:59Z", "note": "First observation: a refine-phase run died mid-run, leaving an empty branch, but the spec-pending-review label was applied anyway"},
+    {"event": "issue_comment", "url": "https://github.com/omniscient/dark-factory/issues/212#issuecomment-4931813575", "timestamp": "2026-07-10T03:51:50Z", "note": "idle_timeout theory narrowed to refine-push/plan-push-and-advance depending only on the ephemeral runner exit code, not on whether a spec/plan artifact was actually committed"},
+    {"event": "issue_comment", "url": "https://github.com/omniscient/dark-factory/issues/212#issuecomment-4932346667", "timestamp": "2026-07-10T05:40:24Z", "note": "Root cause confirmed via kept-container transcript: the agent parks on ScheduleWakeup, gets killed, but the DAG node is still marked dag_node_completed, so downstream push+label nodes fire on an empty branch"},
+    {"event": "issue_comment", "url": "https://github.com/omniscient/dark-factory/issues/212#issuecomment-4934672132", "timestamp": "2026-07-10T11:07:53Z", "note": "Definitive: a command node closes the instant the agent ends its turn, even with a successfully scheduled wakeup pending — this finding is what CLAUDE.md's 'Turn end = process end' rule now encodes"},
+    {"event": "commit", "sha": "fc9ca0cf097c9c7ceeb198cbfc2855a2819c67cc", "timestamp": "2026-07-15T21:21:01Z", "note": "docs: bring over approved spec/plan for issue #212"},
+    {"event": "commit", "sha": "cebe413dec34238c2e338c19716c9aa63125e175", "timestamp": "2026-07-15T21:21:55Z", "note": "feat(workflow): add push_gate_check.sh — git-aware spec/plan artifact check"},
+    {"event": "commit", "sha": "a42b0294d91bf187bb50d7a5b8b7f2df9b688caa", "timestamp": "2026-07-15T21:23:06Z", "note": "fix(workflow): gate refine-push/plan-push-and-advance on committed artifact existence (#212)"}
+  ],
+  "pivot_event_index": 2,
+  "prefix": {
+    "established_state": "A refine or plan phase agent may end its turn (deliberately, via ScheduleWakeup, or by being killed) without having committed a spec/plan artifact for the issue.",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "The next DAG stage (refine-push / plan-push-and-advance) had no way to know whether the prior phase actually produced a committed artifact — it trusted the ephemeral run's completion status alone, so an agent's mid-phase death silently produced a stranded, mislabeled ticket (spec-pending-review or plan-pending-review with nothing to review) at least twice (issues #43 and #41 per the thread).",
+    "verifier_signal": "Root-cause comment #212#issuecomment-4934672132; fixed by push_gate_check.sh (cebe413) wired into both nodes (a42b029), which checks the committed git diff rather than the ephemeral run status"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "high",
+    "notes": "The richest and most explicitly self-documented case in either repo's history — a 4-comment root-cause evolution over ~7.5 hours, directly named in CLAUDE.md's current 'Turn end = process end' rule. Companion fixture policy-violated-before-side-effect-02 covers the same issue's gate-label angle under a distinct pivot/lens."
+  }
+}

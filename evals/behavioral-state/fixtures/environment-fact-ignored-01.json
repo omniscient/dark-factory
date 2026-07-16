@@ -1,0 +1,28 @@
+{
+  "id": "environment-fact-ignored-01",
+  "category": "environment-fact-ignored",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 266,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "issue_body", "url": "https://github.com/omniscient/dark-factory/issues/266", "timestamp": "2026-07-13T19:35:04Z", "note": "Root cause: scripts/oos_excise.sh's two-dot 'git diff origin/main HEAD' flags/deletes files main changed independently after the branch forked. Evidence cites the #251 refine-run excision commit b1f1af6 silently deleting scripts/factory_core/providers/*, requiring a manual rebuild."},
+    {"event": "commit", "sha": "078e3df08d69632f0c5b5978498682613c015f06", "timestamp": "2026-07-14T00:27:18Z", "note": "chore: excise out-of-scope files from plan run (#266) — the still-unpatched gate deletes #266's own just-approved spec and two memory files, on #266's own branch"},
+    {"event": "commit", "sha": "ac05151b08374f596a3034f5920a4c6522c78c23", "timestamp": "2026-07-14T00:28:45Z", "note": "Revert 'chore: excise out-of-scope files from plan run (#266)' — caught and reverted before push"},
+    {"event": "commit", "sha": "041f140b467e690fe4b0e4859f09c7fdff0b96bc", "timestamp": "2026-07-14T02:24:32Z", "note": "fix(oos-excise): diff against merge base, not raw origin/main tip (#266)"}
+  ],
+  "pivot_event_index": 1,
+  "prefix": {
+    "established_state": "oos_excise.sh's two-dot diff against origin/main's raw tip (not the branch's merge-base) is documented, in this very ticket's own issue body, as the root cause of a prior silent deletion (#251's b1f1af6).",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "While the fix for the two-dot bug was still in flight, the same unpatched gate re-triggered on #266's own plan-phase run, deleting the ticket's own approved spec and two memory files — caught only because the agent manually reverted before pushing.",
+    "verifier_signal": "Self-caught revert commit ac05151; permanent fix in 041f140 (merge-base diff)"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "high",
+    "notes": "Self-referential near-miss: the ticket fixing an environment-fact-ignored bug was itself hit by the same bug mid-fix. The #251 damage (b1f1af6) named in the issue body is a second, non-reverted instance of the same fact being ignored, but that commit SHA is on a since-superseded branch tip and is not independently re-resolvable in this checkout — cited via the durable issue-body URL instead, per the rubric's eligibility floor (verify against a live URL when a branch-local SHA has been pruned)."
+  }
+}

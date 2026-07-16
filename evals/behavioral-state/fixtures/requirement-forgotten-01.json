@@ -1,0 +1,28 @@
+{
+  "id": "requirement-forgotten-01",
+  "category": "requirement-forgotten",
+  "version": 1,
+  "fidelity": "reconstructed",
+  "source_issue": 49,
+  "source_repo": "omniscient/dark-factory",
+  "provenance": [
+    {"event": "commit", "sha": "c5b5542133f6b6ea74edf3908a4bf86e8b9f4c02", "timestamp": "2026-07-13T10:48:56Z", "note": "test(rollout-doc): add failing content/README-link pins for #49 runbook — pins the rollout spec at docs/superpowers/specs/, asserting it is not archived"},
+    {"event": "commit", "sha": "e771def46a303a6b7b26803edec43a7e75711fdf", "timestamp": "2026-07-13T10:58:59Z", "note": "docs: archive spec/plan for issue #49 — moves the same spec into docs/archive/, on the same branch"},
+    {"event": "code_review_comment", "url": "https://github.com/omniscient/dark-factory/issues/49#issuecomment-4957253663", "timestamp": "2026-07-13T11:03:11Z", "note": "Code Review BLOCKED: 5 of the pinning tests now fail against HEAD, CLAUDE.md's never-archive-a-referenced-doc rule violated"},
+    {"event": "commit", "sha": "7e543be23ab1be8b66da36a991a6febe0c677d13", "timestamp": "2026-07-13T15:29:36Z", "note": "fix(#49): keep rollout runbook spec at its durable docs/superpowers/specs/ path"}
+  ],
+  "pivot_event_index": 1,
+  "prefix": {
+    "established_state": "The rollout runbook spec at docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md is the ticket's living, tested deliverable and must not be archived — pinned by tests added one commit earlier on this same branch, and already a named rule in CLAUDE.md following a first occurrence at issue #42.",
+    "established_at_event_index": 0
+  },
+  "suffix": {
+    "outcome": "The very next commit on the branch archived the pinned spec anyway, breaking the pinning tests and blocking the PR.",
+    "verifier_signal": "Code Review BLOCKED — 5 tests failing against HEAD (comment #49#issuecomment-4957253663)"
+  },
+  "annotation": {
+    "rubric_version": 1,
+    "confidence": "high",
+    "notes": "Clean single-branch prefix/pivot/verifier triple, one commit apart. Also demonstrates that a written memory entry from the first occurrence (#42, codebase-patterns.md line 6) did not prevent recurrence at #49 within the same repo."
+  }
+}
