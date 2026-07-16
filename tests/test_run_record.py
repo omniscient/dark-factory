@@ -629,6 +629,61 @@ def test_assemble_harness_economics_with_ledger_rows(tmp_path, monkeypatch):
     assert he["ledger_mechanics"]["cache_hit_ratio"] == pytest.approx(2 / 17)
 
 
+# ---------------------------------------------------------------------------
+# issue-economics
+# ---------------------------------------------------------------------------
+
+def test_build_issue_economics_groups_by_run_issue_phase(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(
+        json.dumps({"run_id": "run-1", "issue_number": 235, "intent": "implement",
+                    "stage": "implement", "status": 200,
+                    "gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 50}) + "\n" +
+        json.dumps({"run_id": "run-1", "issue_number": 235, "intent": "implement",
+                    "stage": "implement", "status": 529,
+                    "gen_ai.usage.input_tokens": 20, "gen_ai.usage.output_tokens": 5}) + "\n" +
+        json.dumps({"run_id": "run-2", "issue_number": 235, "intent": "plan",
+                    "stage": "plan", "status": 200,
+                    "gen_ai.usage.input_tokens": 10, "gen_ai.usage.output_tokens": 5}) + "\n" +
+        json.dumps({"run_id": "run-3", "issue_number": 999, "intent": "implement",
+                    "stage": "implement", "status": 200,
+                    "gen_ai.usage.input_tokens": 999, "gen_ai.usage.output_tokens": 999}) + "\n"
+    )
+    artifacts_root = tmp_path / "runs"
+    (artifacts_root / "run-1").mkdir(parents=True)
+    (artifacts_root / "run-1" / "run-record.json").write_text(json.dumps({
+        "totals": {"cost_usd": 1.5},
+        "harness_economics": {"outcome": {"state": "delivered_clean", "score": 1.0},
+                               "factory_cpm": 5714.0},
+    }))
+    # run-2 has no retained run-record.json — overlay must degrade gracefully.
+
+    result = rr._build_issue_economics(235, ledger_path=ledger, artifacts_root=artifacts_root)
+
+    assert set(result["runs"].keys()) == {"run-1", "run-2"}
+    run1 = result["runs"]["run-1"]
+    assert run1["intent"] == "implement"
+    assert run1["stage"] == "implement"
+    assert run1["request_count"] == 2
+    assert run1["retry_spend"] == {"tokens": 25, "request_count": 1}
+    assert run1["cost_usd"] == pytest.approx(1.5)
+    assert run1["outcome_state"] == "delivered_clean"
+    assert run1["factory_cpm"] == pytest.approx(5714.0)
+
+    run2 = result["runs"]["run-2"]
+    assert run2["cost_usd"] is None
+    assert run2["outcome_state"] is None
+
+
+def test_build_issue_economics_no_rows_for_issue(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({"run_id": "run-1", "issue_number": 1, "intent": "x",
+                                   "stage": "x", "status": 200,
+                                   "gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1}) + "\n")
+    result = rr._build_issue_economics(999, ledger_path=ledger, artifacts_root=tmp_path / "runs")
+    assert result["runs"] == {}
+
+
 # ── memory-trace pickup tests (issue #647) ─────────────────────────────────
 
 def test_assemble_picks_up_memory_trace(tmp_path, monkeypatch):

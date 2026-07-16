@@ -533,6 +533,75 @@ def cmd_assemble(args) -> None:
         _post_seq(record)
 
 
+def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, artifacts_root: pathlib.Path) -> dict:
+    """Read-only rollup over request-ledger.jsonl, grouped by run/issue/phase.
+
+    Overlays dollar/outcome figures from each run's own retained run-record.json —
+    never recomputes them independently (see spec's "Cost source" section). Produces
+    no new persisted file.
+    """
+    runs: dict = {}
+    for path in _iter_ledger_paths(ledger_path):
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if int(row.get("issue_number") or 0) != issue_number:
+                    continue
+                run_id = row.get("run_id", "unknown")
+                bucket = runs.setdefault(run_id, {
+                    "intent": row.get("intent", "unknown"),
+                    "stage": row.get("stage", "unknown"),
+                    "rows": [],
+                })
+                bucket["rows"].append(row)
+        except OSError:
+            continue
+
+    result_runs = {}
+    for run_id, bucket in runs.items():
+        rows = bucket["rows"]
+        entry = {
+            "intent": bucket["intent"],
+            "stage": bucket["stage"],
+            "request_count": len(rows),
+            "retry_spend": _compute_retry_spend(rows),
+            "ledger_mechanics": _compute_ledger_mechanics(rows),
+            "cost_usd": None,
+            "outcome_state": None,
+            "factory_cpm": None,
+        }
+        record_path = artifacts_root / run_id / "run-record.json"
+        if record_path.exists():
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                entry["cost_usd"] = record.get("totals", {}).get("cost_usd")
+                he = record.get("harness_economics") or {}
+                entry["outcome_state"] = he.get("outcome", {}).get("state")
+                entry["factory_cpm"] = he.get("factory_cpm")
+            except (json.JSONDecodeError, OSError):
+                pass
+        result_runs[run_id] = entry
+
+    return {"issue_number": issue_number, "runs": result_runs}
+
+
+def cmd_issue_economics(args) -> None:
+    result = _build_issue_economics(
+        args.issue,
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+        artifacts_root=pathlib.Path(args.artifacts_root),
+    )
+    print(json.dumps(result, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dark factory run record")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -560,11 +629,18 @@ def main() -> None:
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)
 
+    ie = sub.add_parser("issue-economics", help="Read-only cross-run rollup for an issue")
+    ie.add_argument("--issue", type=int, required=True)
+    ie.add_argument("--artifacts-root", required=True)
+    ie.add_argument("--ledger-path", default=None)
+
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         cmd_record(parsed)
     elif parsed.cmd == "assemble":
         cmd_assemble(parsed)
+    elif parsed.cmd == "issue-economics":
+        cmd_issue_economics(parsed)
 
 
 if __name__ == "__main__":
