@@ -12,12 +12,37 @@ import fcntl
 import json
 import os
 import pathlib
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+from . import model_proxy
+
 JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
+
+POLICY_VERSION = "1.0"
+GATE_STAGE_NAMES = ("validation", "conformance", "review")
+_BLOCKING_VERDICTS = {
+    "validation": {"FAIL"},
+    "conformance": {"BLOCKED"},
+    "review": {"BLOCKED"},
+}
+CONFORMANCE_CYCLE_PENALTY = 0.10
+REVIEW_ADVISORY_PENALTY = 0.05
+SCORE_FLOOR = 0.25
+
+# run_id is embedded in an on-disk path (artifacts_root / run_id / "run-record.json");
+# reject anything that isn't a plain path segment before joining, so a crafted run_id
+# (e.g. containing "..", "/") can't traverse outside artifacts_root.
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _run_record_path(artifacts_root: pathlib.Path, run_id: str) -> "pathlib.Path | None":
+    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+        return None
+    return artifacts_root / run_id / "run-record.json"
 
 
 def _timestamp() -> str:
@@ -258,6 +283,187 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     return result
 
 
+def _compute_outcome(status: str, stages: list) -> dict:
+    """Deterministic outcome.state / outcome.score policy (policy_version 1.0).
+
+    failed/blocked always score 0.0 regardless of token spend — the mechanical
+    enforcement of "don't reward raw token reduction over correctness." See
+    docs/superpowers/specs/2026-07-16-harness-economics-ledger-cpm-design.md
+    "Outcome-score policy".
+    """
+    stage_by_name = {s["stage"]: s for s in stages if s.get("stage") in GATE_STAGE_NAMES}
+    gate_stages = [stage_by_name[name] for name in GATE_STAGE_NAMES if name in stage_by_name]
+    cycles = stage_by_name.get("conformance", {}).get("cycles") or 0
+    advisory = stage_by_name.get("review", {}).get("advisory") or 0
+
+    if status != "completed":
+        state = "failed"
+    elif any(
+        stage_by_name.get(name, {}).get("verdict") in _BLOCKING_VERDICTS[name]
+        for name in GATE_STAGE_NAMES
+    ):
+        state = "blocked"
+    elif not gate_stages:
+        state = "produced_ungated"
+    else:
+        state = "delivered_with_findings" if (cycles or advisory) else "delivered_clean"
+
+    penalties = []
+    if state in ("failed", "blocked"):
+        score = 0.0
+    elif state == "produced_ungated":
+        score = 1.0
+    else:
+        score = 1.0
+        if cycles:
+            delta = round(-CONFORMANCE_CYCLE_PENALTY * cycles, 4)
+            score += delta
+            penalties.append({"reason": "conformance_cycles", "count": cycles, "delta": delta})
+        if advisory:
+            delta = round(-REVIEW_ADVISORY_PENALTY * advisory, 4)
+            score += delta
+            penalties.append({"reason": "review_advisory", "count": advisory, "delta": delta})
+        score = max(SCORE_FLOOR, min(1.0, round(score, 4)))
+
+    return {
+        "state": state,
+        "score": score,
+        "evidence": {
+            "status": status,
+            "gate_stages": gate_stages,
+            "penalties": penalties,
+            "ungated": state == "produced_ungated",
+        },
+    }
+
+
+LEDGER_PATH = pathlib.Path(
+    os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
+)
+
+
+def _wall_clock_seconds(started_at: str, completed_at: str) -> int:
+    try:
+        start = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ")
+        end = datetime.strptime(completed_at, "%Y-%m-%dT%H:%M:%SZ")
+        return max(0, int((end - start).total_seconds()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _iter_ledger_paths(ledger_path: pathlib.Path):
+    yield ledger_path
+    for i in range(1, model_proxy.BACKUP_COUNT + 1):
+        backup = ledger_path.with_suffix(ledger_path.suffix + f".{i}")
+        if backup.exists():
+            yield backup
+
+
+def _read_ledger_rows(run_id: str, ledger_path: pathlib.Path) -> tuple:
+    """Scan the live ledger plus rotation backups for rows matching run_id.
+
+    Returns (rows, ledger_available) — ledger_available distinguishes "the ledger
+    exists and genuinely has zero rows for this run" from "no ledger data at all"
+    (opt-in model-proxy was never enabled). See the spec's "Graceful degradation"
+    section.
+    """
+    rows = []
+    available = False
+    for path in _iter_ledger_paths(ledger_path):
+        if not path.exists():
+            continue
+        available = True
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("run_id") == run_id:
+                    rows.append(row)
+        except OSError:
+            continue
+    return rows, available
+
+
+def _compute_retry_spend(rows: list) -> dict:
+    """Ledger retry_count is always 0 (single-pass forwarder) — retries are
+    reconstructed from rows with a failure status instead. See model_proxy.py's
+    build_ledger_row docstring.
+    """
+    failed = [r for r in rows if isinstance(r.get("status"), int) and r["status"] >= 400]
+    tokens = sum(
+        r.get("gen_ai.usage.input_tokens", 0) + r.get("gen_ai.usage.output_tokens", 0)
+        for r in failed
+    )
+    return {"tokens": tokens, "request_count": len(failed)}
+
+
+def _compute_ledger_mechanics(rows: list) -> dict:
+    total_input = sum(r.get("gen_ai.usage.input_tokens", 0) for r in rows)
+    total_cache_read = sum(r.get("gen_ai.usage.cache_read_input_tokens", 0) for r in rows)
+    total_cache_creation = sum(r.get("gen_ai.usage.cache_creation_input_tokens", 0) for r in rows)
+    cache_denominator = total_input + total_cache_read + total_cache_creation
+    cache_hit_ratio = (total_cache_read / cache_denominator) if cache_denominator else None
+    tool_schema_overhead_bytes = sum(r.get("tool_bytes", 0) for r in rows)
+    system_bytes_vals = [r.get("system_bytes", 0) for r in rows if r.get("system_bytes")]
+    largest_tools = []
+    for r in rows:
+        largest_tools.extend(r.get("largest_tools") or [])
+    largest_tools = sorted(largest_tools, key=lambda t: t.get("bytes", 0), reverse=True)[:5]
+    return {
+        "cache_hit_ratio": cache_hit_ratio,
+        "tool_schema_overhead_bytes": tool_schema_overhead_bytes,
+        "system_prompt_bytes": max(system_bytes_vals) if system_bytes_vals else 0,
+        "largest_tools": largest_tools,
+    }
+
+
+def _compute_harness_economics(
+    *, run_id: str, status: str, stages: list, totals: dict,
+    started_at: str, completed_at: str, ledger_path: pathlib.Path,
+) -> dict:
+    tokens_in = totals.get("gen_ai.usage.input_tokens", 0)
+    tokens_out = totals.get("gen_ai.usage.output_tokens", 0)
+    tokens_per_task = tokens_in + tokens_out
+    cost_per_task = totals.get("cost_usd", 0.0)
+
+    outcome = _compute_outcome(status, stages)
+    factory_cpm = (
+        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task > 0 else None
+    )
+
+    rows, ledger_available = _read_ledger_rows(run_id, ledger_path)
+    if ledger_available:
+        retry_spend = _compute_retry_spend(rows)
+        ledger_mechanics = _compute_ledger_mechanics(rows)
+    else:
+        retry_spend = {"tokens": None, "request_count": None}
+        ledger_mechanics = None
+
+    if outcome["state"] in ("failed", "blocked"):
+        failure_spend = {"tokens": tokens_per_task, "basis": "whole_run"}
+    else:
+        failure_spend = {"tokens": retry_spend["tokens"] or 0, "basis": "retry_only"}
+
+    return {
+        "policy_version": POLICY_VERSION,
+        "cost_per_task": cost_per_task,
+        "tokens_per_task": tokens_per_task,
+        "wall_clock_seconds": _wall_clock_seconds(started_at, completed_at),
+        "outcome": outcome,
+        "factory_cpm": factory_cpm,
+        "retry_spend": retry_spend,
+        "failure_spend": failure_spend,
+        "ledger_available": ledger_available,
+        "ledger_rows_correlated": len(rows),
+        "ledger_mechanics": ledger_mechanics,
+    }
+
+
 def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)
@@ -288,7 +494,7 @@ def cmd_assemble(args) -> None:
         "intent": args.intent,
         "started_at": args.started_at or _timestamp(),
         "completed_at": _timestamp(),
-        "status": "completed",
+        "status": args.status,
         "stages": stages,
         "nodes": nodes,
         "artifacts": artifacts,
@@ -298,6 +504,15 @@ def cmd_assemble(args) -> None:
             "cost_usd": totals_cost,
         },
     }
+    run_record["harness_economics"] = _compute_harness_economics(
+        run_id=args.run_id,
+        status=run_record["status"],
+        stages=stages,
+        totals=run_record["totals"],
+        started_at=run_record["started_at"],
+        completed_at=run_record["completed_at"],
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+    )
 
     trace_path = artifacts_dir / "memory-trace.json"
     if trace_path.exists():
@@ -332,6 +547,111 @@ def cmd_assemble(args) -> None:
         _post_seq(record)
 
 
+def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, artifacts_root: pathlib.Path) -> dict:
+    """Read-only rollup over request-ledger.jsonl, grouped by run/issue/phase.
+
+    Overlays dollar/outcome figures from each run's own retained run-record.json —
+    never recomputes them independently (see spec's "Cost source" section). Produces
+    no new persisted file.
+    """
+    runs: dict = {}
+    for path in _iter_ledger_paths(ledger_path):
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if int(row.get("issue_number") or 0) != issue_number:
+                    continue
+                run_id = row.get("run_id", "unknown")
+                bucket = runs.setdefault(run_id, {
+                    "intent": row.get("intent", "unknown"),
+                    "stage": row.get("stage", "unknown"),
+                    "rows": [],
+                })
+                bucket["rows"].append(row)
+        except OSError:
+            continue
+
+    result_runs = {}
+    for run_id, bucket in runs.items():
+        rows = bucket["rows"]
+        entry = {
+            "intent": bucket["intent"],
+            "stage": bucket["stage"],
+            "request_count": len(rows),
+            "retry_spend": _compute_retry_spend(rows),
+            "ledger_mechanics": _compute_ledger_mechanics(rows),
+            "cost_usd": None,
+            "outcome_state": None,
+            "factory_cpm": None,
+        }
+        record_path = _run_record_path(artifacts_root, run_id)
+        if record_path is not None and record_path.exists():
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8"))
+                entry["cost_usd"] = record.get("totals", {}).get("cost_usd")
+                he = record.get("harness_economics") or {}
+                entry["outcome_state"] = he.get("outcome", {}).get("state")
+                entry["factory_cpm"] = he.get("factory_cpm")
+            except (json.JSONDecodeError, OSError):
+                pass
+        result_runs[run_id] = entry
+
+    return {"issue_number": issue_number, "runs": result_runs}
+
+
+def cmd_issue_economics(args) -> None:
+    result = _build_issue_economics(
+        args.issue,
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+        artifacts_root=pathlib.Path(args.artifacts_root),
+    )
+    print(json.dumps(result, indent=2))
+
+
+def _backfill_run_economics(run_id: str, *, artifacts_root: pathlib.Path, ledger_path: pathlib.Path) -> bool:
+    """Best-effort, degrade-only recompute of harness_economics for a retained run.
+
+    Returns False (skipped, not an error) when the run's run-record.json directory
+    no longer exists — bounded by artifact retention, per the spec's backfill section.
+    """
+    record_path = _run_record_path(artifacts_root, run_id)
+    if record_path is None or not record_path.exists():
+        return False
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    record["harness_economics"] = _compute_harness_economics(
+        run_id=run_id,
+        status=record.get("status", "completed"),
+        stages=record.get("stages", []),
+        totals=record.get("totals", {}),
+        started_at=record.get("started_at", ""),
+        completed_at=record.get("completed_at", ""),
+        ledger_path=ledger_path,
+    )
+    record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return True
+
+
+def cmd_backfill_economics(args) -> None:
+    ok = _backfill_run_economics(
+        args.run_id,
+        artifacts_root=pathlib.Path(args.artifacts_root),
+        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+    )
+    print(json.dumps({"run_id": args.run_id, "backfilled": ok}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dark factory run record")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -356,12 +676,28 @@ def main() -> None:
     a.add_argument("--artifacts-dir", required=True)
     a.add_argument("--archon-cost-json")
     a.add_argument("--out-file", required=True)
+    a.add_argument("--status", default="completed")
+    a.add_argument("--ledger-path", default=None)
+
+    ie = sub.add_parser("issue-economics", help="Read-only cross-run rollup for an issue")
+    ie.add_argument("--issue", type=int, required=True)
+    ie.add_argument("--artifacts-root", required=True)
+    ie.add_argument("--ledger-path", default=None)
+
+    be = sub.add_parser("backfill-economics", help="Degrade-only historical harness_economics recompute")
+    be.add_argument("--run-id", required=True)
+    be.add_argument("--artifacts-root", required=True)
+    be.add_argument("--ledger-path", default=None)
 
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         cmd_record(parsed)
     elif parsed.cmd == "assemble":
         cmd_assemble(parsed)
+    elif parsed.cmd == "issue-economics":
+        cmd_issue_economics(parsed)
+    elif parsed.cmd == "backfill-economics":
+        cmd_backfill_economics(parsed)
 
 
 if __name__ == "__main__":
