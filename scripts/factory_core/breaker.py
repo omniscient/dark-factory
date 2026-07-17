@@ -57,6 +57,68 @@ def _make_key(issue_num: int, phase: str) -> str:
     return str(issue_num) if phase == "implement" else f"{issue_num}:{phase}"
 
 
+def _read_state(state_file: Path) -> dict:
+    if not state_file.exists():
+        return {}
+    try:
+        return json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_signature_key(key: str, value: str, state_file: Path) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_state(state_file)
+    data[f"{key}:sig"] = value
+    _atomic_write(state_file, data)
+
+
+def record_failure_signature(
+    issue_num: int,
+    phase: str,
+    state_file: Path = _DEFAULT_STATE,
+    state_dir: Path = None,
+) -> tuple:
+    """Reads and consumes the drop file the container wrote via error-signature-write,
+    always updates the stored signature for this issue+phase (regardless of class, so a
+    later substantive repeat still compares against the right prior value), and returns
+    (stuck, signature). stuck is True only when both the newly-read and previously-stored
+    signature carry the "substantive:" prefix and match exactly.
+
+    Naming note for conformance review: the spec's Requirement 5 / Brainstorming Q&A refers
+    to this stored value as "last_error_signature" (one new field on scheduler-state.json,
+    not a new file). This implementation stores it as a "<issue_key>:sig" entry in the same
+    flat dict scheduler-state.json already is (e.g. "42:sig", "42:plan:sig") rather than a
+    literal field named last_error_signature — semantically identical (one new per-key entry
+    on the existing single-writer state surface; see _make_key's existing "<issue>[:phase]"
+    convention, which every other key in this file already follows), just named to match the
+    file's existing flat-key-per-issue+phase shape instead of introducing a differently-shaped
+    nested field. Not a deviation from Requirement 5.
+    """
+    if state_dir is None:
+        state_dir = Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
+    drop_file = Path(state_dir) / "error-signatures" / f"{issue_num}.{phase}.sig"
+    if not drop_file.exists():
+        return False, ""
+    try:
+        new_sig = json.loads(drop_file.read_text()).get("signature", "")
+    except (json.JSONDecodeError, OSError):
+        new_sig = ""
+    try:
+        drop_file.unlink()
+    except OSError:
+        pass
+    if not new_sig:
+        return False, ""
+
+    key = _make_key(issue_num, phase)
+    prev_sig = str(_read_state(state_file).get(f"{key}:sig", ""))
+    _write_signature_key(key, new_sig, state_file)
+
+    stuck = new_sig.startswith("substantive:") and prev_sig == new_sig
+    return stuck, new_sig
+
+
 def trip_to_blocked(
     issue_num: int,
     phase: str,

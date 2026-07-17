@@ -123,3 +123,88 @@ def test_trip_to_blocked_adds_both_labels(tmp_path, monkeypatch):
     edit_cmds = [" ".join(c) for c in calls if "issue" in c and "edit" in c]
     assert any("needs-discussion" in c for c in edit_cmds)
     assert any("factory-regression" in c for c in edit_cmds)
+
+
+from factory_core.breaker import record_failure_signature
+
+
+def _drop(state_dir, issue, phase, signature, exit_code=1):
+    sig_dir = state_dir / "error-signatures"
+    sig_dir.mkdir(parents=True, exist_ok=True)
+    (sig_dir / f"{issue}.{phase}.sig").write_text(
+        json.dumps({"signature": signature, "phase": phase, "exit_code": exit_code}))
+
+
+def test_record_failure_signature_no_drop_file_returns_false(tmp_path):
+    sf = tmp_path / "state.json"
+    stuck, sig = record_failure_signature(1, "implement", sf, tmp_path)
+    assert stuck is False
+    assert sig == ""
+
+
+def test_record_failure_signature_first_substantive_not_stuck(tmp_path):
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 1, "implement", "substantive:test_failure:1")
+    stuck, sig = record_failure_signature(1, "implement", sf, tmp_path)
+    assert stuck is False
+    assert sig == "substantive:test_failure:1"
+
+
+def test_record_failure_signature_second_matching_substantive_is_stuck(tmp_path):
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 1, "implement", "substantive:test_failure:1")
+    record_failure_signature(1, "implement", sf, tmp_path)
+    _drop(tmp_path, 1, "implement", "substantive:test_failure:1")
+    stuck, sig = record_failure_signature(1, "implement", sf, tmp_path)
+    assert stuck is True
+    assert sig == "substantive:test_failure:1"
+
+
+def test_record_failure_signature_different_substantive_not_stuck(tmp_path):
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 1, "implement", "substantive:test_failure:1")
+    record_failure_signature(1, "implement", sf, tmp_path)
+    _drop(tmp_path, 1, "implement", "substantive:build_failure:1")
+    stuck, sig = record_failure_signature(1, "implement", sf, tmp_path)
+    assert stuck is False
+    assert sig == "substantive:build_failure:1"
+
+
+def test_record_failure_signature_environmental_never_stuck_even_when_repeated(tmp_path):
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 279, "implement", "environmental:delivery_failure")
+    record_failure_signature(279, "implement", sf, tmp_path)
+    _drop(tmp_path, 279, "implement", "environmental:delivery_failure")
+    stuck, sig = record_failure_signature(279, "implement", sf, tmp_path)
+    assert stuck is False
+    assert sig == "environmental:delivery_failure"
+
+
+def test_record_failure_signature_consumes_drop_file(tmp_path):
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 1, "plan", "substantive:unknown:1")
+    record_failure_signature(1, "plan", sf, tmp_path)
+    assert not (tmp_path / "error-signatures" / "1.plan.sig").exists()
+
+
+def test_record_failure_signature_respects_phase_key_naming(tmp_path):
+    # implement uses the bare issue number key; plan/refine/resolve use "<issue>:<phase>".
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 5, "implement", "substantive:test_failure:1")
+    record_failure_signature(5, "implement", sf, tmp_path)
+    data = json.loads(sf.read_text())
+    assert "5:sig" in data
+    assert "5:implement:sig" not in data
+
+    _drop(tmp_path, 5, "plan", "substantive:test_failure:1")
+    record_failure_signature(5, "plan", sf, tmp_path)
+    data = json.loads(sf.read_text())
+    assert "5:plan:sig" in data
+
+
+def test_record_failure_signature_does_not_disturb_retry_count(tmp_path):
+    sf = tmp_path / "state.json"
+    increment_retry("5:plan", sf)
+    _drop(tmp_path, 5, "plan", "substantive:test_failure:1")
+    record_failure_signature(5, "plan", sf, tmp_path)
+    assert get_retry_count("5:plan", sf) == 1
