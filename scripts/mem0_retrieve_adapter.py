@@ -51,7 +51,9 @@ def main():
     query = build_query(args.phase, args.files)
 
     m = build_memory(store_path)
-    raw = m.search(query, user_id=USER_ID, limit=TOP_K)
+    # mem0ai (as of the pinned 2.0.12 install, confirmed via live run issue #50) rejects
+    # top-level entity kwargs on search() — user_id must go inside filters=.
+    raw = m.search(query, top_k=TOP_K, filters={"user_id": USER_ID})
     hits = raw.get("results", raw) if isinstance(raw, dict) else raw
 
     for r in hits:

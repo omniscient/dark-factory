@@ -147,7 +147,7 @@ sys.path.insert(0, '$REPO_ROOT/scripts')
 from mem0_spike_config import build_memory, USER_ID
 m = build_memory('$STORE_PATH')
 t0 = time.time()
-m.search('implement lessons', user_id=USER_ID, limit=8)
+m.search('implement lessons', top_k=8, filters={'user_id': USER_ID})
 print(int((time.time() - t0) * 1000))
 ")
 note "search latency: ${LATENCY_MS}ms"
@@ -169,7 +169,7 @@ import sys
 sys.path.insert(0, '$REPO_ROOT/scripts')
 from mem0_spike_config import build_memory, USER_ID
 m = build_memory('$STORE_PATH')
-unfiltered = m.search('lessons', user_id=USER_ID, limit=50)
+unfiltered = m.search('lessons', top_k=50, filters={'user_id': USER_ID})
 u = unfiltered.get('results', unfiltered)
 issues = sorted({
     (r.get('metadata') or {}).get('issue') for r in u if (r.get('metadata') or {}).get('issue')
@@ -178,7 +178,7 @@ if not issues:
     print('no-issue-metadata-found')
     sys.exit(0)
 target_issue = issues[0]
-filtered = m.search('lessons', user_id=USER_ID, limit=50, filters={'issue': target_issue})
+filtered = m.search('lessons', top_k=50, filters={'user_id': USER_ID, 'issue': target_issue})
 f = filtered.get('results', filtered)
 constrained = 0 < len(f) < len(u) and all(
     (r.get('metadata') or {}).get('issue') == target_issue for r in f

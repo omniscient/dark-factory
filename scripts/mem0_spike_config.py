@@ -19,6 +19,9 @@ import os
 
 USER_ID = "dark-factory-spike"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_DIMS = 384  # all-MiniLM-L6-v2's output size; Qdrant's embedding_model_dims defaults to
+                  # 1536 (OpenAI ada-002) and must be overridden or Memory.add() raises a
+                  # numpy broadcast error on the first write (confirmed via live run, issue #50)
 
 # Set before the first `import mem0` so the opt-out takes effect at import time.
 os.environ.setdefault("MEM0_TELEMETRY", "False")
@@ -34,6 +37,7 @@ def build_memory(store_path: str):
             "config": {
                 "path": store_path,
                 "collection_name": "dark_factory_spike",
+                "embedding_model_dims": EMBED_DIMS,
             },
         },
         "embedder": {
