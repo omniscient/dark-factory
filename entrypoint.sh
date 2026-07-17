@@ -337,9 +337,18 @@ _write_error_signature() {
   local elapsed_seconds=0
   if [ -n "${RUN_STARTED_AT:-}" ]; then
     local started_epoch now_epoch
-    started_epoch=$(date -u -d "$RUN_STARTED_AT" +%s 2>/dev/null || echo 0)
-    now_epoch=$(date -u +%s)
-    elapsed_seconds=$((now_epoch - started_epoch))
+    # Guard the parse: a failure here must not fall back to a 0 epoch, which would
+    # make elapsed_seconds ~now() (billions of seconds) and permanently fail the
+    # classifier's "elapsed_seconds < delivery_failure_max_seconds" check — silently
+    # turning a genuine fast delivery-failure into a false substantive:unknown signal
+    # (#33 review). Skip elapsed-based classification instead: leave elapsed_seconds
+    # at its 0 default so the other signals (commits/dirty/artifact) decide.
+    if started_epoch=$(date -u -d "$RUN_STARTED_AT" +%s 2>/dev/null); then
+      now_epoch=$(date -u +%s)
+      elapsed_seconds=$((now_epoch - started_epoch))
+    else
+      echo "WARNING: could not parse RUN_STARTED_AT='${RUN_STARTED_AT}' — skipping elapsed-based failure classification" >&2
+    fi
   fi
   local commits_since_start=0
   if [ -n "${RUN_STARTED_AT:-}" ]; then

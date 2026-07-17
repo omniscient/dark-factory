@@ -208,3 +208,27 @@ def test_record_failure_signature_does_not_disturb_retry_count(tmp_path):
     _drop(tmp_path, 5, "plan", "substantive:test_failure:1")
     record_failure_signature(5, "plan", sf, tmp_path)
     assert get_retry_count("5:plan", sf) == 1
+
+
+def test_reset_retry_clears_stored_signature(tmp_path):
+    # Regression for the #33 review finding: reset_retry (e.g. via a successful run,
+    # Continue-dispatch, or blocked-rescue) must also clear the stored "<key>:sig"
+    # entry, otherwise the signature chain survives the reset and the *first*
+    # post-reset failure with a matching class trips the breaker one attempt early.
+    sf = tmp_path / "state.json"
+    _drop(tmp_path, 9, "implement", "substantive:test_failure:1")
+    record_failure_signature(9, "implement", sf, tmp_path)
+    data = json.loads(sf.read_text())
+    assert "9:sig" in data
+
+    reset_retry("9", sf)
+
+    data = json.loads(sf.read_text())
+    assert "9:sig" not in data
+
+    # A subsequent failure with the same class must NOT be immediately "stuck" —
+    # it is the first attempt since the reset.
+    _drop(tmp_path, 9, "implement", "substantive:test_failure:1")
+    stuck, sig = record_failure_signature(9, "implement", sf, tmp_path)
+    assert stuck is False
+    assert sig == "substantive:test_failure:1"

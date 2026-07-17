@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from . import identity
 from .providers import get_tracker
@@ -32,6 +33,12 @@ def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
     try:
         data = json.loads(state_file.read_text())
         data.pop(key, None)
+        # Clear the stored failure signature alongside the retry counter so the
+        # "two consecutive attempts" invariant in record_failure_signature() doesn't
+        # survive a reset (success, Continue-dispatch, blocked-rescue, spec/plan
+        # advance) — otherwise the first post-reset failure with a matching class
+        # would trip the breaker one attempt early (#33 review).
+        data.pop(f"{key}:sig", None)
         _atomic_write(state_file, data)
     except (json.JSONDecodeError, OSError):
         pass
@@ -77,7 +84,7 @@ def record_failure_signature(
     issue_num: int,
     phase: str,
     state_file: Path = _DEFAULT_STATE,
-    state_dir: Path = None,
+    state_dir: Optional[Path] = None,
 ) -> tuple:
     """Reads and consumes the drop file the container wrote via error-signature-write,
     always updates the stored signature for this issue+phase (regardless of class, so a

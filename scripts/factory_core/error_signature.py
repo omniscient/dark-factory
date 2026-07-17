@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from .session_window import _SUBSTRING_RE as _RATE_LIMIT_RE
+from .session_window import RATE_LIMIT_RE as _RATE_LIMIT_RE
 
 _PREVIEW_INFRA_RE = re.compile(
     r"buildkit|failed to solve|docker[- ]compose|pull access denied|manifest unknown|"
