@@ -46,6 +46,19 @@ def test_dotted_get(tmp_path):
     assert adapter.get(str(tmp_path), "deconflict.migrations_dir") == "alembic/versions/"
 
 
+def test_loops_default_is_empty_list(tmp_path):
+    """Absent adapter file merges to loops: [] (additive parity default)."""
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"] == []
+
+
+def test_schema_version_1_without_loops_merges_to_empty_list(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("schema_version: 1\n")
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"] == []
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
