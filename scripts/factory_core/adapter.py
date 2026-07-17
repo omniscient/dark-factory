@@ -6,9 +6,8 @@ class AdapterError(Exception):
     pass
 
 _KNOWN_TOP = {"schema_version", "components", "safety", "memory_routing", "deconflict",
-              "token_optimization", "repo", "board", "labels"}
-_MAP_KEYS = {"components", "safety", "memory_routing", "deconflict", "token_optimization",
-             "board", "labels"}
+              "token_optimization"}
+_MAP_KEYS = {"components", "safety", "memory_routing", "deconflict", "token_optimization"}
 
 def _deep_merge(base: dict, override: dict) -> dict:
     out = copy.deepcopy(base)

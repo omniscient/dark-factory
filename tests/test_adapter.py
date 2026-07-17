@@ -59,6 +59,22 @@ def test_schema_version_1_without_loops_merges_to_empty_list(tmp_path):
     assert merged["loops"] == []
 
 
+def test_repo_board_labels_now_warn_not_error(tmp_path, capsys):
+    """repo/board/labels are no longer known keys — they fall through to the
+    generic unknown-top-level-key warn-and-carry path, not AdapterError."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "repo: 'org/name'\nboard: 'Project X'\nlabels: ['a', 'b']\n")
+    merged = adapter.load(str(tmp_path))
+    assert merged["repo"] == "org/name"
+    assert merged["board"] == "Project X"
+    assert merged["labels"] == ["a", "b"]
+    err = capsys.readouterr().err
+    assert "unknown adapter key 'repo'" in err
+    assert "unknown adapter key 'board'" in err
+    assert "unknown adapter key 'labels'" in err
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
