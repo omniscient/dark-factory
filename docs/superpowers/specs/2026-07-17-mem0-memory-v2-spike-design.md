@@ -343,3 +343,56 @@ To be finalized once the implement phase's benchmark table (Architecture §2) pr
 - No ARCHITECTURE.md exists at the repo root today (checked during Phase 3); this spec does not
   assume one will be created as part of this spike, and does not reference it as a landing place for
   the adapter-boundary diagram in Architecture §3.
+
+---
+
+## Live Evaluation Results (implement phase, 2026-07-17)
+
+Harness: `bash scripts/eval_mem0.sh` (issue #50). Full output: see commit for this section — the
+table below is a transcription of the harness's own `Row N` / `VERDICT` lines, not independently
+re-derived. Pinned version: `mem0ai==2.0.12` (resolved live from PyPI at run time; full dependency
+set recorded in `scripts/requirements-mem0-spike.txt`, 83 packages). Two real API-shape mismatches
+between the harness's first draft and the pinned `mem0ai==2.0.12` release were found and fixed
+before this run (Qdrant `embedding_model_dims` defaulting to 1536 instead of the HuggingFace
+embedder's actual 384 dims; `Memory.search()` rejecting a top-level `user_id=` kwarg in favor of
+`filters={"user_id": ...}`) — both are spike-script plumbing bugs, not findings about Mem0 itself,
+and are captured in commit `78ba251`.
+
+| # | Criterion | Precedent (agentmemory, #644) | Mem0 result | Pass bar | Result |
+|---|---|---|---|---|---|
+| 1 | Install/deploy footprint | No prebuilt image/npm package; 3-process source build | `pip install mem0ai==2.0.12 qdrant-client sentence-transformers` in 107s, single venv, no source build, no extra long-running service | Single-process, no source build, no extra long-running service | PASS |
+| 2 | Role/path filter support | Silently unimplemented | `search(..., filters={"user_id":..., "issue": "#N"})` actually constrains results (fewer, all-matching rows vs. unfiltered) | Filters must actually constrain results | PASS |
+| 3 | Retrieval latency (~28-34 entries) | BM25 37× slower than grep | 29ms for an 8-result search against the 45-entry imported corpus | Must not regress materially vs. sub-100ms baseline | PASS |
+| 4 | State durability across restarts | In-memory; full re-import required | Record ID resolvable via a fresh process re-opening the same on-disk Qdrant `STORE_PATH` — no re-import needed | Must persist without full re-import | PASS |
+| 5 | Zero network egress / no cloud API key | N/A | `MEM0_TELEMETRY` is referenced (load-bearing) in the installed `mem0ai` source, confirming the opt-out isn't a no-op; the one-time HuggingFace model download for `sentence-transformers/all-MiniLM-L6-v2` is an install-time exception, not a per-query call | Must be verifiably off | PASS |
+| 6 | Stable, dereferenceable record ID | N/A | Same imported-record ID (`4011fe06-5b65-4255-99c7-4e4f5ec45386` for the first entry) resolves via `m.get()` after the simulated-restart process reopened the store | ID stable across restart | PASS |
+| 7 | `infer=False` raw writes vs. LLM-inferred extraction | N/A | `infer=False` verified working — all 45 corpus entries imported via this path with no LLM call; `infer=True` not executed live (would require a real LLM API key, violating the no-Mem0-Cloud-by-default / no-hidden-LLM-call non-goals) | Raw writes must be available with no hidden LLM call | PASS (by construction) |
+| 8 | Retrieval quality: Mem0 top-k vs. factory scoped+capped | N/A | Baseline (`memory_retrieve.py`, `PHASE_SOURCE_MAP`-scoped + path-tag filtered): 100.0% recall (5/5 scorable hits). Mem0 arm (`mem0_retrieve_adapter.py`, raw top-8 semantic search over a free-text `"<phase> lessons for <path>"` query): 0.0% recall (0/5). `recall_delta = -1.0000` | Report delta; informs verdict, doesn't gate alone | informational |
+
+**Verdict: `idea-only`**
+
+The harness's decision rule: `FAIL_COUNT` (rows 1-6) `= 0`, so the branch taken is
+`recall_delta >= -0.10 → "optional backend"` vs. otherwise `"idea-only"`. Row 8's measured
+`recall_delta` is `-1.0000`, far below the `-0.10` threshold, so the rule resolves to `idea-only`:
+Mem0 clears every operational bar the agentmemory spike failed on (install footprint, filters,
+latency, durability, zero-egress, stable IDs), but its raw top-k semantic retrieval — evaluated
+exactly as "expose the full bank automatically every turn" per the PM's Proactive-Memory-Agent
+comment — finds none of the 5 scorable historical regressions the factory's own scoped+capped
+`memory_retrieve.py` finds all of. This is not a knock against Mem0's engineering; it is the
+harness's simple phase+path free-text query (`build_query()` in `mem0_retrieve_adapter.py`) being a
+poor substitute for the factory's precise `PHASE_SOURCE_MAP` + `path:` tag exact-match filtering at
+this corpus's scale (45 entries) — the same "selective intervention beats general retrieval" result
+the folded-in Meta AI paper's ablation predicted (spec Overview, item 2). Per Requirement 5, this
+measures retrieval selectivity only, not the paper's intervention-timing quality.
+
+### Candidate follow-up tickets (recommended only, not created — per spec Requirement 9)
+
+- Event-sourcing purity for ideas 1/2 (independent of the Mem0 verdict — this is a factory-owned
+  improvement either way).
+- Entity extraction/linking (idea 5) — independent of the Mem0 verdict.
+- Procedural handoff memory for `Continue issue #N` (idea 7) — feeds epic #241 but must not depend
+  on Mem0 (Requirement 7).
+- Retrieval explanations surfaced into the agent prompt itself, not just `memory-trace.json`
+  telemetry (idea 8).
+- `memory_adapter.py` as a real internal API boundary (Architecture §3) — recommended regardless of
+  the Mem0 verdict, since it's what lets #241 and any future backend swap stay decoupled.
