@@ -1,6 +1,9 @@
+import copy
+import re
 import sys
 sys.path.insert(0, "scripts")
 import pytest
+import yaml
 from factory_core import adapter, adapter_defaults
 
 
@@ -44,6 +47,180 @@ def test_unknown_keys_warn_not_fail(tmp_path, capsys):
 
 def test_dotted_get(tmp_path):
     assert adapter.get(str(tmp_path), "deconflict.migrations_dir") == "alembic/versions/"
+
+
+def test_loops_default_is_empty_list(tmp_path):
+    """Absent adapter file merges to loops: [] (additive parity default)."""
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"] == []
+
+
+def test_schema_version_1_without_loops_merges_to_empty_list(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("schema_version: 1\n")
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"] == []
+
+
+def test_repo_board_labels_now_warn_not_error(tmp_path, capsys):
+    """repo/board/labels are no longer known keys — they fall through to the
+    generic unknown-top-level-key warn-and-carry path, not AdapterError."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "repo: 'org/name'\nboard: 'Project X'\nlabels: ['a', 'b']\n")
+    merged = adapter.load(str(tmp_path))
+    assert merged["repo"] == "org/name"
+    assert merged["board"] == "Project X"
+    assert merged["labels"] == ["a", "b"]
+    err = capsys.readouterr().err
+    assert "unknown adapter key 'repo'" in err
+    assert "unknown adapter key 'board'" in err
+    assert "unknown adapter key 'labels'" in err
+
+
+_VALID_LOOP_ENTRY = """
+loops:
+  - name: nightly-scan-triage
+    purpose: Triage overnight scanner false positives
+    trigger: 'cron:0 6 * * *'
+    inputs: ["scanner_output.json"]
+    outputs: ["triage_report.md"]
+    artifacts: [".factory/state/triage.json"]
+    verifier: verifiers/triage_verifier.py
+    stop_condition: stop_conditions/triage_stop.py
+    failure_behavior: escalate_to_human
+    side_effect_level: 2
+    handoff: handoffs/triage_handoff.py
+"""
+
+
+def test_valid_loop_entry_parses(tmp_path, capsys):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert len(merged["loops"]) == 1
+    assert merged["loops"][0]["name"] == "nightly-scan-triage"
+    assert merged["loops"][0]["side_effect_level"] == 2
+    assert "unknown adapter key 'loops'" not in capsys.readouterr().err
+
+
+def test_loops_independent_of_schema_version(tmp_path):
+    """A schema_version: 1 file with a valid loops: entry still parses —
+    schema_version never gates loops:."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("schema_version: 1\n" + _VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert len(merged["loops"]) == 1
+
+
+def test_loop_entry_not_a_mapping_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("loops:\n  - 'not-a-mapping'\n")
+    with pytest.raises(adapter.AdapterError, match=r"loops\[0\] must be a mapping"):
+        adapter.load(str(tmp_path))
+
+
+def test_loops_not_a_list_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("loops:\n  name: not-a-list\n")
+    with pytest.raises(adapter.AdapterError, match=r"loops.*must be a list"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_missing_required_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    entry = _VALID_LOOP_ENTRY.replace("    purpose: Triage overnight scanner false positives\n", "")
+    (d / "adapter.yaml").write_text(entry)
+    with pytest.raises(adapter.AdapterError, match=r"missing required field 'purpose'"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    entry = _VALID_LOOP_ENTRY + "    extra_typo_field: oops\n"
+    (d / "adapter.yaml").write_text(entry)
+    with pytest.raises(adapter.AdapterError, match=r"unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", sorted(adapter._LOOP_STRING_FIELDS))
+def test_loop_entry_string_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][field] = 42
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", sorted(adapter._LOOP_LIST_FIELDS))
+def test_loop_entry_list_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][field] = "not-a-list"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("bad_level", [0, 7, -1, 100])
+def test_loop_entry_side_effect_level_out_of_range_raises(tmp_path, bad_level):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = bad_level
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_side_effect_level_non_int_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = "two"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("bad_bool", [True, False])
+def test_loop_entry_side_effect_level_bool_raises(tmp_path, bad_bool):
+    """bool is a subclass of int in Python; side_effect_level: true/false must not
+    slip through as a valid level (true would otherwise pass as level 1)."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = bad_bool
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+def test_duplicate_loop_names_raise(tmp_path):
+    """Two loop entries sharing the same name are ambiguous for A2-A5 enforcement
+    and run-record provenance, which key on name — must be rejected."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    second = copy.deepcopy(parsed["loops"][0])
+    parsed["loops"].append(second)  # same name as the first entry
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=r"duplicate loop name 'nightly-scan-triage'"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_memory_intervention_reserved_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["memory_intervention"] = {"policy": "whatever"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=r"reserved for epic #241"):
+        adapter.load(str(tmp_path))
+
+
+def test_mechanism_candidates_top_level_reserved_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "mechanism_candidates:\n  - id: mc-1\n    target_loop: nightly-scan-triage\n")
+    with pytest.raises(adapter.AdapterError, match=r"mechanism_candidates.*reserved"):
+        adapter.load(str(tmp_path))
 
 
 # ── Parity tests: pin verbatim copies to their source constants ────────────────

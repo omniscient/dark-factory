@@ -395,6 +395,7 @@ class _AssembleArgs:
     archon_cost_json = None
     status = "completed"
     ledger_path = None
+    clone_dir = "."
 
     def __init__(self, artifacts_dir, out_file):
         self.artifacts_dir = str(artifacts_dir)
@@ -804,3 +805,98 @@ def test_assemble_tolerates_unreadable_memory_trace(tmp_path, monkeypatch):
 
     rec = json.loads(out.read_text())
     assert "memory_trace" not in rec
+
+
+# ── loops: surfacing in run record (issue #195) ────────────────────────────
+
+def test_assemble_surfaces_loops_from_adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    clone_dir = tmp_path / "clone"
+    (clone_dir / ".factory").mkdir(parents=True)
+    (clone_dir / ".factory" / "adapter.yaml").write_text(
+        "loops:\n"
+        "  - name: nightly-scan-triage\n"
+        "    purpose: Triage overnight scanner false positives\n"
+        "    trigger: 'cron:0 6 * * *'\n"
+        "    inputs: []\n"
+        "    outputs: []\n"
+        "    artifacts: []\n"
+        "    verifier: verifiers/triage_verifier.py\n"
+        "    stop_condition: stop_conditions/triage_stop.py\n"
+        "    failure_behavior: escalate_to_human\n"
+        "    side_effect_level: 2\n"
+        "    handoff: handoffs/triage_handoff.py\n"
+    )
+
+    artifacts_dir = tmp_path / "artifacts"; artifacts_dir.mkdir()
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(artifacts_dir, out)
+    args.clone_dir = str(clone_dir)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["loops"] == [{
+        "name": "nightly-scan-triage",
+        "purpose": "Triage overnight scanner false positives",
+        "trigger": "cron:0 6 * * *",
+        "inputs": [], "outputs": [], "artifacts": [],
+        "verifier": "verifiers/triage_verifier.py",
+        "stop_condition": "stop_conditions/triage_stop.py",
+        "failure_behavior": "escalate_to_human",
+        "side_effect_level": 2,
+        "handoff": "handoffs/triage_handoff.py",
+    }]
+
+
+def test_assemble_no_adapter_file_loops_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    clone_dir = tmp_path / "clone"; clone_dir.mkdir()
+    artifacts_dir = tmp_path / "artifacts"; artifacts_dir.mkdir()
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(artifacts_dir, out)
+    args.clone_dir = str(clone_dir)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["loops"] == []
+
+
+def test_assemble_malformed_adapter_loops_empty_fail_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    clone_dir = tmp_path / "clone"
+    (clone_dir / ".factory").mkdir(parents=True)
+    (clone_dir / ".factory" / "adapter.yaml").write_text("{broken: [")
+
+    artifacts_dir = tmp_path / "artifacts"; artifacts_dir.mkdir()
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(artifacts_dir, out)
+    args.clone_dir = str(clone_dir)
+    rr.cmd_assemble(args)  # must not raise
+
+    rec = json.loads(out.read_text())
+    assert rec["loops"] == []
+
+
+def test_assemble_default_clone_dir_when_unset(tmp_path, monkeypatch):
+    """_AssembleArgs instances that don't set clone_dir explicitly still work
+    (class attribute default '.') — existing tests in this file rely on this."""
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    artifacts_dir = tmp_path / "artifacts"; artifacts_dir.mkdir()
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(artifacts_dir, out)
+    rr.cmd_assemble(args)  # must not raise even without explicit clone_dir
+
+    rec = json.loads(out.read_text())
+    assert "loops" in rec

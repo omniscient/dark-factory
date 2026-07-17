@@ -97,4 +97,5 @@ DEFAULTS = {
         "models_init": "backend/app/models/__init__.py",
         "migrations_dir": "alembic/versions/",
     },
+    "loops": [],
 }

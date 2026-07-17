@@ -488,6 +488,12 @@ def cmd_assemble(args) -> None:
     totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
     totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
 
+    from . import adapter
+    try:
+        loops = adapter.get(args.clone_dir, "loops") or []
+    except Exception:
+        loops = []
+
     run_record = {
         "run_id": args.run_id,
         "issue_number": args.issue,
@@ -498,6 +504,7 @@ def cmd_assemble(args) -> None:
         "stages": stages,
         "nodes": nodes,
         "artifacts": artifacts,
+        "loops": loops,
         "totals": {
             "gen_ai.usage.input_tokens": totals_in,
             "gen_ai.usage.output_tokens": totals_out,
@@ -678,6 +685,7 @@ def main() -> None:
     a.add_argument("--out-file", required=True)
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)
+    a.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
 
     ie = sub.add_parser("issue-economics", help="Read-only cross-run rollup for an issue")
     ie.add_argument("--issue", type=int, required=True)
