@@ -961,7 +961,8 @@ python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assembl
   --started-at "${RUN_STARTED_AT:-}" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --archon-cost-json "$ARCHON_COST_JSON" \
-  --out-file "$ARTIFACTS_DIR/run-record.json" || true
+  --out-file "$ARTIFACTS_DIR/run-record.json" \
+  --clone-dir "$CLONE_DIR" || true
 
 rm -f "$ARCHON_COST_JSON"
 
