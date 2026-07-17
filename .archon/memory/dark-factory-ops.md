@@ -23,6 +23,7 @@ Entries are advisory. If an entry conflicts with CLAUDE.md or ARCHITECTURE.md, f
 
 ## Codeindex / MCP Integration
 
+- [PATTERN] Write `codeindex high-blast` output to a temp file then atomically rename: `codeindex high-blast > "$TARGET.tmp" && mv "$TARGET.tmp" "$TARGET"` — direct `>` truncates the file before writing, so a crash mid-run leaves a zero-byte artifact; the temp+mv pattern ensures the file is either fully written or unchanged. <!-- issue:#264 date:2026-06-10 expires:2026-12-10 source:implement -->
 
 
 ## Archon when: Expression Grammar
