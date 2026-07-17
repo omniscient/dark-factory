@@ -6,8 +6,42 @@ class AdapterError(Exception):
     pass
 
 _KNOWN_TOP = {"schema_version", "components", "safety", "memory_routing", "deconflict",
-              "token_optimization"}
+              "token_optimization", "loops"}
 _MAP_KEYS = {"components", "safety", "memory_routing", "deconflict", "token_optimization"}
+
+_LOOP_REQUIRED_FIELDS = {
+    "name", "purpose", "trigger", "inputs", "outputs", "artifacts",
+    "verifier", "stop_condition", "failure_behavior", "side_effect_level", "handoff",
+}
+_LOOP_STRING_FIELDS = {
+    "name", "purpose", "trigger", "verifier", "stop_condition",
+    "failure_behavior", "handoff",
+}
+_LOOP_LIST_FIELDS = {"inputs", "outputs", "artifacts"}
+
+
+def _validate_loop(entry, index: int) -> None:
+    if not isinstance(entry, dict):
+        raise AdapterError(f"loops[{index}] must be a mapping, got {type(entry).__name__}")
+    name = entry.get("name", "?")
+    for field in _LOOP_REQUIRED_FIELDS:
+        if field not in entry:
+            raise AdapterError(f"loops[{index}] ('{name}'): missing required field '{field}'")
+    for field in _LOOP_STRING_FIELDS:
+        val = entry[field]
+        if not isinstance(val, str) or not val:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): field '{field}' must be a non-empty string")
+    for field in _LOOP_LIST_FIELDS:
+        val = entry[field]
+        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): field '{field}' must be a list of strings")
+    sel = entry["side_effect_level"]
+    if not isinstance(sel, int) or not (1 <= sel <= 6):
+        raise AdapterError(
+            f"loops[{index}] ('{name}'): field 'side_effect_level' must be an int between 1 and 6")
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     out = copy.deepcopy(base)
@@ -37,6 +71,11 @@ def load(clone_dir: str) -> dict:
             print(f"adapter: warning — unknown adapter key '{k}' (carried through)", file=sys.stderr)
         if k in _MAP_KEYS and not isinstance(v, dict):
             raise AdapterError(f"adapter key '{k}' must be a mapping, got {type(v).__name__}")
+    if "loops" in data:
+        if not isinstance(data["loops"], list):
+            raise AdapterError(f"adapter key 'loops' must be a list, got {type(data['loops']).__name__}")
+        for i, entry in enumerate(data["loops"]):
+            _validate_loop(entry, i)
     return _deep_merge(adapter_defaults.DEFAULTS, data)
 
 def get(clone_dir: str, dotted: str):

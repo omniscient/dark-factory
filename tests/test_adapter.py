@@ -75,6 +75,41 @@ def test_repo_board_labels_now_warn_not_error(tmp_path, capsys):
     assert "unknown adapter key 'labels'" in err
 
 
+_VALID_LOOP_ENTRY = """
+loops:
+  - name: nightly-scan-triage
+    purpose: Triage overnight scanner false positives
+    trigger: 'cron:0 6 * * *'
+    inputs: ["scanner_output.json"]
+    outputs: ["triage_report.md"]
+    artifacts: [".factory/state/triage.json"]
+    verifier: verifiers/triage_verifier.py
+    stop_condition: stop_conditions/triage_stop.py
+    failure_behavior: escalate_to_human
+    side_effect_level: 2
+    handoff: handoffs/triage_handoff.py
+"""
+
+
+def test_valid_loop_entry_parses(tmp_path, capsys):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert len(merged["loops"]) == 1
+    assert merged["loops"][0]["name"] == "nightly-scan-triage"
+    assert merged["loops"][0]["side_effect_level"] == 2
+    assert "unknown adapter key 'loops'" not in capsys.readouterr().err
+
+
+def test_loops_independent_of_schema_version(tmp_path):
+    """A schema_version: 1 file with a valid loops: entry still parses —
+    schema_version never gates loops:."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("schema_version: 1\n" + _VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert len(merged["loops"]) == 1
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
