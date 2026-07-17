@@ -31,6 +31,9 @@ SCHEDULER_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
 SESSION_WINDOW_BACKOFF_ENABLED="${SESSION_WINDOW_BACKOFF_ENABLED:-true}"
 SESSION_WINDOW_BUFFER_MINUTES="${SESSION_WINDOW_BUFFER_MINUTES:-5}"
 SESSION_WINDOW_FALLBACK_MINUTES="${SESSION_WINDOW_FALLBACK_MINUTES:-30}"
+# env-only by design, mirroring REFINE_MAX_RETRIES (scheduler.sh:17) — not threaded through
+# _entrypoint_cfg_apply()/config.yaml; see Task 3's callout in the #33 plan for why.
+DELIVERY_FAILURE_MAX_SECONDS="${DELIVERY_FAILURE_MAX_SECONDS:-30}"
 
 # Read FACTORY_WIP_LIMIT and CONFLICT_RESOLUTION_AI_TIER from config.yaml post-clone.
 # Env overrides are kept and logged; bootstrap defaults above handle pre-clone use.
@@ -306,6 +309,89 @@ _handle_session_window_pause() {
   return 0
 }
 
+# Maps the container's INTENT to the phase string the scheduler's retry keys and
+# trip_to_blocked() already use (_make_key in factory_core/breaker.py): "resolve" for
+# deconflict (not "deconflict" — matches the existing scheduler.sh call sites), "refine"
+# and "plan" pass through unchanged, everything else (fix/continue/recheck/fix-main) maps
+# to "implement" (the bare-issue-number key).
+_failure_phase_for_intent() {
+  case "${INTENT:-fix}" in
+    refine) echo "refine" ;;
+    plan) echo "plan" ;;
+    deconflict) echo "resolve" ;;
+    *) echo "implement" ;;
+  esac
+}
+
+# Classifies the current failure and drops the signature file the scheduler reads back on
+# its next poll (mirrors _handle_session_window_pause's sentinel-file pattern). Called from
+# two places: (1) the main archon-workflow loop's real-failure branch, with the captured
+# transcript — the functionally load-bearing call, since that is where a real task failure
+# (test_failure, build_failure, oos_files) is actually observed; (2) both branches of
+# on_failure() (the ERR trap), with no transcript, covering early/setup-phase crashes before
+# the main loop ever runs — these classify as environmental:delivery_failure by construction
+# (fast, zero commits, no artifact), which is the correct, conservative outcome.
+_write_error_signature() {
+  local phase="$1" exit_code="$2" text_file="${3:-}"
+  [ -z "${ISSUE_NUM:-}" ] && return 0
+  local elapsed_seconds=0
+  if [ -n "${RUN_STARTED_AT:-}" ]; then
+    local started_epoch now_epoch
+    # Guard the parse: a failure here must not fall back to a 0 epoch, which would
+    # make elapsed_seconds ~now() (billions of seconds) and permanently fail the
+    # classifier's "elapsed_seconds < delivery_failure_max_seconds" check — silently
+    # turning a genuine fast delivery-failure into a false substantive:unknown signal
+    # (#33 review). Skip elapsed-based classification instead: leave elapsed_seconds
+    # at its 0 default so the other signals (commits/dirty/artifact) decide.
+    if started_epoch=$(date -u -d "$RUN_STARTED_AT" +%s 2>/dev/null); then
+      now_epoch=$(date -u +%s)
+      elapsed_seconds=$((now_epoch - started_epoch))
+    else
+      echo "WARNING: could not parse RUN_STARTED_AT='${RUN_STARTED_AT}' — skipping elapsed-based failure classification" >&2
+    fi
+  fi
+  local commits_since_start=0
+  if [ -n "${RUN_STARTED_AT:-}" ]; then
+    commits_since_start=$(git log --oneline --since="$RUN_STARTED_AT" HEAD 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  local dirty_flag="" artifact_flag=""
+  [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty_flag="--worktree-dirty"
+  # Allowlist of genuine phase-deliverable filenames, not a denylist of
+  # run-record.json alone: $ARTIFACTS_DIR always already contains workflow-written
+  # context artifacts (issue.json, context-budget.json, token-opt-caps.env — present
+  # before the phase command even starts) and, for implement-intent failures,
+  # run_post_mortem() unconditionally writes factory-failures.jsonl (line 250) before
+  # this helper runs. A denylist of only run-record.json would treat all of those as
+  # "real work happened," making artifact_present effectively always true and the
+  # delivery_failure conjunction unreachable — defeating the #279 carve-out this
+  # spec exists to add. The list below reuses run_post_mortem's own known-deliverable
+  # set (line 201: implementation.md conformance.md review.md plan.md) plus the
+  # refine/plan/deconflict/Task-7 deliverables.
+  if [ -n "${ARTIFACTS_DIR:-}" ]; then
+    for f in implementation.md conformance.md review.md plan.md \
+             refinement-status.md conflict_resolution.md \
+             failure-diagnosis.md out-of-scope.md; do
+      if [ -f "${ARTIFACTS_DIR}/${f}" ]; then
+        artifact_flag="--artifact-present"
+        break
+      fi
+    done
+  fi
+  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+  # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" error-signature-write \
+    --issue "$ISSUE_NUM" \
+    --phase "$phase" \
+    --exit-code "$exit_code" \
+    --text-file "${text_file:-}" \
+    --elapsed-seconds "$elapsed_seconds" \
+    --commits-since-start "$commits_since_start" \
+    $dirty_flag $artifact_flag \
+    --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}" \
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
+    2>/dev/null || true
+}
+
 post_cost_report() {
   if [ -z "${ISSUE_NUM:-}" ]; then return; fi
   local RUN_RECORD_FILE="${ARTIFACTS_DIR:-}/run-record.json"
@@ -520,6 +606,7 @@ on_failure() {
       # Blocked transition after N attempts. Setting Blocked from on_failure would put
       # the issue in Blocked before the scheduler's counter accumulates; Priority 3
       # would then retry it as "Fix" (implement) — wrong intent for a pipeline phase.
+      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" ""
       echo "Refinement pipeline failed (exit $EXIT_CODE) for issue #$ISSUE_NUM"
       post_or_update_comment "$REFINE_FAILURE_MARKER" \
         "${REFINE_FAILURE_MARKER}
@@ -535,6 +622,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 ---
 *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
     else
+      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" ""
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "" || true
       set_board_status "blocked" 2>/dev/null || true
@@ -852,6 +940,7 @@ while true; do
       continue
     fi
     run_post_mortem "$EXIT_CODE" "$TMP_OUT" || true
+    _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "$TMP_OUT"
     rm -f "$TMP_OUT"
     exit "$EXIT_CODE"
   fi

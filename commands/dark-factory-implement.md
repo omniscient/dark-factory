@@ -144,6 +144,51 @@ If the change requires a new SQLAlchemy model:
 3. Generate migration: `cd backend && python -m alembic revision --autogenerate -m "description"`
 4. Apply migration: `cd backend && python -m alembic upgrade head`
 
+### Pre-commit self-review
+
+Before the checkpoint below, scan your own diff for shipped-by-accident debt:
+
+```bash
+git diff main...HEAD -- . ':(exclude)*.md' > /tmp/self-review.diff
+grep -nE '^\+.*\b(TODO|FIXME|XXX)\b' /tmp/self-review.diff || echo "no TODO/FIXME/XXX markers"
+grep -nE '^\+.*\b(print\(|console\.log\(|breakpoint\(\)|pdb\.set_trace\(\))' /tmp/self-review.diff || echo "no shipped debug prints"
+```
+
+For each hit **introduced by this run** (a `+` line, not context): fix it before committing. For a
+pre-existing hit you did not introduce, record it in `$ARTIFACTS_DIR/out-of-scope.md` per Scope
+Discipline above — do not fix it inline.
+
+Also check, for every non-doc file you changed: does at least one touched test file cover it? If a
+changed source path has zero corresponding test changes and isn't pure plumbing (config wiring,
+`__init__.py` exports), add a test before committing or note the gap in `implementation.md`.
+
+Functions grown past ~60 lines by this run's changes are a signal to reconsider decomposition — not
+a hard rule; note the trade-off in `implementation.md` if you keep one long.
+
+### If you cannot pass (blocked exit)
+
+If Phase 3 cannot reach a green state (tests still failing, a gate you can't satisfy, an
+environment you can't unblock) and you are about to end the run without shipping: before ending the
+turn, write a one-paragraph first-guess diagnosis to `$ARTIFACTS_DIR/failure-diagnosis.md`:
+
+```markdown
+## Failure diagnosis — issue #$ISSUE_NUM
+
+**Most likely cause:** <one sentence>
+**Failing command:** `<the exact command>`
+**Last ~15 lines of output:**
+```
+<paste>
+```
+**Smallest next step:** <one sentence — what the next `continue` run should try first>
+```
+
+Then post the same content as an issue comment (`gh issue comment $ISSUE_NUM --body-file
+$ARTIFACTS_DIR/failure-diagnosis.md`) before the turn ends, so a future `continue` run picks it up
+through the existing comment-digest pipeline (referenced above in Phase 1). This is a best-effort
+diagnosis, not a guarantee — state your confidence plainly rather than asserting a root cause you
+have not confirmed.
+
 ### PHASE_3_CHECKPOINT
 - [ ] All tests pass: `cd backend && python -m pytest`
 - [ ] Frontend type-checks: `cd frontend && npx tsc --noEmit` (if frontend changed)
@@ -384,3 +429,13 @@ Write a summary of what was implemented to `$ARTIFACTS_DIR/implementation.md`:
 - Tests added
 - Migrations created (if any)
 - Any decisions or trade-offs made
+
+### Report discipline
+
+Keep a green-path report to the 4 bullets above (files, tests, migrations, decisions) — no restated
+issue text, no process narration ("first I explored...", "then I decided..."), and no questions per
+`CLAUDE.md`'s "never end your turn on a question" rule; this run is headless.
+
+If anything went sideways, surface it prominently at the **top** of `implementation.md`, before the
+4 standard bullets: entries in `$ARTIFACTS_DIR/out-of-scope.md`, unresolved reservations about the
+approach taken, and the contents of `$ARTIFACTS_DIR/failure-diagnosis.md` if one was written.

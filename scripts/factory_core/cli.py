@@ -106,6 +106,34 @@ def _session_window_check(args):
         print("matched=false resume_epoch=0")
 
 
+def _error_signature_write(args):
+    from factory_core.error_signature import classify, write_signature
+    text = ""
+    if args.text_file:
+        text_path = Path(args.text_file)
+        text = text_path.read_text(errors="replace") if text_path.exists() else ""
+    signature = classify(
+        text,
+        args.exit_code,
+        elapsed_seconds=args.elapsed_seconds,
+        commits_since_start=args.commits_since_start,
+        worktree_dirty=args.worktree_dirty,
+        artifact_present=args.artifact_present,
+        delivery_failure_max_seconds=args.delivery_failure_max_seconds,
+    )
+    write_signature(args.issue, args.phase, signature, args.exit_code, Path(args.state_dir))
+    print(f"signature={signature}")
+
+
+def _breaker_check_signature(args):
+    from factory_core.breaker import record_failure_signature
+    state_file = Path(os.environ.get("STATE_FILE",
+                                     "/var/lib/dark-factory/scheduler-state.json"))
+    state_dir = Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
+    stuck, sig = record_failure_signature(args.issue, args.phase, state_file, state_dir)
+    print(f"stuck={'true' if stuck else 'false'} sig={sig}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="factory-core")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -161,6 +189,25 @@ def main():
     sw.add_argument("--buffer-minutes", type=int, default=5)
     sw.add_argument("--fallback-minutes", type=int, default=30)
     sw.set_defaults(func=_session_window_check)
+
+    esw = sub.add_parser("error-signature-write")
+    esw.add_argument("--issue", type=int, required=True)
+    esw.add_argument("--phase", required=True)
+    esw.add_argument("--exit-code", type=int, required=True)
+    esw.add_argument("--text-file", default="")
+    esw.add_argument("--elapsed-seconds", type=int, required=True)
+    esw.add_argument("--commits-since-start", type=int, required=True)
+    esw.add_argument("--worktree-dirty", action="store_true")
+    esw.add_argument("--artifact-present", action="store_true")
+    esw.add_argument("--delivery-failure-max-seconds", type=int, default=30,
+                      dest="delivery_failure_max_seconds")
+    esw.add_argument("--state-dir", default="/var/lib/dark-factory")
+    esw.set_defaults(func=_error_signature_write)
+
+    bcs = sub.add_parser("breaker-check-signature")
+    bcs.add_argument("--issue", type=int, required=True)
+    bcs.add_argument("--phase", required=True)
+    bcs.set_defaults(func=_breaker_check_signature)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

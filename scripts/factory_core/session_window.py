@@ -9,9 +9,12 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_SUBSTRING_RE = re.compile(
+RATE_LIMIT_RE = re.compile(
     r"usage limit|rate limit|429|credit balance|session limit", re.IGNORECASE
 )
+# Backward-compatible alias for existing in-module references; new external
+# consumers should import the public RATE_LIMIT_RE name above.
+_SUBSTRING_RE = RATE_LIMIT_RE
 _STRUCTURED_MARKER = "claude.rate_limit_event"
 _HUMAN_RESET_RE = re.compile(
     r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE

@@ -480,6 +480,18 @@ trip_to_blocked() {
     breaker-trip --issue "$issue_num" --phase "$phase" --reason "$reason"
 }
 
+# --- Early circuit-break: repeated substantive failure signature (thin adapter) ---
+# Reads and consumes the drop file the container wrote via error-signature-write, updates
+# the stored last_error_signature in scheduler-state.json, and reports whether this is the
+# 2nd consecutive SUBSTANTIVE match — logic lives in factory_core/breaker.py's
+# record_failure_signature(), which never reports "stuck" for an environmental: signature.
+# Usage: SIG_RESULT=$(check_failure_signature <issue_num> <phase>) — echoes "stuck=true|false sig=<sig-or-empty>"
+check_failure_signature() {
+  local issue_num="$1" phase="$2"
+  STATE_FILE="$STATE_FILE" SCHEDULER_STATE_DIR="$SCHEDULER_STATE_DIR" python3 "$FACTORY_CORE_CLI" \
+    breaker-check-signature --issue "$issue_num" --phase "$phase"
+}
+
 # --- Mergeable status for a PR: CONFLICTING, MERGEABLE, or UNKNOWN ---
 # UNKNOWN means GitHub hasn't finished computing mergeability — callers must skip.
 # --repo is required because the scheduler runs outside a git checkout.
@@ -1006,6 +1018,13 @@ This issue was left in **In progress** with no running factory container — the
       case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac
       if is_issue_running "$ISSUE"; then continue; fi
 
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
       RETRIES=$(get_retry_count "${ISSUE}:resolve")
       if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
         trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
@@ -1131,6 +1150,13 @@ To proceed:
       if has_above_ceiling_label "$item"; then continue; fi
       if is_issue_running "$ISSUE"; then continue; fi
 
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
       RETRIES=$(get_retry_count "$ISSUE")
       if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
         trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
@@ -1174,6 +1200,13 @@ To proceed:
       if is_issue_running "$ISSUE"; then continue; fi
       if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
       RETRIES=$(get_retry_count "${ISSUE}:plan")
       if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
         trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
@@ -1215,6 +1248,13 @@ To proceed:
       if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
       if is_issue_running "$ISSUE"; then continue; fi
       if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
 
       RETRIES=$(get_retry_count "${ISSUE}:refine")
       if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
