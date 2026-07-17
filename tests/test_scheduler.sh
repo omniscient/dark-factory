@@ -5,6 +5,12 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCHED="$SCRIPT_DIR/../scheduler.sh"
+# Point at this checkout's own cli.py, not the image-baked /opt/dark-factory copy (which
+# lacks any subcommand added since the last image build) — breaker-check-signature (#33)
+# only exists here. Existing sections (breaker-trip et al.) happen to also exist in the
+# baked copy, which is why this override wasn't needed until now (see
+# test_scheduler_pagination.sh for the same pattern already in use).
+export FACTORY_CORE_CLI="$SCRIPT_DIR/../scripts/factory_core/cli.py"
 
 # ---- Stubs ----
 STUB_LOG=$(mktemp /tmp/sched-test-stubs-XXXXXX.log)
@@ -129,6 +135,58 @@ echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
 increment_retry "77"
 trip_to_blocked "77" "implement" "test"
 assert_eq "bare implement counter reset" "0" "$(get_retry_count "77")"
+
+# ==========================================
+# B2: check_failure_signature — early trip on 2nd consecutive substantive match
+# ==========================================
+echo ""
+echo "--- B2: check_failure_signature early trip ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+_drop_sig() {
+  local issue="$1" phase="$2" sig="$3"
+  mkdir -p "${SCHEDULER_STATE_DIR}/error-signatures"
+  printf '{"signature":"%s","phase":"%s","exit_code":1}' "$sig" "$phase" \
+    > "${SCHEDULER_STATE_DIR}/error-signatures/${issue}.${phase}.sig"
+}
+
+_drop_sig 50 implement "substantive:test_failure:1"
+RESULT1=$(check_failure_signature "50" "implement")
+assert_eq "1st substantive match: not stuck" "1" "$(echo "$RESULT1" | grep -c 'stuck=false')"
+
+_drop_sig 50 implement "substantive:test_failure:1"
+RESULT2=$(check_failure_signature "50" "implement")
+assert_eq "2nd consecutive substantive match: stuck" "1" "$(echo "$RESULT2" | grep -c 'stuck=true')"
+assert_eq "stuck result carries the signature" "1" \
+  "$(echo "$RESULT2" | grep -c 'sig=substantive:test_failure:1')"
+
+echo '{}' > "$STATE_FILE"
+_drop_sig 51 implement "environmental:delivery_failure"
+check_failure_signature "51" "implement" > /dev/null
+_drop_sig 51 implement "environmental:delivery_failure"
+RESULT3=$(check_failure_signature "51" "implement")
+assert_eq "environmental repeat never trips (mirrors #279)" "1" \
+  "$(echo "$RESULT3" | grep -c 'stuck=false')"
+
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+# K10: refine/plan/resolve call sites early-trip via trip_to_blocked, bypassing MAX_RETRIES
+_drop_sig 52 resolve "substantive:build_failure:1"
+check_failure_signature "52" "resolve" > /dev/null
+_drop_sig 52 resolve "substantive:build_failure:1"
+
+SIG_RESULT=$(check_failure_signature "52" "resolve")
+if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  trip_to_blocked "52" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+fi
+assert_eq "K10: early trip delegates to breaker-trip (resolve)" \
+  "1" "$(grep -c 'breaker-trip --issue 52 --phase resolve' "$STUB_LOG" || echo 0)"
+K10_EXPECTED_REASON="same failure signature 'substantive:build_failure:1'"
+assert_eq "K10: reason string embeds the signature" \
+  "1" "$(grep -c -F "$K10_EXPECTED_REASON" "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"
 
 # ==========================================
 # C: dispatch() exit-code capture (fails until Task 3)
