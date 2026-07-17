@@ -110,6 +110,36 @@ def test_loops_independent_of_schema_version(tmp_path):
     assert len(merged["loops"]) == 1
 
 
+def test_loop_entry_not_a_mapping_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("loops:\n  - 'not-a-mapping'\n")
+    with pytest.raises(adapter.AdapterError, match=r"loops\[0\] must be a mapping"):
+        adapter.load(str(tmp_path))
+
+
+def test_loops_not_a_list_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("loops:\n  name: not-a-list\n")
+    with pytest.raises(adapter.AdapterError, match=r"loops.*must be a list"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_missing_required_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    entry = _VALID_LOOP_ENTRY.replace("    purpose: Triage overnight scanner false positives\n", "")
+    (d / "adapter.yaml").write_text(entry)
+    with pytest.raises(adapter.AdapterError, match=r"missing required field 'purpose'"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    entry = _VALID_LOOP_ENTRY + "    extra_typo_field: oops\n"
+    (d / "adapter.yaml").write_text(entry)
+    with pytest.raises(adapter.AdapterError, match=r"unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():

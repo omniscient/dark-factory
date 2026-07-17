@@ -24,6 +24,9 @@ def _validate_loop(entry, index: int) -> None:
     if not isinstance(entry, dict):
         raise AdapterError(f"loops[{index}] must be a mapping, got {type(entry).__name__}")
     name = entry.get("name", "?")
+    for key in entry:
+        if key not in _LOOP_REQUIRED_FIELDS:
+            raise AdapterError(f"loops[{index}] ('{name}'): unknown field '{key}'")
     for field in _LOOP_REQUIRED_FIELDS:
         if field not in entry:
             raise AdapterError(f"loops[{index}] ('{name}'): missing required field '{field}'")
