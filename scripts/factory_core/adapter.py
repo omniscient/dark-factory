@@ -19,6 +19,12 @@ _LOOP_STRING_FIELDS = {
 }
 _LOOP_LIST_FIELDS = {"inputs", "outputs", "artifacts"}
 
+# Per-loop-entry field names reserved for a tracked-but-unshipped extension.
+# Rejected with a targeted message so the extension point is discoverable
+# without A1 accepting unvalidated content. Consulted before the generic
+# unknown-field error in _validate_loop.
+_RESERVED_LOOP_FIELDS = {"memory_intervention": "#241"}
+
 
 def _validate_loop(entry, index: int) -> None:
     if not isinstance(entry, dict):
@@ -26,6 +32,12 @@ def _validate_loop(entry, index: int) -> None:
     name = entry.get("name", "?")
     for key in entry:
         if key not in _LOOP_REQUIRED_FIELDS:
+            if key in _RESERVED_LOOP_FIELDS:
+                raise AdapterError(
+                    f"loops[{index}] ('{name}'): field '{key}' is reserved for epic "
+                    f"{_RESERVED_LOOP_FIELDS[key]} (per-loop memory intervention) and is "
+                    f"not accepted in schema v2; remove it"
+                )
             raise AdapterError(f"loops[{index}] ('{name}'): unknown field '{key}'")
     for field in _LOOP_REQUIRED_FIELDS:
         if field not in entry:

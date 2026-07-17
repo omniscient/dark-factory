@@ -181,6 +181,15 @@ def test_loop_entry_side_effect_level_non_int_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
+def test_loop_entry_memory_intervention_reserved_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["memory_intervention"] = {"policy": "whatever"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=r"reserved for epic #241"):
+        adapter.load(str(tmp_path))
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
