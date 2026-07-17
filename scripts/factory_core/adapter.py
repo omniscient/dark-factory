@@ -61,7 +61,7 @@ def _validate_loop(entry, index: int) -> None:
             raise AdapterError(
                 f"loops[{index}] ('{name}'): field '{field}' must be a list of strings")
     sel = entry["side_effect_level"]
-    if not isinstance(sel, int) or not (1 <= sel <= 6):
+    if isinstance(sel, bool) or not isinstance(sel, int) or not (1 <= sel <= 6):
         raise AdapterError(
             f"loops[{index}] ('{name}'): field 'side_effect_level' must be an int between 1 and 6")
 
@@ -99,11 +99,22 @@ def load(clone_dir: str) -> dict:
             print(f"adapter: warning — unknown adapter key '{k}' (carried through)", file=sys.stderr)
         if k in _MAP_KEYS and not isinstance(v, dict):
             raise AdapterError(f"adapter key '{k}' must be a mapping, got {type(v).__name__}")
+    # Intentional: loops: is validated whenever present, independent of
+    # schema_version. Per spec Requirement 4 (see Alternative 4 in
+    # docs/superpowers/specs/2026-07-07-adapter-schema-v2-loops-design.md),
+    # schema_version is inert metadata and gating loops: on it was explicitly
+    # rejected — it would break "no restriction to {1,2}" parity. A
+    # schema_version: 1 file containing loops: is validated the same as v2.
     if "loops" in data:
         if not isinstance(data["loops"], list):
             raise AdapterError(f"adapter key 'loops' must be a list, got {type(data['loops']).__name__}")
+        seen_names = set()
         for i, entry in enumerate(data["loops"]):
             _validate_loop(entry, i)
+            name = entry.get("name")
+            if name in seen_names:
+                raise AdapterError(f"loops[{i}] ('{name}'): duplicate loop name '{name}'")
+            seen_names.add(name)
     return _deep_merge(adapter_defaults.DEFAULTS, data)
 
 def get(clone_dir: str, dotted: str):

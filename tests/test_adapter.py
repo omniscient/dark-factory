@@ -1,3 +1,4 @@
+import copy
 import re
 import sys
 sys.path.insert(0, "scripts")
@@ -178,6 +179,30 @@ def test_loop_entry_side_effect_level_non_int_raises(tmp_path):
     parsed["loops"][0]["side_effect_level"] = "two"
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
     with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("bad_bool", [True, False])
+def test_loop_entry_side_effect_level_bool_raises(tmp_path, bad_bool):
+    """bool is a subclass of int in Python; side_effect_level: true/false must not
+    slip through as a valid level (true would otherwise pass as level 1)."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = bad_bool
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+def test_duplicate_loop_names_raise(tmp_path):
+    """Two loop entries sharing the same name are ambiguous for A2-A5 enforcement
+    and run-record provenance, which key on name — must be rejected."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    second = copy.deepcopy(parsed["loops"][0])
+    parsed["loops"].append(second)  # same name as the first entry
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=r"duplicate loop name 'nightly-scan-triage'"):
         adapter.load(str(tmp_path))
 
 
