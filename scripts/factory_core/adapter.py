@@ -25,6 +25,14 @@ _LOOP_LIST_FIELDS = {"inputs", "outputs", "artifacts"}
 # unknown-field error in _validate_loop.
 _RESERVED_LOOP_FIELDS = {"memory_intervention": "#241"}
 
+# Top-level key names reserved for a tracked future design ticket. Unlike a
+# generic unknown top-level key (which warns and carries — v1 parity), a named
+# reserved key is hard-rejected: it has no v1 history, so strictness here is
+# parity-safe, and warn-and-carry would deep-merge unvalidated content into config.
+_RESERVED_TOP_FIELDS = {
+    "mechanism_candidates": "a future Bilevel Autoresearch design ticket",
+}
+
 
 def _validate_loop(entry, index: int) -> None:
     if not isinstance(entry, dict):
@@ -82,6 +90,11 @@ def load(clone_dir: str) -> dict:
     if not isinstance(data.get("schema_version", 1), int):
         raise AdapterError("schema_version must be an integer")
     for k, v in data.items():
+        if k in _RESERVED_TOP_FIELDS:
+            raise AdapterError(
+                f"adapter key '{k}' is reserved for {_RESERVED_TOP_FIELDS[k]} and is "
+                f"not accepted in schema v2; remove it"
+            )
         if k not in _KNOWN_TOP:
             print(f"adapter: warning — unknown adapter key '{k}' (carried through)", file=sys.stderr)
         if k in _MAP_KEYS and not isinstance(v, dict):

@@ -190,6 +190,14 @@ def test_loop_entry_memory_intervention_reserved_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
+def test_mechanism_candidates_top_level_reserved_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "mechanism_candidates:\n  - id: mc-1\n    target_loop: nightly-scan-triage\n")
+    with pytest.raises(adapter.AdapterError, match=r"mechanism_candidates.*reserved"):
+        adapter.load(str(tmp_path))
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
