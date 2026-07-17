@@ -1,6 +1,8 @@
+import re
 import sys
 sys.path.insert(0, "scripts")
 import pytest
+import yaml
 from factory_core import adapter, adapter_defaults
 
 
@@ -137,6 +139,45 @@ def test_loop_entry_unknown_field_raises(tmp_path):
     entry = _VALID_LOOP_ENTRY + "    extra_typo_field: oops\n"
     (d / "adapter.yaml").write_text(entry)
     with pytest.raises(adapter.AdapterError, match=r"unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", sorted(adapter._LOOP_STRING_FIELDS))
+def test_loop_entry_string_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][field] = 42
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", sorted(adapter._LOOP_LIST_FIELDS))
+def test_loop_entry_list_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][field] = "not-a-list"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("bad_level", [0, 7, -1, 100])
+def test_loop_entry_side_effect_level_out_of_range_raises(tmp_path, bad_level):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = bad_level
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_side_effect_level_non_int_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = "two"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
         adapter.load(str(tmp_path))
 
 
