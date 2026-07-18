@@ -17,6 +17,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export GH_TOKEN="stub-token"
 export CLAUDE_CODE_OAUTH_TOKEN="stub-token"
 
+# Point entrypoint.sh's two hard-sourced /opt/dark-factory/... paths at the repo's
+# own copies so sourcing works on a bare CI checkout (they only exist inside the
+# built image otherwise). identity.sh sets FACTORY_* env defaults; providers/cli.py
+# preflight is env-only (no network) and passes with the stub tokens above.
+export IDENTITY_SH="$REPO_ROOT/scripts/identity.sh"
+export FACTORY_PROVIDERS_CLI="$REPO_ROOT/scripts/factory_core/providers/cli.py"
+
 GH_CALL_COUNT=0
 git() { return 0; }
 export -f git
