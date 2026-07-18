@@ -8,6 +8,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import run_record as rr
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_scheduler_state_dir(tmp_path, monkeypatch):
+    """Never let a test write to the real /var/lib/dark-factory (df#300).
+
+    SCHEDULER_STATE_DIR defaults to that real, writable-by-factory-user path;
+    without this, any test exercising cmd_assemble's durable per-run-id write
+    would pollute production state the same way the pre-#300 bash tests did.
+    Individual tests may still override rr.SCHEDULER_STATE_DIR explicitly to
+    assert on the durable-write path itself.
+    """
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
+
+
 # ---------------------------------------------------------------------------
 # record command
 # ---------------------------------------------------------------------------
@@ -557,6 +570,42 @@ def test_assemble_records_archon_cost_capture_failure_when_nodes_empty(tmp_path,
     assert rec["archon_cost_capture"]["ok"] is False
     assert rec["archon_cost_capture"]["exit_code"] == 127
     assert "unknown command" in rec["archon_cost_capture"]["stderr_excerpt"]
+
+
+def test_assemble_writes_durable_per_run_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", state_dir)
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    durable_path = state_dir / "run-records" / "abc123.json"
+    assert durable_path.exists()
+    durable_rec = json.loads(durable_path.read_text())
+    ephemeral_rec = json.loads(out.read_text())
+    assert durable_rec == ephemeral_rec
+
+
+def test_assemble_durable_write_upserts_same_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", state_dir)
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)  # first write (e.g. on_failure path)
+    args.status = "completed"
+    rr.cmd_assemble(args)  # second write for the same run_id (success path overwrite)
+
+    durable_path = state_dir / "run-records" / "abc123.json"
+    durable_rec = json.loads(durable_path.read_text())
+    assert durable_rec["status"] == "completed"
 
 
 def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):

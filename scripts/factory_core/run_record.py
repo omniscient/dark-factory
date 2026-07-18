@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from . import model_proxy
 
+SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
 JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
@@ -43,6 +44,12 @@ def _run_record_path(artifacts_root: pathlib.Path, run_id: str) -> "pathlib.Path
     if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
         return None
     return artifacts_root / run_id / "run-record.json"
+
+
+def _durable_run_record_path(run_id: str) -> "pathlib.Path | None":
+    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+        return None
+    return SCHEDULER_STATE_DIR / "run-records" / f"{run_id}.json"
 
 
 def _timestamp() -> str:
@@ -621,6 +628,11 @@ def cmd_assemble(args) -> None:
 
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
+
+    durable_path = _durable_run_record_path(args.run_id)
+    if durable_path is not None:
+        durable_path.parent.mkdir(parents=True, exist_ok=True)
+        durable_path.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
 
     ts = _timestamp()
     for stage in stages:
