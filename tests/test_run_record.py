@@ -136,6 +136,53 @@ def test_parse_archon_cost_empty_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# _parse_archon_cost_with_capture (df#300)
+# ---------------------------------------------------------------------------
+
+def test_parse_archon_cost_capture_ok_when_nodes_present(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "xyz",
+        "nodes": [{"nodeId": "implement", "inputTokens": 1, "outputTokens": 1,
+                   "costUsd": 0.01, "durationMs": 100, "modelUsage": {}}],
+    }))
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert len(nodes) == 1
+    assert capture == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_parse_archon_cost_capture_not_ok_on_nonzero_exit(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text("")
+    nodes, capture = rr._parse_archon_cost_with_capture(
+        cost_json, exit_code=127, stderr_text="archon: command not found\n"
+    )
+    assert nodes == []
+    assert capture["ok"] is False
+    assert capture["exit_code"] == 127
+    assert "command not found" in capture["stderr_excerpt"]
+
+
+def test_parse_archon_cost_capture_ok_valid_json_zero_nodes(tmp_path):
+    # Archon ran fine and genuinely reports zero nodes (e.g. an ungated refine/plan
+    # run) — this must NOT be flagged as a capture failure.
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({"runId": "xyz", "nodes": []}))
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert nodes == []
+    assert capture == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_parse_archon_cost_capture_not_ok_on_unparseable_output(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text("not json at all {{{")
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert nodes == []
+    assert capture["ok"] is False
+    assert capture["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
 # _parse_artifact_stage
 # ---------------------------------------------------------------------------
 
@@ -466,6 +513,50 @@ def test_assemble_incorporates_archon_cost(tmp_path, monkeypatch):
     assert rec["nodes"][0]["gen_ai.usage.input_tokens"] == 100
     assert rec["totals"]["gen_ai.usage.input_tokens"] == 100
     assert rec["totals"]["cost_usd"] == pytest.approx(0.01)
+
+
+def test_assemble_records_archon_cost_capture_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 1, "outputTokens": 1,
+                   "costUsd": 0.01, "durationMs": 1, "modelUsage": {}}],
+    }))
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    args.archon_cost_exit_code = 0
+    args.archon_cost_stderr_file = None
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["archon_cost_capture"] == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_assemble_records_archon_cost_capture_failure_when_nodes_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    stderr_file = tmp_path / "archon-cost.stderr"
+    stderr_file.write_text("archon: unknown command 'workflow cost'\n")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(tmp_path / "does-not-exist.json")
+    args.archon_cost_exit_code = 127
+    args.archon_cost_stderr_file = str(stderr_file)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["archon_cost_capture"]["ok"] is False
+    assert rec["archon_cost_capture"]["exit_code"] == 127
+    assert "unknown command" in rec["archon_cost_capture"]["stderr_excerpt"]
 
 
 def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):

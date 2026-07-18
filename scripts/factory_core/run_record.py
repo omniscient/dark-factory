@@ -211,6 +211,49 @@ def _parse_archon_cost(path: pathlib.Path) -> list:
         return []
 
 
+def _parse_archon_cost_with_capture(
+    path: "pathlib.Path | None", *, exit_code: int, stderr_text: str
+) -> "tuple[list, dict]":
+    """Like _parse_archon_cost, but distinguishes "archon ran fine, genuinely zero
+    nodes" from "the command errored / its output didn't parse" (df#300).
+
+    ok=False when: nonzero exit code, OR the file is missing/empty/unparseable.
+    ok=True when: exit_code==0 AND a run object was found (nodes may still be []
+    if archon itself reports no nodes — that is a legitimate zero, not a capture
+    failure).
+    """
+    stderr_excerpt = (stderr_text or "").strip()[-2000:]
+    if exit_code != 0:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    if path is None or not path.exists():
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    if not content:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    run_obj = None
+    for obj in _iter_json_documents(content):
+        candidates = obj if isinstance(obj, list) else [obj]
+        for cand in candidates:
+            if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
+                run_obj = cand
+                break
+        if run_obj is not None:
+            break
+
+    if run_obj is None:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    nodes = _parse_archon_cost(path)
+    return nodes, {"ok": True, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     """Extract stage verdict and metadata from a verdict artifact .md file."""
     if not content.strip():
@@ -482,7 +525,17 @@ def cmd_assemble(args) -> None:
                 stages.append(stage)
 
     archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
-    nodes = _parse_archon_cost(archon_path)
+    stderr_text = ""
+    stderr_file = getattr(args, "archon_cost_stderr_file", None)
+    if stderr_file:
+        try:
+            stderr_text = pathlib.Path(stderr_file).read_text(encoding="utf-8")
+        except OSError:
+            stderr_text = ""
+    exit_code = getattr(args, "archon_cost_exit_code", 0) or 0
+    nodes, archon_cost_capture = _parse_archon_cost_with_capture(
+        archon_path, exit_code=exit_code, stderr_text=stderr_text
+    )
 
     totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
     totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
@@ -505,6 +558,7 @@ def cmd_assemble(args) -> None:
         "nodes": nodes,
         "artifacts": artifacts,
         "loops": loops,
+        "archon_cost_capture": archon_cost_capture,
         "totals": {
             "gen_ai.usage.input_tokens": totals_in,
             "gen_ai.usage.output_tokens": totals_out,
@@ -682,6 +736,8 @@ def main() -> None:
     a.add_argument("--started-at", default="")
     a.add_argument("--artifacts-dir", required=True)
     a.add_argument("--archon-cost-json")
+    a.add_argument("--archon-cost-exit-code", type=int, default=0)
+    a.add_argument("--archon-cost-stderr-file")
     a.add_argument("--out-file", required=True)
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)
