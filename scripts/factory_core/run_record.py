@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from . import model_proxy
 
 SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
-JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
+JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
 POLICY_VERSION = "1.0"

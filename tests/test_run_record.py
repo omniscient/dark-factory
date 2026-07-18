@@ -8,6 +8,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import run_record as rr
 
 
+# ---------------------------------------------------------------------------
+# JSONL_PATH / SCHEDULER_STATE_DIR hermeticity (df#300)
+# ---------------------------------------------------------------------------
+
+def test_jsonl_path_derives_from_scheduler_state_dir(monkeypatch):
+    import importlib
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", "/tmp/fake-state-dir-xyz")
+    reloaded = importlib.reload(rr)
+    try:
+        assert str(reloaded.JSONL_PATH) == "/tmp/fake-state-dir-xyz/runs.jsonl"
+        assert str(reloaded.SCHEDULER_STATE_DIR) == "/tmp/fake-state-dir-xyz"
+    finally:
+        monkeypatch.delenv("SCHEDULER_STATE_DIR", raising=False)
+        importlib.reload(rr)  # restore module-level state for subsequent tests
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_scheduler_state_dir(tmp_path, monkeypatch):
     """Never let a test write to the real /var/lib/dark-factory (df#300).
