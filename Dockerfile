@@ -94,6 +94,17 @@ RUN npm install -g @anthropic-ai/claude-code
 # Pinned to an immutable commit on feat/workflow-cost-tracking instead of the
 # moving branch tip, so a rebuild always fetches the reviewed code. Bump the SHA
 # deliberately to pick up Archon updates.
+#
+# df#300: the previous pin (f83fb556a2a864014e12ecfe6f60c7a1d18928b9) predates
+# the `workflow cost` feature commit despite this comment's prior claim —
+# `archon workflow cost` didn't exist in that tree, every run since ~2026-07-10
+# silently produced zero cost data. Re-pinned to 74372446d1c5f07101dfff61c44be8895cca30db,
+# the specific reviewed commit on feat/workflow-cost-tracking that introduces the
+# subcommand (verified ancestor of that branch's tip f0395f90c404a82f69abb29ba5c05789ed08b654,
+# but NOT following the moving tip itself — see spec Alternative 3). The build-time
+# assertion below is the actual guarantee against a repeat: whichever SHA is chosen,
+# the image fails to build if the CLI surface is missing.
+#
 # Deliberately NOT `bun link`: its shim lands in the invoking user's ~/.bun/bin
 # (root → /root/.bun/bin), which is off PATH and unreadable for the factory
 # user. Cached layers masked this for months; any --no-cache rebuild lost
@@ -101,10 +112,15 @@ RUN npm install -g @anthropic-ai/claude-code
 # shebang, so a plain symlink on PATH is all that's needed.
 RUN git clone https://github.com/omniscient/Archon.git /opt/archon && \
     cd /opt/archon && \
-    git checkout f83fb556a2a864014e12ecfe6f60c7a1d18928b9 && \
+    git checkout 74372446d1c5f07101dfff61c44be8895cca30db && \
     bun install && \
     chmod +x /opt/archon/packages/cli/src/cli.ts && \
     ln -sf /opt/archon/packages/cli/src/cli.ts /usr/local/bin/archon
+
+# Binding correctness guarantee (df#300): fail the build, loudly and immediately,
+# if the pinned commit doesn't actually ship `workflow cost`. This is what prevents
+# a future bad pin from shipping silently — not the SHA choice above.
+RUN archon workflow cost --help
 
 # Workspace directory
 RUN mkdir -p /workspace
