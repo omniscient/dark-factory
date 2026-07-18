@@ -97,6 +97,54 @@ def test_record_detail_float(tmp_path, monkeypatch):
     assert rec["detail"]["count"] == 5
 
 
+def test_record_defaults_to_null_not_zero(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    class _Args:
+        run_id = "abc"
+        issue = 1
+        intent = "fix"
+        stage = "implement"
+        verdict = "PASS"
+        tokens_in = None
+        tokens_out = None
+        cost_usd = None
+        duration_ms = None
+        detail = None
+
+    rr.cmd_record(_Args())
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["gen_ai.usage.input_tokens"] is None
+    assert rec["gen_ai.usage.output_tokens"] is None
+    assert rec["cost_usd"] is None
+    assert rec["duration_ms"] is None
+
+
+def test_record_explicit_zero_stays_zero_not_null(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    class _Args:
+        run_id = "abc"
+        issue = 1
+        intent = "fix"
+        stage = "implement"
+        verdict = "PASS"
+        tokens_in = 0
+        tokens_out = 0
+        cost_usd = 0.0
+        duration_ms = 0
+        detail = None
+
+    rr.cmd_record(_Args())
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["gen_ai.usage.input_tokens"] == 0
+    assert rec["gen_ai.usage.output_tokens"] == 0
+
+
 def test_post_seq_is_nonfatal(tmp_path, monkeypatch):
     jsonl = tmp_path / "runs.jsonl"
     monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
@@ -626,6 +674,25 @@ def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     stages = [json.loads(l)["stage"] for l in lines]
     assert "validation" in stages
     assert "conformance" in stages
+
+
+def test_assemble_stage_stub_rows_use_null_not_zero(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "validation.md").write_text("STATUS: PASS\n")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    line = json.loads(jsonl.read_text().strip().splitlines()[0])
+    assert line["gen_ai.usage.input_tokens"] is None
+    assert line["gen_ai.usage.output_tokens"] is None
+    assert line["cost_usd"] is None
+    assert line["duration_ms"] is None
 
 
 # ---------------------------------------------------------------------------

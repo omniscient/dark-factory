@@ -81,19 +81,15 @@ def _post_seq(record: dict) -> None:
                         "gen_ai.operation.name",
                         f"stage.{record.get('stage', 'unknown')}",
                     ),
-                    "gen_ai.usage.input_tokens": record.get(
-                        "gen_ai.usage.input_tokens", 0
-                    ),
-                    "gen_ai.usage.output_tokens": record.get(
-                        "gen_ai.usage.output_tokens", 0
-                    ),
+                    "gen_ai.usage.input_tokens": record.get("gen_ai.usage.input_tokens"),
+                    "gen_ai.usage.output_tokens": record.get("gen_ai.usage.output_tokens"),
                     "Stage": record.get("stage", ""),
                     "Verdict": record.get("verdict", ""),
                     "IssueNumber": record.get("issue_number", 0),
                     "Intent": record.get("intent", ""),
                     "RunId": record.get("run_id", ""),
-                    "CostUsd": record.get("cost_usd", 0),
-                    "DurationMs": record.get("duration_ms", 0),
+                    "CostUsd": record.get("cost_usd"),
+                    "DurationMs": record.get("duration_ms"),
                 },
             }
         ]
@@ -134,10 +130,10 @@ def cmd_record(args) -> None:
         "verdict": args.verdict,
         "gen_ai.system": "dark-factory",
         "gen_ai.operation.name": f"stage.{args.stage}",
-        "gen_ai.usage.input_tokens": args.tokens_in or 0,
-        "gen_ai.usage.output_tokens": args.tokens_out or 0,
-        "cost_usd": args.cost_usd or 0.0,
-        "duration_ms": args.duration_ms or 0,
+        "gen_ai.usage.input_tokens": args.tokens_in,
+        "gen_ai.usage.output_tokens": args.tokens_out,
+        "cost_usd": args.cost_usd,
+        "duration_ms": args.duration_ms,
         "timestamp": _timestamp(),
     }
     if details:
@@ -644,10 +640,10 @@ def cmd_assemble(args) -> None:
             "verdict": stage["verdict"],
             "gen_ai.system": "dark-factory",
             "gen_ai.operation.name": f"stage.{stage['stage']}",
-            "gen_ai.usage.input_tokens": 0,
-            "gen_ai.usage.output_tokens": 0,
-            "cost_usd": 0.0,
-            "duration_ms": 0,
+            "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
             "timestamp": ts,
         }
         extra = {k: v for k, v in stage.items() if k not in ("stage", "verdict")}
@@ -772,10 +768,10 @@ def main() -> None:
     r.add_argument("--intent", required=True)
     r.add_argument("--stage", required=True)
     r.add_argument("--verdict", required=True)
-    r.add_argument("--tokens-in", type=int, default=0)
-    r.add_argument("--tokens-out", type=int, default=0)
-    r.add_argument("--cost-usd", type=float, default=0.0)
-    r.add_argument("--duration-ms", type=int, default=0)
+    r.add_argument("--tokens-in", type=int, default=None)
+    r.add_argument("--tokens-out", type=int, default=None)
+    r.add_argument("--cost-usd", type=float, default=None)
+    r.add_argument("--duration-ms", type=int, default=None)
     r.add_argument("--detail", nargs="*", metavar="KEY=VAL")
 
     he = sub.add_parser("health-event", help="Emit a non-blocking recurrence-detection signal")
