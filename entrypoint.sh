@@ -443,12 +443,17 @@ post_cost_report() {
     CAPTURE_STDERR=$(jq -r '.archon_cost_capture.stderr_excerpt // ""' "$RUN_RECORD_FILE" 2>/dev/null || echo "")
     NODES_COUNT=$(jq -r '(.nodes // []) | length' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
     echo "ERROR: cost report has zero node rows for run ${RUN_ID:-unknown} (issue #${ISSUE_NUM}); nodes=${NODES_COUNT}, archon_cost_capture.ok=${CAPTURE_OK}, archon_cost_exit_code=${CAPTURE_RC}, stderr=${CAPTURE_STDERR}" >&2
-    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record health-event \
-      --run-id "${RUN_ID:-unknown}" \
-      --issue "${ISSUE_NUM}" \
-      --event "factory.cost_report.missing" \
-      --detail "nodes_count=${NODES_COUNT}" "archon_cost_capture_ok=${CAPTURE_OK}" "archon_cost_exit_code=${CAPTURE_RC}" \
-      2>/dev/null || true
+    # Only emit the recurrence-detection health event when capture itself failed;
+    # archon_cost_capture.ok=true with zero nodes is a legitimate zero (e.g. a run
+    # that executed no AI nodes), not a missing-report condition.
+    if [ "$CAPTURE_OK" != "true" ]; then
+      python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record health-event \
+        --run-id "${RUN_ID:-unknown}" \
+        --issue "${ISSUE_NUM}" \
+        --event "factory.cost_report.missing" \
+        --detail "nodes_count=${NODES_COUNT}" "archon_cost_capture_ok=${CAPTURE_OK}" "archon_cost_exit_code=${CAPTURE_RC}" \
+        2>/dev/null || true
+    fi
     return
   fi
 

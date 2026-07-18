@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -204,6 +205,43 @@ def _iter_json_documents(text: str):
         i = end
 
 
+def _find_run_obj(content: str) -> "dict | None":
+    """Scan already-read JSON document text for the first object carrying a run id."""
+    for obj in _iter_json_documents(content):
+        candidates = obj if isinstance(obj, list) else [obj]
+        for cand in candidates:
+            if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
+                return cand
+    return None
+
+
+def _nodes_from_run_obj(run_obj: dict) -> list:
+    """Map a run object's nodes to OTel field names."""
+    nodes = []
+    for n in run_obj.get("nodes") or []:
+        model_usage = n.get("modelUsage") or n.get("model_usage") or {}
+        raw_model = next(iter(model_usage.keys()), "")
+        if raw_model.startswith("claude-"):
+            raw_model = raw_model[len("claude-"):]
+        if "-20" in raw_model:
+            raw_model = raw_model[: raw_model.index("-20")]
+        nodes.append(
+            {
+                "node_id": n.get("nodeId") or n.get("node_id", ""),
+                "model": raw_model,
+                "gen_ai.usage.input_tokens": (
+                    n.get("inputTokens") or n.get("input_tokens") or 0
+                ),
+                "gen_ai.usage.output_tokens": (
+                    n.get("outputTokens") or n.get("output_tokens") or 0
+                ),
+                "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
+                "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
+            }
+        )
+    return nodes
+
+
 def _parse_archon_cost(path: pathlib.Path) -> list:
     """Map archon workflow cost JSON nodes to OTel field names."""
     if path is None or not path.exists():
@@ -212,41 +250,10 @@ def _parse_archon_cost(path: pathlib.Path) -> list:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             return []
-        run_obj = None
-        for obj in _iter_json_documents(content):
-            candidates = obj if isinstance(obj, list) else [obj]
-            for cand in candidates:
-                if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
-                    run_obj = cand
-                    break
-            if run_obj is not None:
-                break
+        run_obj = _find_run_obj(content)
         if run_obj is None:
             return []
-
-        nodes = []
-        for n in run_obj.get("nodes") or []:
-            model_usage = n.get("modelUsage") or n.get("model_usage") or {}
-            raw_model = next(iter(model_usage.keys()), "")
-            if raw_model.startswith("claude-"):
-                raw_model = raw_model[len("claude-"):]
-            if "-20" in raw_model:
-                raw_model = raw_model[: raw_model.index("-20")]
-            nodes.append(
-                {
-                    "node_id": n.get("nodeId") or n.get("node_id", ""),
-                    "model": raw_model,
-                    "gen_ai.usage.input_tokens": (
-                        n.get("inputTokens") or n.get("input_tokens") or 0
-                    ),
-                    "gen_ai.usage.output_tokens": (
-                        n.get("outputTokens") or n.get("output_tokens") or 0
-                    ),
-                    "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
-                    "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
-                }
-            )
-        return nodes
+        return _nodes_from_run_obj(run_obj)
     except Exception:
         return []
 
@@ -277,20 +284,12 @@ def _parse_archon_cost_with_capture(
     if not content:
         return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
-    run_obj = None
-    for obj in _iter_json_documents(content):
-        candidates = obj if isinstance(obj, list) else [obj]
-        for cand in candidates:
-            if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
-                run_obj = cand
-                break
-        if run_obj is not None:
-            break
+    run_obj = _find_run_obj(content)
 
     if run_obj is None:
         return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
-    nodes = _parse_archon_cost(path)
+    nodes = _nodes_from_run_obj(run_obj)
     return nodes, {"ok": True, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
 
@@ -509,14 +508,14 @@ def _compute_harness_economics(
     *, run_id: str, status: str, stages: list, totals: dict,
     started_at: str, completed_at: str, ledger_path: pathlib.Path,
 ) -> dict:
-    tokens_in = totals.get("gen_ai.usage.input_tokens", 0)
-    tokens_out = totals.get("gen_ai.usage.output_tokens", 0)
-    tokens_per_task = tokens_in + tokens_out
-    cost_per_task = totals.get("cost_usd", 0.0)
+    tokens_in = totals.get("gen_ai.usage.input_tokens")
+    tokens_out = totals.get("gen_ai.usage.output_tokens")
+    tokens_per_task = None if tokens_in is None or tokens_out is None else tokens_in + tokens_out
+    cost_per_task = totals.get("cost_usd")
 
     outcome = _compute_outcome(status, stages)
     factory_cpm = (
-        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task > 0 else None
+        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task else None
     )
 
     rows, ledger_available = _read_ledger_rows(run_id, ledger_path)
@@ -577,9 +576,18 @@ def cmd_assemble(args) -> None:
         archon_path, exit_code=exit_code, stderr_text=stderr_text
     )
 
-    totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
-    totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
-    totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
+    if archon_cost_capture.get("ok"):
+        # Capture succeeded — nodes may legitimately be empty (a run with no AI
+        # nodes), in which case these totals are a genuine, measured zero.
+        totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
+        totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
+        totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
+    else:
+        # Capture failed — totals are unmeasured, not zero. Keep them null so
+        # `.totals.cost_usd` doesn't read as a genuine zero (df#300).
+        totals_in = None
+        totals_out = None
+        totals_cost = None
 
     from . import adapter
     try:
@@ -625,11 +633,6 @@ def cmd_assemble(args) -> None:
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
 
-    durable_path = _durable_run_record_path(args.run_id)
-    if durable_path is not None:
-        durable_path.parent.mkdir(parents=True, exist_ok=True)
-        durable_path.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
-
     ts = _timestamp()
     for stage in stages:
         record: dict = {
@@ -651,6 +654,14 @@ def cmd_assemble(args) -> None:
             record["detail"] = extra
         _append_jsonl(record)
         _post_seq(record)
+
+    durable_path = _durable_run_record_path(args.run_id)
+    if durable_path is not None:
+        try:
+            durable_path.parent.mkdir(parents=True, exist_ok=True)
+            durable_path.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
+        except OSError as exc:
+            print(f"run-record: failed to write durable record {durable_path}: {exc}", file=sys.stderr)
 
 
 def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, artifacts_root: pathlib.Path) -> dict:
