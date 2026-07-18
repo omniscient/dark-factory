@@ -432,7 +432,30 @@ post_cost_report() {
     "| \(.node_id) | \(.model // "") | \((.["gen_ai.usage.input_tokens"] // 0) | fmt_tokens) | \((.["gen_ai.usage.output_tokens"] // 0) | fmt_tokens) | \((.cost_usd // 0) | fmt_cost) | \((.duration_ms // 0) | fmt_dur) |"
   ' "$RUN_RECORD_FILE" 2>/dev/null || true)
 
-  if [ -z "$RUN_ROWS" ]; then return; fi
+  if [ -z "$RUN_ROWS" ]; then
+    local CAPTURE_OK CAPTURE_RC CAPTURE_STDERR NODES_COUNT
+    # NOTE: jq's `//` alternative operator treats `false` the same as `null` (both are
+    # falsy in jq), so `.ok // "unknown"` would silently turn a genuine `ok: false` into
+    # the string "unknown" — exactly the capture-failure case this diagnostic exists to
+    # surface. Use `if has("ok") then .ok else "unknown" end` so a real `false` survives.
+    CAPTURE_OK=$(jq -r '.archon_cost_capture | if type == "object" and has("ok") then .ok else "unknown" end' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
+    CAPTURE_RC=$(jq -r '.archon_cost_capture.exit_code // "unknown"' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
+    CAPTURE_STDERR=$(jq -r '.archon_cost_capture.stderr_excerpt // ""' "$RUN_RECORD_FILE" 2>/dev/null || echo "")
+    NODES_COUNT=$(jq -r '(.nodes // []) | length' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
+    echo "ERROR: cost report has zero node rows for run ${RUN_ID:-unknown} (issue #${ISSUE_NUM}); nodes=${NODES_COUNT}, archon_cost_capture.ok=${CAPTURE_OK}, archon_cost_exit_code=${CAPTURE_RC}, stderr=${CAPTURE_STDERR}" >&2
+    # Only emit the recurrence-detection health event when capture itself failed;
+    # archon_cost_capture.ok=true with zero nodes is a legitimate zero (e.g. a run
+    # that executed no AI nodes), not a missing-report condition.
+    if [ "$CAPTURE_OK" != "true" ]; then
+      python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record health-event \
+        --run-id "${RUN_ID:-unknown}" \
+        --issue "${ISSUE_NUM}" \
+        --event "factory.cost_report.missing" \
+        --detail "nodes_count=${NODES_COUNT}" "archon_cost_capture_ok=${CAPTURE_OK}" "archon_cost_exit_code=${CAPTURE_RC}" \
+        2>/dev/null || true
+    fi
+    return
+  fi
 
   # Find existing cost report comment by marker
   local COMMENT_ID
@@ -586,9 +609,13 @@ on_failure() {
   # outcome.state == "failed" (score 0.0) is actually reachable — previously only the
   # bare stage event above was written and cmd_assemble never ran on failure.
   if [ -n "${ARTIFACTS_DIR:-}" ]; then
-    local FAIL_COST_JSON
+    local FAIL_COST_JSON FAIL_COST_STDERR FAIL_COST_RC
     FAIL_COST_JSON=$(mktemp)
-    archon workflow cost --last --json --quiet > "$FAIL_COST_JSON" 2>/dev/null || true
+    FAIL_COST_STDERR=$(mktemp)
+    set +e
+    archon workflow cost --last --json --quiet > "$FAIL_COST_JSON" 2>"$FAIL_COST_STDERR"
+    FAIL_COST_RC=$?
+    set -e
     python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
       --run-id "${RUN_ID:-unknown}" \
       --issue "${ISSUE_NUM:-0}" \
@@ -596,9 +623,11 @@ on_failure() {
       --started-at "${RUN_STARTED_AT:-}" \
       --artifacts-dir "$ARTIFACTS_DIR" \
       --archon-cost-json "$FAIL_COST_JSON" \
+      --archon-cost-exit-code "$FAIL_COST_RC" \
+      --archon-cost-stderr-file "$FAIL_COST_STDERR" \
       --status failed \
       --out-file "$ARTIFACTS_DIR/run-record.json" || true
-    rm -f "$FAIL_COST_JSON"
+    rm -f "$FAIL_COST_JSON" "$FAIL_COST_STDERR"
   fi
   if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
     if [ "$INTENT" = "refine" ] || [ "$INTENT" = "plan" ] || [ "$INTENT" = "deconflict" ]; then
@@ -950,7 +979,11 @@ done
 
 # --- Capture archon cost data and assemble run record (non-fatal) ---
 ARCHON_COST_JSON=$(mktemp)
-archon workflow cost --last --json --quiet > "$ARCHON_COST_JSON" 2>/dev/null || true
+ARCHON_COST_STDERR=$(mktemp)
+set +e
+archon workflow cost --last --json --quiet > "$ARCHON_COST_JSON" 2>"$ARCHON_COST_STDERR"
+ARCHON_COST_RC=$?
+set -e
 
 # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
 # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
@@ -961,10 +994,12 @@ python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assembl
   --started-at "${RUN_STARTED_AT:-}" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --archon-cost-json "$ARCHON_COST_JSON" \
+  --archon-cost-exit-code "$ARCHON_COST_RC" \
+  --archon-cost-stderr-file "$ARCHON_COST_STDERR" \
   --out-file "$ARTIFACTS_DIR/run-record.json" \
   --clone-dir "$CLONE_DIR" || true
 
-rm -f "$ARCHON_COST_JSON"
+rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR"
 
 # --- Post cost report to GitHub issue (success path) — non-fatal ---
 post_cost_report || true

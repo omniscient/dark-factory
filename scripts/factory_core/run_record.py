@@ -13,13 +13,15 @@ import json
 import os
 import pathlib
 import re
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
 from . import model_proxy
 
-JSONL_PATH = pathlib.Path("/var/lib/dark-factory/runs.jsonl")
+SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
+JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
 POLICY_VERSION = "1.0"
@@ -43,6 +45,12 @@ def _run_record_path(artifacts_root: pathlib.Path, run_id: str) -> "pathlib.Path
     if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
         return None
     return artifacts_root / run_id / "run-record.json"
+
+
+def _durable_run_record_path(run_id: str) -> "pathlib.Path | None":
+    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+        return None
+    return SCHEDULER_STATE_DIR / "run-records" / f"{run_id}.json"
 
 
 def _timestamp() -> str:
@@ -74,23 +82,23 @@ def _post_seq(record: dict) -> None:
                         "gen_ai.operation.name",
                         f"stage.{record.get('stage', 'unknown')}",
                     ),
-                    "gen_ai.usage.input_tokens": record.get(
-                        "gen_ai.usage.input_tokens", 0
-                    ),
-                    "gen_ai.usage.output_tokens": record.get(
-                        "gen_ai.usage.output_tokens", 0
-                    ),
+                    "gen_ai.usage.input_tokens": record.get("gen_ai.usage.input_tokens"),
+                    "gen_ai.usage.output_tokens": record.get("gen_ai.usage.output_tokens"),
                     "Stage": record.get("stage", ""),
                     "Verdict": record.get("verdict", ""),
                     "IssueNumber": record.get("issue_number", 0),
                     "Intent": record.get("intent", ""),
                     "RunId": record.get("run_id", ""),
-                    "CostUsd": record.get("cost_usd", 0),
-                    "DurationMs": record.get("duration_ms", 0),
+                    "CostUsd": record.get("cost_usd"),
+                    "DurationMs": record.get("duration_ms"),
                 },
             }
         ]
     }
+    _post_seq_raw(payload)
+
+
+def _post_seq_raw(payload: dict) -> None:
     endpoint = f"{SEQ_URL.rstrip('/')}/api/events/raw"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -123,10 +131,10 @@ def cmd_record(args) -> None:
         "verdict": args.verdict,
         "gen_ai.system": "dark-factory",
         "gen_ai.operation.name": f"stage.{args.stage}",
-        "gen_ai.usage.input_tokens": args.tokens_in or 0,
-        "gen_ai.usage.output_tokens": args.tokens_out or 0,
-        "cost_usd": args.cost_usd or 0.0,
-        "duration_ms": args.duration_ms or 0,
+        "gen_ai.usage.input_tokens": args.tokens_in,
+        "gen_ai.usage.output_tokens": args.tokens_out,
+        "cost_usd": args.cost_usd,
+        "duration_ms": args.duration_ms,
         "timestamp": _timestamp(),
     }
     if details:
@@ -134,6 +142,39 @@ def cmd_record(args) -> None:
 
     _append_jsonl(record)
     _post_seq(record)
+
+
+def cmd_health_event(args) -> None:
+    """Lightweight, non-blocking recurrence-detection signal (df#300).
+
+    Distinct from cmd_record's per-stage events: this is a named incident signal
+    (e.g. 'factory.cost_report.missing'), not a stage verdict, so it gets its own
+    MessageTemplate rather than overloading Stage/Verdict fields with an event name.
+    """
+    details: dict = {}
+    for kv in args.detail or []:
+        k, _, v = kv.partition("=")
+        details[k] = v
+
+    payload = {
+        "Events": [
+            {
+                "Timestamp": _timestamp(),
+                "Level": "Warning",
+                "MessageTemplate": "{Event} issue=#{IssueNumber} run={RunId}",
+                "Properties": {
+                    "Event": args.event,
+                    "IssueNumber": args.issue,
+                    "RunId": args.run_id,
+                    **details,
+                },
+            }
+        ]
+    }
+    try:
+        _post_seq_raw(payload)
+    except Exception:
+        pass  # non-fatal: this is best-effort observability, not a gate
 
 
 def _iter_json_documents(text: str):
@@ -164,6 +205,43 @@ def _iter_json_documents(text: str):
         i = end
 
 
+def _find_run_obj(content: str) -> "dict | None":
+    """Scan already-read JSON document text for the first object carrying a run id."""
+    for obj in _iter_json_documents(content):
+        candidates = obj if isinstance(obj, list) else [obj]
+        for cand in candidates:
+            if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
+                return cand
+    return None
+
+
+def _nodes_from_run_obj(run_obj: dict) -> list:
+    """Map a run object's nodes to OTel field names."""
+    nodes = []
+    for n in run_obj.get("nodes") or []:
+        model_usage = n.get("modelUsage") or n.get("model_usage") or {}
+        raw_model = next(iter(model_usage.keys()), "")
+        if raw_model.startswith("claude-"):
+            raw_model = raw_model[len("claude-"):]
+        if "-20" in raw_model:
+            raw_model = raw_model[: raw_model.index("-20")]
+        nodes.append(
+            {
+                "node_id": n.get("nodeId") or n.get("node_id", ""),
+                "model": raw_model,
+                "gen_ai.usage.input_tokens": (
+                    n.get("inputTokens") or n.get("input_tokens") or 0
+                ),
+                "gen_ai.usage.output_tokens": (
+                    n.get("outputTokens") or n.get("output_tokens") or 0
+                ),
+                "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
+                "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
+            }
+        )
+    return nodes
+
+
 def _parse_archon_cost(path: pathlib.Path) -> list:
     """Map archon workflow cost JSON nodes to OTel field names."""
     if path is None or not path.exists():
@@ -172,43 +250,47 @@ def _parse_archon_cost(path: pathlib.Path) -> list:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             return []
-        run_obj = None
-        for obj in _iter_json_documents(content):
-            candidates = obj if isinstance(obj, list) else [obj]
-            for cand in candidates:
-                if isinstance(cand, dict) and (cand.get("run_id") or cand.get("runId")):
-                    run_obj = cand
-                    break
-            if run_obj is not None:
-                break
+        run_obj = _find_run_obj(content)
         if run_obj is None:
             return []
-
-        nodes = []
-        for n in run_obj.get("nodes") or []:
-            model_usage = n.get("modelUsage") or n.get("model_usage") or {}
-            raw_model = next(iter(model_usage.keys()), "")
-            if raw_model.startswith("claude-"):
-                raw_model = raw_model[len("claude-"):]
-            if "-20" in raw_model:
-                raw_model = raw_model[: raw_model.index("-20")]
-            nodes.append(
-                {
-                    "node_id": n.get("nodeId") or n.get("node_id", ""),
-                    "model": raw_model,
-                    "gen_ai.usage.input_tokens": (
-                        n.get("inputTokens") or n.get("input_tokens") or 0
-                    ),
-                    "gen_ai.usage.output_tokens": (
-                        n.get("outputTokens") or n.get("output_tokens") or 0
-                    ),
-                    "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
-                    "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
-                }
-            )
-        return nodes
+        return _nodes_from_run_obj(run_obj)
     except Exception:
         return []
+
+
+def _parse_archon_cost_with_capture(
+    path: "pathlib.Path | None", *, exit_code: int, stderr_text: str
+) -> "tuple[list, dict]":
+    """Like _parse_archon_cost, but distinguishes "archon ran fine, genuinely zero
+    nodes" from "the command errored / its output didn't parse" (df#300).
+
+    ok=False when: nonzero exit code, OR the file is missing/empty/unparseable.
+    ok=True when: exit_code==0 AND a run object was found (nodes may still be []
+    if archon itself reports no nodes — that is a legitimate zero, not a capture
+    failure).
+    """
+    stderr_excerpt = (stderr_text or "").strip()[-2000:]
+    if exit_code != 0:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    if path is None or not path.exists():
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    if not content:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    run_obj = _find_run_obj(content)
+
+    if run_obj is None:
+        return [], {"ok": False, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
+
+    nodes = _nodes_from_run_obj(run_obj)
+    return nodes, {"ok": True, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
 
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
@@ -426,14 +508,14 @@ def _compute_harness_economics(
     *, run_id: str, status: str, stages: list, totals: dict,
     started_at: str, completed_at: str, ledger_path: pathlib.Path,
 ) -> dict:
-    tokens_in = totals.get("gen_ai.usage.input_tokens", 0)
-    tokens_out = totals.get("gen_ai.usage.output_tokens", 0)
-    tokens_per_task = tokens_in + tokens_out
-    cost_per_task = totals.get("cost_usd", 0.0)
+    tokens_in = totals.get("gen_ai.usage.input_tokens")
+    tokens_out = totals.get("gen_ai.usage.output_tokens")
+    tokens_per_task = None if tokens_in is None or tokens_out is None else tokens_in + tokens_out
+    cost_per_task = totals.get("cost_usd")
 
     outcome = _compute_outcome(status, stages)
     factory_cpm = (
-        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task > 0 else None
+        outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task else None
     )
 
     rows, ledger_available = _read_ledger_rows(run_id, ledger_path)
@@ -482,11 +564,30 @@ def cmd_assemble(args) -> None:
                 stages.append(stage)
 
     archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
-    nodes = _parse_archon_cost(archon_path)
+    stderr_text = ""
+    stderr_file = getattr(args, "archon_cost_stderr_file", None)
+    if stderr_file:
+        try:
+            stderr_text = pathlib.Path(stderr_file).read_text(encoding="utf-8")
+        except OSError:
+            stderr_text = ""
+    exit_code = getattr(args, "archon_cost_exit_code", 0) or 0
+    nodes, archon_cost_capture = _parse_archon_cost_with_capture(
+        archon_path, exit_code=exit_code, stderr_text=stderr_text
+    )
 
-    totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
-    totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
-    totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
+    if archon_cost_capture.get("ok"):
+        # Capture succeeded — nodes may legitimately be empty (a run with no AI
+        # nodes), in which case these totals are a genuine, measured zero.
+        totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
+        totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
+        totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
+    else:
+        # Capture failed — totals are unmeasured, not zero. Keep them null so
+        # `.totals.cost_usd` doesn't read as a genuine zero (df#300).
+        totals_in = None
+        totals_out = None
+        totals_cost = None
 
     from . import adapter
     try:
@@ -505,6 +606,7 @@ def cmd_assemble(args) -> None:
         "nodes": nodes,
         "artifacts": artifacts,
         "loops": loops,
+        "archon_cost_capture": archon_cost_capture,
         "totals": {
             "gen_ai.usage.input_tokens": totals_in,
             "gen_ai.usage.output_tokens": totals_out,
@@ -541,10 +643,10 @@ def cmd_assemble(args) -> None:
             "verdict": stage["verdict"],
             "gen_ai.system": "dark-factory",
             "gen_ai.operation.name": f"stage.{stage['stage']}",
-            "gen_ai.usage.input_tokens": 0,
-            "gen_ai.usage.output_tokens": 0,
-            "cost_usd": 0.0,
-            "duration_ms": 0,
+            "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
             "timestamp": ts,
         }
         extra = {k: v for k, v in stage.items() if k not in ("stage", "verdict")}
@@ -552,6 +654,14 @@ def cmd_assemble(args) -> None:
             record["detail"] = extra
         _append_jsonl(record)
         _post_seq(record)
+
+    durable_path = _durable_run_record_path(args.run_id)
+    if durable_path is not None:
+        try:
+            durable_path.parent.mkdir(parents=True, exist_ok=True)
+            durable_path.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
+        except OSError as exc:
+            print(f"run-record: failed to write durable record {durable_path}: {exc}", file=sys.stderr)
 
 
 def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, artifacts_root: pathlib.Path) -> dict:
@@ -669,11 +779,17 @@ def main() -> None:
     r.add_argument("--intent", required=True)
     r.add_argument("--stage", required=True)
     r.add_argument("--verdict", required=True)
-    r.add_argument("--tokens-in", type=int, default=0)
-    r.add_argument("--tokens-out", type=int, default=0)
-    r.add_argument("--cost-usd", type=float, default=0.0)
-    r.add_argument("--duration-ms", type=int, default=0)
+    r.add_argument("--tokens-in", type=int, default=None)
+    r.add_argument("--tokens-out", type=int, default=None)
+    r.add_argument("--cost-usd", type=float, default=None)
+    r.add_argument("--duration-ms", type=int, default=None)
     r.add_argument("--detail", nargs="*", metavar="KEY=VAL")
+
+    he = sub.add_parser("health-event", help="Emit a non-blocking recurrence-detection signal")
+    he.add_argument("--run-id", required=True)
+    he.add_argument("--issue", type=int, required=True)
+    he.add_argument("--event", required=True)
+    he.add_argument("--detail", nargs="*", metavar="KEY=VAL")
 
     a = sub.add_parser("assemble", help="Assemble end-of-run record from artifacts")
     a.add_argument("--run-id", required=True)
@@ -682,6 +798,8 @@ def main() -> None:
     a.add_argument("--started-at", default="")
     a.add_argument("--artifacts-dir", required=True)
     a.add_argument("--archon-cost-json")
+    a.add_argument("--archon-cost-exit-code", type=int, default=0)
+    a.add_argument("--archon-cost-stderr-file")
     a.add_argument("--out-file", required=True)
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)
@@ -700,6 +818,8 @@ def main() -> None:
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         cmd_record(parsed)
+    elif parsed.cmd == "health-event":
+        cmd_health_event(parsed)
     elif parsed.cmd == "assemble":
         cmd_assemble(parsed)
     elif parsed.cmd == "issue-economics":

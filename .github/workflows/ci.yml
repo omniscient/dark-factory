@@ -19,6 +19,10 @@ jobs:
       - run: bash tests/test_model_proxy_compose.sh
       - run: bash tests/test_model_proxy_smoke.sh
       - run: bash tests/test_entrypoint_current_run.sh
+      - run: bash tests/test_cost_report_endpoint.sh
+      - run: bash tests/test_cost_report_harness_economics.sh
+      - run: bash tests/test_run_record_hermetic.sh
+      - run: bash tests/test_entrypoint_cost_report_regression.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:

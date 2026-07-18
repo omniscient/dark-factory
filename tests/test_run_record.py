@@ -9,6 +9,35 @@ from factory_core import run_record as rr
 
 
 # ---------------------------------------------------------------------------
+# JSONL_PATH / SCHEDULER_STATE_DIR hermeticity (df#300)
+# ---------------------------------------------------------------------------
+
+def test_jsonl_path_derives_from_scheduler_state_dir(monkeypatch):
+    import importlib
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", "/tmp/fake-state-dir-xyz")
+    reloaded = importlib.reload(rr)
+    try:
+        assert str(reloaded.JSONL_PATH) == "/tmp/fake-state-dir-xyz/runs.jsonl"
+        assert str(reloaded.SCHEDULER_STATE_DIR) == "/tmp/fake-state-dir-xyz"
+    finally:
+        monkeypatch.delenv("SCHEDULER_STATE_DIR", raising=False)
+        importlib.reload(rr)  # restore module-level state for subsequent tests
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_scheduler_state_dir(tmp_path, monkeypatch):
+    """Never let a test write to the real /var/lib/dark-factory (df#300).
+
+    SCHEDULER_STATE_DIR defaults to that real, writable-by-factory-user path;
+    without this, any test exercising cmd_assemble's durable per-run-id write
+    would pollute production state the same way the pre-#300 bash tests did.
+    Individual tests may still override rr.SCHEDULER_STATE_DIR explicitly to
+    assert on the durable-write path itself.
+    """
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
+
+
+# ---------------------------------------------------------------------------
 # record command
 # ---------------------------------------------------------------------------
 
@@ -84,6 +113,54 @@ def test_record_detail_float(tmp_path, monkeypatch):
     assert rec["detail"]["count"] == 5
 
 
+def test_record_defaults_to_null_not_zero(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    class _Args:
+        run_id = "abc"
+        issue = 1
+        intent = "fix"
+        stage = "implement"
+        verdict = "PASS"
+        tokens_in = None
+        tokens_out = None
+        cost_usd = None
+        duration_ms = None
+        detail = None
+
+    rr.cmd_record(_Args())
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["gen_ai.usage.input_tokens"] is None
+    assert rec["gen_ai.usage.output_tokens"] is None
+    assert rec["cost_usd"] is None
+    assert rec["duration_ms"] is None
+
+
+def test_record_explicit_zero_stays_zero_not_null(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    class _Args:
+        run_id = "abc"
+        issue = 1
+        intent = "fix"
+        stage = "implement"
+        verdict = "PASS"
+        tokens_in = 0
+        tokens_out = 0
+        cost_usd = 0.0
+        duration_ms = 0
+        detail = None
+
+    rr.cmd_record(_Args())
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["gen_ai.usage.input_tokens"] == 0
+    assert rec["gen_ai.usage.output_tokens"] == 0
+
+
 def test_post_seq_is_nonfatal(tmp_path, monkeypatch):
     jsonl = tmp_path / "runs.jsonl"
     monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
@@ -133,6 +210,53 @@ def test_parse_archon_cost_empty_file(tmp_path):
     f = tmp_path / "cost.json"
     f.write_text("")
     assert rr._parse_archon_cost(f) == []
+
+
+# ---------------------------------------------------------------------------
+# _parse_archon_cost_with_capture (df#300)
+# ---------------------------------------------------------------------------
+
+def test_parse_archon_cost_capture_ok_when_nodes_present(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "xyz",
+        "nodes": [{"nodeId": "implement", "inputTokens": 1, "outputTokens": 1,
+                   "costUsd": 0.01, "durationMs": 100, "modelUsage": {}}],
+    }))
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert len(nodes) == 1
+    assert capture == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_parse_archon_cost_capture_not_ok_on_nonzero_exit(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text("")
+    nodes, capture = rr._parse_archon_cost_with_capture(
+        cost_json, exit_code=127, stderr_text="archon: command not found\n"
+    )
+    assert nodes == []
+    assert capture["ok"] is False
+    assert capture["exit_code"] == 127
+    assert "command not found" in capture["stderr_excerpt"]
+
+
+def test_parse_archon_cost_capture_ok_valid_json_zero_nodes(tmp_path):
+    # Archon ran fine and genuinely reports zero nodes (e.g. an ungated refine/plan
+    # run) — this must NOT be flagged as a capture failure.
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({"runId": "xyz", "nodes": []}))
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert nodes == []
+    assert capture == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_parse_archon_cost_capture_not_ok_on_unparseable_output(tmp_path):
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text("not json at all {{{")
+    nodes, capture = rr._parse_archon_cost_with_capture(cost_json, exit_code=0, stderr_text="")
+    assert nodes == []
+    assert capture["ok"] is False
+    assert capture["exit_code"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +592,86 @@ def test_assemble_incorporates_archon_cost(tmp_path, monkeypatch):
     assert rec["totals"]["cost_usd"] == pytest.approx(0.01)
 
 
+def test_assemble_records_archon_cost_capture_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 1, "outputTokens": 1,
+                   "costUsd": 0.01, "durationMs": 1, "modelUsage": {}}],
+    }))
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    args.archon_cost_exit_code = 0
+    args.archon_cost_stderr_file = None
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["archon_cost_capture"] == {"ok": True, "exit_code": 0, "stderr_excerpt": ""}
+
+
+def test_assemble_records_archon_cost_capture_failure_when_nodes_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    stderr_file = tmp_path / "archon-cost.stderr"
+    stderr_file.write_text("archon: unknown command 'workflow cost'\n")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(tmp_path / "does-not-exist.json")
+    args.archon_cost_exit_code = 127
+    args.archon_cost_stderr_file = str(stderr_file)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["archon_cost_capture"]["ok"] is False
+    assert rec["archon_cost_capture"]["exit_code"] == 127
+    assert "unknown command" in rec["archon_cost_capture"]["stderr_excerpt"]
+
+
+def test_assemble_writes_durable_per_run_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", state_dir)
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    durable_path = state_dir / "run-records" / "abc123.json"
+    assert durable_path.exists()
+    durable_rec = json.loads(durable_path.read_text())
+    ephemeral_rec = json.loads(out.read_text())
+    assert durable_rec == ephemeral_rec
+
+
+def test_assemble_durable_write_upserts_same_run_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", state_dir)
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)  # first write (e.g. on_failure path)
+    args.status = "completed"
+    rr.cmd_assemble(args)  # second write for the same run_id (success path overwrite)
+
+    durable_path = state_dir / "run-records" / "abc123.json"
+    durable_rec = json.loads(durable_path.read_text())
+    assert durable_rec["status"] == "completed"
+
+
 def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     jsonl = tmp_path / "runs.jsonl"
     monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
@@ -486,6 +690,25 @@ def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     stages = [json.loads(l)["stage"] for l in lines]
     assert "validation" in stages
     assert "conformance" in stages
+
+
+def test_assemble_stage_stub_rows_use_null_not_zero(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "validation.md").write_text("STATUS: PASS\n")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    line = json.loads(jsonl.read_text().strip().splitlines()[0])
+    assert line["gen_ai.usage.input_tokens"] is None
+    assert line["gen_ai.usage.output_tokens"] is None
+    assert line["cost_usd"] is None
+    assert line["duration_ms"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -900,3 +1123,37 @@ def test_assemble_default_clone_dir_when_unset(tmp_path, monkeypatch):
 
     rec = json.loads(out.read_text())
     assert "loops" in rec
+
+
+# ---------------------------------------------------------------------------
+# health-event (factory.cost_report.missing and similar recurrence signals)
+# ---------------------------------------------------------------------------
+
+class _HealthEventArgs:
+    run_id = "abc123"
+    issue = 300
+    event = "factory.cost_report.missing"
+    detail = ["nodes_count=0", "archon_cost_capture_ok=False"]
+
+
+def test_health_event_posts_to_seq(monkeypatch):
+    posted = {}
+    monkeypatch.setattr(rr, "_post_seq_raw", lambda payload: posted.update(payload))
+
+    rr.cmd_health_event(_HealthEventArgs())
+
+    assert posted["Events"][0]["MessageTemplate"] == "{Event} issue=#{IssueNumber} run={RunId}"
+    props = posted["Events"][0]["Properties"]
+    assert props["Event"] == "factory.cost_report.missing"
+    assert props["IssueNumber"] == 300
+    assert props["RunId"] == "abc123"
+    assert props["nodes_count"] == "0"
+    assert props["archon_cost_capture_ok"] == "False"
+
+
+def test_health_event_nonfatal_on_seq_failure(monkeypatch):
+    def _raise(payload):
+        raise Exception("unreachable")
+    monkeypatch.setattr(rr, "_post_seq_raw", _raise)
+
+    rr.cmd_health_event(_HealthEventArgs())  # must not raise
