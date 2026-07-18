@@ -91,6 +91,10 @@ def _post_seq(record: dict) -> None:
             }
         ]
     }
+    _post_seq_raw(payload)
+
+
+def _post_seq_raw(payload: dict) -> None:
     endpoint = f"{SEQ_URL.rstrip('/')}/api/events/raw"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -134,6 +138,39 @@ def cmd_record(args) -> None:
 
     _append_jsonl(record)
     _post_seq(record)
+
+
+def cmd_health_event(args) -> None:
+    """Lightweight, non-blocking recurrence-detection signal (df#300).
+
+    Distinct from cmd_record's per-stage events: this is a named incident signal
+    (e.g. 'factory.cost_report.missing'), not a stage verdict, so it gets its own
+    MessageTemplate rather than overloading Stage/Verdict fields with an event name.
+    """
+    details: dict = {}
+    for kv in args.detail or []:
+        k, _, v = kv.partition("=")
+        details[k] = v
+
+    payload = {
+        "Events": [
+            {
+                "Timestamp": _timestamp(),
+                "Level": "Warning",
+                "MessageTemplate": "{Event} issue=#{IssueNumber} run={RunId}",
+                "Properties": {
+                    "Event": args.event,
+                    "IssueNumber": args.issue,
+                    "RunId": args.run_id,
+                    **details,
+                },
+            }
+        ]
+    }
+    try:
+        _post_seq_raw(payload)
+    except Exception:
+        pass  # non-fatal: this is best-effort observability, not a gate
 
 
 def _iter_json_documents(text: str):
@@ -729,6 +766,12 @@ def main() -> None:
     r.add_argument("--duration-ms", type=int, default=0)
     r.add_argument("--detail", nargs="*", metavar="KEY=VAL")
 
+    he = sub.add_parser("health-event", help="Emit a non-blocking recurrence-detection signal")
+    he.add_argument("--run-id", required=True)
+    he.add_argument("--issue", type=int, required=True)
+    he.add_argument("--event", required=True)
+    he.add_argument("--detail", nargs="*", metavar="KEY=VAL")
+
     a = sub.add_parser("assemble", help="Assemble end-of-run record from artifacts")
     a.add_argument("--run-id", required=True)
     a.add_argument("--issue", type=int, required=True)
@@ -756,6 +799,8 @@ def main() -> None:
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         cmd_record(parsed)
+    elif parsed.cmd == "health-event":
+        cmd_health_event(parsed)
     elif parsed.cmd == "assemble":
         cmd_assemble(parsed)
     elif parsed.cmd == "issue-economics":

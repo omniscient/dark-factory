@@ -991,3 +991,37 @@ def test_assemble_default_clone_dir_when_unset(tmp_path, monkeypatch):
 
     rec = json.loads(out.read_text())
     assert "loops" in rec
+
+
+# ---------------------------------------------------------------------------
+# health-event (factory.cost_report.missing and similar recurrence signals)
+# ---------------------------------------------------------------------------
+
+class _HealthEventArgs:
+    run_id = "abc123"
+    issue = 300
+    event = "factory.cost_report.missing"
+    detail = ["nodes_count=0", "archon_cost_capture_ok=False"]
+
+
+def test_health_event_posts_to_seq(monkeypatch):
+    posted = {}
+    monkeypatch.setattr(rr, "_post_seq_raw", lambda payload: posted.update(payload))
+
+    rr.cmd_health_event(_HealthEventArgs())
+
+    assert posted["Events"][0]["MessageTemplate"] == "{Event} issue=#{IssueNumber} run={RunId}"
+    props = posted["Events"][0]["Properties"]
+    assert props["Event"] == "factory.cost_report.missing"
+    assert props["IssueNumber"] == 300
+    assert props["RunId"] == "abc123"
+    assert props["nodes_count"] == "0"
+    assert props["archon_cost_capture_ok"] == "False"
+
+
+def test_health_event_nonfatal_on_seq_failure(monkeypatch):
+    def _raise(payload):
+        raise Exception("unreachable")
+    monkeypatch.setattr(rr, "_post_seq_raw", _raise)
+
+    rr.cmd_health_event(_HealthEventArgs())  # must not raise

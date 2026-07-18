@@ -432,7 +432,25 @@ post_cost_report() {
     "| \(.node_id) | \(.model // "") | \((.["gen_ai.usage.input_tokens"] // 0) | fmt_tokens) | \((.["gen_ai.usage.output_tokens"] // 0) | fmt_tokens) | \((.cost_usd // 0) | fmt_cost) | \((.duration_ms // 0) | fmt_dur) |"
   ' "$RUN_RECORD_FILE" 2>/dev/null || true)
 
-  if [ -z "$RUN_ROWS" ]; then return; fi
+  if [ -z "$RUN_ROWS" ]; then
+    local CAPTURE_OK CAPTURE_RC CAPTURE_STDERR NODES_COUNT
+    # NOTE: jq's `//` alternative operator treats `false` the same as `null` (both are
+    # falsy in jq), so `.ok // "unknown"` would silently turn a genuine `ok: false` into
+    # the string "unknown" — exactly the capture-failure case this diagnostic exists to
+    # surface. Use `if has("ok") then .ok else "unknown" end` so a real `false` survives.
+    CAPTURE_OK=$(jq -r '.archon_cost_capture | if type == "object" and has("ok") then .ok else "unknown" end' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
+    CAPTURE_RC=$(jq -r '.archon_cost_capture.exit_code // "unknown"' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
+    CAPTURE_STDERR=$(jq -r '.archon_cost_capture.stderr_excerpt // ""' "$RUN_RECORD_FILE" 2>/dev/null || echo "")
+    NODES_COUNT=$(jq -r '(.nodes // []) | length' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
+    echo "ERROR: cost report has zero node rows for run ${RUN_ID:-unknown} (issue #${ISSUE_NUM}); nodes=${NODES_COUNT}, archon_cost_capture.ok=${CAPTURE_OK}, archon_cost_exit_code=${CAPTURE_RC}, stderr=${CAPTURE_STDERR}" >&2
+    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record health-event \
+      --run-id "${RUN_ID:-unknown}" \
+      --issue "${ISSUE_NUM}" \
+      --event "factory.cost_report.missing" \
+      --detail "nodes_count=${NODES_COUNT}" "archon_cost_capture_ok=${CAPTURE_OK}" "archon_cost_exit_code=${CAPTURE_RC}" \
+      2>/dev/null || true
+    return
+  fi
 
   # Find existing cost report comment by marker
   local COMMENT_ID
