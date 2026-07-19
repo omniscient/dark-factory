@@ -111,6 +111,46 @@ assert_true "factory-failures.jsonl alone still classifies as delivery_failure" 
   "grep -q 'environmental:delivery_failure' '$SIG_FILE'"
 
 rm -f "$TMP_OUT"
+
+echo ""
+echo "--- F: on_failure()'s own wiring must thread real captured text (#303 regression) ---"
+# Sections B-E call _write_error_signature() directly with an explicit text_file arg —
+# they never exercise on_failure()'s own (buggy) call sites, which hardcoded "" instead of
+# threading the real $TMP_OUT the main retry loop already captures. Drive the literal
+# observed session-limit string through on_failure() itself to prove the wiring, not just
+# the classifier underneath it.
+rm -rf "$SCHEDULER_STATE_DIR"; SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-es-statedir5-XXXXXX)
+export SCHEDULER_STATE_DIR
+unset ARTIFACTS_DIR
+TMP_OUT=$(mktemp)
+echo "Claude session limit reached — resets 9:20pm (UTC)" > "$TMP_OUT"
+# Elapsed must clear delivery_failure_max_seconds (default 30s) so classify()'s
+# delivery_failure conjunction is false and the rate_limit regex actually gets checked.
+RUN_STARTED_AT=$(date -u -d '-5 minutes' +"%Y-%m-%dT%H:%M:%SZ")
+ISSUE_NUM=33
+INTENT=fix
+RUN_ID=test-run-f1
+
+# post_or_update_comment()/set_board_status()/run_post_mortem() shell out to the real
+# /opt/dark-factory providers/cli.py, bypassing the gh() stub above (it calls urllib
+# directly, not the gh binary) — stub python3 itself so on_failure() stays hermetic, but
+# pass through to the real interpreter for factory_core/cli.py (the code under test).
+python3() {
+  case "$*" in
+    *"providers/cli.py"*) echo '{}'; return 0 ;;
+    *) command python3 "$@" ;;
+  esac
+}
+export -f python3
+
+false
+on_failure
+SIG_FILE="${SCHEDULER_STATE_DIR}/error-signatures/33.implement.sig"
+assert_true "on_failure() threads real TMP_OUT text -> environmental:rate_limit" \
+  "grep -q 'environmental:rate_limit' '$SIG_FILE'"
+
+unset -f python3
+rm -f "$TMP_OUT"
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR"
 
 echo ""
