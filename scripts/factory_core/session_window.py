@@ -19,6 +19,9 @@ _STRUCTURED_MARKER = "claude.rate_limit_event"
 _HUMAN_RESET_RE = re.compile(
     r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
 )
+# Physical invariant: a Claude Max session window is fixed at 5h, so no true resume can
+# ever be more than 5h out. Hardcoded, not a config.yaml key -- see #305.
+MAX_SESSION_WINDOW_HOURS = 5
 
 
 def is_session_window_failure(text: str) -> bool:
@@ -67,7 +70,10 @@ def parse_fallback_reset_epoch(text: str, now_epoch: int) -> Optional[int]:
         return None
     now_dt = datetime.fromtimestamp(now_epoch, tz)
     candidate = datetime.combine(now_dt.date(), parsed_time, tzinfo=tz)
-    if candidate.timestamp() < now_epoch:
+    if (
+        candidate.timestamp() < now_epoch
+        and candidate.timestamp() + 86400 <= now_epoch + MAX_SESSION_WINDOW_HOURS * 3600
+    ):
         candidate += timedelta(days=1)
     return int(candidate.timestamp())
 
@@ -77,13 +83,14 @@ def compute_resume_epoch(
 ) -> Optional[int]:
     if not is_session_window_failure(text):
         return None
+    ceiling = now_epoch + MAX_SESSION_WINDOW_HOURS * 3600 + buffer_minutes * 60
     structured = parse_structured_reset_epoch(text)
     if structured is not None:
-        return structured + buffer_minutes * 60
+        return min(structured + buffer_minutes * 60, ceiling)
     fallback = parse_fallback_reset_epoch(text, now_epoch)
     if fallback is not None:
-        return fallback + buffer_minutes * 60
-    return now_epoch + fallback_minutes * 60
+        return min(fallback + buffer_minutes * 60, ceiling)
+    return min(now_epoch + fallback_minutes * 60, ceiling)
 
 
 def write_pause_sentinel(resume_epoch: int, state_dir: Path) -> None:

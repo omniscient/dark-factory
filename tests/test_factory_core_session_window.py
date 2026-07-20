@@ -1,5 +1,5 @@
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -66,10 +66,30 @@ def test_parse_fallback_reset_epoch_parses_human_readable_reset():
     assert parse_fallback_reset_epoch(text, now) == expected
 
 
-def test_parse_fallback_reset_epoch_rolls_over_to_next_day():
+def test_parse_fallback_reset_epoch_stays_today_when_time_already_passed():
     now = int(datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc).timestamp())
     text = "resets 11:10pm (UTC)"
-    expected = int(datetime(2026, 7, 14, 23, 10, tzinfo=timezone.utc).timestamp())
+    expected = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp())
+    assert parse_fallback_reset_epoch(text, now) == expected
+
+
+def test_parse_fallback_reset_epoch_matches_305_incident_repro():
+    # Issue #305 repro: death at 22:49Z, reset text names 21:20Z (already passed today).
+    # Must resolve to today, not roll to tomorrow (the ~22h false-pause bug).
+    now = int(datetime(2026, 7, 18, 22, 49, tzinfo=timezone.utc).timestamp())
+    text = "...resets 9:20pm (UTC)"
+    result = parse_fallback_reset_epoch(text, now)
+    assert result is not None
+    assert result <= now
+
+
+def test_parse_fallback_reset_epoch_rolls_forward_when_still_within_window():
+    # Failure at 23:40Z, named reset "12:10am (UTC)" is just after midnight -- rolling
+    # to tomorrow keeps the resume within the 5h session window, so it must roll
+    # forward (unlike the #305 incident case, which stays today/past).
+    now = int(datetime(2026, 7, 18, 23, 40, tzinfo=timezone.utc).timestamp())
+    text = "resets 12:10am (UTC)"
+    expected = int(datetime(2026, 7, 19, 0, 10, tzinfo=timezone.utc).timestamp())
     assert parse_fallback_reset_epoch(text, now) == expected
 
 
@@ -104,6 +124,26 @@ def test_compute_resume_epoch_uses_fallback_minutes_when_unparseable():
 
 def test_compute_resume_epoch_none_when_no_match():
     assert compute_resume_epoch("unrelated error", 0, 5, 30) is None
+
+
+def test_compute_resume_epoch_clamps_structured_far_future_to_max_window():
+    # A malformed/far-out structured resetsAt (here +48h) is exactly as physically
+    # impossible as the fallback rollover bug and must be bounded the same way.
+    now = int(datetime(2026, 7, 18, 22, 49, tzinfo=timezone.utc).timestamp())
+    far_future = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(hours=48)
+    resets_at = far_future.isoformat().replace("+00:00", "Z")
+    text = f'{{"event":"claude.rate_limit_event","resetsAt":"{resets_at}"}}'
+    result = compute_resume_epoch(text, now, buffer_minutes=5, fallback_minutes=30)
+    ceiling = now + 5 * 3600 + 5 * 60
+    assert result <= ceiling
+
+
+def test_compute_resume_epoch_clamps_305_incident_to_max_window():
+    now = int(datetime(2026, 7, 18, 22, 49, tzinfo=timezone.utc).timestamp())
+    text = "You've hit your session limit · resets 9:20pm (UTC)"
+    result = compute_resume_epoch(text, now, buffer_minutes=5, fallback_minutes=30)
+    assert result is not None
+    assert result <= now + 5 * 3600 + 5 * 60
 
 
 def test_write_pause_sentinel_atomic(tmp_path):
