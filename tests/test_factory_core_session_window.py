@@ -66,11 +66,21 @@ def test_parse_fallback_reset_epoch_parses_human_readable_reset():
     assert parse_fallback_reset_epoch(text, now) == expected
 
 
-def test_parse_fallback_reset_epoch_rolls_over_to_next_day():
+def test_parse_fallback_reset_epoch_stays_today_when_time_already_passed():
     now = int(datetime(2026, 7, 13, 23, 30, tzinfo=timezone.utc).timestamp())
     text = "resets 11:10pm (UTC)"
-    expected = int(datetime(2026, 7, 14, 23, 10, tzinfo=timezone.utc).timestamp())
+    expected = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp())
     assert parse_fallback_reset_epoch(text, now) == expected
+
+
+def test_parse_fallback_reset_epoch_matches_305_incident_repro():
+    # Issue #305 repro: death at 22:49Z, reset text names 21:20Z (already passed today).
+    # Must resolve to today, not roll to tomorrow (the ~22h false-pause bug).
+    now = int(datetime(2026, 7, 18, 22, 49, tzinfo=timezone.utc).timestamp())
+    text = "...resets 9:20pm (UTC)"
+    result = parse_fallback_reset_epoch(text, now)
+    assert result is not None
+    assert result <= now
 
 
 def test_parse_fallback_reset_epoch_none_when_unparseable():
