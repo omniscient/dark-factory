@@ -635,7 +635,7 @@ on_failure() {
       # Blocked transition after N attempts. Setting Blocked from on_failure would put
       # the issue in Blocked before the scheduler's counter accumulates; Priority 3
       # would then retry it as "Fix" (implement) — wrong intent for a pipeline phase.
-      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" ""
+      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "${TMP_OUT:-}"
       echo "Refinement pipeline failed (exit $EXIT_CODE) for issue #$ISSUE_NUM"
       post_or_update_comment "$REFINE_FAILURE_MARKER" \
         "${REFINE_FAILURE_MARKER}
@@ -651,9 +651,9 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 ---
 *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
     else
-      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" ""
+      _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "${TMP_OUT:-}"
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
-      run_post_mortem "$EXIT_CODE" "" || true
+      run_post_mortem "$EXIT_CODE" "${TMP_OUT:-}" || true
       set_board_status "blocked" 2>/dev/null || true
       post_or_update_comment "$FACTORY_FAILURE_MARKER" \
         "${FACTORY_FAILURE_MARKER}

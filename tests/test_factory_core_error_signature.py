@@ -113,6 +113,26 @@ def test_cli_error_signature_write_end_to_end(tmp_path):
     assert json.loads(sig_file.read_text())["signature"] == "substantive:test_failure:1"
 
 
+def test_rate_limit_session_limit_string(tmp_path):
+    # Literal string observed in the #303 failure (Fix #195's first live engagement):
+    # entrypoint.sh's on_failure() passed an empty text_file, so this never reached the
+    # RATE_LIMIT_RE classifier and fell through to substantive:unknown.
+    text_file = tmp_path / "out.txt"
+    text_file.write_text("Claude session limit reached — resets 9:20pm (UTC)")
+    result = subprocess.run(
+        [_sys.executable, CLI, "error-signature-write",
+         "--issue", "33", "--phase", "implement", "--exit-code", "1",
+         "--text-file", str(text_file),
+         "--elapsed-seconds", "300", "--commits-since-start", "0",
+         "--state-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "signature=environmental:rate_limit" in result.stdout
+    sig_file = tmp_path / "error-signatures" / "33.implement.sig"
+    assert json.loads(sig_file.read_text())["signature"] == "environmental:rate_limit"
+
+
 def test_cli_error_signature_write_missing_text_file_is_empty_text(tmp_path):
     result = subprocess.run(
         [_sys.executable, CLI, "error-signature-write",
