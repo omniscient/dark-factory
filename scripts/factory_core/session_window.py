@@ -4,7 +4,7 @@ scheduler.sh gates dispatch on.
 """
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -70,6 +70,11 @@ def parse_fallback_reset_epoch(text: str, now_epoch: int) -> Optional[int]:
         return None
     now_dt = datetime.fromtimestamp(now_epoch, tz)
     candidate = datetime.combine(now_dt.date(), parsed_time, tzinfo=tz)
+    if (
+        candidate.timestamp() < now_epoch
+        and candidate.timestamp() + 86400 <= now_epoch + MAX_SESSION_WINDOW_HOURS * 3600
+    ):
+        candidate += timedelta(days=1)
     return int(candidate.timestamp())
 
 

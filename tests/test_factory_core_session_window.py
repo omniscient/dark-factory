@@ -83,6 +83,16 @@ def test_parse_fallback_reset_epoch_matches_305_incident_repro():
     assert result <= now
 
 
+def test_parse_fallback_reset_epoch_rolls_forward_when_still_within_window():
+    # Failure at 23:40Z, named reset "12:10am (UTC)" is just after midnight -- rolling
+    # to tomorrow keeps the resume within the 5h session window, so it must roll
+    # forward (unlike the #305 incident case, which stays today/past).
+    now = int(datetime(2026, 7, 18, 23, 40, tzinfo=timezone.utc).timestamp())
+    text = "resets 12:10am (UTC)"
+    expected = int(datetime(2026, 7, 19, 0, 10, tzinfo=timezone.utc).timestamp())
+    assert parse_fallback_reset_epoch(text, now) == expected
+
+
 def test_parse_fallback_reset_epoch_none_when_unparseable():
     assert parse_fallback_reset_epoch("session limit hit, try later", 0) is None
 
