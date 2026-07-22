@@ -6,6 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
 export GH_TOKEN="stub-token"
@@ -42,7 +43,11 @@ set +o pipefail
 > "$GIT_LOG"
 
 # ── Test fixture ──────────────────────────────────────────────────────────
-CLONE_DIR=$(mktemp -d /tmp/521-clone-XXXXXX)
+# CLONE_DIR/dark-factory resolves to REPO_ROOT — matches the established idiom
+# in test_entrypoint_cost_report_regression.sh / test_entrypoint_session_window.sh.
+# Needed post-#182: run_post_mortem's Python delegation now resolves cli.py
+# under $CLONE_DIR/dark-factory/, which an isolated mktemp dir cannot satisfy.
+CLONE_DIR="$(dirname "$REPO_ROOT")"
 
 # Set ARTIFACTS_DIR to a temp directory (simulates the global per-run dir)
 ARTIFACTS_DIR=$(mktemp -d /tmp/521-artifacts-XXXXXX)
@@ -98,7 +103,12 @@ assert_eq "issue field matches ISSUE_NUM" "521" "$ISSUE_FIELD"
 
 # ── Cleanup ───────────────────────────────────────────────────────────────
 rm -f "$GIT_LOG"
-rm -rf "$CLONE_DIR" "$ARTIFACTS_DIR"
+# CLONE_DIR is now the repo checkout's PARENT directory (see above) — it must
+# NOT be rm -rf'd here (that used to be safe when it was a throwaway mktemp
+# dir, but would now delete the checkout's parent). Matches
+# test_entrypoint_cost_report_regression.sh:118, which never includes
+# CLONE_DIR in its cleanup for the identical reason.
+rm -rf "$ARTIFACTS_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"

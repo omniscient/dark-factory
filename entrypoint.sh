@@ -179,53 +179,21 @@ run_post_mortem() {
   local exit_code="${1:-1}"
   local transcript_file="${2:-}"
 
-  # Only run post-mortem for implement/continue failures, not pipeline phases
   case "${INTENT:-fix}" in
     refine|plan|deconflict) return 0 ;;
   esac
 
   [ -z "${ISSUE_NUM:-}" ] && return 0
 
-  # Gather evidence: transcript tail + artifacts
-  local transcript_tail=""
-  if [ -n "$transcript_file" ] && [ -f "$transcript_file" ]; then
-    transcript_tail=$(tail -200 "$transcript_file" 2>/dev/null || true)
-  fi
-
-  local artifacts_context=""
   local ARTIFACTS_BASE_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs"
-  # Find the most recent run artifacts directory for this issue
-  local run_dir
-  run_dir=$(ls -dt "${ARTIFACTS_BASE_DIR}"/*/issue.json 2>/dev/null \
-    | xargs grep -l "\"resolved_number\": ${ISSUE_NUM}" 2>/dev/null \
-    | head -1 | xargs dirname 2>/dev/null || true)
-
-  if [ -n "$run_dir" ]; then
-    for f in implementation.md conformance.md review.md plan.md; do
-      if [ -f "${run_dir}/${f}" ]; then
-        artifacts_context="${artifacts_context}
-
-=== ${f} ===
-$(head -100 "${run_dir}/${f}" 2>/dev/null || true)"
-      fi
-    done
-  fi
 
   local prompt
-  prompt="You are analyzing a failed dark factory run for issue #${ISSUE_NUM}.
-Exit code: ${exit_code}
-Intent: ${INTENT:-fix}
-
-Write a concise post-mortem paragraph (3-5 sentences) explaining:
-1. What phase or step likely failed (based on the transcript tail)
-2. The probable root cause
-3. What the next run should do differently
-
-Keep it factual and actionable. No markdown headers, just a plain paragraph.
-
-=== Transcript tail (last 200 lines) ===
-${transcript_tail:-<no transcript available>}
-${artifacts_context}"
+  prompt=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" post-mortem-gather \
+    --artifacts-base "$ARTIFACTS_BASE_DIR" \
+    --issue "$ISSUE_NUM" \
+    --transcript-file "$transcript_file" \
+    --exit-code "$exit_code" \
+    --intent "${INTENT:-fix}")
 
   local post_mortem_text
   post_mortem_text=$(echo "$prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
@@ -234,38 +202,29 @@ ${artifacts_context}"
     post_mortem_text="Post-mortem generation failed — no output from haiku agent. Exit code was ${exit_code}. Check the factory logs for details."
   fi
 
-  # Post idempotent marker comment
-  local PROMOTED_AT
+  local PROMOTED_AT TEXTFILE
   PROMOTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  post_or_update_comment "$DF_POST_MORTEM_MARKER" \
-    "${DF_POST_MORTEM_MARKER}
-## Dark Factory — Post-Mortem
+  TEXTFILE=$(mktemp /tmp/postmortem-text-XXXXXX)
+  echo "$post_mortem_text" > "$TEXTFILE"
 
-${post_mortem_text}
+  local title_json title
+  title_json=$(python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
+    tracker get --id "${ISSUE_NUM}" --fields title 2>/dev/null || echo '{}')
+  title=$(echo "$title_json" | jq -r '.title // ""')
 
-**Exit code:** ${exit_code} | **Phase:** ${INTENT:-fix} | **Timestamp:** ${PROMOTED_AT}
+  local comment_body
+  comment_body=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" post-mortem-format \
+    --exit-code "$exit_code" \
+    --intent "${INTENT:-fix}" \
+    --promoted-at "$PROMOTED_AT" \
+    --text-file "$TEXTFILE" \
+    --issue "$ISSUE_NUM" \
+    --title "$title" \
+    --artifacts-dir "${ARTIFACTS_DIR:-/tmp}" \
+    --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}")
+  rm -f "$TEXTFILE"
 
----
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" || true
-
-  # Write failure telemetry to per-run ARTIFACTS_DIR (no git operations).
-  if [ -n "${ARTIFACTS_DIR:-}" ]; then
-    local JSONL_PATH="${ARTIFACTS_DIR}/factory-failures.jsonl"
-    local excerpt
-    excerpt=$(echo "$post_mortem_text" | head -c 500 | tr '\n' ' ')
-    local title_json
-    title_json=$(python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
-      tracker get --id "${ISSUE_NUM}" --fields title 2>/dev/null || echo '{}')
-    local record
-    record=$(printf '{"issue":%s,"title":"%s","phase":"%s","exit_code":%s,"postmortem":"%s","promoted_at":"%s"}\n' \
-      "${ISSUE_NUM}" \
-      "$(echo "$title_json" | jq -r '.title // "unknown"' | sed 's/"/\\"/g')" \
-      "${INTENT:-fix}" \
-      "${exit_code}" \
-      "$(echo "$excerpt" | sed 's/"/\\"/g')" \
-      "$PROMOTED_AT")
-    echo "$record" >> "$JSONL_PATH" 2>/dev/null || true
-  fi
+  post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
 # Detects a session-window exhaustion in the captured run output via the Python

@@ -163,6 +163,27 @@ def _cost_report_render(args):
                               product_name=args.product_name, budget=budget))
 
 
+def _post_mortem_gather(args):
+    from factory_core import post_mortem
+    evidence = post_mortem.gather_evidence(
+        args.artifacts_base, args.issue, args.transcript_file or None
+    )
+    prompt = post_mortem.build_prompt(args.exit_code, args.intent, args.issue, evidence)
+    print(prompt)
+
+
+def _post_mortem_format(args):
+    from factory_core import post_mortem
+    text = Path(args.text_file).read_text(errors="replace") if args.text_file else ""
+    comment_body = post_mortem.render_comment(text, args.exit_code, args.intent, args.promoted_at,
+                                               product_name=args.product_name)
+    record = post_mortem.build_failure_record(
+        args.issue, args.title or "", args.intent, args.exit_code, text, args.promoted_at
+    )
+    post_mortem.append_failure_record(record, args.artifacts_dir)
+    print(comment_body)
+
+
 def _breaker_check_signature(args):
     from factory_core.breaker import record_failure_signature
     state_file = Path(os.environ.get("STATE_FILE",
@@ -261,6 +282,25 @@ def main():
     crr.add_argument("--product-name", default="Dark Factory")
     crr.add_argument("--budget-file", default="")
     crr.set_defaults(func=_cost_report_render)
+
+    pmg = sub.add_parser("post-mortem-gather")
+    pmg.add_argument("--artifacts-base", required=True)
+    pmg.add_argument("--issue", type=int, required=True)
+    pmg.add_argument("--transcript-file", default="")
+    pmg.add_argument("--exit-code", type=int, required=True)
+    pmg.add_argument("--intent", required=True)
+    pmg.set_defaults(func=_post_mortem_gather)
+
+    pmf = sub.add_parser("post-mortem-format")
+    pmf.add_argument("--exit-code", type=int, required=True)
+    pmf.add_argument("--intent", required=True)
+    pmf.add_argument("--promoted-at", required=True)
+    pmf.add_argument("--text-file", default="")
+    pmf.add_argument("--issue", type=int, required=True)
+    pmf.add_argument("--title", default="")
+    pmf.add_argument("--artifacts-dir", required=True)
+    pmf.add_argument("--product-name", default="Dark Factory")
+    pmf.set_defaults(func=_post_mortem_format)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
