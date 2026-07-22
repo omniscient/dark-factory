@@ -4,6 +4,7 @@ Extracted from entrypoint.sh's post_cost_report(). No gh, no docker, no archon, 
 network calls in this module — see cli.py's cost-report subcommands for the IO seam.
 """
 import math
+import re
 
 
 def _round_half_away_from_zero(x: float) -> int:
@@ -144,3 +145,92 @@ def format_savings_block(budget: "dict | None") -> str:
     if not lines:
         return ""
     return "\n" + "\n".join(lines)
+
+
+def check_renderable(run_record: dict) -> "dict | None":
+    """Requirement 1a's guard — the ONLY place `.nodes` length is inspected.
+
+    Returns None when there's something to render, else a diagnostic dict.
+    """
+    nodes = run_record.get("nodes") or []
+    if nodes:
+        return None
+    capture = run_record.get("archon_cost_capture")
+    capture = capture if isinstance(capture, dict) else {}
+    capture_ok = capture["ok"] if "ok" in capture else "unknown"
+    return {
+        "nodes_count": len(nodes),
+        "capture_ok": capture_ok,
+        "capture_exit_code": _jq_alt(capture.get("exit_code"), "unknown"),
+        "capture_stderr": _jq_alt(capture.get("stderr_excerpt"), ""),
+    }
+
+
+def _jqstr(value) -> str:
+    """jq -r's raw text rendering: lowercase booleans, everything else via str()."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def format_missing_diagnostic(diagnostic: dict, run_id: str, issue: int) -> str:
+    """Reproduces entrypoint.sh:445 byte-for-byte — the string the regression
+    test greps for."""
+    return (
+        f"ERROR: cost report has zero node rows for run {run_id or 'unknown'} "
+        f"(issue #{issue}); nodes={diagnostic['nodes_count']}, "
+        f"archon_cost_capture.ok={_jqstr(diagnostic['capture_ok'])}, "
+        f"archon_cost_exit_code={_jqstr(diagnostic['capture_exit_code'])}, "
+        f"stderr={diagnostic['capture_stderr']}"
+    )
+
+
+_CUMULATIVE_MARKER_RE = re.compile(
+    r"<!-- cumulative: cost=([0-9.]+) in=(\d+) out=(\d+) -->"
+)
+
+
+def parse_prior_cumulative(prior_comment_body: str) -> dict:
+    """Reproduces the sed/grep -oP parsing at entrypoint.sh:474-477.
+
+    The `gh api` fetch that produces prior_comment_body stays bash-side; this
+    function only parses the already-fetched string.
+    """
+    if not prior_comment_body:
+        return {"prior_runs": "", "prev_cost": "0", "prev_in": 0, "prev_out": 0,
+                 "run_count": 0}
+
+    lines = prior_comment_body.splitlines()
+    prior_run_lines = []
+    in_run_block = False
+    for line in lines:
+        if line.startswith("### Run:"):
+            in_run_block = True
+        if in_run_block:
+            if line.strip() == "---":
+                break
+            prior_run_lines.append(line)
+    # Mirrors bash's $(...) command substitution, which strips ALL trailing
+    # newlines (not just one) from the sed '/^### Run:/,/^---$/p' | head -n -1
+    # pipeline's output — verified against real bash (see "Deviations" above).
+    prior_runs = "\n".join(prior_run_lines).rstrip("\n")
+
+    match = _CUMULATIVE_MARKER_RE.search(prior_comment_body)
+    if match:
+        # prev_cost stays a STRING — it feeds _bc_add (render(), Task 4),
+        # which needs the exact decimal text bc originally produced, not a
+        # float (float arithmetic can diverge from bc's arbitrary-precision
+        # decimal addition — verified case: bc's "0 + 0.0207" -> ".0207").
+        prev_cost, prev_in, prev_out = match.group(1), int(match.group(2)), int(match.group(3))
+    else:
+        prev_cost, prev_in, prev_out = "0", 0, 0
+
+    run_count = prior_comment_body.count("### Run:")
+
+    return {
+        "prior_runs": prior_runs,
+        "prev_cost": prev_cost,
+        "prev_in": prev_in,
+        "prev_out": prev_out,
+        "run_count": run_count,
+    }

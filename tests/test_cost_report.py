@@ -202,3 +202,108 @@ def test_format_savings_block_would_trim_falls_back_to_reserved_when_estimated_a
     }
     block = cr.format_savings_block(budget)
     assert "rsv 9.0K" in block
+
+
+# ---------------------------------------------------------------------------
+# check_renderable / format_missing_diagnostic (entrypoint.sh:435-458, Req 1a)
+# ---------------------------------------------------------------------------
+
+def test_check_renderable_none_when_nodes_present():
+    assert cr.check_renderable({"nodes": [{"node_id": "refine"}]}) is None
+
+
+def test_check_renderable_diagnostic_when_nodes_empty():
+    run_record = {
+        "nodes": [],
+        "archon_cost_capture": {"ok": False, "exit_code": 127, "stderr_excerpt": "boom"},
+    }
+    diag = cr.check_renderable(run_record)
+    assert diag == {
+        "nodes_count": 0,
+        "capture_ok": False,
+        "capture_exit_code": 127,
+        "capture_stderr": "boom",
+    }
+
+
+def test_check_renderable_diagnostic_when_nodes_absent():
+    diag = cr.check_renderable({})
+    assert diag["nodes_count"] == 0
+    assert diag["capture_ok"] == "unknown"
+    assert diag["capture_exit_code"] == "unknown"
+    assert diag["capture_stderr"] == ""
+
+
+def test_check_renderable_capture_ok_false_survives_jq_alt_bug():
+    # Regression guard: jq's `.ok // "unknown"` would silently turn a real
+    # `ok: false` into "unknown" (both are falsy in jq) — entrypoint.sh:437-440
+    # works around this with `if has("ok") then .ok else "unknown" end`.
+    run_record = {"nodes": [], "archon_cost_capture": {"ok": False}}
+    diag = cr.check_renderable(run_record)
+    assert diag["capture_ok"] is False   # NOT "unknown"
+
+
+def test_format_missing_diagnostic_matches_bash_string_exactly():
+    diag = {
+        "nodes_count": 0,
+        "capture_ok": False,
+        "capture_exit_code": 127,
+        "capture_stderr": "archon: command not found",
+    }
+    msg = cr.format_missing_diagnostic(diag, run_id="test-run-1", issue=300)
+    assert msg == (
+        "ERROR: cost report has zero node rows for run test-run-1 "
+        "(issue #300); nodes=0, archon_cost_capture.ok=false, "
+        "archon_cost_exit_code=127, stderr=archon: command not found"
+    )
+
+
+def test_format_missing_diagnostic_run_id_defaults_to_unknown():
+    diag = {"nodes_count": 0, "capture_ok": "unknown", "capture_exit_code": "unknown",
+             "capture_stderr": ""}
+    msg = cr.format_missing_diagnostic(diag, run_id="", issue=300)
+    assert "for run unknown " in msg
+
+
+# ---------------------------------------------------------------------------
+# parse_prior_cumulative (entrypoint.sh:466-478)
+# ---------------------------------------------------------------------------
+
+def test_parse_prior_cumulative_first_run_defaults():
+    parsed = cr.parse_prior_cumulative("")
+    assert parsed == {"prior_runs": "", "prev_cost": "0", "prev_in": 0, "prev_out": 0,
+                       "run_count": 0}
+
+
+def test_parse_prior_cumulative_extracts_marker_and_prior_runs():
+    body = (
+        "<!-- dark-factory-cost-report -->\n"
+        "<!-- cumulative: cost=1.5 in=100 out=200 -->\n"
+        "## Dark Factory — Cost Report\n\n"
+        "**1 run(s) — Total: $1.5 (100 in / 200 out)**\n\n\n"
+        "### Run: 2026-07-21 10:00 UTC (fix, completed)\n\n"
+        "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+        "|------|-------|-----------|------------|------|----------|\n"
+        "| refine |  | 100 | 200 | $1.5 | 5s |\n"
+        "| **Subtotal** | | **100** | **200** | **$1.5** | |\n\n"
+        "---\n"
+        "*Updated by Dark Factory Dark Factory*"
+    )
+    parsed = cr.parse_prior_cumulative(body)
+    # prev_cost stays a STRING (not float) — it feeds _bc_add (Task 4), which
+    # needs the exact decimal text, matching bc's arbitrary-precision behavior.
+    assert parsed["prev_cost"] == "1.5"
+    assert parsed["prev_in"] == 100
+    assert parsed["prev_out"] == 200
+    assert parsed["run_count"] == 1
+    assert parsed["prior_runs"] == (
+        "### Run: 2026-07-21 10:00 UTC (fix, completed)\n\n"
+        "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+        "|------|-------|-----------|------------|------|----------|\n"
+        "| refine |  | 100 | 200 | $1.5 | 5s |\n"
+        "| **Subtotal** | | **100** | **200** | **$1.5** | |"
+    )
+    # No trailing newline — mirrors bash's $(...) stripping ALL trailing
+    # newlines from the sed/head-n--1 pipeline (verified against real bash;
+    # see the "Deviations from the spec" note above item 3's sibling finding).
+    assert not parsed["prior_runs"].endswith("\n")
