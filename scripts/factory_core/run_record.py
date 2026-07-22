@@ -144,6 +144,33 @@ def cmd_record(args) -> None:
     _post_seq(record)
 
 
+def emit_health_event(event: str, issue: int, run_id: str, detail: dict) -> None:
+    """Non-blocking recurrence-detection signal (df#300), callable in-process.
+
+    Used by both the `run-record health-event` CLI subcommand (cmd_health_event,
+    unchanged behavior) and cli.py's `cost-report-check` handler (#182).
+    """
+    payload = {
+        "Events": [
+            {
+                "Timestamp": _timestamp(),
+                "Level": "Warning",
+                "MessageTemplate": "{Event} issue=#{IssueNumber} run={RunId}",
+                "Properties": {
+                    "Event": event,
+                    "IssueNumber": issue,
+                    "RunId": run_id,
+                    **detail,
+                },
+            }
+        ]
+    }
+    try:
+        _post_seq_raw(payload)
+    except Exception:
+        pass  # non-fatal: this is best-effort observability, not a gate
+
+
 def cmd_health_event(args) -> None:
     """Lightweight, non-blocking recurrence-detection signal (df#300).
 
@@ -155,26 +182,7 @@ def cmd_health_event(args) -> None:
     for kv in args.detail or []:
         k, _, v = kv.partition("=")
         details[k] = v
-
-    payload = {
-        "Events": [
-            {
-                "Timestamp": _timestamp(),
-                "Level": "Warning",
-                "MessageTemplate": "{Event} issue=#{IssueNumber} run={RunId}",
-                "Properties": {
-                    "Event": args.event,
-                    "IssueNumber": args.issue,
-                    "RunId": args.run_id,
-                    **details,
-                },
-            }
-        ]
-    }
-    try:
-        _post_seq_raw(payload)
-    except Exception:
-        pass  # non-fatal: this is best-effort observability, not a gate
+    emit_health_event(args.event, args.issue, args.run_id, details)
 
 
 def _iter_json_documents(text: str):

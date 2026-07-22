@@ -1157,3 +1157,28 @@ def test_health_event_nonfatal_on_seq_failure(monkeypatch):
     monkeypatch.setattr(rr, "_post_seq_raw", _raise)
 
     rr.cmd_health_event(_HealthEventArgs())  # must not raise
+
+
+def test_emit_health_event_posts_seq_payload(monkeypatch):
+    posted = {}
+    monkeypatch.setattr(rr, "_post_seq_raw", lambda payload: posted.update(payload=payload))
+
+    rr.emit_health_event(
+        "factory.cost_report.missing", issue=300, run_id="run-1",
+        detail={"nodes_count": "0", "archon_cost_capture_ok": "false"},
+    )
+
+    event = posted["payload"]["Events"][0]
+    assert event["Properties"]["Event"] == "factory.cost_report.missing"
+    assert event["Properties"]["IssueNumber"] == 300
+    assert event["Properties"]["RunId"] == "run-1"
+    assert event["Properties"]["nodes_count"] == "0"
+
+
+def test_emit_health_event_swallows_post_exceptions(monkeypatch):
+    def _boom(payload):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(rr, "_post_seq_raw", _boom)
+    rr.emit_health_event("factory.cost_report.missing", issue=1, run_id="r", detail={})  # no raise
+
+    rr.cmd_health_event(_HealthEventArgs())  # must not raise

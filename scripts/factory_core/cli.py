@@ -125,6 +125,44 @@ def _error_signature_write(args):
     print(f"signature={signature}")
 
 
+def _cost_report_check(args):
+    import json
+    from factory_core import cost_report, run_record
+    run_record_data = json.loads(Path(args.run_record_file).read_text())
+    diagnostic = cost_report.check_renderable(run_record_data)
+    if diagnostic is None:
+        return
+    msg = cost_report.format_missing_diagnostic(diagnostic, args.run_id, args.issue)
+    print(msg, file=sys.stderr)
+    if cost_report._jqstr(diagnostic["capture_ok"]) != "true":
+        run_record.emit_health_event(
+            "factory.cost_report.missing", args.issue, args.run_id,
+            {
+                "nodes_count": str(diagnostic["nodes_count"]),
+                "archon_cost_capture_ok": cost_report._jqstr(diagnostic["capture_ok"]),
+                "archon_cost_exit_code": cost_report._jqstr(diagnostic["capture_exit_code"]),
+            },
+        )
+    sys.exit(3)
+
+
+def _cost_report_render(args):
+    import json
+    from factory_core import cost_report
+    run_record_data = json.loads(Path(args.run_record_file).read_text())
+    prior_body = ""
+    if args.prior_body_file:
+        prior_path = Path(args.prior_body_file)
+        prior_body = prior_path.read_text() if prior_path.exists() else ""
+    budget = None
+    if args.budget_file:
+        budget_path = Path(args.budget_file)
+        if budget_path.exists():
+            budget = json.loads(budget_path.read_text())
+    print(cost_report.render(run_record_data, prior_body, args.timestamp, args.intent,
+                              product_name=args.product_name, budget=budget))
+
+
 def _breaker_check_signature(args):
     from factory_core.breaker import record_failure_signature
     state_file = Path(os.environ.get("STATE_FILE",
@@ -208,6 +246,21 @@ def main():
     bcs.add_argument("--issue", type=int, required=True)
     bcs.add_argument("--phase", required=True)
     bcs.set_defaults(func=_breaker_check_signature)
+
+    crc = sub.add_parser("cost-report-check")
+    crc.add_argument("--run-record-file", required=True)
+    crc.add_argument("--run-id", required=True)
+    crc.add_argument("--issue", type=int, required=True)
+    crc.set_defaults(func=_cost_report_check)
+
+    crr = sub.add_parser("cost-report-render")
+    crr.add_argument("--run-record-file", required=True)
+    crr.add_argument("--prior-body-file", default="")
+    crr.add_argument("--timestamp", required=True)
+    crr.add_argument("--intent", required=True)
+    crr.add_argument("--product-name", default="Dark Factory")
+    crr.add_argument("--budget-file", default="")
+    crr.set_defaults(func=_cost_report_render)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
