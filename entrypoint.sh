@@ -179,53 +179,21 @@ run_post_mortem() {
   local exit_code="${1:-1}"
   local transcript_file="${2:-}"
 
-  # Only run post-mortem for implement/continue failures, not pipeline phases
   case "${INTENT:-fix}" in
     refine|plan|deconflict) return 0 ;;
   esac
 
   [ -z "${ISSUE_NUM:-}" ] && return 0
 
-  # Gather evidence: transcript tail + artifacts
-  local transcript_tail=""
-  if [ -n "$transcript_file" ] && [ -f "$transcript_file" ]; then
-    transcript_tail=$(tail -200 "$transcript_file" 2>/dev/null || true)
-  fi
-
-  local artifacts_context=""
   local ARTIFACTS_BASE_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs"
-  # Find the most recent run artifacts directory for this issue
-  local run_dir
-  run_dir=$(ls -dt "${ARTIFACTS_BASE_DIR}"/*/issue.json 2>/dev/null \
-    | xargs grep -l "\"resolved_number\": ${ISSUE_NUM}" 2>/dev/null \
-    | head -1 | xargs dirname 2>/dev/null || true)
-
-  if [ -n "$run_dir" ]; then
-    for f in implementation.md conformance.md review.md plan.md; do
-      if [ -f "${run_dir}/${f}" ]; then
-        artifacts_context="${artifacts_context}
-
-=== ${f} ===
-$(head -100 "${run_dir}/${f}" 2>/dev/null || true)"
-      fi
-    done
-  fi
 
   local prompt
-  prompt="You are analyzing a failed dark factory run for issue #${ISSUE_NUM}.
-Exit code: ${exit_code}
-Intent: ${INTENT:-fix}
-
-Write a concise post-mortem paragraph (3-5 sentences) explaining:
-1. What phase or step likely failed (based on the transcript tail)
-2. The probable root cause
-3. What the next run should do differently
-
-Keep it factual and actionable. No markdown headers, just a plain paragraph.
-
-=== Transcript tail (last 200 lines) ===
-${transcript_tail:-<no transcript available>}
-${artifacts_context}"
+  prompt=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" post-mortem-gather \
+    --artifacts-base "$ARTIFACTS_BASE_DIR" \
+    --issue "$ISSUE_NUM" \
+    --transcript-file "$transcript_file" \
+    --exit-code "$exit_code" \
+    --intent "${INTENT:-fix}")
 
   local post_mortem_text
   post_mortem_text=$(echo "$prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
@@ -234,38 +202,29 @@ ${artifacts_context}"
     post_mortem_text="Post-mortem generation failed — no output from haiku agent. Exit code was ${exit_code}. Check the factory logs for details."
   fi
 
-  # Post idempotent marker comment
-  local PROMOTED_AT
+  local PROMOTED_AT TEXTFILE
   PROMOTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  post_or_update_comment "$DF_POST_MORTEM_MARKER" \
-    "${DF_POST_MORTEM_MARKER}
-## Dark Factory — Post-Mortem
+  TEXTFILE=$(mktemp /tmp/postmortem-text-XXXXXX)
+  echo "$post_mortem_text" > "$TEXTFILE"
 
-${post_mortem_text}
+  local title_json title
+  title_json=$(python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
+    tracker get --id "${ISSUE_NUM}" --fields title 2>/dev/null || echo '{}')
+  title=$(echo "$title_json" | jq -r '.title // ""')
 
-**Exit code:** ${exit_code} | **Phase:** ${INTENT:-fix} | **Timestamp:** ${PROMOTED_AT}
+  local comment_body
+  comment_body=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" post-mortem-format \
+    --exit-code "$exit_code" \
+    --intent "${INTENT:-fix}" \
+    --promoted-at "$PROMOTED_AT" \
+    --text-file "$TEXTFILE" \
+    --issue "$ISSUE_NUM" \
+    --title "$title" \
+    --artifacts-dir "${ARTIFACTS_DIR:-}" \
+    --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}" || true)
+  rm -f "$TEXTFILE"
 
----
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" || true
-
-  # Write failure telemetry to per-run ARTIFACTS_DIR (no git operations).
-  if [ -n "${ARTIFACTS_DIR:-}" ]; then
-    local JSONL_PATH="${ARTIFACTS_DIR}/factory-failures.jsonl"
-    local excerpt
-    excerpt=$(echo "$post_mortem_text" | head -c 500 | tr '\n' ' ')
-    local title_json
-    title_json=$(python3 /opt/dark-factory/scripts/factory_core/providers/cli.py \
-      tracker get --id "${ISSUE_NUM}" --fields title 2>/dev/null || echo '{}')
-    local record
-    record=$(printf '{"issue":%s,"title":"%s","phase":"%s","exit_code":%s,"postmortem":"%s","promoted_at":"%s"}\n' \
-      "${ISSUE_NUM}" \
-      "$(echo "$title_json" | jq -r '.title // "unknown"' | sed 's/"/\\"/g')" \
-      "${INTENT:-fix}" \
-      "${exit_code}" \
-      "$(echo "$excerpt" | sed 's/"/\\"/g')" \
-      "$PROMOTED_AT")
-    echo "$record" >> "$JSONL_PATH" 2>/dev/null || true
-  fi
+  post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
 # Detects a session-window exhaustion in the captured run output via the Python
@@ -399,61 +358,12 @@ post_cost_report() {
 
   echo "Posting cost report to issue #${ISSUE_NUM}..."
 
-  # Extract totals and status from run-record.json
-  local RUN_STATUS TOTAL_COST TOTAL_IN TOTAL_OUT
-  RUN_STATUS=$(jq -r '.status // "completed"' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
-  TOTAL_COST=$(jq -r '.totals.cost_usd // 0' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
-  TOTAL_IN=$(jq -r '.totals["gen_ai.usage.input_tokens"] // 0' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
-  TOTAL_OUT=$(jq -r '.totals["gen_ai.usage.output_tokens"] // 0' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
-
-  # Extract harness_economics (absent-tolerant — older run-record.json files predate it)
-  local HE_CPM HE_STATE HE_SCORE ECONOMICS_LINE=""
-  HE_CPM=$(jq -r '.harness_economics.factory_cpm // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
-  HE_STATE=$(jq -r '.harness_economics.outcome.state // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
-  HE_SCORE=$(jq -r '.harness_economics.outcome.score // empty' "$RUN_RECORD_FILE" 2>/dev/null || true)
-  if [ -n "$HE_STATE" ]; then
-    local HE_CPM_FMT="n/a"
-    [ -n "$HE_CPM" ] && HE_CPM_FMT=$(printf '%.0f' "$HE_CPM" 2>/dev/null || echo "$HE_CPM")
-    ECONOMICS_LINE="**Factory CPM:** ${HE_CPM_FMT} | **Outcome:** ${HE_STATE} (score ${HE_SCORE:-n/a})"
-  fi
-
-  # Build per-node table rows from nodes[] (OTel field names, model pre-stripped)
-  local RUN_ROWS TIMESTAMP
-  TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-  RUN_ROWS=$(jq -r '
-    def fmt_tokens: if . >= 1000000 then "\(. / 1000000 * 10 | round / 10)M"
-                    elif . >= 1000 then "\(. / 1000 * 10 | round / 10)K"
-                    else "\(.)" end;
-    def fmt_dur: if . < 1000 then "\(.)ms"
-                 elif . < 60000 then "\(. / 100 | round / 10)s"
-                 else "\(. / 60000 | floor)m \((. % 60000 / 1000) | round)s" end;
-    def fmt_cost: "$\(. * 10000 | round / 10000)";
-    (.nodes // [])[] |
-    "| \(.node_id) | \(.model // "") | \((.["gen_ai.usage.input_tokens"] // 0) | fmt_tokens) | \((.["gen_ai.usage.output_tokens"] // 0) | fmt_tokens) | \((.cost_usd // 0) | fmt_cost) | \((.duration_ms // 0) | fmt_dur) |"
-  ' "$RUN_RECORD_FILE" 2>/dev/null || true)
-
-  if [ -z "$RUN_ROWS" ]; then
-    local CAPTURE_OK CAPTURE_RC CAPTURE_STDERR NODES_COUNT
-    # NOTE: jq's `//` alternative operator treats `false` the same as `null` (both are
-    # falsy in jq), so `.ok // "unknown"` would silently turn a genuine `ok: false` into
-    # the string "unknown" — exactly the capture-failure case this diagnostic exists to
-    # surface. Use `if has("ok") then .ok else "unknown" end` so a real `false` survives.
-    CAPTURE_OK=$(jq -r '.archon_cost_capture | if type == "object" and has("ok") then .ok else "unknown" end' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
-    CAPTURE_RC=$(jq -r '.archon_cost_capture.exit_code // "unknown"' "$RUN_RECORD_FILE" 2>/dev/null || echo "unknown")
-    CAPTURE_STDERR=$(jq -r '.archon_cost_capture.stderr_excerpt // ""' "$RUN_RECORD_FILE" 2>/dev/null || echo "")
-    NODES_COUNT=$(jq -r '(.nodes // []) | length' "$RUN_RECORD_FILE" 2>/dev/null || echo "0")
-    echo "ERROR: cost report has zero node rows for run ${RUN_ID:-unknown} (issue #${ISSUE_NUM}); nodes=${NODES_COUNT}, archon_cost_capture.ok=${CAPTURE_OK}, archon_cost_exit_code=${CAPTURE_RC}, stderr=${CAPTURE_STDERR}" >&2
-    # Only emit the recurrence-detection health event when capture itself failed;
-    # archon_cost_capture.ok=true with zero nodes is a legitimate zero (e.g. a run
-    # that executed no AI nodes), not a missing-report condition.
-    if [ "$CAPTURE_OK" != "true" ]; then
-      python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record health-event \
-        --run-id "${RUN_ID:-unknown}" \
-        --issue "${ISSUE_NUM}" \
-        --event "factory.cost_report.missing" \
-        --detail "nodes_count=${NODES_COUNT}" "archon_cost_capture_ok=${CAPTURE_OK}" "archon_cost_exit_code=${CAPTURE_RC}" \
-        2>/dev/null || true
-    fi
+  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
+  # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+  if ! python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" cost-report-check \
+      --run-record-file "$RUN_RECORD_FILE" \
+      --run-id "${RUN_ID:-unknown}" \
+      --issue "${ISSUE_NUM}"; then
     return
   fi
 
@@ -462,119 +372,34 @@ post_cost_report() {
   COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
     --jq "[.[] | select(.body | contains(\"$COST_MARKER\"))] | last | .id // empty" 2>/dev/null || true)
 
-  # If there's an existing comment, extract prior run sections and cumulative totals
-  local PRIOR_RUNS="" PREV_COST="0" PREV_IN="0" PREV_OUT="0"
+  local PRIOR_BODY_FILE=""
   if [ -n "$COMMENT_ID" ]; then
-    local EXISTING_BODY
+    PRIOR_BODY_FILE=$(mktemp /tmp/prior-body-XXXXXX.md)
     # Single-comment endpoint omits the issue number: /issues/comments/{id}, NOT
-    # /issues/{n}/comments/{id} (the latter 404s — it silently lost all prior-run
-    # history and left the report frozen on its first run).
-    EXISTING_BODY=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-      --jq '.body' 2>/dev/null || true)
-    PRIOR_RUNS=$(echo "$EXISTING_BODY" | sed -n '/^### Run:/,/^---$/p' | head -n -1 || true)
-    PREV_COST=$(echo "$EXISTING_BODY" | grep -oP '<!-- cumulative: cost=\K[0-9.]+' || echo "0")
-    PREV_IN=$(echo "$EXISTING_BODY" | grep -oP '<!-- cumulative: cost=[0-9.]+ in=\K[0-9]+' || echo "0")
-    PREV_OUT=$(echo "$EXISTING_BODY" | grep -oP '<!-- cumulative: cost=[0-9.]+ in=[0-9]+ out=\K[0-9]+' || echo "0")
+    # /issues/{n}/comments/{id} (the latter 404s).
+    gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
+      --jq '.body' > "$PRIOR_BODY_FILE" 2>/dev/null || true
   fi
 
-  # Calculate cumulative totals
-  local CUM_COST CUM_IN CUM_OUT
-  CUM_COST=$(echo "$PREV_COST + $TOTAL_COST" | bc)
-  CUM_IN=$(( PREV_IN + TOTAL_IN ))
-  CUM_OUT=$(( PREV_OUT + TOTAL_OUT ))
-  local RUN_COUNT
-  RUN_COUNT=$(echo "$PRIOR_RUNS" | grep -c '^### Run:' || true)
-  RUN_COUNT=$(( ${RUN_COUNT:-0} + 1 ))
+  local TIMESTAMP
+  TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
 
-  # Format token counts for display
-  fmt_tokens() {
-    local n=$1
-    if [ "$n" -ge 1000000 ]; then
-      echo "$(echo "scale=1; $n / 1000000" | bc)M"
-    elif [ "$n" -ge 1000 ]; then
-      echo "$(echo "scale=1; $n / 1000" | bc)K"
-    else
-      echo "$n"
-    fi
-  }
-
-  # Build context savings line from context-budget.json (schema v2, best-effort)
-  local SAVINGS_LINE="" FALLBACKS_LINE="" BUDGET_LINE=""
+  # --intent/--product-name/--budget-file: see "Deviations from the spec" items
+  # 1-2 above — render() cannot derive these from run-record.json alone.
   local BUDGET_FILE="${ARTIFACTS_DIR:-}/context-budget.json"
-  if [ -f "$BUDGET_FILE" ]; then
-    local SCHEMA_VER SAVINGS_TOKENS SAVINGS_PCT FALLBACK_COUNT
-    SCHEMA_VER=$(jq -r '.schema_version // 1' "$BUDGET_FILE" 2>/dev/null || echo "1")
-    if [[ "$SCHEMA_VER" =~ ^[0-9]+$ ]] && [ "$SCHEMA_VER" -ge 2 ]; then
-      SAVINGS_TOKENS=$(jq -r '.savings_tokens // 0' "$BUDGET_FILE" 2>/dev/null || echo "0")
-      SAVINGS_PCT=$(jq -r '.savings_pct // 0' "$BUDGET_FILE" 2>/dev/null || echo "0")
-      if [ "${SAVINGS_TOKENS:-0}" -gt 0 ] 2>/dev/null; then
-        SAVINGS_LINE="**Context savings: $(fmt_tokens "$SAVINGS_TOKENS") tokens (${SAVINGS_PCT}%)**"
-      fi
-      FALLBACK_COUNT=$(jq -r '(.fallback_events // []) | length' "$BUDGET_FILE" 2>/dev/null || echo "0")
-      if [ "${FALLBACK_COUNT:-0}" -gt 0 ] 2>/dev/null; then
-        FALLBACKS_LINE=$(jq -r '
-          "**Fallbacks:** " + ([ (.fallback_events // [])[] | "\(.section): \(.reason)" ] | join(", "))
-        ' "$BUDGET_FILE" 2>/dev/null || true)
-      fi
-      local OVER_BUDGET WOULD_TRIM
-      OVER_BUDGET=$(jq -r '.over_budget // "null"' "$BUDGET_FILE" 2>/dev/null || echo "null") || true
-      WOULD_TRIM=$(jq -r '.would_trim // "null"' "$BUDGET_FILE" 2>/dev/null || echo "null") || true
-      if [ "$OVER_BUDGET" = "true" ]; then
-        local BE_SCENARIO BE_RESERVED BE_BUDGET CAPS_STR
-        BE_SCENARIO=$(jq -r '.scenario // "unknown"' "$BUDGET_FILE" 2>/dev/null || echo "unknown") || true
-        BE_RESERVED=$(jq -r '.reserved_tokens // 0' "$BUDGET_FILE" 2>/dev/null || echo "0") || true
-        BE_BUDGET=$(jq -r '.scenario_budget // 0' "$BUDGET_FILE" 2>/dev/null || echo "0") || true
-        CAPS_STR=$(jq -r '
-          [(.derived_caps // {}) | to_entries[] | "\(.key)→\(.value)"] | join(", ")
-        ' "$BUDGET_FILE" 2>/dev/null || echo "") || true
-        BUDGET_LINE="**⚠️ Over budget (${BE_SCENARIO}): $(fmt_tokens "$BE_RESERVED") reserved / $(fmt_tokens "$BE_BUDGET") budget — trimmed: ${CAPS_STR}**" || true
-      elif [ "$WOULD_TRIM" = "true" ]; then
-        local BE_SCENARIO BE_ESTIMATED BE_BUDGET CAPS_STR
-        BE_SCENARIO=$(jq -r '.scenario // "unknown"' "$BUDGET_FILE" 2>/dev/null || echo "unknown") || true
-        BE_ESTIMATED=$(jq -r '.estimated_input_tokens // empty' "$BUDGET_FILE" 2>/dev/null || echo "") || true
-        if [ -z "$BE_ESTIMATED" ]; then
-          BE_ESTIMATED=$(jq -r '.reserved_tokens // 0' "$BUDGET_FILE" 2>/dev/null || echo "0") || true
-          local EST_LABEL="rsv"
-        else
-          local EST_LABEL="est"
-        fi
-        BE_BUDGET=$(jq -r '.scenario_budget // 0' "$BUDGET_FILE" 2>/dev/null || echo "0") || true
-        CAPS_STR=$(jq -r '
-          [(.derived_caps // {}) | to_entries[] | "\(.key)→\(.value)"] | join(", ")
-        ' "$BUDGET_FILE" 2>/dev/null || echo "") || true
-        BUDGET_LINE="**Budget trim (${BE_SCENARIO}): ${EST_LABEL} $(fmt_tokens "$BE_ESTIMATED") / $(fmt_tokens "$BE_BUDGET") budget — capped: ${CAPS_STR}**" || true
-      fi
-    fi
-  fi
-
-  # Build the full comment body
-  local SAVINGS_BLOCK=""
-  if [ -n "$SAVINGS_LINE" ] || [ -n "$FALLBACKS_LINE" ] || [ -n "$BUDGET_LINE" ]; then
-    SAVINGS_BLOCK="
-${SAVINGS_LINE}${SAVINGS_LINE:+
-}${FALLBACKS_LINE}${FALLBACKS_LINE:+
-}${BUDGET_LINE}"
-  fi
+  local BUDGET_ARGS=()
+  [ -f "$BUDGET_FILE" ] && BUDGET_ARGS=(--budget-file "$BUDGET_FILE")
+  local PRIOR_ARGS=()
+  [ -n "$PRIOR_BODY_FILE" ] && PRIOR_ARGS=(--prior-body-file "$PRIOR_BODY_FILE")
 
   local BODY
-  BODY="${COST_MARKER}
-<!-- cumulative: cost=${CUM_COST} in=${CUM_IN} out=${CUM_OUT} -->
-## Dark Factory — Cost Report
-
-**${RUN_COUNT} run(s) — Total: \$${CUM_COST} ($(fmt_tokens "$CUM_IN") in / $(fmt_tokens "$CUM_OUT") out)**
-
-${PRIOR_RUNS}
-### Run: ${TIMESTAMP} (${INTENT:-fix}, ${RUN_STATUS})
-${SAVINGS_BLOCK}
-| Step | Model | In tokens | Out tokens | Cost | Duration |
-|------|-------|-----------|------------|------|----------|
-${RUN_ROWS}
-| **Subtotal** | | **$(fmt_tokens "$TOTAL_IN")** | **$(fmt_tokens "$TOTAL_OUT")** | **\$${TOTAL_COST}** | |
-${ECONOMICS_LINE:+
-${ECONOMICS_LINE}}
-
----
-*Updated by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+  BODY=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" cost-report-render \
+    --run-record-file "$RUN_RECORD_FILE" \
+    --timestamp "$TIMESTAMP" \
+    --intent "${INTENT:-fix}" \
+    --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}" \
+    "${PRIOR_ARGS[@]}" "${BUDGET_ARGS[@]}" || true)
+  [ -n "$PRIOR_BODY_FILE" ] && rm -f "$PRIOR_BODY_FILE"
 
   # Create or update the comment
   local TMPFILE
