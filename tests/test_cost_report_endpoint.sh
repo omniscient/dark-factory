@@ -9,9 +9,12 @@
 # updated (frozen on its first run, prior-run history lost). Verified live: the bad path
 # returns 404, the canonical path returns the comment.
 #
-# Behavioral testing of post_cost_report is impractical (it shells out to archon + gh +
-# bc), so this is a static guard: the single-comment endpoint must NOT carry an issue
-# number. The list/create endpoint (/issues/{n}/comments, no trailing id) is fine.
+# Behavioral testing of the full render path now lives in
+# tests/test_cost_report.py (factory_core.cost_report unit + golden tests, #182).
+# This file remains a static guard specifically for the gh endpoint bug below,
+# which stays bash-side post-refactor: the single-comment endpoint must NOT
+# carry an issue number. The list/create endpoint (/issues/{n}/comments, no
+# trailing id) is fine.
 #
 # Run: bash tests/test_cost_report_endpoint.sh
 set -uo pipefail
