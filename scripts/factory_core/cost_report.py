@@ -5,6 +5,7 @@ network calls in this module — see cli.py's cost-report subcommands for the IO
 """
 import math
 import re
+from decimal import Decimal
 
 
 def _round_half_away_from_zero(x: float) -> int:
@@ -234,3 +235,107 @@ def parse_prior_cumulative(prior_comment_body: str) -> dict:
         "prev_out": prev_out,
         "run_count": run_count,
     }
+
+
+def _decimal_scale(s: str) -> int:
+    return len(s.split(".", 1)[1]) if "." in s else 0
+
+
+def _bc_add(a: str, b: str) -> str:
+    """Reproduces bc's default-scale decimal addition (entrypoint.sh:482):
+    result scale = max(scale of the two operands); a leading '0' before the
+    decimal point is dropped for magnitude < 1 — verified directly against
+    `bc` for whole-number, matching-scale, mismatched-scale, and sub-1 cases."""
+    scale = max(_decimal_scale(a), _decimal_scale(b))
+    total = Decimal(a) + Decimal(b)
+    quant = Decimal(1).scaleb(-scale) if scale > 0 else Decimal(1)
+    total = total.quantize(quant)
+    s = format(total, "f")
+    if s.startswith("0."):
+        s = s[1:]
+    elif s.startswith("-0."):
+        s = "-" + s[2:]
+    return s
+
+
+def _passthrough_num(value) -> str:
+    """jq -r on a field that passes through UNMODIFIED (no arithmetic applied,
+    e.g. `.totals.cost_usd // 0`) preserves the original JSON decimal literal
+    text exactly (jq >=1.7's decimal-literal preservation) -- a JSON `2.0`
+    prints "2.0", not "2". This is the OPPOSITE convention from a *computed*
+    value (e.g. fmt_cost's round(...)), which always drops a trailing ".0" —
+    keep this separate from _trim_decimal, don't unify them. Verified:
+    `echo '{"x":2.0}' | jq -r '.x'` -> "2.0". Python's json.loads preserves
+    the int-vs-float distinction from the source text, and float repr()
+    reproduces the shortest round-tripping decimal, which matches jq's
+    preserved text for the values exercised here."""
+    if isinstance(value, int):
+        return str(value)
+    return repr(value)
+
+
+COST_MARKER = "<!-- dark-factory-cost-report -->"
+
+
+def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: str,
+           product_name: str = "Dark Factory", budget: "dict | None" = None) -> str:
+    """Top-level entry point — assembles the full comment body.
+
+    Callers must have already confirmed `check_renderable(run_record) is None`;
+    this function does not itself special-case empty `nodes`. `intent` and
+    `budget` are read from the bash caller's environment/`context-budget.json`
+    respectively, not from `run_record` — see "Deviations from the spec" above.
+    """
+    status = run_record.get("status") or "completed"
+    totals = run_record.get("totals") or {}
+    total_cost_raw = totals.get("cost_usd")
+    if total_cost_raw is None:
+        total_cost_raw = 0
+    total_cost_str = _passthrough_num(total_cost_raw)
+    total_in = totals.get("gen_ai.usage.input_tokens") or 0
+    total_out = totals.get("gen_ai.usage.output_tokens") or 0
+
+    economics_line = format_economics_line(run_record)
+    economics_segment = f"\n{economics_line}" if economics_line else ""
+
+    row_lines = []
+    for node in run_record.get("nodes") or []:
+        row_lines.append(
+            f"| {node.get('node_id', '')} | {node.get('model') or ''} | "
+            f"{format_tokens_table(node.get('gen_ai.usage.input_tokens', 0) or 0)} | "
+            f"{format_tokens_table(node.get('gen_ai.usage.output_tokens', 0) or 0)} | "
+            f"{format_cost(node.get('cost_usd', 0) or 0)} | "
+            f"{format_duration(node.get('duration_ms', 0) or 0)} |"
+        )
+    run_rows = "\n".join(row_lines)
+
+    prior = parse_prior_cumulative(prior_comment_body)
+    cum_cost = _bc_add(prior["prev_cost"], total_cost_str)
+    cum_in = prior["prev_in"] + total_in
+    cum_out = prior["prev_out"] + total_out
+    run_count = prior["run_count"] + 1
+
+    savings_block = format_savings_block(budget)
+
+    # NOTE: `{prior['prior_runs']}` and `{savings_block}` are each on their OWN
+    # source line here, matching entrypoint.sh's heredoc structure exactly —
+    # this is load-bearing for blank-line placement (verified against real
+    # captured output; see the golden tests above and "Deviations" item 3).
+    body = f"""{COST_MARKER}
+<!-- cumulative: cost={cum_cost} in={cum_in} out={cum_out} -->
+## Dark Factory — Cost Report
+
+**{run_count} run(s) — Total: ${cum_cost} ({format_tokens_cumulative(cum_in)} in / {format_tokens_cumulative(cum_out)} out)**
+
+{prior['prior_runs']}
+### Run: {timestamp} ({intent}, {status})
+{savings_block}
+| Step | Model | In tokens | Out tokens | Cost | Duration |
+|------|-------|-----------|------------|------|----------|
+{run_rows}
+| **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **${total_cost_str}** | |
+{economics_segment}
+
+---
+*Updated by {product_name} Dark Factory*"""
+    return body

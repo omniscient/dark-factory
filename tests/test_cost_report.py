@@ -307,3 +307,205 @@ def test_parse_prior_cumulative_extracts_marker_and_prior_runs():
     # newlines from the sed/head-n--1 pipeline (verified against real bash;
     # see the "Deviations from the spec" note above item 3's sibling finding).
     assert not parsed["prior_runs"].endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# render() — execution-captured goldens (captured from pre-refactor entrypoint.sh
+# via the harness above, per the #182 operator's 2026-07-22 guidance — NOT
+# hand-derived). Verified byte-for-byte against real bash output.
+# ---------------------------------------------------------------------------
+
+GOLDEN_A_MULTI_NODE_FIRST_RUN = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=.0207 in=20 out=270 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**1 run(s) — Total: $.0207 (20 in / 270 out)**\n\n\n"
+    "### Run: 2026-07-22 13:02 UTC (fix, completed)\n\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| parse-intent |  | 20 | 270 | $0.0207 | 7.8s |\n"
+    "| **Subtotal** | | **20** | **270** | **$0.0207** | |\n\n"
+    "**Factory CPM:** 17 | **Outcome:** produced_ungated (score 1.0)\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+RUN_RECORD_A = {
+    "status": "completed",
+    "totals": {"cost_usd": 0.0207, "gen_ai.usage.input_tokens": 20, "gen_ai.usage.output_tokens": 270},
+    "nodes": [
+        {"node_id": "parse-intent", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 270, "cost_usd": 0.0207, "duration_ms": 7800},
+    ],
+    "harness_economics": {"factory_cpm": 17.4, "outcome": {"state": "produced_ungated", "score": 1.0}},
+    "archon_cost_capture": {"ok": True},
+}
+
+
+def test_render_matches_golden_a_multi_node_first_run():
+    body = cr.render(RUN_RECORD_A, prior_comment_body="", timestamp="2026-07-22 13:02 UTC",
+                      intent="fix")
+    assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
+
+
+GOLDEN_B_PRIOR_COMMENT_CUMULATIVE = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=1.2707 in=520 out=12270 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**2 run(s) — Total: $1.2707 (520 in / 12.2K out)**\n\n"
+    "### Run: 2026-07-22 13:02 UTC (fix, completed)\n\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| parse-intent |  | 20 | 270 | $0.0207 | 7.8s |\n"
+    "| **Subtotal** | | **20** | **270** | **$0.0207** | |\n\n"
+    "**Factory CPM:** 17 | **Outcome:** produced_ungated (score 1.0)\n"
+    "### Run: 2026-07-22 13:03 UTC (fix, completed)\n\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| plan | claude-opus-4-8 | 300 | 8K | $0.9 | 45s |\n"
+    "| review | claude-sonnet-5 | 200 | 4K | $0.35 | 12s |\n"
+    "| **Subtotal** | | **500** | **12.0K** | **$1.25** | |\n\n"
+    "**Factory CPM:** 23 | **Outcome:** produced_ungated (score 0.95)\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+RUN_RECORD_B = {
+    "status": "completed",
+    "totals": {"cost_usd": 1.25, "gen_ai.usage.input_tokens": 500, "gen_ai.usage.output_tokens": 12000},
+    "nodes": [
+        {"node_id": "plan", "model": "claude-opus-4-8", "gen_ai.usage.input_tokens": 300,
+         "gen_ai.usage.output_tokens": 8000, "cost_usd": 0.9, "duration_ms": 45000},
+        {"node_id": "review", "model": "claude-sonnet-5", "gen_ai.usage.input_tokens": 200,
+         "gen_ai.usage.output_tokens": 4000, "cost_usd": 0.35, "duration_ms": 12000},
+    ],
+    "harness_economics": {"factory_cpm": 22.9, "outcome": {"state": "produced_ungated", "score": 0.95}},
+    "archon_cost_capture": {"ok": True},
+}
+
+
+def test_render_matches_golden_b_prior_comment_cumulative():
+    body = cr.render(RUN_RECORD_B, prior_comment_body=GOLDEN_A_MULTI_NODE_FIRST_RUN,
+                      timestamp="2026-07-22 13:03 UTC", intent="fix")
+    assert body == GOLDEN_B_PRIOR_COMMENT_CUMULATIVE
+
+
+GOLDEN_C_ECONOMICS_ABSENT = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=.5 in=100 out=2000 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**1 run(s) — Total: $.5 (100 in / 2.0K out)**\n\n\n"
+    "### Run: 2026-07-22 13:04 UTC (fix, completed)\n\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| implement | claude-sonnet-5 | 100 | 2K | $0.5 | 30s |\n"
+    "| **Subtotal** | | **100** | **2.0K** | **$0.5** | |\n\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+RUN_RECORD_C = {
+    "status": "completed",
+    "totals": {"cost_usd": 0.5, "gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 2000},
+    "nodes": [
+        {"node_id": "implement", "model": "claude-sonnet-5", "gen_ai.usage.input_tokens": 100,
+         "gen_ai.usage.output_tokens": 2000, "cost_usd": 0.5, "duration_ms": 30000},
+    ],
+    "archon_cost_capture": {"ok": True},
+    # NOTE: no "harness_economics" key at all — the absent-tolerant case.
+}
+
+
+def test_render_matches_golden_c_economics_absent():
+    body = cr.render(RUN_RECORD_C, prior_comment_body="", timestamp="2026-07-22 13:04 UTC",
+                      intent="fix")
+    assert body == GOLDEN_C_ECONOMICS_ABSENT
+
+
+GOLDEN_D_OVER_BUDGET = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=2.0 in=5000 out=9000 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**1 run(s) — Total: $2.0 (5.0K in / 9.0K out)**\n\n\n"
+    "### Run: 2026-07-22 13:04 UTC (fix, completed)\n\n"
+    "**⚠️ Over budget (implement): 12.0K reserved / 8.0K budget — trimmed: arch→1500, memory→750**\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| implement | claude-sonnet-5 | 5K | 9K | $2 | 1m 0s |\n"
+    "| **Subtotal** | | **5.0K** | **9.0K** | **$2.0** | |\n\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+RUN_RECORD_D = {
+    "status": "completed",
+    "totals": {"cost_usd": 2.0, "gen_ai.usage.input_tokens": 5000, "gen_ai.usage.output_tokens": 9000},
+    "nodes": [
+        {"node_id": "implement", "model": "claude-sonnet-5", "gen_ai.usage.input_tokens": 5000,
+         "gen_ai.usage.output_tokens": 9000, "cost_usd": 2.0, "duration_ms": 60000},
+    ],
+    "archon_cost_capture": {"ok": True},
+}
+
+BUDGET_D = {
+    "schema_version": 2,
+    "over_budget": True,
+    "scenario": "implement",
+    "reserved_tokens": 12000,
+    "scenario_budget": 8000,
+    "derived_caps": {"arch": 1500, "memory": 750},
+}
+
+
+def test_render_matches_golden_d_over_budget():
+    body = cr.render(RUN_RECORD_D, prior_comment_body="", timestamp="2026-07-22 13:04 UTC",
+                      intent="fix", budget=BUDGET_D)
+    assert body == GOLDEN_D_OVER_BUDGET
+
+
+GOLDEN_E_WOULD_TRIM = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=.3 in=800 out=1500 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**1 run(s) — Total: $.3 (800 in / 1.5K out)**\n\n\n"
+    "### Run: 2026-07-22 13:05 UTC (fix, completed)\n\n"
+    "**Context savings: 3.0K tokens (15.5%)**\n"
+    "**Fallbacks:** architecture_md: safety_keyword:performance\n"
+    "**Budget trim (conformance): est 10.0K / 8.0K budget — capped: arch→1500, memory→750**\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| conformance | claude-opus-4-8 | 800 | 1.5K | $0.3 | 9s |\n"
+    "| **Subtotal** | | **800** | **1.5K** | **$0.3** | |\n\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+RUN_RECORD_E = {
+    "status": "completed",
+    "totals": {"cost_usd": 0.3, "gen_ai.usage.input_tokens": 800, "gen_ai.usage.output_tokens": 1500},
+    "nodes": [
+        {"node_id": "conformance", "model": "claude-opus-4-8", "gen_ai.usage.input_tokens": 800,
+         "gen_ai.usage.output_tokens": 1500, "cost_usd": 0.3, "duration_ms": 9000},
+    ],
+    "archon_cost_capture": {"ok": True},
+}
+
+BUDGET_E = {
+    "schema_version": 2,
+    "scenario": "conformance",
+    "over_budget": False,
+    "would_trim": True,
+    "estimated_input_tokens": 10000,
+    "reserved_tokens": 9000,
+    "scenario_budget": 8000,
+    "derived_caps": {"arch": 1500, "memory": 750},
+    "savings_tokens": 3000,
+    "savings_pct": 15.5,
+    "fallback_events": [{"section": "architecture_md", "reason": "safety_keyword:performance"}],
+}
+
+
+def test_render_matches_golden_e_would_trim():
+    body = cr.render(RUN_RECORD_E, prior_comment_body="", timestamp="2026-07-22 13:05 UTC",
+                      intent="fix", budget=BUDGET_E)
+    assert body == GOLDEN_E_WOULD_TRIM
