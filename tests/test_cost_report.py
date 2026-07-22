@@ -121,3 +121,84 @@ def test_format_economics_line_missing_cpm_falls_back_to_na():
     assert cr.format_economics_line(run_record) == (
         "**Factory CPM:** n/a | **Outcome:** failed (score 0.0)"
     )
+
+
+# ---------------------------------------------------------------------------
+# format_savings_block (entrypoint.sh:501-548, schema v2, best-effort)
+# ---------------------------------------------------------------------------
+
+def test_format_savings_block_none_or_v1_returns_empty():
+    assert cr.format_savings_block(None) == ""
+    assert cr.format_savings_block({}) == ""
+    assert cr.format_savings_block({"schema_version": 1}) == ""
+
+
+def test_format_savings_block_savings_line():
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 6000,
+        "savings_pct": 30.0,
+        "fallback_events": [],
+    }
+    block = cr.format_savings_block(budget)
+    assert "**Context savings: 6.0K tokens (30.0%)**" in block
+
+
+def test_format_savings_block_fallbacks_line():
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 0,
+        "savings_pct": 0,
+        "fallback_events": [
+            {"section": "architecture_md", "reason": "safety_keyword:performance"},
+        ],
+    }
+    block = cr.format_savings_block(budget)
+    assert (
+        "**Fallbacks:** architecture_md: safety_keyword:performance" in block
+    )
+
+
+def test_format_savings_block_over_budget_branch():
+    budget = {
+        "schema_version": 2,
+        "over_budget": True,
+        "scenario": "implement",
+        "reserved_tokens": 12000,
+        "scenario_budget": 8000,
+        "derived_caps": {"arch": 1500, "memory": 750},
+    }
+    block = cr.format_savings_block(budget)
+    assert "⚠️ Over budget (implement): 12.0K reserved / 8.0K budget" in block
+    assert "arch→1500, memory→750" in block
+
+
+def test_format_savings_block_would_trim_uses_estimated_input_tokens_not_reserved():
+    # Regression (df, migrated from test_budget_line_trim.sh): would_trim must
+    # render estimated_input_tokens (10000), NOT reserved_tokens (9000).
+    budget = {
+        "schema_version": 2,
+        "scenario": "conformance",
+        "over_budget": False,
+        "would_trim": True,
+        "estimated_input_tokens": 10000,
+        "reserved_tokens": 9000,
+        "scenario_budget": 8000,
+        "derived_caps": {"arch": 1500, "memory": 750},
+    }
+    block = cr.format_savings_block(budget)
+    assert "est 10.0K" in block
+    assert "9.0K" not in block
+
+
+def test_format_savings_block_would_trim_falls_back_to_reserved_when_estimated_absent():
+    budget = {
+        "schema_version": 2,
+        "scenario": "conformance",
+        "would_trim": True,
+        "reserved_tokens": 9000,
+        "scenario_budget": 8000,
+        "derived_caps": {},
+    }
+    block = cr.format_savings_block(budget)
+    assert "rsv 9.0K" in block

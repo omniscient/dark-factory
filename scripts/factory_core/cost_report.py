@@ -88,3 +88,59 @@ def format_economics_line(run_record: dict) -> str:
     cpm_fmt = "n/a" if cpm is None else f"{_round_half_away_from_zero(cpm)}"
     score = _jq_alt(outcome.get("score"), "n/a")
     return f"**Factory CPM:** {cpm_fmt} | **Outcome:** {state} (score {score})"
+
+
+def format_savings_block(budget: "dict | None") -> str:
+    """Mirrors the context-budget.json (schema v2) block at entrypoint.sh:501-548."""
+    if not budget:
+        return ""
+    schema_version = budget.get("schema_version", 1)
+    if not isinstance(schema_version, int) or schema_version < 2:
+        return ""
+
+    lines = []
+
+    savings_tokens = budget.get("savings_tokens", 0) or 0
+    if savings_tokens > 0:
+        savings_pct = budget.get("savings_pct", 0)
+        lines.append(
+            f"**Context savings: {format_tokens_cumulative(savings_tokens)} "
+            f"tokens ({savings_pct}%)**"
+        )
+
+    fallback_events = budget.get("fallback_events") or []
+    if fallback_events:
+        parts = [f"{ev['section']}: {ev['reason']}" for ev in fallback_events]
+        lines.append("**Fallbacks:** " + ", ".join(parts))
+
+    over_budget = budget.get("over_budget")
+    would_trim = budget.get("would_trim")
+    caps_str = ", ".join(
+        f"{k}→{v}" for k, v in (budget.get("derived_caps") or {}).items()
+    )
+    scenario = budget.get("scenario", "unknown")
+    scenario_budget = budget.get("scenario_budget", 0)
+    if over_budget is True:
+        reserved = budget.get("reserved_tokens", 0)
+        lines.append(
+            f"**⚠️ Over budget ({scenario}): "
+            f"{format_tokens_cumulative(reserved)} reserved / "
+            f"{format_tokens_cumulative(scenario_budget)} budget — "
+            f"trimmed: {caps_str}**"
+        )
+    elif would_trim is True:
+        estimated = budget.get("estimated_input_tokens")
+        if estimated:
+            label, value = "est", estimated
+        else:
+            label, value = "rsv", budget.get("reserved_tokens", 0)
+        lines.append(
+            f"**Budget trim ({scenario}): {label} "
+            f"{format_tokens_cumulative(value)} / "
+            f"{format_tokens_cumulative(scenario_budget)} budget — "
+            f"capped: {caps_str}**"
+        )
+
+    if not lines:
+        return ""
+    return "\n" + "\n".join(lines)
