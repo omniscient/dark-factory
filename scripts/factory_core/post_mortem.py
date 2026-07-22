@@ -75,6 +75,7 @@ def render_comment(post_mortem_text: str, exit_code: int, intent: str, promoted_
     token — see "Deviations from the spec" item 1: bash expands that env var at
     the point BODY is assigned (a double-quoted string), before this text is ever
     captured by a `$(...)` Python subprocess call, which does not re-expand it."""
+    post_mortem_text = post_mortem_text.rstrip("\n")
     return f"""{_MARKER}
 ## Dark Factory — Post-Mortem
 

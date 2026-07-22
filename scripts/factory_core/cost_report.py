@@ -87,7 +87,7 @@ def format_economics_line(run_record: dict) -> str:
     if not state:
         return ""
     cpm = he.get("factory_cpm")
-    cpm_fmt = "n/a" if cpm is None else f"{_round_half_away_from_zero(cpm)}"
+    cpm_fmt = "n/a" if cpm is None else f"{round(cpm)}"
     score = _jq_alt(outcome.get("score"), "n/a")
     return f"**Factory CPM:** {cpm_fmt} | **Outcome:** {state} (score {score})"
 
@@ -97,7 +97,11 @@ def format_savings_block(budget: "dict | None") -> str:
     if not budget:
         return ""
     schema_version = budget.get("schema_version", 1)
-    if not isinstance(schema_version, int) or schema_version < 2:
+    try:
+        schema_version = int(schema_version)
+    except (TypeError, ValueError):
+        return ""
+    if schema_version < 2:
         return ""
 
     lines = []

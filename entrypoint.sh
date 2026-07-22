@@ -220,8 +220,8 @@ run_post_mortem() {
     --text-file "$TEXTFILE" \
     --issue "$ISSUE_NUM" \
     --title "$title" \
-    --artifacts-dir "${ARTIFACTS_DIR:-/tmp}" \
-    --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}")
+    --artifacts-dir "${ARTIFACTS_DIR:-}" \
+    --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}" || true)
   rm -f "$TEXTFILE"
 
   post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
@@ -398,7 +398,7 @@ post_cost_report() {
     --timestamp "$TIMESTAMP" \
     --intent "${INTENT:-fix}" \
     --product-name "${FACTORY_PRODUCT_NAME:-Dark Factory}" \
-    "${PRIOR_ARGS[@]}" "${BUDGET_ARGS[@]}")
+    "${PRIOR_ARGS[@]}" "${BUDGET_ARGS[@]}" || true)
   [ -n "$PRIOR_BODY_FILE" ] && rm -f "$PRIOR_BODY_FILE"
 
   # Create or update the comment

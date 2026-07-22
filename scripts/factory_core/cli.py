@@ -180,7 +180,8 @@ def _post_mortem_format(args):
     record = post_mortem.build_failure_record(
         args.issue, args.title or "", args.intent, args.exit_code, text, args.promoted_at
     )
-    post_mortem.append_failure_record(record, args.artifacts_dir)
+    if args.artifacts_dir:
+        post_mortem.append_failure_record(record, args.artifacts_dir)
     print(comment_body)
 
 
