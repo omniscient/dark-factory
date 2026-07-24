@@ -24,6 +24,20 @@ def test_env_overrides(monkeypatch):
     assert ident.SLUG == "acme/widgets"
     assert ident.marker("factory") == "*Posted by Acme Dark Factory*"
 
+def test_detection_patterns_covers_all_footer_variants(monkeypatch):
+    ident = _fresh(monkeypatch)
+    patterns = ident.detection_patterns()
+    assert "Posted by MarketHawk Refinement Pipeline" in patterns
+    assert "Posted by MarketHawk Backlog Scheduler" in patterns
+    assert "Posted by MarketHawk Dark Factory" in patterns
+    assert "Posted by MarketHawk Epic Autopilot" in patterns
+    assert "Updated by MarketHawk Dark Factory" in patterns
+    assert "dark-factory-cost-report" in patterns
+
+def test_detection_patterns_excludes_main_red(monkeypatch):
+    ident = _fresh(monkeypatch)
+    assert not any("Main-Red" in p for p in ident.detection_patterns())
+
 def test_board_consumes_identity(monkeypatch):
     _fresh(monkeypatch, FACTORY_REPO="widgets")
     import factory_core.board as board
