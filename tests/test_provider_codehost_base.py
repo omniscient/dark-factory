@@ -10,9 +10,10 @@ def test_codehost_is_abstract_with_required_ops():
     from factory_core.providers.codehost.base import CodeHost
 
     required = {
-        "remote_url", "find_change_for", "open_change", "update_change_body",
-        "mark_ready", "merge_change", "get_change_checks", "get_change_mergeable",
-        "get_change_reviews", "get_change_inline_comments", "close_keyword",
+        "remote_url", "find_change_for", "find_change_details", "open_change",
+        "update_change_body", "mark_ready", "merge_change", "get_change_checks",
+        "get_change_mergeable", "get_change_reviews", "get_change_inline_comments",
+        "close_keyword",
     }
     assert required.issubset(CodeHost.__abstractmethods__)
     with pytest.raises(TypeError):
@@ -25,6 +26,7 @@ def test_codehost_degradable_ops_have_safe_defaults():
     class _Bare(CodeHost):
         def remote_url(self): return ""
         def find_change_for(self, branch): return None
+        def find_change_details(self, branch): return None
         def open_change(self, source, target, title, body, draft=False): return "1"
         def update_change_body(self, id, body): return True
         def mark_ready(self, id): pass

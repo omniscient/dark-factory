@@ -17,6 +17,11 @@ class CodeHost(ABC):
         """The open PR/MR id for a branch (or branch prefix), or None."""
 
     @abstractmethod
+    def find_change_details(self, branch: str, exact: bool = False,
+                             repo: str | None = None) -> dict | None:
+        """The open PR/MR {number, isDraft, mergeable} for a branch (or prefix), or None."""
+
+    @abstractmethod
     def open_change(self, source: str, target: str, title: str, body: str,
                      draft: bool = False) -> str:
         """Create a PR/MR; returns its opaque id."""
