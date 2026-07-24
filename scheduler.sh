@@ -525,11 +525,8 @@ failing_checks_for_pr() {
   local pr_num="$1"
   local checks
   # --repo required for the same reason as get_pr_for_issue (scheduler runs outside a checkout).
-  # NOT migrated to `codehost checks` (providers CLI, #249): GitHubCodeHost.get_change_checks
-  # returns [] whenever `gh`'s exit code is nonzero, but `gh pr checks` legitimately exits
-  # nonzero exactly when a check is failing/pending — the case this function most needs to see.
-  # Routing through it would silently blind the CI gate. See out-of-scope.md.
-  checks=$(gh pr checks "$pr_num" --repo "$FACTORY_REPO_SLUG" --json name,bucket,link 2>/dev/null) || true
+  checks=$(python3 "$FACTORY_PROVIDERS_CLI" codehost checks --id "$pr_num" \
+    --repo "$FACTORY_REPO_SLUG" --fields name,bucket,link 2>/dev/null) || true
   echo "$checks" | jq -e 'type == "array"' >/dev/null 2>&1 || checks='[]'
   echo "$checks" | jq -c '[.[] | select(.bucket == "fail")]'
 }
