@@ -17,9 +17,8 @@ def test_command_wires_the_contract():
     assert clone_pos < baked_pos, "clone-live path must be named before the baked fallback"
     # mirrors conformance's pre-triage diff exclusions
     assert "':!*.lock'" in text and "':!.archon/memory/**'" in text
-    # blocking path uses the real Blocked board option id
-    assert "FACTORY_STATUS_BLOCKED" in text
-    assert "FACTORY_STATUS_FIELD" in text
+    # blocking path routes the board-move through the shared tracker seam (#181 R1)
+    assert "tracker set-status" in text and "--status blocked" in text
     # posts the review via the Pulls Reviews API
     assert "/pulls/" in text and "/reviews" in text
     # writes the artifact the report node reads
