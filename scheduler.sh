@@ -777,6 +777,91 @@ ${FOOTER}" 2>/dev/null || true
   done < <(echo "$IN_PROGRESS" | jq -c '.[]')
 }
 
+# --- Priority 1.5: In Review items with merge conflicts (proactive auto-resolve) ---
+# Runs every cycle after the factory guard. Scans in-review PRs for GitHub's
+# CONFLICTING mergeability state and dispatches a deconflict run before any
+# human comments are processed. Honors SKIP_LABELS, CI_BLOCKED, and is_issue_running.
+# UNKNOWN is skipped — GitHub hasn't computed mergeability yet.
+stage_conflict_resolve() {
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_deconflict"
+  elif [ "${CONFLICT_RESOLUTION_ENABLED:-true}" = "true" ]; then
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
+      if has_skip_label "$item"; then continue; fi
+      case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac
+      if is_issue_running "$ISSUE"; then continue; fi
+
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
+      RETRIES=$(get_retry_count "${ISSUE}:resolve")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+        continue
+      fi
+
+      PR_NUM=$(get_pr_for_issue "$ISSUE")
+      [ -z "$PR_NUM" ] && continue
+
+      MERGEABLE=$(check_pr_mergeable "$PR_NUM")
+      case "$MERGEABLE" in
+        CONFLICTING)
+          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
+          increment_retry "${ISSUE}:resolve" || true
+          if dispatch "Deconflict issue #${ISSUE}"; then
+            DISPATCHED="Deconflict issue #${ISSUE}"
+          fi
+          ;;
+        UNKNOWN)
+          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=UNKNOWN action=skip"
+          ;;
+      esac
+    done < <(echo "$IN_REVIEW" | jq -c '.[]')
+  fi
+}
+
+# --- Priority 1: In Review items with new comments (unblock existing work) ---
+stage_review_triage() {
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+    case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac   # gated to Blocked this cycle
+
+    if end_gate_check "$ISSUE" "$item"; then continue; fi
+
+    NEW_COMMENTS=$(get_new_comments "$ISSUE")
+    COMMENT_COUNT=$(echo "$NEW_COMMENTS" | jq 'length')
+    if [ "$COMMENT_COUNT" -eq 0 ]; then continue; fi
+
+    TITLE=$(echo "$item" | jq -r '.content.title')
+    VERDICT=$(classify_comments "$ISSUE" "$TITLE" "$NEW_COMMENTS")
+
+    case "$VERDICT" in
+      MERGE)
+        if dispatch "Close issue #${ISSUE}"; then
+          DISPATCHED="Close issue #${ISSUE}"
+        fi
+        ;;
+      CONTINUE)
+        if ! is_issue_running "$ISSUE"; then
+          if dispatch "Continue issue #${ISSUE}"; then
+            DISPATCHED="Continue issue #${ISSUE}"
+            reset_retry "$ISSUE"
+          fi
+        fi
+        ;;
+      SKIP) ;;
+    esac
+  done < <(echo "$IN_REVIEW" | jq -c '.[]')
+}
+
 # When sourced for testing (SCHEDULER_SOURCE_ONLY=1) stop here: the helper functions
 # and constants above are now defined (the pure predicates via scripts/scheduler_lib.sh,
 # sourced above; the rest inline), but the startup probes and poll loop below must
@@ -924,86 +1009,11 @@ while true; do
     fi
   fi
 
-  # --- Priority 1.5: In Review items with merge conflicts (proactive auto-resolve) ---
-  # Runs every cycle after the factory guard. Scans in-review PRs for GitHub's
-  # CONFLICTING mergeability state and dispatches a deconflict run before any
-  # human comments are processed. Honors SKIP_LABELS, CI_BLOCKED, and is_issue_running.
-  # UNKNOWN is skipped — GitHub hasn't computed mergeability yet.
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_deconflict"
-  elif [ "${CONFLICT_RESOLUTION_ENABLED:-true}" = "true" ]; then
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac
-      if is_issue_running "$ISSUE"; then continue; fi
+  # --- Priority 1.5: conflict resolution (see stage_conflict_resolve) ---
+  stage_conflict_resolve
 
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
-
-      RETRIES=$(get_retry_count "${ISSUE}:resolve")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
-        continue
-      fi
-
-      PR_NUM=$(get_pr_for_issue "$ISSUE")
-      [ -z "$PR_NUM" ] && continue
-
-      MERGEABLE=$(check_pr_mergeable "$PR_NUM")
-      case "$MERGEABLE" in
-        CONFLICTING)
-          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
-          increment_retry "${ISSUE}:resolve" || true
-          if dispatch "Deconflict issue #${ISSUE}"; then
-            DISPATCHED="Deconflict issue #${ISSUE}"
-          fi
-          ;;
-        UNKNOWN)
-          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=UNKNOWN action=skip"
-          ;;
-      esac
-    done < <(echo "$IN_REVIEW" | jq -c '.[]')
-  fi
-
-  # --- Priority 1: In Review items with new comments (unblock existing work) ---
-  while IFS= read -r item; do
-    [ -n "$DISPATCHED" ] && break
-    ISSUE=$(get_issue_number "$item")
-    if has_skip_label "$item"; then continue; fi
-    case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac   # gated to Blocked this cycle
-
-    if end_gate_check "$ISSUE" "$item"; then continue; fi
-
-    NEW_COMMENTS=$(get_new_comments "$ISSUE")
-    COMMENT_COUNT=$(echo "$NEW_COMMENTS" | jq 'length')
-    if [ "$COMMENT_COUNT" -eq 0 ]; then continue; fi
-
-    TITLE=$(echo "$item" | jq -r '.content.title')
-    VERDICT=$(classify_comments "$ISSUE" "$TITLE" "$NEW_COMMENTS")
-
-    case "$VERDICT" in
-      MERGE)
-        if dispatch "Close issue #${ISSUE}"; then
-          DISPATCHED="Close issue #${ISSUE}"
-        fi
-        ;;
-      CONTINUE)
-        if ! is_issue_running "$ISSUE"; then
-          if dispatch "Continue issue #${ISSUE}"; then
-            DISPATCHED="Continue issue #${ISSUE}"
-            reset_retry "$ISSUE"
-          fi
-        fi
-        ;;
-      SKIP) ;;
-    esac
-  done < <(echo "$IN_REVIEW" | jq -c '.[]')
+  # --- Priority 1: in-review comment triage (see stage_review_triage) ---
+  stage_review_triage
 
   # --- Priority 2: Ready items (implement what's already refined+planned) ---
   if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
