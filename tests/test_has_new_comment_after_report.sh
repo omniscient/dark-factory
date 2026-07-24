@@ -38,9 +38,17 @@ gh() {
 python3() {
   case "$*" in
     *"providers/cli.py"*"get-comments"*) printf '%s' "$MOCK_COMMENTS" ;;
+    *"markers-regex"*)
+      printf '%s' "Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline|Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Backlog Scheduler|Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Dark Factory|Updated by ${FACTORY_PRODUCT_NAME:-MarketHawk} Dark Factory|dark-factory-cost-report|Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Epic Autopilot"
+      ;;
     *) return 0 ;;
   esac
 }
+
+# SCHEDULER_SOURCE_ONLY=1 sourcing returns before the `while true` loop, so BOT_RE is
+# never set by the sourcing itself — set it explicitly here, mirroring what the
+# production loop does (#181 R4/R5).
+BOT_RE=$(python3 "${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}" markers-regex)
 
 REPORT_MARKER="Posted by ${FACTORY_PRODUCT_NAME:-MarketHawk} Refinement Pipeline"
 PASS=0
