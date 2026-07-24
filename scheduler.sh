@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -E  # inherit ERR trap into functions (stage_* bodies) so SCHED_UNHANDLED_ERR still logs
 
 # --- Configuration (non-policy infrastructure) ---
 # ready-for-human marks a ticket a human has taken over; the factory must leave it alone
@@ -1083,7 +1084,7 @@ STAGE_ORDER=(stage_conflict_resolve stage_review_triage stage_ready_implement st
 # guard directly, per-stage, without needing a live poll cycle.
 dispatch_stage() {
   local _stage="$1"
-  case "${STAGE_GUARD[$_stage]}" in
+  case "${STAGE_GUARD[$_stage]:-none}" in
     red_or_paused)
       if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
         echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=${STAGE_SKIP_ACTION[$_stage]}"
