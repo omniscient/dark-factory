@@ -165,6 +165,37 @@ def test_get_change_checks_matches_rescue_py(monkeypatch):
     assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "bucket"]
 
 
+def test_get_change_checks_green_exit_path_unchanged(monkeypatch):
+    """Byte-for-byte: a zero-exit response returns exactly what it always did."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (
+        calls.append(cmd),
+        _ok(stdout='[{"name": "ci", "bucket": "pass", "link": "u"}]', returncode=0),
+    )[1])
+    checks = GitHubCodeHost().get_change_checks("9", repo=identity.SLUG)
+    assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "name,bucket,link"]
+    assert checks == [{"name": "ci", "bucket": "pass", "link": "u"}]
+
+
+def test_get_change_checks_returns_data_on_nonzero_exit_with_valid_json(monkeypatch):
+    """The failing/pending path: gh exits nonzero but stdout is valid JSON — must not be discarded."""
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(
+        stdout='[{"name": "ci", "bucket": "fail", "link": "u"}]', returncode=1,
+    ))
+    checks = GitHubCodeHost().get_change_checks("9", repo=identity.SLUG)
+    assert checks == [{"name": "ci", "bucket": "fail", "link": "u"}]
+
+
+def test_get_change_checks_empty_list_on_invalid_json_regardless_of_exit_code(monkeypatch):
+    """A genuine error (empty/invalid stdout) still yields [] on both exit codes."""
+    for code in (0, 1):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="not json", returncode=code))
+        assert GitHubCodeHost().get_change_checks("9") == []
+    for code in (0, 1):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=code))
+        assert GitHubCodeHost().get_change_checks("9") == []
+
+
 def test_get_change_mergeable_matches_scheduler_check_pr_mergeable(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="MERGEABLE\n"))[1])

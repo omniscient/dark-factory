@@ -98,8 +98,6 @@ class GitHubCodeHost(CodeHost):
             cmd += ["--repo", repo]
         cmd += ["--json", fields]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            return []
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError:
