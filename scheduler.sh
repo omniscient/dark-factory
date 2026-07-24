@@ -862,6 +862,106 @@ stage_review_triage() {
   done < <(echo "$IN_REVIEW" | jq -c '.[]')
 }
 
+# --- Priority 2: Ready items (implement what's already refined+planned) ---
+stage_ready_implement() {
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_implement"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
+      if has_skip_label "$item"; then continue; fi
+      if [ "$IN_PROGRESS_COUNT" -ge "$MAX_IN_PROGRESS" ]; then break; fi
+      if [ "$IN_REVIEW_COUNT" -ge "$MAX_IN_REVIEW" ]; then break; fi
+      if ! dependencies_met "$ISSUE" "$BOARD_ITEMS"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+
+      # Dispatch ceiling (#339): park above-ceiling work for human pairing. The label
+      # check stops the comment/board-move from repeating every poll cycle — the label
+      # persists and comes back in the next fetch_board_items snapshot.
+      if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
+        if ! has_above_ceiling_label "$item"; then
+          echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
+          python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
+            --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
+          set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
+          FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+          gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
+"## Scheduler — Above Dispatch Ceiling
+
+This ticket has been classified as **above the autonomous dispatch ceiling** \
+(size: XL, or size: M with a perf/architectural/migration title keyword).
+
+Spec and plan are complete. **A human must pair on implementation.**
+
+To proceed:
+1. Remove the \`$ABOVE_CEILING_LABEL\` label.
+2. Dispatch manually:
+   \`\`\`bash
+   docker compose --profile factory run --rm dark-factory \"Fix issue #${ISSUE}\"
+   \`\`\`
+   Or implement directly in a local worktree.
+
+---
+${FOOTER}" 2>/dev/null || true
+        fi
+        continue
+      fi
+
+      if dispatch "Fix issue #${ISSUE}"; then
+        DISPATCHED="Fix issue #${ISSUE}"
+      fi
+    done < <(echo "$READY" | jq -c '.[]')
+  fi
+}
+
+# --- Priority 3: Blocked items (retry stuck work) ---
+stage_blocked_retry() {
+  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_blocked_retry"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
+      if has_skip_label "$item"; then continue; fi
+      # Promoted to In review by the Priority 0.6 rescue this cycle — don't re-dispatch
+      # (its green PR is now in the merge flow; BLOCKED was snapshotted before the move).
+      case "$RESCUED" in *" $ISSUE "*) continue ;; esac
+      # Above-ceiling items in Blocked are parked by design (#339), not failed — the
+      # retry loop must not auto-dispatch them.
+      if has_above_ceiling_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
+      RETRIES=$(get_retry_count "$ISSUE")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
+        continue
+      fi
+
+      increment_retry "$ISSUE"
+      # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
+      # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
+      # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
+      if [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
+        if dispatch "Continue issue #${ISSUE}"; then
+          DISPATCHED="Continue issue #${ISSUE}"
+        fi
+      else
+        if dispatch "Fix issue #${ISSUE}"; then
+          DISPATCHED="Fix issue #${ISSUE}"
+        fi
+      fi
+    done < <(echo "$BLOCKED" | jq -c '.[]')
+  fi
+}
+
 # When sourced for testing (SCHEDULER_SOURCE_ONLY=1) stop here: the helper functions
 # and constants above are now defined (the pure predicates via scripts/scheduler_lib.sh,
 # sourced above; the rest inline), but the startup probes and poll loop below must
@@ -1015,101 +1115,11 @@ while true; do
   # --- Priority 1: in-review comment triage (see stage_review_triage) ---
   stage_review_triage
 
-  # --- Priority 2: Ready items (implement what's already refined+planned) ---
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_implement"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      if [ "$IN_PROGRESS_COUNT" -ge "$MAX_IN_PROGRESS" ]; then break; fi
-      if [ "$IN_REVIEW_COUNT" -ge "$MAX_IN_REVIEW" ]; then break; fi
-      if ! dependencies_met "$ISSUE" "$BOARD_ITEMS"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
+  # --- Priority 2: Ready → implement (see stage_ready_implement) ---
+  stage_ready_implement
 
-      # Dispatch ceiling (#339): park above-ceiling work for human pairing. The label
-      # check stops the comment/board-move from repeating every poll cycle — the label
-      # persists and comes back in the next fetch_board_items snapshot.
-      if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
-        if ! has_above_ceiling_label "$item"; then
-          echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
-          python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
-            --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
-          set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
-          FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-          gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
-"## Scheduler — Above Dispatch Ceiling
-
-This ticket has been classified as **above the autonomous dispatch ceiling** \
-(size: XL, or size: M with a perf/architectural/migration title keyword).
-
-Spec and plan are complete. **A human must pair on implementation.**
-
-To proceed:
-1. Remove the \`$ABOVE_CEILING_LABEL\` label.
-2. Dispatch manually:
-   \`\`\`bash
-   docker compose --profile factory run --rm dark-factory \"Fix issue #${ISSUE}\"
-   \`\`\`
-   Or implement directly in a local worktree.
-
----
-${FOOTER}" 2>/dev/null || true
-        fi
-        continue
-      fi
-
-      if dispatch "Fix issue #${ISSUE}"; then
-        DISPATCHED="Fix issue #${ISSUE}"
-      fi
-    done < <(echo "$READY" | jq -c '.[]')
-  fi
-
-  # --- Priority 3: Blocked items (retry stuck work) ---
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_blocked_retry"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      # Promoted to In review by the Priority 0.6 rescue this cycle — don't re-dispatch
-      # (its green PR is now in the merge flow; BLOCKED was snapshotted before the move).
-      case "$RESCUED" in *" $ISSUE "*) continue ;; esac
-      # Above-ceiling items in Blocked are parked by design (#339), not failed — the
-      # retry loop must not auto-dispatch them.
-      if has_above_ceiling_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
-
-      RETRIES=$(get_retry_count "$ISSUE")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
-        continue
-      fi
-
-      increment_retry "$ISSUE"
-      # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
-      # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
-      # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
-      if [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
-        if dispatch "Continue issue #${ISSUE}"; then
-          DISPATCHED="Continue issue #${ISSUE}"
-        fi
-      else
-        if dispatch "Fix issue #${ISSUE}"; then
-          DISPATCHED="Fix issue #${ISSUE}"
-        fi
-      fi
-    done < <(echo "$BLOCKED" | jq -c '.[]')
-  fi
+  # --- Priority 3: Blocked → retry (see stage_blocked_retry) ---
+  stage_blocked_retry
 
   # --- Priority 4: Refined items (plan generation — advance refined work before pulling new backlog) ---
   if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
