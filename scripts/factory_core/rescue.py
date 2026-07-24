@@ -33,30 +33,8 @@ def _repo() -> str:
 
 
 def pr_for_issue(issue_num: int) -> dict | None:
-    """The open PR for an issue's feature branch (feat/issue-<N>-*), or None.
-
-    Returns the first match with the fields rescue needs. ``gh`` is run with
-    ``--repo`` because the scheduler executes outside a git checkout.
-
-    Not routed through GitHubCodeHost.find_change_for (#249): that method always
-    applies ``--jq '.[0].number // empty'``, discarding the isDraft/mergeable fields
-    this function needs alongside the PR number in one call.
-    """
-    r = subprocess.run(
-        ["gh", "pr", "list", "--repo", _repo(),
-         "--search", f"head:feat/issue-{issue_num}-",
-         "--json", "number,isDraft,mergeable"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return None
-    try:
-        arr = json.loads(r.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(arr, list) or not arr:
-        return None
-    return arr[0]
+    """The open PR for an issue's feature branch (feat/issue-<N>-*), or None."""
+    return get_codehost().find_change_details(f"feat/issue-{issue_num}-", repo=_repo())
 
 
 def pr_check_buckets(pr_num: int) -> list:
