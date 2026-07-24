@@ -78,7 +78,7 @@ Read the latest comments after any "Refinement Pipeline" report. Treat these as 
 
 Check the issue body length. If fewer than 20 characters:
 1. Post a comment: "This issue needs more detail before it can be refined. Please add a description of what you'd like to build and any constraints."
-2. Add `needs-discussion` label: `gh issue edit $ISSUE_NUM --add-label needs-discussion`
+2. Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
 3. Exit cleanly
 
 ## Phase 3: CONTEXT ASSEMBLY
@@ -102,7 +102,7 @@ Follow this process:
    - The subagent needs Glob, Grep, and Read tools to explore the codebase
 3. If the subagent returns a response starting with `UNCERTAIN:`:
    - Post a comment on the issue explaining the question and context gathered so far
-   - Run: `gh issue edit $ISSUE_NUM --add-label needs-discussion`
+   - Run: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
    - Write a brief summary to `$ARTIFACTS_DIR/refinement-status.md` noting the abort reason
    - Exit cleanly (exit code 0)
 4. Record the answer and continue until you have enough information

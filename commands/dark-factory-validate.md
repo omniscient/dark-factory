@@ -89,7 +89,8 @@ docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_N
 *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*
 EOF
 )"
-    gh issue edit "$ISSUE_NUM" --add-label needs-discussion
+    python3 dark-factory/scripts/factory_core/providers/cli.py \
+      tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
     # Move to Blocked on the project board
     python3 dark-factory/scripts/factory_core/providers/cli.py \
       tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH

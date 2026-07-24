@@ -101,7 +101,7 @@ Spawn an architect subagent using the Agent tool:
 3. Repeat until approved (max 3 cycles)
 4. If still not approved after 3 cycles:
    - Post the plan + architect feedback as an issue comment
-   - Add `needs-discussion` label: `gh issue edit $ISSUE_NUM --add-label needs-discussion`
+   - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
    - Exit cleanly
 
 ### If architect returns "Approved":
@@ -144,7 +144,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
         ---
         *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
         ```
-      - Add `needs-discussion` label: `gh issue edit $ISSUE_NUM --add-label needs-discussion`
+      - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
       - Exit cleanly (do not abort — this is a known state)
    c. Read the MATERIAL deviation descriptions from the conformance reviewer output
    d. Revise the plan to address each MATERIAL deviation (update the plan file, re-read it)

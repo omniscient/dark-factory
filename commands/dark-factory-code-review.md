@@ -173,7 +173,8 @@ Exit `0`. `status-in-review` and `report` proceed.
    ```
 3. Add the `needs-discussion` label:
    ```bash
-   gh issue edit "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --add-label needs-discussion
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
    ```
 4. Write to `$ARTIFACTS_DIR/review.md`:
    ```bash

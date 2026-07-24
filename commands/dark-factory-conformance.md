@@ -523,7 +523,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
 3. Add `needs-discussion` label:
    ```bash
-   gh issue edit $ISSUE_NUM --add-label needs-discussion
+   python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion  # TARGET-PATH
    ```
 
 4. Write blocked status to `$ARTIFACTS_DIR/conformance.md`:
