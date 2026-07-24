@@ -12,7 +12,7 @@ def test_no_raw_project_item_edit_or_list_in_commands():
 
 
 def test_no_raw_footer_literal_in_commands_or_workflow():
-    for f in [Path("workflows/archon-dark-factory.yaml")]:
+    for f in ALL_TRACKED_FILES:
         text = f.read_text(encoding="utf-8")
         assert "Posted by ${FACTORY_PRODUCT_NAME}" not in text, f
         assert "Updated by ${FACTORY_PRODUCT_NAME}" not in text, f

@@ -154,6 +154,7 @@ Exit `0`. `status-in-review` and `report` proceed.
 
 1. Post a "Code Review — Blocked" comment on the issue, listing the blocking findings (from `.blockers` in the result JSON):
    ```bash
+   FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
    gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body "## Code Review — Blocked
 
    The AI code reviewer found ${BLOCKERS} blocking issue(s) (severity ≥ ${BLOCK_THRESHOLD}). See the inline comments on PR #${PR_NUM}.
@@ -164,7 +165,7 @@ Exit `0`. `status-in-review` and `report` proceed.
    Fix the issues and re-run: \`docker compose --profile factory run --rm dark-factory \\\"Continue issue #${ISSUE_NUM}\\\"\`, or add \`needs-discussion\` if a finding is a false positive.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+   ${FOOTER}"
    ```
 2. Move the issue to **Blocked** on the project board:
    ```bash

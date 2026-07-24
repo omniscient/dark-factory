@@ -133,7 +133,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 8. **Reconcile loop** (only if MATERIAL):
    a. Increment `CONFORMANCE_CYCLE`
    b. If `CONFORMANCE_CYCLE > MAX_CYCLES`:
-      - Post the conformance dialogue as an issue comment:
+      - Post the conformance dialogue as an issue comment (fetch the footer first via
+        `python3 dark-factory/scripts/factory_core/cli.py marker refinement`):
         ```
         ## Spec Conformance — Blocked (Plan)
 
@@ -142,7 +143,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
         $CONFORMANCE_DIALOGUE
 
         ---
-        *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
+        <fetched footer text>
         ```
       - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
       - Exit cleanly (do not abort — this is a known state)
@@ -213,8 +214,10 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    - ❓ **Need to discuss** — add the `needs-discussion` label to pause automation.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
+   <fetched footer text>
    ```
+   Fetch the footer first: `python3 dark-factory/scripts/factory_core/cli.py marker refinement` —
+   use its output in place of the literal line above when composing the comment.
 8. Write status to `$ARTIFACTS_DIR/refinement-status.md`:
    ```
    STATUS: PLAN_COMPLETE

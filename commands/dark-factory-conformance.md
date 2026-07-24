@@ -498,6 +498,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
 1. Post a "Spec Conformance — Blocked" comment on the issue:
    ```bash
+   FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
    gh issue comment $ISSUE_NUM --body "## Spec Conformance — Blocked
 
    The implementation has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
@@ -512,7 +513,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    - Add \`needs-discussion\` if the spec itself needs revisiting.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+   $FOOTER"
    ```
 
 2. Move the issue to **Blocked** on the project board:

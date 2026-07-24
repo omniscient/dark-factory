@@ -227,8 +227,10 @@ Follow this process:
    - ❓ **Need to discuss** — add the `needs-discussion` label to pause automation.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*
+   <fetched footer text>
    ```
+   Fetch the footer first: `python3 dark-factory/scripts/factory_core/cli.py marker refinement` —
+   use its output in place of the literal line above when composing the comment.
 6. Write status to `$ARTIFACTS_DIR/refinement-status.md`:
    ```
    STATUS: SPEC_COMPLETE

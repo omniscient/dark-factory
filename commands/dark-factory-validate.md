@@ -71,6 +71,7 @@ if [ "$BLAST_ENABLED" != "skip" ]; then
 
   # 4. Block on HUMAN_REQUIRED
   if [ "$BLAST_STATUS" = "HUMAN_REQUIRED" ]; then
+    FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
     gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
 ## Blast-Radius Gate — BLOCKED
 
@@ -86,7 +87,7 @@ Remove the \`needs-discussion\` label after reviewing and approving the risk, th
 docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_NUM"
 \`\`\`
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*
+$FOOTER
 EOF
 )"
     python3 dark-factory/scripts/factory_core/providers/cli.py \
