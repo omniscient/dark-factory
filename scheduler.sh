@@ -681,6 +681,102 @@ ${comment_text}"
   esac
 }
 
+# --- Stage functions (poll loop) ---
+
+# --- Priority 0: In Review items with failing CI (gate red PRs out of review) ---
+# Runs on EVERY cycle, independent of the factory-concurrency guard below: a PR with
+# red CI must not sit in review (a human could approve/merge it) just because the
+# factory happens to be busy. This only sets board status + posts a comment (it never
+# dispatches a factory container), so it is safe to run while a factory run is active.
+# The branch-aware Blocked retry below later continues the existing PR branch and
+# re-runs validate (pytest) to fix the failures. Cheap, so we gate every red ticket
+# this cycle — no DISPATCHED/break.
+stage_ci_gate() {
+  CI_BLOCKED=""   # space-padded list of issues gated this cycle (Priority 1 skips them)
+  while IFS= read -r item; do
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+
+    PR_NUM=$(get_pr_for_issue "$ISSUE")
+    [ -z "$PR_NUM" ] && continue
+
+    FAILED=$(failing_checks_for_pr "$PR_NUM")
+    FAIL_COUNT=$(echo "$FAILED" | jq 'length')
+    [ "$FAIL_COUNT" -eq 0 ] && continue
+
+    echo "[$(date -u +%FT%TZ)] ci_gate issue=#${ISSUE} pr=#${PR_NUM} failing=${FAIL_COUNT} action=move_to_blocked"
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+
+    FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — CI Failing, Moved to Blocked
+
+PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In review** to **Blocked**. The factory will retry automatically, continue the existing PR branch, and attempt to fix the failures.
+
+**Failing checks:**
+${FAIL_LIST}
+
+---
+${FOOTER}" 2>/dev/null || true
+
+    CI_BLOCKED="${CI_BLOCKED} ${ISSUE} "
+  done < <(echo "$IN_REVIEW" | jq -c '.[]')
+}
+
+# --- Priority 0.6: rescue Blocked items whose PR is already green + mergeable ---
+# Inverse of Priority 0. A ticket can sit in Blocked (CI gate, circuit-breaker trip,
+# orphaned-run sweep) while its PR is actually green and conflict-free. The Priority 3
+# retry loop below would re-dispatch "Continue" on it — re-running the whole pipeline,
+# burning the Max session window, re-hitting the same gate — until the retry counter
+# exhausts and trip_to_blocked parks it FOREVER with a mergeable PR stranded. Instead,
+# promote it to In review so the normal merge flow (human / "Close issue #N") takes it.
+# Dispatch-free (only sets board status + marks the PR ready + comments), so it runs
+# every cycle regardless of factory capacity, like Priority 0. RESCUED is consumed by
+# Priority 3 so a just-rescued issue is not retried in the same cycle.
+stage_rescue_blocked() {
+  RESCUED=""
+  if [ "${BLOCKED_RESCUE_ENABLED:-true}" = "true" ]; then
+    while IFS= read -r item; do
+      ISSUE=$(get_issue_number "$item")
+      if has_skip_label "$item"; then continue; fi
+      # Above-ceiling items are parked in Blocked by design (#339), not failed.
+      if has_above_ceiling_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+      RESCUE_OUT=$(python3 "$FACTORY_CORE_CLI" rescue-blocked --issue "$ISSUE" 2>/dev/null) || true
+      if [ "$RESCUE_OUT" = "rescued" ]; then
+        echo "[$(date -u +%FT%TZ)] blocked_rescue issue=#${ISSUE} action=promoted_to_in_review"
+        RESCUED="${RESCUED} ${ISSUE} "
+        reset_retry "$ISSUE" || true
+      fi
+    done < <(echo "$BLOCKED" | jq -c '.[]')
+  fi
+}
+
+# --- Sweep: recover orphaned "In progress" items ---
+# We reach here whenever a factory slot is free (capacity guard above). An issue in
+# "In progress" whose container is alive is skipped by is_issue_running below; one
+# with no container was abandoned mid-run. The usual
+# failure path (entrypoint on_failure -> Blocked) cannot fire for untrappable
+# deaths — host reboot, OOM/SIGKILL — so those issues would otherwise sit stuck
+# forever and silently consume a WIP slot. Route them into the Blocked retry path,
+# exactly what on_failure would have done. (Skip-labels let a human park an item.)
+stage_orphan_sweep() {
+  while IFS= read -r item; do
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
+    echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — Orphaned Run Recovered
+
+This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
+
+---
+${FOOTER}" 2>/dev/null || true
+  done < <(echo "$IN_PROGRESS" | jq -c '.[]')
+}
+
 # When sourced for testing (SCHEDULER_SOURCE_ONLY=1) stop here: the helper functions
 # and constants above are now defined (the pure predicates via scripts/scheduler_lib.sh,
 # sourced above; the rest inline), but the startup probes and poll loop below must
@@ -770,70 +866,11 @@ while true; do
   REFINED_COUNT=$(echo "$REFINED" | jq 'length')
   REFINE_RUNNING=$(count_refine_running)
 
-  # --- Priority 0: In Review items with failing CI (gate red PRs out of review) ---
-  # Runs on EVERY cycle, independent of the factory-concurrency guard below: a PR with
-  # red CI must not sit in review (a human could approve/merge it) just because the
-  # factory happens to be busy. This only sets board status + posts a comment (it never
-  # dispatches a factory container), so it is safe to run while a factory run is active.
-  # The branch-aware Blocked retry below later continues the existing PR branch and
-  # re-runs validate (pytest) to fix the failures. Cheap, so we gate every red ticket
-  # this cycle — no DISPATCHED/break.
-  CI_BLOCKED=""   # space-padded list of issues gated this cycle (Priority 1 skips them)
-  while IFS= read -r item; do
-    ISSUE=$(get_issue_number "$item")
-    if has_skip_label "$item"; then continue; fi
+  # --- Priority 0: CI gate (see stage_ci_gate) ---
+  stage_ci_gate
 
-    PR_NUM=$(get_pr_for_issue "$ISSUE")
-    [ -z "$PR_NUM" ] && continue
-
-    FAILED=$(failing_checks_for_pr "$PR_NUM")
-    FAIL_COUNT=$(echo "$FAILED" | jq 'length')
-    [ "$FAIL_COUNT" -eq 0 ] && continue
-
-    echo "[$(date -u +%FT%TZ)] ci_gate issue=#${ISSUE} pr=#${PR_NUM} failing=${FAIL_COUNT} action=move_to_blocked"
-    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
-
-    FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
-    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — CI Failing, Moved to Blocked
-
-PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In review** to **Blocked**. The factory will retry automatically, continue the existing PR branch, and attempt to fix the failures.
-
-**Failing checks:**
-${FAIL_LIST}
-
----
-${FOOTER}" 2>/dev/null || true
-
-    CI_BLOCKED="${CI_BLOCKED} ${ISSUE} "
-  done < <(echo "$IN_REVIEW" | jq -c '.[]')
-
-  # --- Priority 0.6: rescue Blocked items whose PR is already green + mergeable ---
-  # Inverse of Priority 0. A ticket can sit in Blocked (CI gate, circuit-breaker trip,
-  # orphaned-run sweep) while its PR is actually green and conflict-free. The Priority 3
-  # retry loop below would re-dispatch "Continue" on it — re-running the whole pipeline,
-  # burning the Max session window, re-hitting the same gate — until the retry counter
-  # exhausts and trip_to_blocked parks it FOREVER with a mergeable PR stranded. Instead,
-  # promote it to In review so the normal merge flow (human / "Close issue #N") takes it.
-  # Dispatch-free (only sets board status + marks the PR ready + comments), so it runs
-  # every cycle regardless of factory capacity, like Priority 0. RESCUED is consumed by
-  # Priority 3 so a just-rescued issue is not retried in the same cycle.
-  RESCUED=""
-  if [ "${BLOCKED_RESCUE_ENABLED:-true}" = "true" ]; then
-    while IFS= read -r item; do
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      # Above-ceiling items are parked in Blocked by design (#339), not failed.
-      if has_above_ceiling_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-      RESCUE_OUT=$(python3 "$FACTORY_CORE_CLI" rescue-blocked --issue "$ISSUE" 2>/dev/null) || true
-      if [ "$RESCUE_OUT" = "rescued" ]; then
-        echo "[$(date -u +%FT%TZ)] blocked_rescue issue=#${ISSUE} action=promoted_to_in_review"
-        RESCUED="${RESCUED} ${ISSUE} "
-        reset_retry "$ISSUE" || true
-      fi
-    done < <(echo "$BLOCKED" | jq -c '.[]')
-  fi
+  # --- Priority 0.6: rescue Blocked (see stage_rescue_blocked) ---
+  stage_rescue_blocked
 
   # Guard: cap concurrent factory containers at FACTORY_WIP_LIMIT (Claude Max 5h-window
   # burn scales with concurrency — default 1, override in .archon/.env). Everything
@@ -846,28 +883,8 @@ ${FOOTER}" 2>/dev/null || true
     continue
   fi
 
-  # --- Sweep: recover orphaned "In progress" items ---
-  # We reach here whenever a factory slot is free (capacity guard above). An issue in
-  # "In progress" whose container is alive is skipped by is_issue_running below; one
-  # with no container was abandoned mid-run. The usual
-  # failure path (entrypoint on_failure -> Blocked) cannot fire for untrappable
-  # deaths — host reboot, OOM/SIGKILL — so those issues would otherwise sit stuck
-  # forever and silently consume a WIP slot. Route them into the Blocked retry path,
-  # exactly what on_failure would have done. (Skip-labels let a human park an item.)
-  while IFS= read -r item; do
-    ISSUE=$(get_issue_number "$item")
-    if has_skip_label "$item"; then continue; fi
-    if is_issue_running "$ISSUE"; then continue; fi
-    echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
-    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
-    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — Orphaned Run Recovered
-
-This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
-
----
-${FOOTER}" 2>/dev/null || true
-  done < <(echo "$IN_PROGRESS" | jq -c '.[]')
+  # --- Sweep: recover orphaned "In progress" items (see stage_orphan_sweep) ---
+  stage_orphan_sweep
 
   # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
   # Claude Max session-window exhaustion, #35) — self-clearing, no recheck dispatch
