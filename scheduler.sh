@@ -962,6 +962,120 @@ stage_blocked_retry() {
   fi
 }
 
+# --- Priority 4: Refined items (plan generation — advance refined work before pulling new backlog) ---
+stage_plan() {
+  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_plan"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
+
+      # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
+      if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
+         && has_direct_to_pr_label "$item"; then
+        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+          plan_advance_check "$ISSUE" "$item"
+        fi
+        continue
+      fi
+
+      if has_refine_skip_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
+      RETRIES=$(get_retry_count "${ISSUE}:plan")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        continue
+      fi
+
+      increment_retry "${ISSUE}:plan"
+      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
+
+---
+${FOOTER}" 2>/dev/null || true
+      if dispatch "Plan issue #${ISSUE}"; then
+        DISPATCHED="Plan issue #${ISSUE}"
+        REFINE_RUNNING=$((REFINE_RUNNING + 1))
+      fi
+    done < <(echo "$REFINED" | jq -c '.[]')
+  fi
+}
+
+# --- Priority 5: Backlog items (refinement — prepare future work) ---
+stage_refine() {
+  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_refine"
+  else
+    while IFS= read -r item; do
+      [ -n "$DISPATCHED" ] && break
+      ISSUE=$(get_issue_number "$item")
+
+      # Handle spec-pending-review items first (before skip-label check would filter them)
+      ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
+      if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
+        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+          spec_advance_check "$ISSUE" "$item"
+        fi
+        continue
+      fi
+
+      if has_refine_skip_label "$item"; then continue; fi
+      # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
+      # Unlabelled items are left for triage — humans add the label when the issue is ready.
+      if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
+      if is_issue_running "$ISSUE"; then continue; fi
+      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+
+      SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
+      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+        trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+        continue
+      fi
+
+      RETRIES=$(get_retry_count "${ISSUE}:refine")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        continue
+      fi
+
+      increment_retry "${ISSUE}:refine"
+      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+
+---
+${FOOTER}" 2>/dev/null || true
+      if dispatch "Refine issue #${ISSUE}"; then
+        DISPATCHED="Refine issue #${ISSUE}"
+        REFINE_RUNNING=$((REFINE_RUNNING + 1))
+      fi
+    done < <(echo "$BACKLOG" | jq -c '.[]')
+  fi
+}
+
+# --- Priority 6: Epic Autopilot (starved self-unlock, #571) ---
+# Runs ONLY when this cycle dispatched nothing (starved), main is green, and it is
+# enabled. Reviews the refined, below-ceiling children of in-progress epics with Opus
+# and advances the low-risk ones via direct-to-pr. Fail-soft: never abort the loop.
+# Distinct one-line compound-condition shape — not folded into the STAGE_GUARD table.
+stage_epic_autopilot() {
+  if [ -z "$DISPATCHED" ] && [ "$MAIN_IS_RED" = "false" ] && [ "$SESSION_WINDOW_PAUSED" = "false" ] && [ "${EPIC_AUTOPILOT_ENABLED:-false}" = "true" ]; then
+    AP_OUT=$(python3 "$FACTORY_CORE_CLI" epic-autopilot --once 2>&1) || true
+    echo "[$(date -u +%FT%TZ)] ${AP_OUT}"
+    case "$AP_OUT" in *"autopilot=advanced"*|*"autopilot=epic_started"*) DISPATCHED="$AP_OUT" ;; esac
+  fi
+}
+
 # When sourced for testing (SCHEDULER_SOURCE_ONLY=1) stop here: the helper functions
 # and constants above are now defined (the pure predicates via scripts/scheduler_lib.sh,
 # sourced above; the rest inline), but the startup probes and poll loop below must
@@ -1121,112 +1235,14 @@ while true; do
   # --- Priority 3: Blocked → retry (see stage_blocked_retry) ---
   stage_blocked_retry
 
-  # --- Priority 4: Refined items (plan generation — advance refined work before pulling new backlog) ---
-  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_plan"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
+  # --- Priority 4: Refined → plan (see stage_plan) ---
+  stage_plan
 
-      # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
-      if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
-         && has_direct_to_pr_label "$item"; then
-        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-          plan_advance_check "$ISSUE" "$item"
-        fi
-        continue
-      fi
+  # --- Priority 5: Backlog → refine (see stage_refine) ---
+  stage_refine
 
-      if has_refine_skip_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
-
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
-
-      RETRIES=$(get_retry_count "${ISSUE}:plan")
-      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
-        continue
-      fi
-
-      increment_retry "${ISSUE}:plan"
-      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
-
----
-${FOOTER}" 2>/dev/null || true
-      if dispatch "Plan issue #${ISSUE}"; then
-        DISPATCHED="Plan issue #${ISSUE}"
-        REFINE_RUNNING=$((REFINE_RUNNING + 1))
-      fi
-    done < <(echo "$REFINED" | jq -c '.[]')
-  fi
-
-  # --- Priority 5: Backlog items (refinement — prepare future work) ---
-  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_refine"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-
-      # Handle spec-pending-review items first (before skip-label check would filter them)
-      ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
-      if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
-        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-          spec_advance_check "$ISSUE" "$item"
-        fi
-        continue
-      fi
-
-      if has_refine_skip_label "$item"; then continue; fi
-      # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
-      # Unlabelled items are left for triage — humans add the label when the issue is ready.
-      if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
-
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
-
-      RETRIES=$(get_retry_count "${ISSUE}:refine")
-      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
-        continue
-      fi
-
-      increment_retry "${ISSUE}:refine"
-      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
-
----
-${FOOTER}" 2>/dev/null || true
-      if dispatch "Refine issue #${ISSUE}"; then
-        DISPATCHED="Refine issue #${ISSUE}"
-        REFINE_RUNNING=$((REFINE_RUNNING + 1))
-      fi
-    done < <(echo "$BACKLOG" | jq -c '.[]')
-  fi
-
-  # --- Priority 6: Epic Autopilot (starved self-unlock, #571) ---
-  # Runs ONLY when this cycle dispatched nothing (starved), main is green, and it is
-  # enabled. Reviews the refined, below-ceiling children of in-progress epics with Opus
-  # and advances the low-risk ones via direct-to-pr. Fail-soft: never abort the loop.
-  if [ -z "$DISPATCHED" ] && [ "$MAIN_IS_RED" = "false" ] && [ "$SESSION_WINDOW_PAUSED" = "false" ] && [ "${EPIC_AUTOPILOT_ENABLED:-false}" = "true" ]; then
-    AP_OUT=$(python3 "$FACTORY_CORE_CLI" epic-autopilot --once 2>&1) || true
-    echo "[$(date -u +%FT%TZ)] ${AP_OUT}"
-    case "$AP_OUT" in *"autopilot=advanced"*|*"autopilot=epic_started"*) DISPATCHED="$AP_OUT" ;; esac
-  fi
+  # --- Priority 6: Epic Autopilot (see stage_epic_autopilot) ---
+  stage_epic_autopilot
 
   # --- Log cycle summary ---
   BUDGET=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-rate-budget 2>/dev/null \
