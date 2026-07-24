@@ -168,15 +168,8 @@ Exit `0`. `status-in-review` and `report` proceed.
    ```
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-     | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
-   if [ -n "$ITEM_ID" ]; then
-     gh project item-edit \
-       --project-id "$FACTORY_PROJECT_ID" \
-       --id "$ITEM_ID" \
-       --field-id "$FACTORY_STATUS_FIELD" \
-       --single-select-option-id "$FACTORY_STATUS_BLOCKED"
-   fi
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
    ```
 3. Add the `needs-discussion` label:
    ```bash
