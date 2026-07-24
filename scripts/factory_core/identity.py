@@ -30,3 +30,9 @@ _MARKERS = {
 
 def marker(kind: str) -> str:
     return _MARKERS[kind].format(PRODUCT_NAME)
+
+
+def detection_patterns() -> list[str]:
+    posted = [f"Posted by {PRODUCT_NAME} {suffix}" for suffix in
+              ("Refinement Pipeline", "Backlog Scheduler", "Dark Factory", "Epic Autopilot")]
+    return posted + [f"Updated by {PRODUCT_NAME} Dark Factory", "dark-factory-cost-report"]

@@ -57,6 +57,42 @@ def test_find_change_for_exact_head_matches_push_resolve(monkeypatch):
     ]
 
 
+def test_find_change_details_matches_rescue_pr_for_issue(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (
+        calls.append(cmd),
+        _ok(stdout='[{"number": 7, "isDraft": false, "mergeable": "MERGEABLE"}]'),
+    )[1])
+    details = GitHubCodeHost().find_change_details("feat/issue-7-", repo=identity.SLUG)
+    assert calls[0] == [
+        "gh", "pr", "list", "--repo", identity.SLUG,
+        "--search", "head:feat/issue-7-",
+        "--json", "number,isDraft,mergeable",
+    ]
+    assert details == {"number": 7, "isDraft": False, "mergeable": "MERGEABLE"}
+
+
+def test_find_change_details_exact_head(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
+    details = GitHubCodeHost().find_change_details("feat/issue-7-slug", exact=True)
+    assert calls[0] == [
+        "gh", "pr", "list", "--head", "feat/issue-7-slug",
+        "--json", "number,isDraft,mergeable",
+    ]
+    assert details is None
+
+
+def test_find_change_details_returns_none_on_failure(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=1))
+    assert GitHubCodeHost().find_change_details("feat/issue-7-") is None
+
+
+def test_find_change_details_returns_none_on_invalid_json(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="not json"))
+    assert GitHubCodeHost().find_change_details("feat/issue-7-") is None
+
+
 def test_open_change_matches_run_dag_push_and_pr(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="https://github.com/o/r/pull/9\n"))[1])
@@ -127,6 +163,37 @@ def test_get_change_checks_matches_rescue_py(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="[]"))[1])
     GitHubCodeHost().get_change_checks("9", fields="bucket", repo=identity.SLUG)
     assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "bucket"]
+
+
+def test_get_change_checks_green_exit_path_unchanged(monkeypatch):
+    """Byte-for-byte: a zero-exit response returns exactly what it always did."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (
+        calls.append(cmd),
+        _ok(stdout='[{"name": "ci", "bucket": "pass", "link": "u"}]', returncode=0),
+    )[1])
+    checks = GitHubCodeHost().get_change_checks("9", repo=identity.SLUG)
+    assert calls[0] == ["gh", "pr", "checks", "9", "--repo", identity.SLUG, "--json", "name,bucket,link"]
+    assert checks == [{"name": "ci", "bucket": "pass", "link": "u"}]
+
+
+def test_get_change_checks_returns_data_on_nonzero_exit_with_valid_json(monkeypatch):
+    """The failing/pending path: gh exits nonzero but stdout is valid JSON — must not be discarded."""
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(
+        stdout='[{"name": "ci", "bucket": "fail", "link": "u"}]', returncode=1,
+    ))
+    checks = GitHubCodeHost().get_change_checks("9", repo=identity.SLUG)
+    assert checks == [{"name": "ci", "bucket": "fail", "link": "u"}]
+
+
+def test_get_change_checks_empty_list_on_invalid_json_regardless_of_exit_code(monkeypatch):
+    """A genuine error (empty/invalid stdout) still yields [] on both exit codes."""
+    for code in (0, 1):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="not json", returncode=code))
+        assert GitHubCodeHost().get_change_checks("9") == []
+    for code in (0, 1):
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="", returncode=code))
+        assert GitHubCodeHost().get_change_checks("9") == []
 
 
 def test_get_change_mergeable_matches_scheduler_check_pr_mergeable(monkeypatch):

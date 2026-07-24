@@ -194,6 +194,17 @@ def _breaker_check_signature(args):
     print(f"stuck={'true' if stuck else 'false'} sig={sig}")
 
 
+def _marker(args):
+    from factory_core import identity
+    print(identity.marker(args.kind))
+
+
+def _markers_regex(args):
+    import re
+    from factory_core import identity
+    print("|".join(re.escape(p) for p in identity.detection_patterns()))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="factory-core")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -302,6 +313,15 @@ def main():
     pmf.add_argument("--artifacts-dir", required=True)
     pmf.add_argument("--product-name", default="Dark Factory")
     pmf.set_defaults(func=_post_mortem_format)
+
+    from factory_core import identity
+
+    mk = sub.add_parser("marker")
+    mk.add_argument("kind", choices=list(identity._MARKERS))
+    mk.set_defaults(func=_marker)
+
+    mkr = sub.add_parser("markers-regex")
+    mkr.set_defaults(func=_markers_regex)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

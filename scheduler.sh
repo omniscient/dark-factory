@@ -318,11 +318,12 @@ spec_advance_check() {
     reset_retry "${issue_num}:refine"
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
       --remove "spec-pending-review" 2>/dev/null || true
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running with new feedback.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
     if dispatch "Refine issue #${issue_num}"; then
       DISPATCHED="Refine issue #${issue_num}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -353,11 +354,12 @@ plan_advance_check() {
     reset_retry "${issue_num}:plan"
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
       --remove "plan-pending-review" 2>/dev/null || true
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running plan with new feedback.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
     if dispatch "Plan issue #${issue_num}"; then
       DISPATCHED="Plan issue #${issue_num}"
       REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -430,10 +432,11 @@ has_new_comment_after_report() {
   # posts pipeline-status comments — none are feedback, so re-running the spec on them
   # loops the pipeline (issue #124: cost report -> spurious second spec). Match on
   # footer/marker, NOT author: every comment is authored by the same PAT account.
-  local bot_re="Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline|Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler|Posted by ${FACTORY_PRODUCT_NAME} Dark Factory|Updated by ${FACTORY_PRODUCT_NAME} Dark Factory|dark-factory-cost-report|Posted by ${FACTORY_PRODUCT_NAME} Epic Autopilot"
-
+  # BOT_RE is computed once per poll cycle (see the `while true` loop top) via
+  # `factory_core/cli.py markers-regex`, sourced from identity.detection_patterns() — not
+  # hand-listed here, so it can't drift from identity.py (#181).
   local has_human
-  has_human=$(echo "$comments" | jq --arg marker "$report_marker" --arg bot "$bot_re" '
+  has_human=$(echo "$comments" | jq --arg marker "$report_marker" --arg bot "$BOT_RE" '
     (to_entries | map(select(.value.body | test($marker))) | last | .key // -1) as $ridx
     | if $ridx == -1 then false
       else (to_entries | any(.key > $ridx and (.value.body | test($bot) | not)))
@@ -525,11 +528,8 @@ failing_checks_for_pr() {
   local pr_num="$1"
   local checks
   # --repo required for the same reason as get_pr_for_issue (scheduler runs outside a checkout).
-  # NOT migrated to `codehost checks` (providers CLI, #249): GitHubCodeHost.get_change_checks
-  # returns [] whenever `gh`'s exit code is nonzero, but `gh pr checks` legitimately exits
-  # nonzero exactly when a check is failing/pending — the case this function most needs to see.
-  # Routing through it would silently blind the CI gate. See out-of-scope.md.
-  checks=$(gh pr checks "$pr_num" --repo "$FACTORY_REPO_SLUG" --json name,bucket,link 2>/dev/null) || true
+  checks=$(python3 "$FACTORY_PROVIDERS_CLI" codehost checks --id "$pr_num" \
+    --repo "$FACTORY_REPO_SLUG" --fields name,bucket,link 2>/dev/null) || true
   echo "$checks" | jq -e 'type == "array"' >/dev/null 2>&1 || checks='[]'
   echo "$checks" | jq -c '[.[] | select(.bucket == "fail")]'
 }
@@ -847,6 +847,7 @@ echo "Backlog scheduler started (poll every ${POLL_INTERVAL}s)"
 
 while true; do
   DISPATCHED=""
+  BOT_RE=$(python3 "$FACTORY_CORE_CLI" markers-regex)
 
   # Guard against rate limit exhaustion (REST call, doesn't cost GraphQL points)
   check_rate_limit
@@ -892,6 +893,7 @@ while true; do
     set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
 
     FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — CI Failing, Moved to Blocked
 
 PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In review** to **Blocked**. The factory will retry automatically, continue the existing PR branch, and attempt to fix the failures.
@@ -900,7 +902,7 @@ PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In r
 ${FAIL_LIST}
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
 
     CI_BLOCKED="${CI_BLOCKED} ${ISSUE} "
   done < <(echo "$IN_REVIEW" | jq -c '.[]')
@@ -957,12 +959,13 @@ ${FAIL_LIST}
     if is_issue_running "$ISSUE"; then continue; fi
     echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
     set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — Orphaned Run Recovered
 
 This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
   done < <(echo "$IN_PROGRESS" | jq -c '.[]')
 
   # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
@@ -1106,6 +1109,7 @@ This issue was left in **In progress** with no running factory container — the
           python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
             --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
           set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
+          FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
           gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
 "## Scheduler — Above Dispatch Ceiling
 
@@ -1123,7 +1127,7 @@ To proceed:
    Or implement directly in a local worktree.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
         fi
         continue
       fi
@@ -1214,10 +1218,11 @@ To proceed:
       fi
 
       increment_retry "${ISSUE}:plan"
+      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
       gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
       if dispatch "Plan issue #${ISSUE}"; then
         DISPATCHED="Plan issue #${ISSUE}"
         REFINE_RUNNING=$((REFINE_RUNNING + 1))
@@ -1263,10 +1268,11 @@ To proceed:
       fi
 
       increment_retry "${ISSUE}:refine"
+      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
       gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
       if dispatch "Refine issue #${ISSUE}"; then
         DISPATCHED="Refine issue #${ISSUE}"
         REFINE_RUNNING=$((REFINE_RUNNING + 1))

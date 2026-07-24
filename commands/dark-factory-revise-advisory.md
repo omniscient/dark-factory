@@ -125,6 +125,7 @@ check will detect no changes and exit 0 cleanly).
 Post a follow-up comment on the PR listing what was addressed:
 
 ```bash
+FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
 SUMMARY=$(cat "$ARTIFACTS_DIR/revise_summary.txt" 2>/dev/null || echo "(no summary)")
 gh api "repos/${FACTORY_REPO_SLUG}/pulls/$PR_NUM/reviews" \
   --method POST \
@@ -135,7 +136,7 @@ Automatically addressed **${ADVISORY_COUNT}** advisory finding(s):
 ${SUMMARY}
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" \
+${FOOTER}" \
   --field event="COMMENT" || \
   echo "revise-advisory: WARNING — posting follow-up review comment failed (continuing)"
 ```

@@ -498,6 +498,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
 1. Post a "Spec Conformance — Blocked" comment on the issue:
    ```bash
+   FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
    gh issue comment $ISSUE_NUM --body "## Spec Conformance — Blocked
 
    The implementation has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
@@ -512,25 +513,18 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    - Add \`needs-discussion\` if the spec itself needs revisiting.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+   $FOOTER"
    ```
 
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-     | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
-   if [ -n "$ITEM_ID" ]; then
-     gh project item-edit \
-       --project-id "$FACTORY_PROJECT_ID" \
-       --id "$ITEM_ID" \
-       --field-id "$FACTORY_STATUS_FIELD" \
-       --single-select-option-id "$FACTORY_STATUS_BLOCKED"
-   fi
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
    ```
 
 3. Add `needs-discussion` label:
    ```bash
-   gh issue edit $ISSUE_NUM --add-label needs-discussion
+   python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion  # TARGET-PATH
    ```
 
 4. Write blocked status to `$ARTIFACTS_DIR/conformance.md`:

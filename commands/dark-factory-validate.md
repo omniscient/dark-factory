@@ -71,6 +71,7 @@ if [ "$BLAST_ENABLED" != "skip" ]; then
 
   # 4. Block on HUMAN_REQUIRED
   if [ "$BLAST_STATUS" = "HUMAN_REQUIRED" ]; then
+    FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
     gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
 ## Blast-Radius Gate — BLOCKED
 
@@ -86,20 +87,14 @@ Remove the \`needs-discussion\` label after reviewing and approving the risk, th
 docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_NUM"
 \`\`\`
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*
+$FOOTER
 EOF
 )"
-    gh issue edit "$ISSUE_NUM" --add-label needs-discussion
+    python3 dark-factory/scripts/factory_core/providers/cli.py \
+      tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
     # Move to Blocked on the project board
-    ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-      | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
-    if [ -n "$ITEM_ID" ]; then
-      gh project item-edit \
-        --project-id "$FACTORY_PROJECT_ID" \
-        --id "$ITEM_ID" \
-        --field-id "$FACTORY_STATUS_FIELD" \
-        --single-select-option-id "$FACTORY_STATUS_BLOCKED"
-    fi
+    python3 dark-factory/scripts/factory_core/providers/cli.py \
+      tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
     exit 1
   fi
 

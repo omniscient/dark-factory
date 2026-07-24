@@ -28,6 +28,7 @@ IMPLEMENTATIONS = {
 
 HTTP_BACKED_ARGS = {
     "find_change_for": ("feat/issue-1-x",),
+    "find_change_details": ("feat/issue-1-x",),
     "open_change": (None, None, "title", "body"),
     "update_change_body": ("{id}", "body"),
     "mark_ready": ("{id}",),

@@ -84,6 +84,10 @@ def _codehost_find_change(args):
     _print(get_codehost().find_change_for(args.branch, exact=args.exact, repo=args.repo) or "")
 
 
+def _codehost_find_change_details(args):
+    _print(get_codehost().find_change_details(args.branch, exact=args.exact, repo=args.repo) or "")
+
+
 def _codehost_open_change(args):
     body = Path(args.body_file).read_text(encoding="utf-8")
     _print(get_codehost().open_change(
@@ -198,6 +202,12 @@ def main():
     cfc.add_argument("--repo")
     cfc.add_argument("--exact", action="store_true")
     cfc.set_defaults(func=_codehost_find_change)
+
+    cfcd = csub.add_parser("find-change-details")
+    cfcd.add_argument("--branch", required=True)
+    cfcd.add_argument("--repo")
+    cfcd.add_argument("--exact", action="store_true")
+    cfcd.set_defaults(func=_codehost_find_change_details)
 
     coc = csub.add_parser("open-change")
     coc.add_argument("--source")

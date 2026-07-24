@@ -15,9 +15,6 @@ re-running the factory. It deliberately escalates only to In review — it never
 The scheduler calls ``rescue-blocked --issue N`` once per Blocked item each cycle,
 *before* the Priority-3 retry loop, and skips any issue this returns ``rescued`` for.
 """
-import json
-import subprocess
-
 from factory_core import board, identity
 from factory_core.providers import get_codehost
 
@@ -33,54 +30,14 @@ def _repo() -> str:
 
 
 def pr_for_issue(issue_num: int) -> dict | None:
-    """The open PR for an issue's feature branch (feat/issue-<N>-*), or None.
-
-    Returns the first match with the fields rescue needs. ``gh`` is run with
-    ``--repo`` because the scheduler executes outside a git checkout.
-
-    Not routed through GitHubCodeHost.find_change_for (#249): that method always
-    applies ``--jq '.[0].number // empty'``, discarding the isDraft/mergeable fields
-    this function needs alongside the PR number in one call.
-    """
-    r = subprocess.run(
-        ["gh", "pr", "list", "--repo", _repo(),
-         "--search", f"head:feat/issue-{issue_num}-",
-         "--json", "number,isDraft,mergeable"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return None
-    try:
-        arr = json.loads(r.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(arr, list) or not arr:
-        return None
-    return arr[0]
+    """The open PR for an issue's feature branch (feat/issue-<N>-*), or None."""
+    return get_codehost().find_change_details(f"feat/issue-{issue_num}-", repo=_repo())
 
 
 def pr_check_buckets(pr_num: int) -> list:
-    """Bucket of every check on a PR ("pass" / "fail" / "pending" / "skipping" / …).
-
-    ``gh pr checks`` exits non-zero when any check is failing or pending, but still
-    prints valid JSON on stdout, so the return code is ignored and stdout is parsed
-    defensively (empty / non-array ⇒ []).
-
-    Not routed through GitHubCodeHost.get_change_checks (#249): that method returns
-    [] whenever gh's exit code is nonzero, discarding exactly the failing/pending
-    check data this function needs to read.
-    """
-    r = subprocess.run(
-        ["gh", "pr", "checks", str(pr_num), "--repo", _repo(), "--json", "bucket"],
-        capture_output=True, text=True,
-    )
-    try:
-        arr = json.loads(r.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(arr, list):
-        return []
-    return [c.get("bucket") for c in arr]
+    """Bucket of every check on a PR ("pass" / "fail" / "pending" / "skipping" / …)."""
+    checks = get_codehost().get_change_checks(str(pr_num), fields="bucket", repo=_repo())
+    return [c.get("bucket") for c in checks]
 
 
 def assess(issue_num: int) -> tuple[str, str]:

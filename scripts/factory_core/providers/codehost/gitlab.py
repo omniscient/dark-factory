@@ -60,6 +60,13 @@ class GitLabCodeHost(CodeHost):
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
+    def find_change_details(self, branch: str, exact: bool = False,
+                             repo: str | None = None) -> dict | None:
+        raise NotImplementedError(
+            "live GitLab MR list API — deferred; see "
+            "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
+        )
+
     def open_change(self, source: str, target: str, title: str, body: str,
                      draft: bool = False) -> str:
         raise NotImplementedError(

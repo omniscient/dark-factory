@@ -35,6 +35,25 @@ class GitHubCodeHost(CodeHost):
         out = r.stdout.strip() if r.returncode == 0 else ""
         return out or None
 
+    def find_change_details(self, branch: str, exact: bool = False,
+                             repo: str | None = None) -> dict | None:
+        cmd = ["gh", "pr", "list"]
+        if repo:
+            cmd += ["--repo", repo]
+        if exact:
+            cmd += ["--head", branch]
+        else:
+            cmd += ["--search", f"head:{branch}"]
+        cmd += ["--json", "number,isDraft,mergeable"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        try:
+            arr = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return None
+        return arr[0] if isinstance(arr, list) and arr else None
+
     def open_change(self, source: str | None, target: str | None, title: str, body: str,
                      draft: bool = False, repo: str | None = None) -> str:
         cmd = ["gh", "pr", "create"]
@@ -79,8 +98,6 @@ class GitHubCodeHost(CodeHost):
             cmd += ["--repo", repo]
         cmd += ["--json", fields]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            return []
         try:
             data = json.loads(r.stdout)
         except json.JSONDecodeError:

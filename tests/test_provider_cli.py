@@ -51,6 +51,54 @@ def test_codehost_find_change_passes_repo_and_exact(monkeypatch):
     assert seen == {"branch": "feat/issue-42-slug", "exact": True, "repo": "o/r"}
 
 
+def test_codehost_find_change_details_prints_json(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeCodeHost:
+        def find_change_details(self, branch, exact=False, repo=None):
+            return {"number": 9, "isDraft": False, "mergeable": "MERGEABLE"}
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "codehost", "find-change-details", "--branch", "feat/issue-9-",
+    ])
+    cli_mod.main()
+    assert json.loads(capsys.readouterr().out) == {
+        "number": 9, "isDraft": False, "mergeable": "MERGEABLE",
+    }
+
+
+def test_codehost_find_change_details_prints_empty_string_on_none(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeCodeHost:
+        def find_change_details(self, branch, exact=False, repo=None):
+            return None
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "codehost", "find-change-details", "--branch", "feat/issue-9-",
+    ])
+    cli_mod.main()
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_codehost_find_change_details_passes_repo_and_exact(monkeypatch):
+    import factory_core.providers.cli as cli_mod
+
+    seen = {}
+
+    class _FakeCodeHost:
+        def find_change_details(self, branch, exact=False, repo=None):
+            seen.update(branch=branch, exact=exact, repo=repo)
+            return None
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "codehost", "find-change-details", "--branch", "feat/issue-9-slug",
+        "--repo", "o/r", "--exact",
+    ])
+    cli_mod.main()
+    assert seen == {"branch": "feat/issue-9-slug", "exact": True, "repo": "o/r"}
+
+
 def test_tracker_get_default_fields(monkeypatch):
     import factory_core.providers.cli as cli_mod
 

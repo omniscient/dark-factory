@@ -462,6 +462,7 @@ on_failure() {
       # would then retry it as "Fix" (implement) — wrong intent for a pipeline phase.
       _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "${TMP_OUT:-}"
       echo "Refinement pipeline failed (exit $EXIT_CODE) for issue #$ISSUE_NUM"
+      FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker refinement)
       post_or_update_comment "$REFINE_FAILURE_MARKER" \
         "${REFINE_FAILURE_MARKER}
 ## Refinement Pipeline — Failed
@@ -474,12 +475,13 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
+${FOOTER}"
     else
       _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "${TMP_OUT:-}"
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "${TMP_OUT:-}" || true
       set_board_status "blocked" 2>/dev/null || true
+      FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory)
       post_or_update_comment "$FACTORY_FAILURE_MARKER" \
         "${FACTORY_FAILURE_MARKER}
 ## Dark Factory Run — Failed
@@ -493,7 +495,7 @@ docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+${FOOTER}"
     fi
   fi
   # Cost report runs LAST and is non-fatal: a failure here (missing dependency,
@@ -727,6 +729,7 @@ Merged origin/main into the feature branch using the tiered resolution strategy.
 EOF
 
   # --- Post success comment ---
+  FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory)
   gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
 "## Dark Factory — Merge Conflicts Resolved
 
@@ -735,7 +738,7 @@ EOF
 The branch has been pushed and is ready for re-review.
 
 ---
-*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" 2>/dev/null || true
+${FOOTER}" 2>/dev/null || true
 
   echo "[deconflict] Done — issue #${ISSUE_NUM} conflicts resolved and pushed."
   exit 0

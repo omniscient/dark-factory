@@ -154,6 +154,7 @@ Exit `0`. `status-in-review` and `report` proceed.
 
 1. Post a "Code Review — Blocked" comment on the issue, listing the blocking findings (from `.blockers` in the result JSON):
    ```bash
+   FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
    gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body "## Code Review — Blocked
 
    The AI code reviewer found ${BLOCKERS} blocking issue(s) (severity ≥ ${BLOCK_THRESHOLD}). See the inline comments on PR #${PR_NUM}.
@@ -164,23 +165,17 @@ Exit `0`. `status-in-review` and `report` proceed.
    Fix the issues and re-run: \`docker compose --profile factory run --rm dark-factory \\\"Continue issue #${ISSUE_NUM}\\\"\`, or add \`needs-discussion\` if a finding is a false positive.
 
    ---
-   *Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+   ${FOOTER}"
    ```
 2. Move the issue to **Blocked** on the project board:
    ```bash
-   ITEM_ID=$(gh project item-list "$FACTORY_PROJECT_NUMBER" --owner "$FACTORY_OWNER" --format json --limit 200 \
-     | jq -r ".items[] | select(.content.number == $ISSUE_NUM and .content.type == \"Issue\") | .id")
-   if [ -n "$ITEM_ID" ]; then
-     gh project item-edit \
-       --project-id "$FACTORY_PROJECT_ID" \
-       --id "$ITEM_ID" \
-       --field-id "$FACTORY_STATUS_FIELD" \
-       --single-select-option-id "$FACTORY_STATUS_BLOCKED"
-   fi
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
    ```
 3. Add the `needs-discussion` label:
    ```bash
-   gh issue edit "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --add-label needs-discussion
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
    ```
 4. Write to `$ARTIFACTS_DIR/review.md`:
    ```bash

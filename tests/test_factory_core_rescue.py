@@ -9,6 +9,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import rescue
 
 
+def test_pr_for_issue_routes_through_codehost_find_change_details(monkeypatch):
+    seen = {}
+
+    class _FakeCodeHost:
+        def find_change_details(self, branch, exact=False, repo=None):
+            seen.update(branch=branch, repo=repo)
+            return {"number": 7, "isDraft": False, "mergeable": "MERGEABLE"}
+    monkeypatch.setattr(rescue, "get_codehost", lambda: _FakeCodeHost())
+    result = rescue.pr_for_issue(7)
+    assert seen == {"branch": "feat/issue-7-", "repo": rescue._repo()}
+    assert result == {"number": 7, "isDraft": False, "mergeable": "MERGEABLE"}
+
+
+def test_pr_check_buckets_routes_through_codehost_get_change_checks(monkeypatch):
+    seen = {}
+
+    class _FakeCodeHost:
+        def get_change_checks(self, id, fields="name,bucket,link", repo=None):
+            seen.update(id=id, fields=fields, repo=repo)
+            return [{"bucket": "fail"}, {"bucket": "pass"}]
+    monkeypatch.setattr(rescue, "get_codehost", lambda: _FakeCodeHost())
+    result = rescue.pr_check_buckets(9)
+    assert seen == {"id": "9", "fields": "bucket", "repo": rescue._repo()}
+    assert result == ["fail", "pass"]
+
+
 def _cp(stdout="", code=0):
     return subprocess.CompletedProcess([], code, stdout=stdout, stderr="")
 
