@@ -1104,6 +1104,71 @@ assert_eq "Q3: get_items_by_status: null status does not raise under set -e" "0"
 assert_eq "Q4: get_items_by_status: null status excluded from bucket" "0" "$(echo "$_Q_NULL_OUT" | jq 'length')"
 
 # ==========================================
+# R: Stage guard semantics (#185) — dispatch_stage must preserve per-stage heterogeneity
+# ==========================================
+echo ""
+echo "--- R: Stage guard semantics ---"
+
+# R1: stage_review_triage (P1) has no guard — dispatch_stage must still call it when MAIN_IS_RED=true.
+MAIN_IS_RED=true; SESSION_WINDOW_PAUSED=false
+IN_REVIEW='[{"content":{"number":901,"title":"t"},"labels":[]}]'
+DISPATCHED=""; CI_BLOCKED=""
+get_new_comments() { echo '[{"body":"please continue","author":"human"}]'; }
+classify_comments() { echo "CONTINUE"; }
+is_issue_running() { return 1; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f get_new_comments classify_comments is_issue_running dispatch
+: > "$STUB_LOG"
+dispatch_stage stage_review_triage
+assert_eq "R1: dispatch_stage(stage_review_triage) still dispatches Continue when MAIN_IS_RED=true" \
+  "1" "$(grep -c 'dispatch Continue issue #901' "$STUB_LOG" || true)"
+
+# R2: stage_plan (P4) is SESSION_WINDOW_PAUSED-only — dispatch_stage must still call it when only MAIN_IS_RED=true.
+MAIN_IS_RED=true; SESSION_WINDOW_PAUSED=false; REFINED='[]'; REFINE_RUNNING=0
+STDOUT_R2=$(dispatch_stage stage_plan 2>&1)
+assert_eq "R2: dispatch_stage(stage_plan) does not skip when only MAIN_IS_RED is true" \
+  "0" "$(echo "$STDOUT_R2" | grep -c 'action=skip_plan')"
+
+# R3: dispatch_stage(stage_plan) DOES skip when SESSION_WINDOW_PAUSED=true.
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=true
+STDOUT_R3=$(dispatch_stage stage_plan 2>&1)
+assert_eq "R3: dispatch_stage(stage_plan) skips on session_window_paused" \
+  "1" "$(echo "$STDOUT_R3" | grep -c 'action=skip_plan')"
+
+# R4: dispatch_stage(stage_conflict_resolve) skips on MAIN_IS_RED=true (red-or-paused guard).
+MAIN_IS_RED=true; SESSION_WINDOW_PAUSED=false; IN_REVIEW='[]'
+STDOUT_R4=$(dispatch_stage stage_conflict_resolve 2>&1)
+assert_eq "R4: dispatch_stage(stage_conflict_resolve) skips on main_red" \
+  "1" "$(echo "$STDOUT_R4" | grep -c 'action=skip_deconflict')"
+
+# R5: dispatch_stage(stage_ready_implement) skips on SESSION_WINDOW_PAUSED=true (red-or-paused guard).
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=true; READY='[]'
+STDOUT_R5=$(dispatch_stage stage_ready_implement 2>&1)
+assert_eq "R5: dispatch_stage(stage_ready_implement) skips on session_window_paused" \
+  "1" "$(echo "$STDOUT_R5" | grep -c 'action=skip_implement')"
+
+# R6: dispatch_stage(stage_blocked_retry) skips on MAIN_IS_RED=true (red-or-paused guard).
+MAIN_IS_RED=true; SESSION_WINDOW_PAUSED=false; BLOCKED='[]'; RESCUED=""
+STDOUT_R6=$(dispatch_stage stage_blocked_retry 2>&1)
+assert_eq "R6: dispatch_stage(stage_blocked_retry) skips on main_red" \
+  "1" "$(echo "$STDOUT_R6" | grep -c 'action=skip_blocked_retry')"
+
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false
+
+# R7: stage_epic_autopilot is excluded from the guard table (own compound condition, R3).
+assert_eq "R7: stage_epic_autopilot not a STAGE_GUARD key" \
+  "0" "$([ -v 'STAGE_GUARD[stage_epic_autopilot]' ] && echo 1 || echo 0)"
+assert_eq "R7b: stage_epic_autopilot not in STAGE_ORDER" \
+  "0" "$(printf '%s\n' "${STAGE_ORDER[@]}" | grep -c '^stage_epic_autopilot$')"
+
+# R8: stage_review_triage is in STAGE_ORDER with guard type "none" (runs unconditionally
+# through dispatch_stage, matching its already-guardless behavior).
+assert_eq "R8: stage_review_triage is in STAGE_ORDER" \
+  "1" "$(printf '%s\n' "${STAGE_ORDER[@]}" | grep -c '^stage_review_triage$')"
+assert_eq "R8b: stage_review_triage guard type is none" \
+  "none" "${STAGE_GUARD[stage_review_triage]}"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
