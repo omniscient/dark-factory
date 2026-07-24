@@ -783,47 +783,44 @@ ${FOOTER}" 2>/dev/null || true
 # human comments are processed. Honors SKIP_LABELS, CI_BLOCKED, and is_issue_running.
 # UNKNOWN is skipped — GitHub hasn't computed mergeability yet.
 stage_conflict_resolve() {
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_deconflict"
-  elif [ "${CONFLICT_RESOLUTION_ENABLED:-true}" = "true" ]; then
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac
-      if is_issue_running "$ISSUE"; then continue; fi
+  [ "${CONFLICT_RESOLUTION_ENABLED:-true}" = "true" ] || return 0
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+    case "$CI_BLOCKED" in *" $ISSUE "*) continue ;; esac
+    if is_issue_running "$ISSUE"; then continue; fi
 
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
+    SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
+    if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+      trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+      continue
+    fi
 
-      RETRIES=$(get_retry_count "${ISSUE}:resolve")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
-        continue
-      fi
+    RETRIES=$(get_retry_count "${ISSUE}:resolve")
+    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+      continue
+    fi
 
-      PR_NUM=$(get_pr_for_issue "$ISSUE")
-      [ -z "$PR_NUM" ] && continue
+    PR_NUM=$(get_pr_for_issue "$ISSUE")
+    [ -z "$PR_NUM" ] && continue
 
-      MERGEABLE=$(check_pr_mergeable "$PR_NUM")
-      case "$MERGEABLE" in
-        CONFLICTING)
-          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
-          increment_retry "${ISSUE}:resolve" || true
-          if dispatch "Deconflict issue #${ISSUE}"; then
-            DISPATCHED="Deconflict issue #${ISSUE}"
-          fi
-          ;;
-        UNKNOWN)
-          echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=UNKNOWN action=skip"
-          ;;
-      esac
-    done < <(echo "$IN_REVIEW" | jq -c '.[]')
-  fi
+    MERGEABLE=$(check_pr_mergeable "$PR_NUM")
+    case "$MERGEABLE" in
+      CONFLICTING)
+        echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
+        increment_retry "${ISSUE}:resolve" || true
+        if dispatch "Deconflict issue #${ISSUE}"; then
+          DISPATCHED="Deconflict issue #${ISSUE}"
+        fi
+        ;;
+      UNKNOWN)
+        echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=UNKNOWN action=skip"
+        ;;
+    esac
+  done < <(echo "$IN_REVIEW" | jq -c '.[]')
 }
 
 # --- Priority 1: In Review items with new comments (unblock existing work) ---
@@ -864,29 +861,26 @@ stage_review_triage() {
 
 # --- Priority 2: Ready items (implement what's already refined+planned) ---
 stage_ready_implement() {
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_implement"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      if [ "$IN_PROGRESS_COUNT" -ge "$MAX_IN_PROGRESS" ]; then break; fi
-      if [ "$IN_REVIEW_COUNT" -ge "$MAX_IN_REVIEW" ]; then break; fi
-      if ! dependencies_met "$ISSUE" "$BOARD_ITEMS"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+    if [ "$IN_PROGRESS_COUNT" -ge "$MAX_IN_PROGRESS" ]; then break; fi
+    if [ "$IN_REVIEW_COUNT" -ge "$MAX_IN_REVIEW" ]; then break; fi
+    if ! dependencies_met "$ISSUE" "$BOARD_ITEMS"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
 
-      # Dispatch ceiling (#339): park above-ceiling work for human pairing. The label
-      # check stops the comment/board-move from repeating every poll cycle — the label
-      # persists and comes back in the next fetch_board_items snapshot.
-      if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
-        if ! has_above_ceiling_label "$item"; then
-          echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
-          python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
-            --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
-          set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
-          FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-          gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
+    # Dispatch ceiling (#339): park above-ceiling work for human pairing. The label
+    # check stops the comment/board-move from repeating every poll cycle — the label
+    # persists and comes back in the next fetch_board_items snapshot.
+    if [ "${DISPATCH_CEILING_ENABLED:-true}" = "true" ] && is_above_ceiling "$item"; then
+      if ! has_above_ceiling_label "$item"; then
+        echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
+        python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
+          --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
+        set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
+        FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+        gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
 "## Scheduler — Above Dispatch Ceiling
 
 This ticket has been classified as **above the autonomous dispatch ceiling** \
@@ -904,163 +898,150 @@ To proceed:
 
 ---
 ${FOOTER}" 2>/dev/null || true
-        fi
-        continue
       fi
+      continue
+    fi
 
-      if dispatch "Fix issue #${ISSUE}"; then
-        DISPATCHED="Fix issue #${ISSUE}"
-      fi
-    done < <(echo "$READY" | jq -c '.[]')
-  fi
+    if dispatch "Fix issue #${ISSUE}"; then
+      DISPATCHED="Fix issue #${ISSUE}"
+    fi
+  done < <(echo "$READY" | jq -c '.[]')
 }
 
 # --- Priority 3: Blocked items (retry stuck work) ---
 stage_blocked_retry() {
-  if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=skip_blocked_retry"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
-      if has_skip_label "$item"; then continue; fi
-      # Promoted to In review by the Priority 0.6 rescue this cycle — don't re-dispatch
-      # (its green PR is now in the merge flow; BLOCKED was snapshotted before the move).
-      case "$RESCUED" in *" $ISSUE "*) continue ;; esac
-      # Above-ceiling items in Blocked are parked by design (#339), not failed — the
-      # retry loop must not auto-dispatch them.
-      if has_above_ceiling_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
+    if has_skip_label "$item"; then continue; fi
+    # Promoted to In review by the Priority 0.6 rescue this cycle — don't re-dispatch
+    # (its green PR is now in the merge flow; BLOCKED was snapshotted before the move).
+    case "$RESCUED" in *" $ISSUE "*) continue ;; esac
+    # Above-ceiling items in Blocked are parked by design (#339), not failed — the
+    # retry loop must not auto-dispatch them.
+    if has_above_ceiling_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
 
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
+    SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
+    if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+      trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+      continue
+    fi
 
-      RETRIES=$(get_retry_count "$ISSUE")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
-        continue
-      fi
+    RETRIES=$(get_retry_count "$ISSUE")
+    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
+      continue
+    fi
 
-      increment_retry "$ISSUE"
-      # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
-      # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
-      # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
-      if [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
-        if dispatch "Continue issue #${ISSUE}"; then
-          DISPATCHED="Continue issue #${ISSUE}"
-        fi
-      else
-        if dispatch "Fix issue #${ISSUE}"; then
-          DISPATCHED="Fix issue #${ISSUE}"
-        fi
+    increment_retry "$ISSUE"
+    # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
+    # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
+    # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
+    if [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
+      if dispatch "Continue issue #${ISSUE}"; then
+        DISPATCHED="Continue issue #${ISSUE}"
       fi
-    done < <(echo "$BLOCKED" | jq -c '.[]')
-  fi
+    else
+      if dispatch "Fix issue #${ISSUE}"; then
+        DISPATCHED="Fix issue #${ISSUE}"
+      fi
+    fi
+  done < <(echo "$BLOCKED" | jq -c '.[]')
 }
 
 # --- Priority 4: Refined items (plan generation — advance refined work before pulling new backlog) ---
 stage_plan() {
-  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_plan"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
 
-      # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
-      if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
-         && has_direct_to_pr_label "$item"; then
-        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-          plan_advance_check "$ISSUE" "$item"
-        fi
-        continue
+    # Direct-to-PR plan auto-advance: handle before refine_skip_label blocks plan-pending-review
+    if echo "$item" | jq -r '.labels[]?' 2>/dev/null | grep -qi "plan-pending-review" \
+       && has_direct_to_pr_label "$item"; then
+      if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+        plan_advance_check "$ISSUE" "$item"
       fi
+      continue
+    fi
 
-      if has_refine_skip_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+    if has_refine_skip_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
+    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
+    SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
+    if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+      trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+      continue
+    fi
 
-      RETRIES=$(get_retry_count "${ISSUE}:plan")
-      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
-        continue
-      fi
+    RETRIES=$(get_retry_count "${ISSUE}:plan")
+    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+      trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+      continue
+    fi
 
-      increment_retry "${ISSUE}:plan"
-      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
+    increment_retry "${ISSUE}:plan"
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
 
 ---
 ${FOOTER}" 2>/dev/null || true
-      if dispatch "Plan issue #${ISSUE}"; then
-        DISPATCHED="Plan issue #${ISSUE}"
-        REFINE_RUNNING=$((REFINE_RUNNING + 1))
-      fi
-    done < <(echo "$REFINED" | jq -c '.[]')
-  fi
+    if dispatch "Plan issue #${ISSUE}"; then
+      DISPATCHED="Plan issue #${ISSUE}"
+      REFINE_RUNNING=$((REFINE_RUNNING + 1))
+    fi
+  done < <(echo "$REFINED" | jq -c '.[]')
 }
 
 # --- Priority 5: Backlog items (refinement — prepare future work) ---
 stage_refine() {
-  if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
-    echo "[$(date -u +%FT%TZ)] session_window_paused=true action=skip_refine"
-  else
-    while IFS= read -r item; do
-      [ -n "$DISPATCHED" ] && break
-      ISSUE=$(get_issue_number "$item")
+  while IFS= read -r item; do
+    [ -n "$DISPATCHED" ] && break
+    ISSUE=$(get_issue_number "$item")
 
-      # Handle spec-pending-review items first (before skip-label check would filter them)
-      ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
-      if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
-        if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
-          spec_advance_check "$ISSUE" "$item"
-        fi
-        continue
+    # Handle spec-pending-review items first (before skip-label check would filter them)
+    ITEM_LABELS=$(echo "$item" | jq -r '.labels[]?' 2>/dev/null)
+    if echo "$ITEM_LABELS" | grep -qi "spec-pending-review"; then
+      if ! is_issue_running "$ISSUE" && [ "$REFINE_RUNNING" -lt "$REFINE_WIP_LIMIT" ]; then
+        spec_advance_check "$ISSUE" "$item"
       fi
+      continue
+    fi
 
-      if has_refine_skip_label "$item"; then continue; fi
-      # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
-      # Unlabelled items are left for triage — humans add the label when the issue is ready.
-      if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
-      if is_issue_running "$ISSUE"; then continue; fi
-      if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
+    if has_refine_skip_label "$item"; then continue; fi
+    # Opt-in gate: only auto-refine Backlog items labelled ready-for-agent.
+    # Unlabelled items are left for triage — humans add the label when the issue is ready.
+    if ! has_opt_in_refine_label "$item" && ! has_direct_to_pr_label "$item"; then continue; fi
+    if is_issue_running "$ISSUE"; then continue; fi
+    if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
-      SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
-      if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-        SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
-        trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
-        continue
-      fi
+    SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
+    if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+      trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+      continue
+    fi
 
-      RETRIES=$(get_retry_count "${ISSUE}:refine")
-      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-        trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
-        continue
-      fi
+    RETRIES=$(get_retry_count "${ISSUE}:refine")
+    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+      trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+      continue
+    fi
 
-      increment_retry "${ISSUE}:refine"
-      FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-      gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+    increment_retry "${ISSUE}:refine"
+    FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
 
 ---
 ${FOOTER}" 2>/dev/null || true
-      if dispatch "Refine issue #${ISSUE}"; then
-        DISPATCHED="Refine issue #${ISSUE}"
-        REFINE_RUNNING=$((REFINE_RUNNING + 1))
-      fi
-    done < <(echo "$BACKLOG" | jq -c '.[]')
-  fi
+    if dispatch "Refine issue #${ISSUE}"; then
+      DISPATCHED="Refine issue #${ISSUE}"
+      REFINE_RUNNING=$((REFINE_RUNNING + 1))
+    fi
+  done < <(echo "$BACKLOG" | jq -c '.[]')
 }
 
 # --- Priority 6: Epic Autopilot (starved self-unlock, #571) ---
@@ -1074,6 +1055,50 @@ stage_epic_autopilot() {
     echo "[$(date -u +%FT%TZ)] ${AP_OUT}"
     case "$AP_OUT" in *"autopilot=advanced"*|*"autopilot=epic_started"*) DISPATCHED="$AP_OUT" ;; esac
   fi
+}
+
+# --- Stage guard-type table (#185): collapses the 3 verbatim MAIN_IS_RED ||
+# SESSION_WINDOW_PAUSED conditionals into one declarative evaluation site. Guard types
+# are genuinely heterogeneous — do not apply one guard uniformly (P1 is unguarded;
+# P4/P5 are session-window-only; P6 keeps its own compound condition below the table).
+declare -A STAGE_GUARD=(
+  [stage_conflict_resolve]=red_or_paused
+  [stage_review_triage]=none
+  [stage_ready_implement]=red_or_paused
+  [stage_blocked_retry]=red_or_paused
+  [stage_plan]=paused_only
+  [stage_refine]=paused_only
+)
+declare -A STAGE_SKIP_ACTION=(
+  [stage_conflict_resolve]=skip_deconflict
+  [stage_ready_implement]=skip_implement
+  [stage_blocked_retry]=skip_blocked_retry
+  [stage_plan]=skip_plan
+  [stage_refine]=skip_refine
+)
+STAGE_ORDER=(stage_conflict_resolve stage_review_triage stage_ready_implement stage_blocked_retry stage_plan stage_refine)
+
+# The single declarative evaluation site R3 requires. Pre-guard-defined (unlike the bare
+# for-loop it replaces at the call site) so SCHEDULER_SOURCE_ONLY=1 tests can exercise the
+# guard directly, per-stage, without needing a live poll cycle.
+dispatch_stage() {
+  local _stage="$1"
+  case "${STAGE_GUARD[$_stage]}" in
+    red_or_paused)
+      if [ "$MAIN_IS_RED" = "true" ] || [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+        echo "[$(date -u +%FT%TZ)] main_red=${MAIN_IS_RED} session_window_paused=${SESSION_WINDOW_PAUSED} action=${STAGE_SKIP_ACTION[$_stage]}"
+        return 0
+      fi
+      ;;
+    paused_only)
+      if [ "$SESSION_WINDOW_PAUSED" = "true" ]; then
+        echo "[$(date -u +%FT%TZ)] session_window_paused=true action=${STAGE_SKIP_ACTION[$_stage]}"
+        return 0
+      fi
+      ;;
+    none) ;;
+  esac
+  "$_stage"
 }
 
 # When sourced for testing (SCHEDULER_SOURCE_ONLY=1) stop here: the helper functions
@@ -1223,23 +1248,10 @@ while true; do
     fi
   fi
 
-  # --- Priority 1.5: conflict resolution (see stage_conflict_resolve) ---
-  stage_conflict_resolve
-
-  # --- Priority 1: in-review comment triage (see stage_review_triage) ---
-  stage_review_triage
-
-  # --- Priority 2: Ready → implement (see stage_ready_implement) ---
-  stage_ready_implement
-
-  # --- Priority 3: Blocked → retry (see stage_blocked_retry) ---
-  stage_blocked_retry
-
-  # --- Priority 4: Refined → plan (see stage_plan) ---
-  stage_plan
-
-  # --- Priority 5: Backlog → refine (see stage_refine) ---
-  stage_refine
+  # --- Priorities 1.5/1/2/3/4/5: guard-table-driven dispatch (see dispatch_stage) ---
+  for _stage in "${STAGE_ORDER[@]}"; do
+    dispatch_stage "$_stage"
+  done
 
   # --- Priority 6: Epic Autopilot (see stage_epic_autopilot) ---
   stage_epic_autopilot
