@@ -15,9 +15,6 @@ re-running the factory. It deliberately escalates only to In review — it never
 The scheduler calls ``rescue-blocked --issue N`` once per Blocked item each cycle,
 *before* the Priority-3 retry loop, and skips any issue this returns ``rescued`` for.
 """
-import json
-import subprocess
-
 from factory_core import board, identity
 from factory_core.providers import get_codehost
 
@@ -38,27 +35,9 @@ def pr_for_issue(issue_num: int) -> dict | None:
 
 
 def pr_check_buckets(pr_num: int) -> list:
-    """Bucket of every check on a PR ("pass" / "fail" / "pending" / "skipping" / …).
-
-    ``gh pr checks`` exits non-zero when any check is failing or pending, but still
-    prints valid JSON on stdout, so the return code is ignored and stdout is parsed
-    defensively (empty / non-array ⇒ []).
-
-    Not routed through GitHubCodeHost.get_change_checks (#249): that method returns
-    [] whenever gh's exit code is nonzero, discarding exactly the failing/pending
-    check data this function needs to read.
-    """
-    r = subprocess.run(
-        ["gh", "pr", "checks", str(pr_num), "--repo", _repo(), "--json", "bucket"],
-        capture_output=True, text=True,
-    )
-    try:
-        arr = json.loads(r.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(arr, list):
-        return []
-    return [c.get("bucket") for c in arr]
+    """Bucket of every check on a PR ("pass" / "fail" / "pending" / "skipping" / …)."""
+    checks = get_codehost().get_change_checks(str(pr_num), fields="bucket", repo=_repo())
+    return [c.get("bucket") for c in checks]
 
 
 def assess(issue_num: int) -> tuple[str, str]:
