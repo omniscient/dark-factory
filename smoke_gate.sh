@@ -41,7 +41,24 @@ _smoke_check_main() {
   return 0
 }
 
+# Lists OPEN regression tickets bearing SMOKE_MARKER, oldest first, one number per
+# line. GitHub is the source of truth: the local state files can be lost on container
+# recreate, which historically duplicated tickets on red and stranded them open on
+# green. Returns gh's exit code so callers can distinguish "no open tickets" (empty
+# output, rc 0) from "could not ask GitHub" (rc non-zero → fall back to state file).
+_smoke_list_open_red_issues() {
+  gh issue list \
+    --repo "$FACTORY_REPO_SLUG" \
+    --label regression --state open --limit 100 \
+    --json number,body \
+    --jq "[ .[] | select(.body | contains(\"${SMOKE_MARKER}\")) | .number ] | sort | .[]" \
+    2>/dev/null
+}
+
 # Writes sentinel, files or updates the regression ticket, then exits 0 (clean halt).
+# At most ONE marker ticket stays open: an existing open ticket is adopted (oldest
+# wins, so links/comments stay in one place) and duplicates are closed before
+# commenting; a new ticket is created only when none is open.
 _smoke_on_red() {
   echo "[smoke_gate] main is RED — halting factory run cleanly (exit 0, no per-ticket failure)"
   mkdir -p "${SMOKE_STATE_DIR}"
@@ -51,9 +68,32 @@ _smoke_on_red() {
   touch "${SMOKE_STATE_DIR}/main-red-last-recheck"
 
   local ISSUE_FILE="${SMOKE_STATE_DIR}/main-is-red-issue"
-  if [ -f "$ISSUE_FILE" ]; then
-    local REGR_NUM
-    REGR_NUM=$(cat "$ISSUE_FILE")
+  local FILE_NUM=""
+  [ -f "$ISSUE_FILE" ] && FILE_NUM=$(cat "$ISSUE_FILE")
+
+  local OPEN_NUMS="" LIST_OK=1
+  OPEN_NUMS=$(_smoke_list_open_red_issues) && LIST_OK=0
+
+  # Canonical ticket: the state-file one if present; otherwise adopt the oldest open
+  # marker ticket from GitHub (state file lost, e.g. container recreate). Every other
+  # open marker ticket is closed as a duplicate.
+  local REGR_NUM="$FILE_NUM"
+  if [ "$LIST_OK" -eq 0 ]; then
+    if [ -z "$REGR_NUM" ] && [ -n "$OPEN_NUMS" ]; then
+      REGR_NUM=$(echo "$OPEN_NUMS" | head -1)
+    fi
+    local DUP
+    for DUP in $OPEN_NUMS; do
+      [ "$DUP" = "$REGR_NUM" ] && continue
+      gh issue close "$DUP" \
+        --repo "$FACTORY_REPO_SLUG" \
+        --comment "Duplicate of #${REGR_NUM} — only one main-red regression ticket stays open." \
+        2>/dev/null || true
+    done
+  fi
+
+  if [ -n "$REGR_NUM" ]; then
+    echo "$REGR_NUM" > "$ISSUE_FILE"
     gh issue comment "$REGR_NUM" \
       --repo "$FACTORY_REPO_SLUG" \
       --body "main still red at $(date -u +%FT%TZ) — factory implementation runs remain paused." \
@@ -70,7 +110,6 @@ The dark factory is pausing all implementation dispatches (Priority 1.5/2/3) unt
 
 This ticket closes automatically on the next green gate pass.
 EOF
-    local REGR_NUM
     REGR_NUM=$(python3 "$PROVIDERS_CLI" tracker create \
       --title "main is red: tsc/python import failure" \
       --body-file "$BODY_FILE" \
@@ -82,24 +121,32 @@ EOF
   exit 0
 }
 
-# On green: removes sentinel (if present) and closes regression ticket (if open).
+# On green: removes sentinel (if present) and closes ALL open regression tickets —
+# swept from GitHub, not just the state-file number, so tickets orphaned by a lost
+# state dir still get closed instead of leaking open forever.
 _smoke_on_green() {
-  if [ ! -f "${SMOKE_STATE_DIR}/main-is-red" ]; then
+  local ISSUE_FILE="${SMOKE_STATE_DIR}/main-is-red-issue"
+  local FILE_NUM=""
+  [ -f "$ISSUE_FILE" ] && FILE_NUM=$(cat "$ISSUE_FILE")
+
+  local OPEN_NUMS=""
+  OPEN_NUMS=$(_smoke_list_open_red_issues) || true
+
+  if [ ! -f "${SMOKE_STATE_DIR}/main-is-red" ] && [ -z "$FILE_NUM" ] && [ -z "$OPEN_NUMS" ]; then
     return 0
   fi
-  echo "[smoke_gate] main is GREEN — removing red sentinel and closing regression ticket"
+  echo "[smoke_gate] main is GREEN — removing red sentinel and closing regression ticket(s)"
   rm -f "${SMOKE_STATE_DIR}/main-is-red" "${SMOKE_STATE_DIR}/main-red-last-recheck"
 
-  local ISSUE_FILE="${SMOKE_STATE_DIR}/main-is-red-issue"
-  if [ -f "$ISSUE_FILE" ]; then
-    local REGR_NUM
-    REGR_NUM=$(cat "$ISSUE_FILE")
+  # Union of the state-file ticket (covers a failed GitHub sweep) and the swept list.
+  local REGR_NUM
+  for REGR_NUM in $(printf '%s\n%s\n' "$FILE_NUM" "$OPEN_NUMS" | grep -E '^[0-9]+$' | sort -un); do
     gh issue close "$REGR_NUM" \
       --repo "$FACTORY_REPO_SLUG" \
       --comment "main smoke gate passed — closing regression ticket." \
       2>/dev/null || true
-    rm -f "$ISSUE_FILE"
-  fi
+  done
+  rm -f "$ISSUE_FILE"
 }
 
 # Built-in default for the smoke-gate hook — called by hooks.sh run_hook when no

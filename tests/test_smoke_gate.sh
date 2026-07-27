@@ -58,9 +58,17 @@ python3() {
   fi
   python "$@"
 }
+# GH_LIST_OUTPUT: space-separated issue numbers the stub emits (one per line) for
+# `gh issue list` — emulates _smoke_list_open_red_issues's post---jq output.
+GH_LIST_OUTPUT=""
+export GH_LIST_OUTPUT
 # shellcheck disable=SC2317
 gh() {
   echo "gh $*" >> "$STUB_LOG"
+  if echo "$*" | grep -q "issue list"; then
+    # shellcheck disable=SC2086
+    [ -n "${GH_LIST_OUTPUT:-}" ] && printf '%s\n' $GH_LIST_OUTPUT
+  fi
   return 0
 }
 # Functions that must NOT be called on red main
@@ -173,6 +181,47 @@ assert_file_absent "sentinel removed by green recheck" "${SMOKE_STATE_DIR}/main-
 assert_file_absent "throttle stamp removed by green recheck" "${SMOKE_STATE_DIR}/main-red-last-recheck"
 GH_CLOSES4=$(grep -c "gh.*issue close" "$STUB_LOG" 2>/dev/null || true)
 assert_eq "regression ticket closed by green recheck" "1" "$GH_CLOSES4"
+
+# ---- Phase 5: Green sweep — orphaned tickets closed with NO local state ----
+echo ""
+echo "--- Phase 5: Green sweep closes orphaned open tickets despite lost state files ---"
+TSC_FAIL=0; PY_FAIL=0; export TSC_FAIL PY_FAIL
+> "$STUB_LOG"
+rm -f "${SMOKE_STATE_DIR}/main-is-red" "${SMOKE_STATE_DIR}/main-is-red-issue" \
+      "${SMOKE_STATE_DIR}/main-red-last-recheck"
+GH_LIST_OUTPUT="264 283 297"; export GH_LIST_OUTPUT
+INTENT=fix; export INTENT
+
+(run_smoke_gate) || true
+
+GH_CLOSES5=$(grep -c "gh issue close" "$STUB_LOG" 2>/dev/null || true)
+assert_eq "green sweep closes ALL open marker tickets (no state file)" "3" "$GH_CLOSES5"
+for N in 264 283 297; do
+  CLOSED_N=$(grep -c "gh issue close $N " "$STUB_LOG" 2>/dev/null || true)
+  assert_eq "green sweep closed #$N" "1" "$CLOSED_N"
+done
+
+# ---- Phase 6: Red dedup — adopt oldest open ticket, close duplicates, no create ----
+echo ""
+echo "--- Phase 6: Red with lost state file adopts oldest open ticket and closes dupes ---"
+TSC_FAIL=1; PY_FAIL=0; export TSC_FAIL PY_FAIL
+> "$STUB_LOG"
+rm -f "${SMOKE_STATE_DIR}/main-is-red" "${SMOKE_STATE_DIR}/main-is-red-issue"
+GH_LIST_OUTPUT="264 283 297"; export GH_LIST_OUTPUT
+
+(run_smoke_gate) || true
+
+PY_CREATES6=$(grep -c "python3.*tracker create" "$STUB_LOG" 2>/dev/null || true)
+assert_eq "no new ticket created while one is already open" "0" "$PY_CREATES6"
+ADOPT_COMMENT=$(grep -c "gh issue comment 264 " "$STUB_LOG" 2>/dev/null || true)
+assert_eq "still-red comment lands on the adopted (oldest) ticket #264" "1" "$ADOPT_COMMENT"
+DUP_CLOSES=$(grep -c "gh issue close" "$STUB_LOG" 2>/dev/null || true)
+assert_eq "duplicate tickets closed on red (283, 297)" "2" "$DUP_CLOSES"
+CANON_CLOSED=$(grep -c "gh issue close 264 " "$STUB_LOG" 2>/dev/null || true)
+assert_eq "adopted canonical ticket NOT closed" "0" "$CANON_CLOSED"
+assert_eq "state file re-seeded with adopted ticket" "264" "$(cat "${SMOKE_STATE_DIR}/main-is-red-issue" 2>/dev/null)"
+
+GH_LIST_OUTPUT=""; export GH_LIST_OUTPUT
 
 # ---- Summary ----
 echo ""
