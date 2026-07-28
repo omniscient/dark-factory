@@ -367,24 +367,9 @@ nodes:
     when: "$parse-intent.output.intent == 'refine'"
     timeout: 30000
 
-  # The 5 enforce-budget-* nodes below are intentionally inline bash blocks; the Archon
-  # runner does not support calling external scripts from YAML bash nodes without entrypoint
-  # changes. Each block differs only by the scenario key ('refine', 'plan', etc.).
   - id: enforce-budget-refine
     bash: |
-      (
-        _CLONE="${CLONE_DIR:-.}"
-        _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
-        # Single parse — avoids mode/budget desync if config is partially malformed.
-        read -r _EB _ES _BUD < <(python3 -c "import yaml; to=yaml.safe_load(open('${_CFG}')).get('token_optimization',{}); print(str(to.get('enforce_budgets',False)).lower(), str(to.get('enforce',{}).get('refine',False)).lower(), to.get('budgets',{}).get('refine',to.get('default_budget_tokens',30000)))" 2>/dev/null || echo "false false 30000")
-        if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
-        _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS}"
-        case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
-        python3 "${_CLONE}/dark-factory/scripts/budget_enforce.py" \
-          --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
-          --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
-          > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs
-      ) || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_gate.sh" refine || true
     depends_on: [budget-refine]
     when: "$parse-intent.output.intent == 'refine'"
     timeout: 30000
@@ -419,19 +404,7 @@ nodes:
 
   - id: enforce-budget-plan
     bash: |
-      (
-        _CLONE="${CLONE_DIR:-.}"
-        _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
-        # Single parse — avoids mode/budget desync if config is partially malformed.
-        read -r _EB _ES _BUD < <(python3 -c "import yaml; to=yaml.safe_load(open('${_CFG}')).get('token_optimization',{}); print(str(to.get('enforce_budgets',False)).lower(), str(to.get('enforce',{}).get('plan',False)).lower(), to.get('budgets',{}).get('plan',to.get('default_budget_tokens',30000)))" 2>/dev/null || echo "false false 30000")
-        if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
-        _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS}"
-        case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
-        python3 "${_CLONE}/dark-factory/scripts/budget_enforce.py" \
-          --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
-          --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
-          > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs
-      ) || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_gate.sh" plan || true
     depends_on: [budget-plan]
     when: "$parse-intent.output.intent == 'plan'"
     timeout: 30000
@@ -592,19 +565,7 @@ nodes:
 
   - id: enforce-budget-implement
     bash: |
-      (
-        _CLONE="${CLONE_DIR:-.}"
-        _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
-        # Single parse — avoids mode/budget desync if config is partially malformed.
-        read -r _EB _ES _BUD < <(python3 -c "import yaml; to=yaml.safe_load(open('${_CFG}')).get('token_optimization',{}); print(str(to.get('enforce_budgets',False)).lower(), str(to.get('enforce',{}).get('implement',False)).lower(), to.get('budgets',{}).get('implement',to.get('default_budget_tokens',30000)))" 2>/dev/null || echo "false false 30000")
-        if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
-        _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS}"
-        case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
-        python3 "${_CLONE}/dark-factory/scripts/budget_enforce.py" \
-          --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
-          --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
-          > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs
-      ) || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_gate.sh" implement || true
     depends_on: [budget-implement]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000
@@ -990,19 +951,7 @@ nodes:
 
   - id: enforce-budget-conformance
     bash: |
-      (
-        _CLONE="${CLONE_DIR:-.}"
-        _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
-        # Single parse — avoids mode/budget desync if config is partially malformed.
-        read -r _EB _ES _BUD < <(python3 -c "import yaml; to=yaml.safe_load(open('${_CFG}')).get('token_optimization',{}); print(str(to.get('enforce_budgets',False)).lower(), str(to.get('enforce',{}).get('conformance',False)).lower(), to.get('budgets',{}).get('conformance',to.get('default_budget_tokens',30000)))" 2>/dev/null || echo "false false 30000")
-        if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
-        _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS}"
-        case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
-        python3 "${_CLONE}/dark-factory/scripts/budget_enforce.py" \
-          --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
-          --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
-          > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs
-      ) || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_gate.sh" conformance || true
     depends_on: [budget-conformance]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000
@@ -1210,19 +1159,7 @@ nodes:
 
   - id: enforce-budget-code-review
     bash: |
-      (
-        _CLONE="${CLONE_DIR:-.}"
-        _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
-        # Single parse — avoids mode/budget desync if config is partially malformed.
-        read -r _EB _ES _BUD < <(python3 -c "import yaml; to=yaml.safe_load(open('${_CFG}')).get('token_optimization',{}); print(str(to.get('enforce_budgets',False)).lower(), str(to.get('enforce',{}).get('code-review',False)).lower(), to.get('budgets',{}).get('code-review',to.get('default_budget_tokens',30000)))" 2>/dev/null || echo "false false 30000")
-        if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
-        _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS}"
-        case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
-        python3 "${_CLONE}/dark-factory/scripts/budget_enforce.py" \
-          --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
-          --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
-          > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs
-      ) || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_gate.sh" code-review || true
     depends_on: [budget-code-review]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000

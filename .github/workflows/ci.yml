@@ -23,6 +23,7 @@ jobs:
       - run: bash tests/test_cost_report_harness_economics.sh
       - run: bash tests/test_run_record_hermetic.sh
       - run: bash tests/test_entrypoint_cost_report_regression.sh
+      - run: bash tests/test_budget_gate.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:
