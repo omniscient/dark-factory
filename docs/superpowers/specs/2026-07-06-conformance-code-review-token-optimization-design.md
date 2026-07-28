@@ -4,6 +4,14 @@
 **Source issue:** #19 (sibling of #18, "Raise doc-slicing component-resolution hit-rate")
 **Author:** Dark Factory Refinement Pipeline
 
+**Revision note (2026-07-28):** Updated after a 2026-07-11 issue comment (citing arXiv
+`2607.06906v1`, "The Harness Effect") argued conformance/code-review savings should feed Factory
+CPM and quality/failure-spend signals, not just token deltas, and pointed at a new epic, #234
+("Harness economics"). Verified #234 is real; its own backlog table scopes #19's contribution as
+"phase-specific savings measurement" only, with CPM/quality/failure-spend synthesis assigned to
+#234's own child issues. See the new Non-Goals bullet and Assumptions/Open Questions entries
+below — no change to Requirements or Approach resulted from this comment.
+
 ---
 
 ## Overview / Problem Statement
@@ -245,6 +253,20 @@ prefers strict parity instead.
   out of scope; likely folds into #18.
 - **Changing enforcement mode, per-scenario budgets, or diff-ranking behavior.** Unchanged, per
   issue scope item 4.
+- **Factory CPM / cost-saved synthesis, false-pass/false-block quality signals, failure-spend
+  taxonomy, and the six generic "Harness Effect" mechanisms** (cache-shape discipline, structured
+  incremental compaction, context offload, zero-token waiting/durable continuation, failure-spend
+  governance, model-agnostic execution floor + feature-demand routing) raised in the 2026-07-11
+  issue comment citing arXiv `2607.06906v1`. These are child issues of epic #234 ("Harness
+  economics"), not #19 — confirmed by fetching #234 directly: its own backlog-analysis table
+  lists #19's role as "phase-specific savings measurement" (i.e. exactly the per-scenario
+  `savings_pct` this spec's registry fix produces via `evals/token_opt_eval.py`), and its
+  Non-Goals explicitly forbid duplicating #208's raw ledger. Run-level Factory CPM, retry-spend,
+  and failure-spend are already computed today at `factory_core/run_record.py:522-550` and
+  surfaced via `factory_core/cost_report.py:92` — building a second, scenario-scoped copy inside
+  #19 would duplicate that machinery rather than feed it, which is exactly what #234 says not to
+  do. #19's contribution to #234 is its per-scenario `savings_pct` output; nothing else changes
+  here as a result of the comment.
 
 ---
 
@@ -261,6 +283,9 @@ prefers strict parity instead.
   consumed by the gates they're named for, or is the existing naming (chosen for an unrelated
   reason — `"validate"` reads conformance-sourced entries for the *validate* command) left
   as-is to avoid an unrelated rename? Purely cosmetic; does not block this ticket.
+- `evals/token_opt_eval.py` currently reports token deltas only (`savings_pct` on token counts).
+  If epic #234 later wants a cost-saved (not just tokens-saved) figure per scenario, that needs a
+  price-per-token input the eval doesn't take today — a #234 decision, not this ticket's.
 
 ---
 
@@ -280,3 +305,8 @@ prefers strict parity instead.
   reviewer prompts (an extra advisory `$MEMORY_CONTEXT` section that may be empty) and
   telemetry-only for architecture — no change to the conformance/code-review verdict logic,
   output format, or blocking thresholds.
+- Per the 2026-07-11 comment's underlying concern (avoid "fewer tokens" as the sole success
+  signal — the paper's actual lesson is fewer tokens *at maintained outcome quality*): a
+  non-trivial `savings_pct` alone does not satisfy this ticket. The bench-suite spot pass^k
+  check (Acceptance criterion 3, above) is the quality gate — a savings win paired with a bench
+  regression fails the ticket regardless of the eval's token numbers.
