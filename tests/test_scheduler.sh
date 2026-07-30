@@ -1307,6 +1307,74 @@ assert_eq "T3d: normal counter reset to 0 after trip (trip_to_blocked's existing
 > "$STUB_LOG"
 
 # ==========================================
+# U: stage_plan — delivery-failure retry exemption wiring (#279)
+# ==========================================
+echo ""
+echo "--- U: stage_plan — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f gh dispatch
+
+_run_plan_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "plan")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  PREV_DELIVERY_SKIP=""
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) PREV_DELIVERY_SKIP=1 ;;
+    trip:*) trip_to_blocked "$issue" "plan" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "${issue}:plan")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "${issue}:plan"
+      ;;
+  esac
+
+  DELIVERY_NOTE=""
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
+  fi
+  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}" > /dev/null
+  dispatch "Plan issue #${issue}" > /dev/null
+}
+
+_drop_sig 90 plan "substantive:test_failure:1"
+_run_plan_body 90
+assert_eq "U1: normal counter incremented" "1" "$(get_retry_count "90:plan")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+_drop_sig 91 plan "environmental:delivery_failure"
+_run_plan_body 91
+assert_eq "U2: normal counter NOT incremented" "0" "$(get_retry_count "91:plan")"
+assert_eq "U2b: shadow counter incremented to 1" "1" "$(get_retry_count "91:plan:delivery")"
+assert_eq "U2c: comment carries the delivery-skip note" "1" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do
+  _drop_sig 92 plan "environmental:delivery_failure"
+  _run_plan_body 92
+done
+assert_eq "U3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 92:plan --value ${REFINE_MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "U3b: breaker-trip delegated" \
+  "1" "$(grep -c 'breaker-trip --issue 92 --phase plan' "$STUB_LOG" || echo 0)"
+assert_eq "U3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "92:plan")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
