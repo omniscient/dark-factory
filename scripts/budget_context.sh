@@ -30,7 +30,7 @@ if [ ! -f "$ARTIFACTS_DIR/issue.json" ]; then
 fi
 
 _CLONE="${CLONE_DIR:-.}"
-_RUN="${RUN_ID:-$(basename "${ARTIFACTS_DIR:-/tmp/budget}")}"
+_RUN="${RUN_ID:-$(basename "$ARTIFACTS_DIR")}"
 _SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
@@ -39,6 +39,11 @@ INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
 case "$INTENT" in
   new)      SCENARIO=implement ;;
   continue) SCENARIO=continue ;;
+  "")
+    echo "budget_context.sh: could not read .intent from $ARTIFACTS_DIR/issue.json" \
+         "(empty result — check that jq is installed and issue.json is valid JSON)" >&2
+    exit 1
+    ;;
   *) echo "budget_context.sh: unexpected INTENT='$INTENT'; expected new or continue" >&2
      exit 1 ;;
 esac

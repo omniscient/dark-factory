@@ -17,16 +17,24 @@ _make_case() {
   printf '{"resolved_number": 280, "intent": "%s"}' "$intent" > "${dir}/issue.json"
 }
 
-# --- Case 1: intent=new maps to scenario=implement --------------------------
+# --- Case 1: intent=new maps to scenario=implement ---------------------------
+# CLONE_DIR is pointed at the real repo root (not the throwaway artifacts dir) so
+# CLAUDE.md is actually readable — otherwise every section resolves to "dropped"
+# and the token-total/claude_md assertions below would pass vacuously even if
+# --clone-dir were wired to the wrong value.
 CASE1="${WORK}/case1"
 _make_case "$CASE1" new
 RC=0
-ARTIFACTS_DIR="$CASE1" CLONE_DIR="$CASE1" bash "$SCRIPT" \
+ARTIFACTS_DIR="$CASE1" CLONE_DIR="$REPO_ROOT" bash "$SCRIPT" \
   > "${CASE1}/stdout.log" 2> "${CASE1}/stderr.log" || RC=$?
 [ "$RC" = "0" ] || { echo "FAIL case1 exit code: $RC"; cat "${CASE1}/stderr.log"; exit 1; }
 [ -f "${CASE1}/context-budget.json" ] || { echo "FAIL case1 expected context-budget.json to exist"; exit 1; }
 SCEN=$(jq -r '.scenario' "${CASE1}/context-budget.json")
 [ "$SCEN" = "implement" ] || { echo "FAIL case1 expected scenario=implement, got $SCEN"; exit 1; }
+CLAUDE_MD_STATUS=$(jq -r '.sections.claude_md.status' "${CASE1}/context-budget.json")
+[ "$CLAUDE_MD_STATUS" = "included" ] || { echo "FAIL case1 expected sections.claude_md.status=included, got $CLAUDE_MD_STATUS"; cat "${CASE1}/context-budget.json"; exit 1; }
+EST_TOKENS=$(jq -r '.estimated_input_tokens' "${CASE1}/context-budget.json")
+[ "$EST_TOKENS" -gt 0 ] || { echo "FAIL case1 expected estimated_input_tokens > 0, got $EST_TOKENS"; exit 1; }
 
 # --- Case 2: intent=continue maps to scenario=continue ----------------------
 CASE2="${WORK}/case2"

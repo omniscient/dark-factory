@@ -310,23 +310,40 @@ def test_conformance_cmd_sources_near_diff_rank():
 # ── T5-G1: every reachable --scenario value is a _SECTION_REGISTRY key ──────
 # The check that would have caught #280: budget-implement used to pass INTENT
 # ("new"/"continue") straight through as --scenario, and "new" is not a registry
-# key. Extracts the literal --scenario values from the four budget-* nodes that
-# pass one directly, plus the SCENARIO=<value> case arms from budget_context.sh
-# (which budget-implement now delegates to) — not hardcoded, so a future node or
-# script that starts emitting an invalid scenario is actually caught.
+# key. Discovers every budget-* node in the workflow (not a hardcoded subset —
+# a future budget-* node is automatically included) and, for each, requires
+# either a literal --scenario <registry-key> or delegation to
+# scripts/budget_context.sh. A --scenario "$VAR" form (a shell variable passed
+# straight through, exactly how #280 happened) is explicitly rejected even if
+# the node also delegates or has an unrelated literal elsewhere in its body.
 
-def test_all_reachable_scenarios_are_registry_keys():
+def test_all_budget_nodes_use_registry_scenario():
     sys.path.insert(0, str(_REPO_ROOT / "scripts"))
     from context_budget import _SECTION_REGISTRY
     registry_keys = set(_SECTION_REGISTRY.keys())
 
     nodes = _workflow_nodes()
+    budget_node_ids = sorted(nid for nid in nodes if nid.startswith("budget-"))
+    assert budget_node_ids, "no budget-* nodes found in workflow"
+
     found = set()
-    for node_id in ("budget-refine", "budget-plan", "budget-conformance", "budget-code-review"):
-        bash = nodes.get(node_id, {}).get("bash", "")
-        matches = re.findall(r'--scenario\s+"?([a-z-]+)"?', bash)
-        assert matches, f"{node_id}: no --scenario literal found in bash body"
-        found.update(matches)
+    for node_id in budget_node_ids:
+        bash = nodes[node_id].get("bash", "")
+
+        var_scenario = re.search(r'--scenario\s+"?\$\w', bash)
+        assert not var_scenario, \
+            f"{node_id}: --scenario must not be a shell-variable reference " \
+            f"(found {var_scenario.group(0)!r}); use a literal registry key or " \
+            f"delegate to scripts/budget_context.sh"
+
+        literal_matches = re.findall(r'--scenario\s+"?([a-z-]+)"?', bash)
+        delegates = "scripts/budget_context.sh" in bash
+
+        assert literal_matches or delegates, \
+            f"{node_id}: must contain a literal --scenario <value> or delegate " \
+            f"to scripts/budget_context.sh"
+
+        found.update(literal_matches)
 
     script_text = (_REPO_ROOT / "scripts" / "budget_context.sh").read_text(encoding="utf-8")
     mapped = re.findall(r'SCENARIO=([a-z-]+)\s*;;', script_text)
@@ -336,3 +353,14 @@ def test_all_reachable_scenarios_are_registry_keys():
     for scenario in found:
         assert scenario in registry_keys, \
             f"scenario '{scenario}' (from DAG/budget_context.sh) not in _SECTION_REGISTRY"
+
+
+def test_budget_implement_delegates_to_budget_context_script():
+    # #280's bug lived specifically in budget-implement's node body; assert the
+    # delegation directly so a future edit that inlines context_budget.py again
+    # (bypassing budget_context.sh's SCENARIO mapping) is caught here, not just
+    # by the generic literal-or-delegate check above.
+    nodes = _workflow_nodes()
+    bash = nodes.get("budget-implement", {}).get("bash", "")
+    assert "scripts/budget_context.sh" in bash, \
+        "budget-implement must delegate to scripts/budget_context.sh"
