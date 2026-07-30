@@ -829,16 +829,34 @@ stage_conflict_resolve() {
     if is_issue_running "$ISSUE"; then continue; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:resolve")
-    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
-      continue
+    # #279: the delivery-failure exemption's accounting (the "<key>:delivery" shadow
+    # counter) must increment at the actual dispatch point below, not here — this
+    # checkpoint only PEEKS the shadow counter to decide trip-vs-proceed, preserving
+    # the existing two-step shape (decide-to-trip here; count/skip at the CONFLICTING
+    # branch). See the "#279 skip-retry-counter design" spec's Requirement 2 for why
+    # this site doesn't call the shared retry_or_skip_delivery_failure helper the other
+    # three call sites use.
+    RESOLVE_DELIVERY_SKIP=""
+    if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
+      DPEEK=$(get_retry_count "${ISSUE}:resolve:delivery" || echo 0)
+      if [ "$DPEEK" -ge "$MAX_RETRIES" ]; then
+        STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "${ISSUE}:resolve" --value "$DPEEK"
+        trip_to_blocked "$ISSUE" "resolve" "same failure signature 'environmental:delivery_failure' recorded ${DPEEK} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+        continue
+      fi
+      RESOLVE_DELIVERY_SKIP=1
+    else
+      RETRIES=$(get_retry_count "${ISSUE}:resolve")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+        continue
+      fi
     fi
 
     PR_NUM=$(get_pr_for_issue "$ISSUE")
@@ -848,7 +866,12 @@ stage_conflict_resolve() {
     case "$MERGEABLE" in
       CONFLICTING)
         echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
-        increment_retry "${ISSUE}:resolve" || true
+        if [ -n "$RESOLVE_DELIVERY_SKIP" ]; then
+          DCOUNT=$(increment_retry "${ISSUE}:resolve:delivery" || echo 0)
+          echo "[$(date -u +%FT%TZ)] delivery_gate issue=#${ISSUE} phase=resolve action=delivery_failure_skip count=${DCOUNT}/${MAX_RETRIES}" >&2
+        else
+          increment_retry "${ISSUE}:resolve" || true
+        fi
         if dispatch "Deconflict issue #${ISSUE}"; then
           DISPATCHED="Deconflict issue #${ISSUE}"
         fi

@@ -1442,6 +1442,122 @@ assert_eq "V3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "10
 > "$STUB_LOG"
 
 # ==========================================
+# W: stage_conflict_resolve (resolve) — delivery-failure retry exemption (#279)
+# ==========================================
+echo ""
+echo "--- W: stage_conflict_resolve — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_pr_for_issue() { echo "500"; }
+check_pr_mergeable() { echo "CONFLICTING"; }
+export -f dispatch get_pr_for_issue check_pr_mergeable
+
+_run_resolve_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "resolve")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  RESOLVE_DELIVERY_SKIP=""
+  if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
+    DPEEK=$(get_retry_count "${issue}:resolve:delivery" || echo 0)
+    if [ "$DPEEK" -ge "$MAX_RETRIES" ]; then
+      STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "${issue}:resolve" --value "$DPEEK"
+      trip_to_blocked "$issue" "resolve" "same failure signature 'environmental:delivery_failure' recorded ${DPEEK} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+      return
+    fi
+    RESOLVE_DELIVERY_SKIP=1
+  else
+    RETRIES=$(get_retry_count "${issue}:resolve")
+    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      trip_to_blocked "$issue" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+      return
+    fi
+  fi
+
+  PR_NUM=$(get_pr_for_issue "$issue")
+  [ -z "$PR_NUM" ] && return
+
+  MERGEABLE=$(check_pr_mergeable "$PR_NUM")
+  case "$MERGEABLE" in
+    CONFLICTING)
+      if [ -n "$RESOLVE_DELIVERY_SKIP" ]; then
+        increment_retry "${issue}:resolve:delivery" > /dev/null || true
+      else
+        increment_retry "${issue}:resolve" || true
+      fi
+      dispatch "Deconflict issue #${issue}" > /dev/null
+      ;;
+  esac
+}
+
+# W1: substantive failure — unchanged behavior (normal counter increments on dispatch)
+_drop_sig 110 resolve "substantive:test_failure:1"
+_run_resolve_body 110
+assert_eq "W1: normal counter incremented" "1" "$(get_retry_count "110:resolve")"
+assert_eq "W1b: dispatched" "1" "$(grep -c 'dispatch Deconflict issue #110' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W2: delivery failure under cap — dispatches, shadow counter (not normal) increments
+_drop_sig 111 resolve "environmental:delivery_failure"
+_run_resolve_body 111
+assert_eq "W2: normal counter NOT incremented" "0" "$(get_retry_count "111:resolve")"
+assert_eq "W2b: shadow counter incremented to 1" "1" "$(get_retry_count "111:resolve:delivery")"
+assert_eq "W2c: dispatched" "1" "$(grep -c 'dispatch Deconflict issue #111' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W3: MAX_RETRIES consecutive delivery failures dispatch (each incrementing the shadow
+# counter), then the NEXT checkpoint peeks a shadow count already at the ceiling and
+# trips without dispatching again — see the plan's "Accepted asymmetry" note for why
+# this is MAX_RETRIES dispatches (not MAX_RETRIES-1, unlike refine/plan/implement).
+for i in $(seq 1 "$MAX_RETRIES"); do
+  _drop_sig 112 resolve "environmental:delivery_failure"
+  _run_resolve_body 112
+done
+assert_eq "W3: shadow counter at MAX_RETRIES after MAX_RETRIES dispatches" \
+  "$MAX_RETRIES" "$(get_retry_count "112:resolve:delivery")"
+assert_eq "W3b: MAX_RETRIES dispatches occurred" \
+  "$MAX_RETRIES" "$(grep -c 'dispatch Deconflict issue #112' "$STUB_LOG" || echo 0)"
+
+_drop_sig 112 resolve "environmental:delivery_failure"
+_run_resolve_body 112
+assert_eq "W3c: the next checkpoint trips instead of dispatching again" \
+  "$MAX_RETRIES" "$(grep -c 'dispatch Deconflict issue #112' "$STUB_LOG" || echo 0)"
+assert_eq "W3d: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 112:resolve --value ${MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "W3e: breaker-trip delegated with the delivery-failure reason" \
+  "1" "$(grep -c 'breaker-trip --issue 112 --phase resolve' "$STUB_LOG" || echo 0)"
+assert_eq "W3f: normal counter reset to 0 after trip" "0" "$(get_retry_count "112:resolve")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W4: no dispatch this cycle (MERGEABLE=UNKNOWN) → neither counter mutates
+check_pr_mergeable() { echo "UNKNOWN"; }
+export -f check_pr_mergeable
+_drop_sig 113 resolve "environmental:delivery_failure"
+_run_resolve_body 113
+assert_eq "W4: shadow counter untouched when no dispatch occurs" "0" "$(get_retry_count "113:resolve:delivery")"
+assert_eq "W4b: no dispatch" "0" "$(grep -c 'dispatch' "$STUB_LOG" || true)"
+check_pr_mergeable() { echo "CONFLICTING"; }
+export -f check_pr_mergeable
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W5: reset_retry clears the resolve shadow counter
+_drop_sig 114 resolve "environmental:delivery_failure"
+_run_resolve_body 114
+assert_eq "W5: shadow counter at 1 before reset" "1" "$(get_retry_count "114:resolve:delivery")"
+reset_retry "114:resolve"
+assert_eq "W5b: shadow counter cleared" "0" "$(get_retry_count "114:resolve:delivery")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
