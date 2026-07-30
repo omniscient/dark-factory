@@ -1375,6 +1375,73 @@ assert_eq "U3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "92
 > "$STUB_LOG"
 
 # ==========================================
+# V: stage_blocked_retry (implement) — delivery-failure retry exemption (#279)
+# ==========================================
+echo ""
+echo "--- V: stage_blocked_retry — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_pr_for_issue() { echo ""; }
+export -f dispatch get_pr_for_issue
+
+_run_blocked_retry_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "implement")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) ;;
+    trip:*) trip_to_blocked "$issue" "implement" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "$issue")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "implement" "retry limit of ${MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "$issue"
+      ;;
+  esac
+
+  if [ -n "$(get_pr_for_issue "$issue")" ]; then
+    dispatch "Continue issue #${issue}" > /dev/null
+  else
+    dispatch "Fix issue #${issue}" > /dev/null
+  fi
+}
+
+_drop_sig 100 implement "substantive:test_failure:1"
+_run_blocked_retry_body 100
+assert_eq "V1: normal counter incremented" "1" "$(get_retry_count "100")"
+assert_eq "V1b: dispatched Fix (no PR)" "1" "$(grep -c 'dispatch Fix issue #100' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+_drop_sig 101 implement "environmental:delivery_failure"
+_run_blocked_retry_body 101
+assert_eq "V2: normal counter NOT incremented" "0" "$(get_retry_count "101")"
+assert_eq "V2b: shadow counter incremented to 1" "1" "$(get_retry_count "101:delivery")"
+assert_eq "V2c: dispatched" "1" "$(grep -c 'dispatch Fix issue #101' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+for i in $(seq 1 "$MAX_RETRIES"); do
+  _drop_sig 102 implement "environmental:delivery_failure"
+  _run_blocked_retry_body 102
+done
+assert_eq "V3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 102 --value ${MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "V3b: breaker-trip delegated" \
+  "1" "$(grep -c 'breaker-trip --issue 102 --phase implement' "$STUB_LOG" || echo 0)"
+assert_eq "V3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "102")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"

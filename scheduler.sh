@@ -960,19 +960,29 @@ stage_blocked_retry() {
     if is_issue_running "$ISSUE"; then continue; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "$ISSUE")
-    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
-      continue
-    fi
-
-    increment_retry "$ISSUE"
+    DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES" || echo "count")
+    case "$DECISION" in
+      skip)
+        ;;
+      trip:*)
+        trip_to_blocked "$ISSUE" "implement" "${DECISION#trip:}"
+        continue
+        ;;
+      count|*)
+        RETRIES=$(get_retry_count "$ISSUE")
+        if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+          trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
+          continue
+        fi
+        increment_retry "$ISSUE"
+        ;;
+    esac
     # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
     # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
     # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
