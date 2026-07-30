@@ -311,18 +311,12 @@ from .providers import get_tracker  # noqa: E402
 OWNER = identity.SLUG
 PROJECT_ID = identity.PROJECT_ID
 _GATING_LABELS = ("plan-pending-review", "spec-pending-review")  # plan takes precedence
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
-try:
-    from .adapter_defaults import DEFAULTS as _AD
-    _DEFAULT_EXCLUDE = _AD["safety"]["hard_exclude_paths"]
-    _DEFAULT_SENSITIVE_KEYWORDS = _AD["safety"]["sensitive_keywords"]
-except Exception:
-    _DEFAULT_EXCLUDE = ["dark-factory/", ".archon/", "scheduler.sh", "factory_core/",
-                        "app/services/trading", "app/tasks/trading.py", "app/core/auth", "app/routers/auth"]
-    _DEFAULT_SENSITIVE_KEYWORDS = (
-        r"trading|ibkr|live order|notional|authentication|authorization"
-        r"|authn|authz|jwt|oauth|rbac|/auth"
-    )
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
+from .adapter_defaults import DEFAULTS as _AD
+
+_DEFAULT_EXCLUDE = _AD["safety"]["hard_exclude_paths"]
+_DEFAULT_SENSITIVE_KEYWORDS = _AD["safety"]["sensitive_keywords"]
 _CONFIG_PATHS = ["/workspace/project/config/config.yaml",
                  "/opt/dark-factory/config/config.yaml",
                  "/workspace/project/.claude/skills/refinement/config.yaml",

@@ -12,7 +12,8 @@ SKILL_SECURITY_TOKENS = (
 DEFAULTS = {
     "schema_version": 1,
     "components": {
-        # Verbatim copy of COMPONENT_SECTION_MAP from scripts/architecture_slice.py
+        # Sole source of truth — scripts/architecture_slice.py re-exports this
+        # as COMPONENT_SECTION_MAP.
         "backend": [
             "Scan Execution Flow",
             "Backend Module Map",
@@ -51,7 +52,8 @@ DEFAULTS = {
             ".mcp.json", ".claude/plugins/", ".claude-plugin/", ".factory/hooks/",
         ],
         "dispatch_ceiling_keywords": "migration|migrate|performance|perf|architectur|refactor",
-        # Verbatim copy of SAFETY_PATH_PATTERNS patterns from scripts/diff_rank.py
+        # Sole source of truth — scripts/diff_rank.py re-exports this compiled
+        # as SAFETY_PATH_PATTERNS.
         "critical_diff_paths": [
             r"^alembic/versions/",
             r"^backend/app/routers/auth",

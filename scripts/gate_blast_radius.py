@@ -10,6 +10,13 @@ import re
 import sys
 from pathlib import Path
 
+# Make factory_core resolvable regardless of caller CWD/invocation style
+# (mirrors factory_core/cli.py), since this module is both run standalone and
+# imported by diff_rank.py.
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -78,19 +85,13 @@ def parse_hotspots(path: str, score_floor: float) -> set:
     return hot
 
 
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
-try:
-    from factory_core.adapter_defaults import DEFAULTS as _AD
-    MIGRATION_SEED_AUTH_PATTERNS = [
-        re.compile(p) for p in _AD["safety"]["migration_seed_auth_patterns"]
-    ]
-except Exception:
-    MIGRATION_SEED_AUTH_PATTERNS = [
-        re.compile(r"^alembic/versions/"),
-        re.compile(r"^dark-factory/seed/"),
-        re.compile(r"seed.*\.sql$"),
-        re.compile(r"^backend/app/routers/auth\.py$"),
-    ]
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
+from factory_core.adapter_defaults import DEFAULTS as _AD
+
+MIGRATION_SEED_AUTH_PATTERNS = [
+    re.compile(p) for p in _AD["safety"]["migration_seed_auth_patterns"]
+]
 
 
 def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
@@ -117,14 +118,9 @@ def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
 # (e.g. r"settings\.json$"), which breaks a plain unescaped-dot substring
 # match; "settings" and "mcp" alone are unambiguous within this pattern set.
 #
-# Re-exported from adapter_defaults so this and diff_rank.py's identical
-# classification logic can't drift out of sync.
-try:
-    from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
-except Exception:
-    _SKILL_SECURITY_TOKENS = (
-        "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
-    )
+# Sole source of truth so this and diff_rank.py's identical classification
+# logic can't drift out of sync.
+from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
 
 
 def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> list:
