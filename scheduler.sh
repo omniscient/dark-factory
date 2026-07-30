@@ -1056,21 +1056,40 @@ stage_refine() {
     if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:refine")
-    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
-      continue
-    fi
+    PREV_DELIVERY_SKIP=""
+    DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES" || echo "count")
+    case "$DECISION" in
+      skip)
+        PREV_DELIVERY_SKIP=1
+        ;;
+      trip:*)
+        trip_to_blocked "$ISSUE" "refine" "${DECISION#trip:}"
+        continue
+        ;;
+      count|*)
+        RETRIES=$(get_retry_count "${ISSUE}:refine")
+        if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+          trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+          continue
+        fi
+        increment_retry "${ISSUE}:refine"
+        ;;
+    esac
 
-    increment_retry "${ISSUE}:refine"
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+    DELIVERY_NOTE=""
+    if [ -n "$PREV_DELIVERY_SKIP" ]; then
+      DELIVERY_NOTE="
+
+> ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget."
+    fi
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true

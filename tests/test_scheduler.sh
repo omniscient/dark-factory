@@ -1218,6 +1218,95 @@ assert_eq "S7b: shadow counter cleared by reset_retry" "0" "$(get_retry_count "6
 > "$STUB_LOG"
 
 # ==========================================
+# T: stage_refine — delivery-failure retry exemption wiring (#279)
+# ==========================================
+echo ""
+echo "--- T: stage_refine — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f gh dispatch
+
+# Reproduces stage_refine's per-item body (matches this file's existing K-section
+# convention of exercising the loop body directly rather than fixturing REFINE_RUNNING/
+# REFINE_WIP_LIMIT/BACKLOG end-to-end). This section defines every stub it needs itself
+# (gh, dispatch above) rather than relying on whatever an earlier section left bound.
+_run_refine_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "refine")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  PREV_DELIVERY_SKIP=""
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) PREV_DELIVERY_SKIP=1 ;;
+    trip:*) trip_to_blocked "$issue" "refine" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "${issue}:refine")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "${issue}:refine"
+      ;;
+  esac
+
+  DELIVERY_NOTE=""
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
+  fi
+  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}" > /dev/null
+  dispatch "Refine issue #${issue}" > /dev/null
+}
+
+# T1: a substantive (non-delivery) failure increments the normal counter, no note
+_drop_sig 80 refine "substantive:test_failure:1"
+_run_refine_body 80
+assert_eq "T1: normal counter incremented" "1" "$(get_retry_count "80:refine")"
+assert_eq "T1b: no shadow counter created" "0" "$(get_retry_count "80:refine:delivery")"
+assert_eq "T1c: dispatched" "1" "$(grep -c 'dispatch Refine issue #80' "$STUB_LOG" || echo 0)"
+assert_eq "T1d: comment has no delivery-skip note" "0" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || true)"
+
+> "$STUB_LOG"
+
+# T2: a delivery failure under cap dispatches without touching the normal counter,
+# and the comment carries the delivery-skip note
+echo '{}' > "$STATE_FILE"
+_drop_sig 81 refine "environmental:delivery_failure"
+_run_refine_body 81
+assert_eq "T2: normal counter NOT incremented" "0" "$(get_retry_count "81:refine")"
+assert_eq "T2b: shadow counter incremented to 1" "1" "$(get_retry_count "81:refine:delivery")"
+assert_eq "T2c: dispatched" "1" "$(grep -c 'dispatch Refine issue #81' "$STUB_LOG" || echo 0)"
+assert_eq "T2d: comment carries the delivery-skip note" "1" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"
+
+# T3: REFINE_MAX_RETRIES consecutive delivery failures trip, back-filling the normal
+# counter (asserted via the breaker-set-retry delegation — trip_to_blocked's own
+# reset_retry zeroes the counter again immediately after, matching section B/K9's
+# already-passing "counter reset after trip" assertions), and do NOT dispatch on the
+# tripping attempt
+echo '{}' > "$STATE_FILE"
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do
+  _drop_sig 82 refine "environmental:delivery_failure"
+  _run_refine_body 82
+done
+assert_eq "T3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 82:refine --value ${REFINE_MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "T3b: only REFINE_MAX_RETRIES-1 dispatches occurred (cap attempt trips, no dispatch)" \
+  "$((REFINE_MAX_RETRIES - 1))" "$(grep -c 'dispatch Refine issue #82' "$STUB_LOG" || echo 0)"
+assert_eq "T3c: breaker-trip delegated with the delivery-failure reason" \
+  "1" "$(grep -c 'breaker-trip --issue 82 --phase refine' "$STUB_LOG" || echo 0)"
+assert_eq "T3d: normal counter reset to 0 after trip (trip_to_blocked's existing reset_retry)" \
+  "0" "$(get_retry_count "82:refine")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
