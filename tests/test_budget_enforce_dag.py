@@ -1,4 +1,5 @@
 """Tests for Phase 4 T3: enforce-budget DAG nodes + per-scenario config."""
+import re
 import sys
 from pathlib import Path
 
@@ -304,3 +305,34 @@ def test_conformance_cmd_sources_near_diff_rank():
     assert caps_pos != -1, "conformance must source token-opt-caps.env"
     assert caps_pos > rank_pos, \
         "token-opt-caps.env must be sourced after RANK_IN=$(mktemp ...) in ranking block"
+
+
+# ── T5-G1: every reachable --scenario value is a _SECTION_REGISTRY key ──────
+# The check that would have caught #280: budget-implement used to pass INTENT
+# ("new"/"continue") straight through as --scenario, and "new" is not a registry
+# key. Extracts the literal --scenario values from the four budget-* nodes that
+# pass one directly, plus the SCENARIO=<value> case arms from budget_context.sh
+# (which budget-implement now delegates to) — not hardcoded, so a future node or
+# script that starts emitting an invalid scenario is actually caught.
+
+def test_all_reachable_scenarios_are_registry_keys():
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+    from context_budget import _SECTION_REGISTRY
+    registry_keys = set(_SECTION_REGISTRY.keys())
+
+    nodes = _workflow_nodes()
+    found = set()
+    for node_id in ("budget-refine", "budget-plan", "budget-conformance", "budget-code-review"):
+        bash = nodes.get(node_id, {}).get("bash", "")
+        matches = re.findall(r'--scenario\s+"?([a-z-]+)"?', bash)
+        assert matches, f"{node_id}: no --scenario literal found in bash body"
+        found.update(matches)
+
+    script_text = (_REPO_ROOT / "scripts" / "budget_context.sh").read_text(encoding="utf-8")
+    mapped = re.findall(r'SCENARIO=([a-z-]+)\s*;;', script_text)
+    assert mapped, "budget_context.sh: no SCENARIO=<value> case arms found"
+    found.update(mapped)
+
+    for scenario in found:
+        assert scenario in registry_keys, \
+            f"scenario '{scenario}' (from DAG/budget_context.sh) not in _SECTION_REGISTRY"
