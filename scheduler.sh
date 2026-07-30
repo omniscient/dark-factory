@@ -396,6 +396,42 @@ check_failure_signature() {
     breaker-check-signature --issue "$issue_num" --phase "$phase"
 }
 
+# --- Skip the counted retry for a runner-side delivery failure (#279) ---
+# Bounded by a capped shadow counter ("<retry_key>:delivery") so a chronically-cursed
+# ticket's worst-case dispatch volume still matches today's behavior exactly once the
+# cap is reached (back-fill + trip). Reuses increment_retry's existing key/counter
+# adapter for the shadow counter — no new bash/python plumbing beyond breaker-set-retry.
+# Usage: DECISION=$(retry_or_skip_delivery_failure <issue_num> <phase> <sig_value> <retry_key> <ceiling> || echo "count")
+# Callers MUST append `|| echo "count"` at the capture site — see the plan's "Bash
+# mechanics note" for why (safe fail-toward-counted behavior under set -euo pipefail).
+# Echoes exactly one of (the diagnostic log line goes to stderr so it never pollutes
+# the captured decision):
+#   "count"          - sig_value is not environmental:delivery_failure; caller proceeds
+#                       with its existing get_retry_count/ceiling-check/increment_retry
+#                       sequence unchanged.
+#   "skip"           - delivery failure, under cap; delivery-skip counter incremented;
+#                       caller dispatches WITHOUT touching the normal retry counter.
+#   "trip:<reason>"  - delivery failure, cap reached; normal retry counter has been
+#                       back-filled via breaker-set-retry; caller calls trip_to_blocked
+#                       with the given reason and continues.
+retry_or_skip_delivery_failure() {
+  local issue_num="$1" phase="$2" sig_value="$3" retry_key="$4" ceiling="$5"
+  if [ "$sig_value" != "environmental:delivery_failure" ]; then echo "count"; return; fi
+  local dkey="${retry_key}:delivery"
+  local dcount
+  dcount=$(increment_retry "$dkey" || echo "")
+  case "$dcount" in
+    ''|*[!0-9]*) echo "count"; return ;;
+  esac
+  if [ "$dcount" -lt "$ceiling" ]; then
+    echo "[$(date -u +%FT%TZ)] delivery_gate issue=#${issue_num} phase=${phase} action=delivery_failure_skip count=${dcount}/${ceiling}" >&2
+    echo "skip"
+  else
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "$retry_key" --value "$dcount"
+    echo "trip:same failure signature 'environmental:delivery_failure' recorded ${dcount} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+  fi
+}
+
 # --- Mergeable status for a PR: CONFLICTING, MERGEABLE, or UNKNOWN ---
 # UNKNOWN means GitHub hasn't finished computing mergeability — callers must skip.
 # --repo is required because the scheduler runs outside a git checkout.

@@ -1169,6 +1169,55 @@ assert_eq "R8b: stage_review_triage guard type is none" \
   "none" "${STAGE_GUARD[stage_review_triage]}"
 
 # ==========================================
+# S: retry_or_skip_delivery_failure (#279 skip-retry-counter exemption)
+# ==========================================
+echo ""
+echo "--- S: retry_or_skip_delivery_failure ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+assert_eq "S1: non-delivery signature returns count" "count" \
+  "$(retry_or_skip_delivery_failure 60 refine "substantive:test_failure:1" "60:refine" 3)"
+assert_eq "S1b: non-delivery signature creates no shadow counter" "0" \
+  "$(get_retry_count "60:refine:delivery")"
+
+assert_eq "S2: empty signature returns count" "count" \
+  "$(retry_or_skip_delivery_failure 60 refine "" "60:refine" 3)"
+
+echo '{}' > "$STATE_FILE"
+D1=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S3: 1st delivery failure under cap returns skip" "skip" "$D1"
+assert_eq "S3b: shadow counter incremented to 1" "1" "$(get_retry_count "61:refine:delivery")"
+assert_eq "S3c: normal counter untouched" "0" "$(get_retry_count "61:refine")"
+
+D2=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S4: 2nd delivery failure under cap returns skip" "skip" "$D2"
+assert_eq "S4b: shadow counter incremented to 2" "2" "$(get_retry_count "61:refine:delivery")"
+
+D3=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S5: 3rd delivery failure at cap returns a trip: decision" \
+  "1" "$(echo "$D3" | grep -c '^trip:')"
+assert_eq "S5b: trip reason names the consecutive count and #279" \
+  "1" "$(echo "$D3" | grep -c "3 consecutive times.*#279")"
+assert_eq "S5c: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c 'breaker-set-retry --key 61:refine --value 3' "$STUB_LOG" || echo 0)"
+assert_eq "S5d: normal counter back-filled to 3" "3" "$(get_retry_count "61:refine")"
+
+# S6: the diagnostic log line must go to stderr, not pollute the captured decision
+echo '{}' > "$STATE_FILE"
+D_CLEAN=$(retry_or_skip_delivery_failure 62 refine "environmental:delivery_failure" "62:refine" 5 2>/dev/null)
+assert_eq "S6: decision value is exactly 'skip', not polluted by the log line" "skip" "$D_CLEAN"
+
+# S7: reset_retry clears the shadow counter (#279 Requirement 5 / breaker.py Task 1)
+echo '{}' > "$STATE_FILE"
+retry_or_skip_delivery_failure 63 refine "environmental:delivery_failure" "63:refine" 3 > /dev/null
+retry_or_skip_delivery_failure 63 refine "environmental:delivery_failure" "63:refine" 3 > /dev/null
+assert_eq "S7: shadow counter at 2 before reset" "2" "$(get_retry_count "63:refine:delivery")"
+reset_retry "63:refine"
+assert_eq "S7b: shadow counter cleared by reset_retry" "0" "$(get_retry_count "63:refine:delivery")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
