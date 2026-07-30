@@ -67,6 +67,13 @@ def _breaker_trip(args):
     )
 
 
+def _breaker_set_retry(args):
+    from factory_core.breaker import set_retry_count
+    state_file = Path(os.environ.get("STATE_FILE",
+                                     "/var/lib/dark-factory/scheduler-state.json"))
+    set_retry_count(args.key, args.value, state_file)
+
+
 def _run_record(args):
     sys.argv = ["run_record"] + args.run_record_args
     from factory_core import run_record
@@ -237,6 +244,11 @@ def main():
     bt.add_argument("--phase", required=True)
     bt.add_argument("--reason", required=True)
     bt.set_defaults(func=_breaker_trip)
+
+    bsr = sub.add_parser("breaker-set-retry")
+    bsr.add_argument("--key", required=True)
+    bsr.add_argument("--value", type=int, required=True)
+    bsr.set_defaults(func=_breaker_set_retry)
 
     rr = sub.add_parser("run-record")
     rr.add_argument("run_record_args", nargs=argparse.REMAINDER)

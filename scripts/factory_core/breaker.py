@@ -27,6 +27,14 @@ def increment_retry(key: str, state_file: Path = _DEFAULT_STATE) -> int:
     return new
 
 
+def set_retry_count(key: str, value: int, state_file: Path = _DEFAULT_STATE) -> None:
+    """Write an explicit retry count, bypassing the +1 that increment_retry applies.
+    Used only to back-fill the normal counter when a capped `<key>:delivery` shadow
+    counter (#279) reaches its ceiling, so trip_to_blocked's "attempted N time(s)"
+    report reflects the true dispatch count."""
+    _write_key(key, value, state_file)
+
+
 def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
     if not state_file.exists():
         return
@@ -39,6 +47,10 @@ def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
         # advance) — otherwise the first post-reset failure with a matching class
         # would trip the breaker one attempt early (#33 review).
         data.pop(f"{key}:sig", None)
+        # Same reasoning for the capped delivery-failure shadow counter (#279): a
+        # ticket resumed from Blocked must not inherit a banked count from a prior,
+        # unrelated episode.
+        data.pop(f"{key}:delivery", None)
         _atomic_write(state_file, data)
     except (json.JSONDecodeError, OSError):
         pass

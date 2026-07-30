@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core.breaker import (
-    get_retry_count, increment_retry, reset_retry, trip_to_blocked,
+    get_retry_count, increment_retry, reset_retry, set_retry_count, trip_to_blocked,
 )
 
 
@@ -68,6 +68,27 @@ def test_atomic_write_survives_existing_file(tmp_path):
     data = json.loads(sf.read_text())
     assert data["existing"] == 5
     assert data["42:refine"] == 1
+
+
+def test_set_retry_count_writes_exact_value(tmp_path):
+    sf = tmp_path / "state.json"
+    set_retry_count("42:refine:delivery", 7, sf)
+    assert get_retry_count("42:refine:delivery", sf) == 7
+
+
+def test_set_retry_count_overwrites_existing_value(tmp_path):
+    sf = tmp_path / "state.json"
+    increment_retry("42:refine:delivery", sf)
+    increment_retry("42:refine:delivery", sf)
+    set_retry_count("42:refine:delivery", 3, sf)
+    assert get_retry_count("42:refine:delivery", sf) == 3
+
+
+def test_set_retry_count_does_not_disturb_other_keys(tmp_path):
+    sf = tmp_path / "state.json"
+    increment_retry("42:refine", sf)
+    set_retry_count("42:refine:delivery", 3, sf)
+    assert get_retry_count("42:refine", sf) == 1
 
 
 def test_trip_to_blocked_resets_retry(tmp_path, monkeypatch):
@@ -232,3 +253,18 @@ def test_reset_retry_clears_stored_signature(tmp_path):
     stuck, sig = record_failure_signature(9, "implement", sf, tmp_path)
     assert stuck is False
     assert sig == "substantive:test_failure:1"
+
+
+def test_reset_retry_clears_delivery_shadow_counter(tmp_path):
+    # Regression for #279 Requirement 5: a ticket resumed from Blocked (human removes
+    # needs-discussion) must not inherit a banked delivery-skip count from a prior,
+    # unrelated episode — otherwise it re-trips on its very first subsequent delivery
+    # failure instead of getting a fresh cap.
+    sf = tmp_path / "state.json"
+    increment_retry("9:refine:delivery", sf)
+    increment_retry("9:refine:delivery", sf)
+    assert get_retry_count("9:refine:delivery", sf) == 2
+
+    reset_retry("9:refine", sf)
+
+    assert get_retry_count("9:refine:delivery", sf) == 0
