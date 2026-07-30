@@ -432,6 +432,20 @@ retry_or_skip_delivery_failure() {
   fi
 }
 
+# --- Shared "previous attempt hit a delivery failure" issue-comment note (#279) ---
+# Byte-identical to the inline construction previously duplicated in stage_plan and
+# stage_refine. Callers must set PREV_DELIVERY_SKIP (non-empty to include the note)
+# before calling; echoes the note text (or nothing) for capture via DELIVERY_NOTE=$(...).
+delivery_skip_note() {
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    cat <<EOF
+
+
+> ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget.
+EOF
+  fi
+}
+
 # --- Mergeable status for a PR: CONFLICTING, MERGEABLE, or UNKNOWN ---
 # UNKNOWN means GitHub hasn't finished computing mergeability — callers must skip.
 # --repo is required because the scheduler runs outside a git checkout.
@@ -1068,12 +1082,7 @@ stage_plan() {
     esac
 
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    DELIVERY_NOTE=""
-    if [ -n "$PREV_DELIVERY_SKIP" ]; then
-      DELIVERY_NOTE="
-
-> ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget."
-    fi
+    DELIVERY_NOTE=$(delivery_skip_note)
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}
 
 ---
@@ -1135,12 +1144,7 @@ stage_refine() {
     esac
 
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    DELIVERY_NOTE=""
-    if [ -n "$PREV_DELIVERY_SKIP" ]; then
-      DELIVERY_NOTE="
-
-> ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget."
-    fi
+    DELIVERY_NOTE=$(delivery_skip_note)
     gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}
 
 ---
