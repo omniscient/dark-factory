@@ -302,5 +302,78 @@ rm -f "$TMP_OUT"
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
 
 echo ""
+echo "--- G: on_failure() — set_board_status failure renders the 'attempted but failed' text ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-g-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-g-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-g1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+unset TMP_OUT
+
+run_post_mortem() { :; }
+set_board_status() { return 1; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-g-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+post_cost_report() { :; }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call (Task 1) for why this is required
+
+assert_true "failure comment says the board update was attempted but failed" \
+  "grep -q 'Attempted to move the issue to \*\*Blocked\*\*, but the board update failed' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+assert_true "failure comment does NOT falsely claim the move succeeded" \
+  "! grep -q '^Issue has been moved to \*\*Blocked\*\*\.\$' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- H: on_failure() — genuine failure with a successful board move posts both markers with the true claim ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-h-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-h-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-h1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+unset TMP_OUT
+
+run_post_mortem() {
+  post_or_update_comment "$DF_POST_MORTEM_MARKER" "${DF_POST_MORTEM_MARKER}
+stub post-mortem"
+}
+set_board_status() { return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-h-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+post_cost_report() { :; }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call (Task 1) for why this is required
+
+assert_true "df-post-mortem comment produced on a genuine failure" \
+  "[ -f '${COMMENT_LOG_DIR}/dfpostmortem.md' ]"
+assert_true "df-factory-failure comment produced on a genuine failure" \
+  "[ -f '${COMMENT_LOG_DIR}/dffactoryfailure.md' ]"
+assert_true "failure comment claims the (true) successful board move" \
+  "grep -q 'Issue has been moved to \*\*Blocked\*\*\.' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]
