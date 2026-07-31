@@ -99,6 +99,281 @@ SESSION_WINDOW_BACKOFF_ENABLED=true
 rm -f "$TMP_OUT" "$TMP_OUT2"
 rm -rf "$SCHEDULER_STATE_DIR"
 
+# Stubs archon (the "archon workflow cost" call inside on_failure()'s always-run
+# cost-capture block) once, shared by every section below (D-H) that calls on_failure()
+# directly — not just section D.
+archon() { echo "{}"; return 0; }
+export -f archon
+
+echo ""
+echo "--- D: on_failure() guard — matched signal suppresses post-mortem/board-claim, posts pause comment ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-d-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-d-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-d1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SESSION_WINDOW_BACKOFF_ENABLED=true
+
+POST_MORTEM_CALLS=0
+run_post_mortem() {
+  POST_MORTEM_CALLS=$((POST_MORTEM_CALLS+1))
+  post_or_update_comment "$DF_POST_MORTEM_MARKER" "${DF_POST_MORTEM_MARKER}
+stub post-mortem"
+}
+BOARD_STATUS_CALLS=0
+set_board_status() { BOARD_STATUS_CALLS=$((BOARD_STATUS_CALLS+1)); return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-d-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+COST_REPORT_CALLS=0
+post_cost_report() { COST_REPORT_CALLS=$((COST_REPORT_CALLS+1)); }
+
+RESET_ISO_D=$(date -u -d "@$(( $(date -u +%s) + 600 ))" +%Y-%m-%dT%H:%M:%SZ)
+TMP_OUT=$(mktemp /tmp/ep-sw-out-d-XXXXXX)
+printf 'some claude output\n{"event":"claude.rate_limit_event","resetsAt":"%s"}\n' \
+  "$RESET_ISO_D" > "$TMP_OUT"
+
+false
+on_failure
+# Required for sections E-H's fallthrough path: on_failure()'s existing (unchanged)
+# archon-cost-capture block does its own internal `set +e; ...; set -e` around the
+# `archon workflow cost` call, which leaks `set -e` back into THIS shell once
+# on_failure() returns, since it's a plain function call, not a subshell (harmless in
+# production — on_failure only ever runs once via the ERR trap right before the
+# container exits). In section D specifically this is a no-op today (the guard
+# `return`s before ever reaching that block) — reset anyway so this section stays
+# resilient if a future edit changes that, and so the pattern stays uniform across D-H.
+set +e
+
+assert_eq "run_post_mortem NOT called on matched session-window path" "0" "$POST_MORTEM_CALLS"
+assert_eq "set_board_status NOT called on matched session-window path" "0" "$BOARD_STATUS_CALLS"
+assert_eq "post_cost_report still called exactly once" "1" "$COST_REPORT_CALLS"
+assert_true "pause comment posted under the session-window marker" \
+  "[ -f '${COMMENT_LOG_DIR}/dfsessionwindowpause.md' ]"
+assert_true "pause comment exists and does not claim a board move" \
+  "[ -f '${COMMENT_LOG_DIR}/dfsessionwindowpause.md' ] && ! grep -q 'Blocked' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
+assert_true "pause comment exists and does not include a retry snippet" \
+  "[ -f '${COMMENT_LOG_DIR}/dfsessionwindowpause.md' ] && ! grep -q 'Retry' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
+assert_true "no df-post-mortem comment produced" \
+  "[ ! -f '${COMMENT_LOG_DIR}/dfpostmortem.md' ]"
+assert_true "no df-factory-failure comment produced" \
+  "[ ! -f '${COMMENT_LOG_DIR}/dffactoryfailure.md' ]"
+assert_true "runs.jsonl records a paused stage" \
+  "grep -q '\"stage\": \"paused\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
+assert_true "runs.jsonl records no failed stage for this run" \
+  "! grep -q '\"stage\": \"failed\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
+assert_true "no error signature written on the paused path" \
+  "[ ! -d '${SCHEDULER_STATE_DIR}/error-signatures' ]"
+
+rm -f "$TMP_OUT"
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- E: on_failure() guard — falls through to normal failure path when \$TMP_OUT is unset ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-e-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-e-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-e1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+unset TMP_OUT
+
+POST_MORTEM_CALLS=0
+run_post_mortem() { POST_MORTEM_CALLS=$((POST_MORTEM_CALLS+1)); }
+BOARD_STATUS_CALLS=0
+set_board_status() { BOARD_STATUS_CALLS=$((BOARD_STATUS_CALLS+1)); return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-e-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+COST_REPORT_CALLS=0
+post_cost_report() { COST_REPORT_CALLS=$((COST_REPORT_CALLS+1)); }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call for why this is required
+
+assert_eq "run_post_mortem IS called when \$TMP_OUT is unset (normal failure path)" "1" "$POST_MORTEM_CALLS"
+assert_eq "set_board_status IS called when \$TMP_OUT is unset" "1" "$BOARD_STATUS_CALLS"
+assert_true "df-factory-failure comment produced" \
+  "[ -f '${COMMENT_LOG_DIR}/dffactoryfailure.md' ]"
+assert_true "runs.jsonl records a failed stage" \
+  "grep -q '\"stage\": \"failed\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
+
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- E2: on_failure() guard — falls through when \$TMP_OUT is stale (set but the file is already gone) ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-e2-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-e2-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-e2-1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# This is the case that actually occurs in production: after the main retry loop
+# completes, $TMP_OUT still holds its mktemp path but the file itself has already been
+# rm -f'd — this is the sole reason the guard's `[ -f "$TMP_OUT" ]` half exists.
+TMP_OUT=$(mktemp /tmp/ep-sw-out-e2-XXXXXX)
+rm -f "$TMP_OUT"
+
+POST_MORTEM_CALLS=0
+run_post_mortem() { POST_MORTEM_CALLS=$((POST_MORTEM_CALLS+1)); }
+BOARD_STATUS_CALLS=0
+set_board_status() { BOARD_STATUS_CALLS=$((BOARD_STATUS_CALLS+1)); return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-e2-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+COST_REPORT_CALLS=0
+post_cost_report() { COST_REPORT_CALLS=$((COST_REPORT_CALLS+1)); }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call for why this is required
+
+assert_eq "run_post_mortem IS called when \$TMP_OUT is stale" "1" "$POST_MORTEM_CALLS"
+assert_eq "set_board_status IS called when \$TMP_OUT is stale" "1" "$BOARD_STATUS_CALLS"
+assert_true "no session-window pause comment produced for a stale \$TMP_OUT" \
+  "[ ! -f '${COMMENT_LOG_DIR}/dfsessionwindowpause.md' ]"
+
+unset TMP_OUT
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- F: on_failure() guard — kill-switch off falls through even on a matched signal ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-f-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-f-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-f1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SESSION_WINDOW_BACKOFF_ENABLED=false
+
+POST_MORTEM_CALLS=0
+run_post_mortem() { POST_MORTEM_CALLS=$((POST_MORTEM_CALLS+1)); }
+BOARD_STATUS_CALLS=0
+set_board_status() { BOARD_STATUS_CALLS=$((BOARD_STATUS_CALLS+1)); return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-f-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+COST_REPORT_CALLS=0
+post_cost_report() { COST_REPORT_CALLS=$((COST_REPORT_CALLS+1)); }
+
+RESET_ISO_F=$(date -u -d "@$(( $(date -u +%s) + 600 ))" +%Y-%m-%dT%H:%M:%SZ)
+TMP_OUT=$(mktemp /tmp/ep-sw-out-f-XXXXXX)
+printf 'some claude output\n{"event":"claude.rate_limit_event","resetsAt":"%s"}\n' \
+  "$RESET_ISO_F" > "$TMP_OUT"
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call for why this is required
+
+assert_eq "run_post_mortem IS called when kill-switch is off" "1" "$POST_MORTEM_CALLS"
+assert_true "df-factory-failure comment produced when kill-switch is off" \
+  "[ -f '${COMMENT_LOG_DIR}/dffactoryfailure.md' ]"
+assert_true "no session-window pause comment produced when kill-switch is off" \
+  "[ ! -f '${COMMENT_LOG_DIR}/dfsessionwindowpause.md' ]"
+SESSION_WINDOW_BACKOFF_ENABLED=true
+
+rm -f "$TMP_OUT"
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- G: on_failure() — set_board_status failure renders the 'attempted but failed' text ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-g-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-g-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-g1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+unset TMP_OUT
+
+run_post_mortem() { :; }
+set_board_status() { return 1; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-g-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+post_cost_report() { :; }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call (Task 1) for why this is required
+
+assert_true "failure comment says the board update was attempted but failed" \
+  "grep -q 'Attempted to move the issue to \*\*Blocked\*\*, but the board update failed' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+assert_true "failure comment does NOT falsely claim the move succeeded" \
+  "! grep -q '^Issue has been moved to \*\*Blocked\*\*\.\$' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- H: on_failure() — genuine failure with a successful board move posts both markers with the true claim ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-h-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-h-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-h1
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+unset TMP_OUT
+
+run_post_mortem() {
+  post_or_update_comment "$DF_POST_MORTEM_MARKER" "${DF_POST_MORTEM_MARKER}
+stub post-mortem"
+}
+set_board_status() { return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-h-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+post_cost_report() { :; }
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call (Task 1) for why this is required
+
+assert_true "df-post-mortem comment produced on a genuine failure" \
+  "[ -f '${COMMENT_LOG_DIR}/dfpostmortem.md' ]"
+assert_true "df-factory-failure comment produced on a genuine failure" \
+  "[ -f '${COMMENT_LOG_DIR}/dffactoryfailure.md' ]"
+assert_true "failure comment claims the (true) successful board move" \
+  "grep -q 'Issue has been moved to \*\*Blocked\*\*\.' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
+
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]
