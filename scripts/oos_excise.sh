@@ -5,7 +5,8 @@
 #   <allowed-prefixes>  space-separated path prefixes that are in scope
 #   <commit-noun>       noun for the excision commit message (e.g. "refine", "plan")
 # Env:
-#   ISSUE_NUM     (optional) issue number embedded in commit message
+#   ISSUE_NUM     (optional) issue number embedded in commit message; falls back to
+#                 $ARTIFACTS_DIR/issue.json's resolved_number when unset
 #   ARTIFACTS_DIR (required) directory where out-of-scope.md is written
 # Stdout: names of excised files, one per line (log messages go to stderr)
 # Side effects:
@@ -16,8 +17,14 @@ set -euo pipefail
 
 ALLOWED_PREFIXES="${1:?Usage: oos_excise.sh <allowed-prefixes> <commit-noun>}"
 COMMIT_NOUN="${2:?Usage: oos_excise.sh <allowed-prefixes> <commit-noun>}"
-ISSUE_NUM="${ISSUE_NUM:-}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:?ARTIFACTS_DIR must be set}"
+# Falls back to the issue.json artifact every phase command already requires and
+# treats as ground truth, since callers frequently fail to export ISSUE_NUM into
+# the shell invocation that runs this script (#293).
+ISSUE_NUM="${ISSUE_NUM:-$(jq -r '.resolved_number // empty' "$ARTIFACTS_DIR/issue.json" 2>/dev/null || true)}"
+if [ -z "$ISSUE_NUM" ]; then
+  echo "oos_excise: ISSUE_NUM unset and issue.json unreadable" >&2
+fi
 
 OOS_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | while read -r f; do
   ALLOWED=false

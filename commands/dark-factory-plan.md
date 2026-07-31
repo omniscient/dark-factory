@@ -167,9 +167,13 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    ```
    If `IS_DIRECT_TO_PR=yes`, prepend the following note to the "### Next Steps" section of the comment (replacing `$PLAN_GRACE` with the actual value):
    > ⏩ **Auto-advancing in ~`$PLAN_GRACE` min** unless you comment — the scheduler will move this to **Ready** automatically. Leave a comment to re-run the plan or redirect.
-4. Run the OOS gate — detect and revert any files committed outside the plan allowlist:
+4. Run the OOS gate — detect and revert any files committed outside the plan
+   allowlist. `docs/superpowers/specs/` and `.archon/memory/` are included because
+   the refine phase legitimately commits to those prefixes earlier on this same
+   branch (#293); they remain outside this command's own `SCOPE BOUNDARY`, which is
+   still only `docs/superpowers/plans/`:
    ```bash
-   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/" plan)  # TARGET-PATH
+   OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/ docs/superpowers/specs/ .archon/memory/" plan)  # TARGET-PATH
    ```
 5. Commit the plan
 6. Post a summary comment on the issue:
