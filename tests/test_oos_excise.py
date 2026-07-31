@@ -188,6 +188,32 @@ class TestOosExciseScript:
         assert "refine" in log, f"Commit noun not in message: {log}"
         assert "670" in log, f"Issue number not in message: {log}"
 
+    def test_issue_num_falls_back_to_issue_json_when_env_unset(self, git_repo, tmp_path):
+        """Regression test for #293: when the caller doesn't set $ISSUE_NUM (the
+        common case, since entrypoint.sh's ISSUE_NUM isn't exported into the later
+        Bash tool subprocess that runs this script), the excision commit message
+        must still embed the real issue number instead of interpolating '(#)'."""
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        (artifacts / "issue.json").write_text('{"resolved_number": 293}\n')
+
+        oos_file = git_repo / "backend" / "oops.py"
+        oos_file.parent.mkdir(exist_ok=True)
+        oos_file.write_text("oops\n")
+        git("add", str(oos_file), cwd=str(git_repo))
+        git("commit", "-m", "oos", cwd=str(git_repo))
+
+        env = os.environ.copy()
+        env["ARTIFACTS_DIR"] = str(artifacts)
+        env.pop("ISSUE_NUM", None)
+
+        result = run_script("docs/", "plan", env, git_repo)
+        assert result.returncode == 0, result.stderr
+        log = git("log", "--oneline", "-1", cwd=str(git_repo)).stdout.strip()
+        # Match the parenthesized form, not a bare "293" substring — --oneline
+        # prepends an abbreviated SHA that could coincidentally contain "293".
+        assert "(#293)" in log, f"Issue number not in message (issue.json fallback failed): {log}"
+
     def test_log_line_goes_to_stderr_not_stdout(self, git_repo, tmp_path):
         """The 'OOS gate: excising...' log line must appear on stderr, not stdout."""
         artifacts = tmp_path / "artifacts"
