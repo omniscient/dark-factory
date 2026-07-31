@@ -436,7 +436,8 @@ on_failure() {
 ⏸️ **Dark Factory — Paused** (session window)
 
 Claude session window exhausted mid-run. Dispatch resumes automatically at \`${RESUME_ISO}\`
-(scheduler-enforced) — no board change and no retry needed."
+(scheduler-enforced). The scheduler reconciles this issue's board state on its next poll —
+no action needed."
     fi
     post_cost_report || true
     return
