@@ -1169,6 +1169,395 @@ assert_eq "R8b: stage_review_triage guard type is none" \
   "none" "${STAGE_GUARD[stage_review_triage]}"
 
 # ==========================================
+# S: retry_or_skip_delivery_failure (#279 skip-retry-counter exemption)
+# ==========================================
+echo ""
+echo "--- S: retry_or_skip_delivery_failure ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+assert_eq "S1: non-delivery signature returns count" "count" \
+  "$(retry_or_skip_delivery_failure 60 refine "substantive:test_failure:1" "60:refine" 3)"
+assert_eq "S1b: non-delivery signature creates no shadow counter" "0" \
+  "$(get_retry_count "60:refine:delivery")"
+
+assert_eq "S2: empty signature returns count" "count" \
+  "$(retry_or_skip_delivery_failure 60 refine "" "60:refine" 3)"
+
+echo '{}' > "$STATE_FILE"
+D1=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S3: 1st delivery failure under cap returns skip" "skip" "$D1"
+assert_eq "S3b: shadow counter incremented to 1" "1" "$(get_retry_count "61:refine:delivery")"
+assert_eq "S3c: normal counter untouched" "0" "$(get_retry_count "61:refine")"
+
+D2=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S4: 2nd delivery failure under cap returns skip" "skip" "$D2"
+assert_eq "S4b: shadow counter incremented to 2" "2" "$(get_retry_count "61:refine:delivery")"
+
+D3=$(retry_or_skip_delivery_failure 61 refine "environmental:delivery_failure" "61:refine" 3)
+assert_eq "S5: 3rd delivery failure at cap returns a trip: decision" \
+  "1" "$(echo "$D3" | grep -c '^trip:')"
+assert_eq "S5b: trip reason names the consecutive count and #279" \
+  "1" "$(echo "$D3" | grep -c "3 consecutive times.*#279")"
+assert_eq "S5c: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c 'breaker-set-retry --key 61:refine --value 3' "$STUB_LOG" || echo 0)"
+assert_eq "S5d: normal counter back-filled to 3" "3" "$(get_retry_count "61:refine")"
+
+# S6: the diagnostic log line must go to stderr, not pollute the captured decision
+echo '{}' > "$STATE_FILE"
+D_CLEAN=$(retry_or_skip_delivery_failure 62 refine "environmental:delivery_failure" "62:refine" 5 2>/dev/null)
+assert_eq "S6: decision value is exactly 'skip', not polluted by the log line" "skip" "$D_CLEAN"
+
+# S7: reset_retry clears the shadow counter (#279 Requirement 5 / breaker.py Task 1)
+echo '{}' > "$STATE_FILE"
+retry_or_skip_delivery_failure 63 refine "environmental:delivery_failure" "63:refine" 3 > /dev/null
+retry_or_skip_delivery_failure 63 refine "environmental:delivery_failure" "63:refine" 3 > /dev/null
+assert_eq "S7: shadow counter at 2 before reset" "2" "$(get_retry_count "63:refine:delivery")"
+reset_retry "63:refine"
+assert_eq "S7b: shadow counter cleared by reset_retry" "0" "$(get_retry_count "63:refine:delivery")"
+
+> "$STUB_LOG"
+
+# ==========================================
+# T: stage_refine — delivery-failure retry exemption wiring (#279)
+# ==========================================
+echo ""
+echo "--- T: stage_refine — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f gh dispatch
+
+# Reproduces stage_refine's per-item body (matches this file's existing K-section
+# convention of exercising the loop body directly rather than fixturing REFINE_RUNNING/
+# REFINE_WIP_LIMIT/BACKLOG end-to-end). This section defines every stub it needs itself
+# (gh, dispatch above) rather than relying on whatever an earlier section left bound.
+_run_refine_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "refine")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  PREV_DELIVERY_SKIP=""
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) PREV_DELIVERY_SKIP=1 ;;
+    trip:*) trip_to_blocked "$issue" "refine" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "${issue}:refine")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "${issue}:refine"
+      ;;
+  esac
+
+  DELIVERY_NOTE=""
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
+  fi
+  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}" > /dev/null
+  dispatch "Refine issue #${issue}" > /dev/null
+}
+
+# T1: a substantive (non-delivery) failure increments the normal counter, no note
+_drop_sig 80 refine "substantive:test_failure:1"
+_run_refine_body 80
+assert_eq "T1: normal counter incremented" "1" "$(get_retry_count "80:refine")"
+assert_eq "T1b: no shadow counter created" "0" "$(get_retry_count "80:refine:delivery")"
+assert_eq "T1c: dispatched" "1" "$(grep -c 'dispatch Refine issue #80' "$STUB_LOG" || echo 0)"
+assert_eq "T1d: comment has no delivery-skip note" "0" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || true)"
+
+> "$STUB_LOG"
+
+# T2: a delivery failure under cap dispatches without touching the normal counter,
+# and the comment carries the delivery-skip note
+echo '{}' > "$STATE_FILE"
+_drop_sig 81 refine "environmental:delivery_failure"
+_run_refine_body 81
+assert_eq "T2: normal counter NOT incremented" "0" "$(get_retry_count "81:refine")"
+assert_eq "T2b: shadow counter incremented to 1" "1" "$(get_retry_count "81:refine:delivery")"
+assert_eq "T2c: dispatched" "1" "$(grep -c 'dispatch Refine issue #81' "$STUB_LOG" || echo 0)"
+assert_eq "T2d: comment carries the delivery-skip note" "1" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"
+
+# T3: REFINE_MAX_RETRIES consecutive delivery failures trip, back-filling the normal
+# counter (asserted via the breaker-set-retry delegation — trip_to_blocked's own
+# reset_retry zeroes the counter again immediately after, matching section B/K9's
+# already-passing "counter reset after trip" assertions), and do NOT dispatch on the
+# tripping attempt
+echo '{}' > "$STATE_FILE"
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do
+  _drop_sig 82 refine "environmental:delivery_failure"
+  _run_refine_body 82
+done
+assert_eq "T3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 82:refine --value ${REFINE_MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "T3b: only REFINE_MAX_RETRIES-1 dispatches occurred (cap attempt trips, no dispatch)" \
+  "$((REFINE_MAX_RETRIES - 1))" "$(grep -c 'dispatch Refine issue #82' "$STUB_LOG" || echo 0)"
+assert_eq "T3c: breaker-trip delegated with the delivery-failure reason" \
+  "1" "$(grep -c 'breaker-trip --issue 82 --phase refine' "$STUB_LOG" || echo 0)"
+assert_eq "T3d: normal counter reset to 0 after trip (trip_to_blocked's existing reset_retry)" \
+  "0" "$(get_retry_count "82:refine")"
+
+> "$STUB_LOG"
+
+# ==========================================
+# U: stage_plan — delivery-failure retry exemption wiring (#279)
+# ==========================================
+echo ""
+echo "--- U: stage_plan — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f gh dispatch
+
+_run_plan_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "plan")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  PREV_DELIVERY_SKIP=""
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) PREV_DELIVERY_SKIP=1 ;;
+    trip:*) trip_to_blocked "$issue" "plan" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "${issue}:plan")
+      if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "${issue}:plan"
+      ;;
+  esac
+
+  DELIVERY_NOTE=""
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
+  fi
+  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}" > /dev/null
+  dispatch "Plan issue #${issue}" > /dev/null
+}
+
+_drop_sig 90 plan "substantive:test_failure:1"
+_run_plan_body 90
+assert_eq "U1: normal counter incremented" "1" "$(get_retry_count "90:plan")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+_drop_sig 91 plan "environmental:delivery_failure"
+_run_plan_body 91
+assert_eq "U2: normal counter NOT incremented" "0" "$(get_retry_count "91:plan")"
+assert_eq "U2b: shadow counter incremented to 1" "1" "$(get_retry_count "91:plan:delivery")"
+assert_eq "U2c: comment carries the delivery-skip note" "1" "$(grep -c 'was not counted against the retry budget' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do
+  _drop_sig 92 plan "environmental:delivery_failure"
+  _run_plan_body 92
+done
+assert_eq "U3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 92:plan --value ${REFINE_MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "U3b: breaker-trip delegated" \
+  "1" "$(grep -c 'breaker-trip --issue 92 --phase plan' "$STUB_LOG" || echo 0)"
+assert_eq "U3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "92:plan")"
+
+> "$STUB_LOG"
+
+# ==========================================
+# V: stage_blocked_retry (implement) — delivery-failure retry exemption (#279)
+# ==========================================
+echo ""
+echo "--- V: stage_blocked_retry — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_pr_for_issue() { echo ""; }
+export -f dispatch get_pr_for_issue
+
+_run_blocked_retry_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "implement")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  DECISION=$(retry_or_skip_delivery_failure "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES" || echo "count")
+  case "$DECISION" in
+    skip) ;;
+    trip:*) trip_to_blocked "$issue" "implement" "${DECISION#trip:}"; return ;;
+    count|*)
+      RETRIES=$(get_retry_count "$issue")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$issue" "implement" "retry limit of ${MAX_RETRIES} reached"
+        return
+      fi
+      increment_retry "$issue"
+      ;;
+  esac
+
+  if [ -n "$(get_pr_for_issue "$issue")" ]; then
+    dispatch "Continue issue #${issue}" > /dev/null
+  else
+    dispatch "Fix issue #${issue}" > /dev/null
+  fi
+}
+
+_drop_sig 100 implement "substantive:test_failure:1"
+_run_blocked_retry_body 100
+assert_eq "V1: normal counter incremented" "1" "$(get_retry_count "100")"
+assert_eq "V1b: dispatched Fix (no PR)" "1" "$(grep -c 'dispatch Fix issue #100' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+_drop_sig 101 implement "environmental:delivery_failure"
+_run_blocked_retry_body 101
+assert_eq "V2: normal counter NOT incremented" "0" "$(get_retry_count "101")"
+assert_eq "V2b: shadow counter incremented to 1" "1" "$(get_retry_count "101:delivery")"
+assert_eq "V2c: dispatched" "1" "$(grep -c 'dispatch Fix issue #101' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+for i in $(seq 1 "$MAX_RETRIES"); do
+  _drop_sig 102 implement "environmental:delivery_failure"
+  _run_blocked_retry_body 102
+done
+assert_eq "V3: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 102 --value ${MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "V3b: breaker-trip delegated" \
+  "1" "$(grep -c 'breaker-trip --issue 102 --phase implement' "$STUB_LOG" || echo 0)"
+assert_eq "V3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "102")"
+
+> "$STUB_LOG"
+
+# ==========================================
+# W: stage_conflict_resolve (resolve) — delivery-failure retry exemption (#279)
+# ==========================================
+echo ""
+echo "--- W: stage_conflict_resolve — delivery-failure exemption ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_pr_for_issue() { echo "500"; }
+check_pr_mergeable() { echo "CONFLICTING"; }
+export -f dispatch get_pr_for_issue check_pr_mergeable
+
+_run_resolve_body() {
+  local issue="$1"
+  SIG_RESULT=$(check_failure_signature "$issue" "resolve")
+  SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
+  if echo "$SIG_RESULT" | grep -q "stuck=true"; then
+    trip_to_blocked "$issue" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
+    return
+  fi
+
+  RESOLVE_DELIVERY_SKIP=""
+  if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
+    DPEEK=$(get_retry_count "${issue}:resolve:delivery" || echo 0)
+    if [ "$DPEEK" -ge "$MAX_RETRIES" ]; then
+      STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "${issue}:resolve" --value "$DPEEK"
+      trip_to_blocked "$issue" "resolve" "same failure signature 'environmental:delivery_failure' recorded ${DPEEK} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+      return
+    fi
+    RESOLVE_DELIVERY_SKIP=1
+  else
+    RETRIES=$(get_retry_count "${issue}:resolve")
+    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      trip_to_blocked "$issue" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+      return
+    fi
+  fi
+
+  PR_NUM=$(get_pr_for_issue "$issue")
+  [ -z "$PR_NUM" ] && return
+
+  MERGEABLE=$(check_pr_mergeable "$PR_NUM")
+  case "$MERGEABLE" in
+    CONFLICTING)
+      if [ -n "$RESOLVE_DELIVERY_SKIP" ]; then
+        increment_retry "${issue}:resolve:delivery" > /dev/null || true
+      else
+        increment_retry "${issue}:resolve" || true
+      fi
+      dispatch "Deconflict issue #${issue}" > /dev/null
+      ;;
+  esac
+}
+
+# W1: substantive failure — unchanged behavior (normal counter increments on dispatch)
+_drop_sig 110 resolve "substantive:test_failure:1"
+_run_resolve_body 110
+assert_eq "W1: normal counter incremented" "1" "$(get_retry_count "110:resolve")"
+assert_eq "W1b: dispatched" "1" "$(grep -c 'dispatch Deconflict issue #110' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W2: delivery failure under cap — dispatches, shadow counter (not normal) increments
+_drop_sig 111 resolve "environmental:delivery_failure"
+_run_resolve_body 111
+assert_eq "W2: normal counter NOT incremented" "0" "$(get_retry_count "111:resolve")"
+assert_eq "W2b: shadow counter incremented to 1" "1" "$(get_retry_count "111:resolve:delivery")"
+assert_eq "W2c: dispatched" "1" "$(grep -c 'dispatch Deconflict issue #111' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W3: MAX_RETRIES consecutive delivery failures dispatch (each incrementing the shadow
+# counter), then the NEXT checkpoint peeks a shadow count already at the ceiling and
+# trips without dispatching again — see the plan's "Accepted asymmetry" note for why
+# this is MAX_RETRIES dispatches (not MAX_RETRIES-1, unlike refine/plan/implement).
+for i in $(seq 1 "$MAX_RETRIES"); do
+  _drop_sig 112 resolve "environmental:delivery_failure"
+  _run_resolve_body 112
+done
+assert_eq "W3: shadow counter at MAX_RETRIES after MAX_RETRIES dispatches" \
+  "$MAX_RETRIES" "$(get_retry_count "112:resolve:delivery")"
+assert_eq "W3b: MAX_RETRIES dispatches occurred" \
+  "$MAX_RETRIES" "$(grep -c 'dispatch Deconflict issue #112' "$STUB_LOG" || echo 0)"
+
+_drop_sig 112 resolve "environmental:delivery_failure"
+_run_resolve_body 112
+assert_eq "W3c: the next checkpoint trips instead of dispatching again" \
+  "$MAX_RETRIES" "$(grep -c 'dispatch Deconflict issue #112' "$STUB_LOG" || echo 0)"
+assert_eq "W3d: back-fill delegates to breaker-set-retry with the shadow count" \
+  "1" "$(grep -c "breaker-set-retry --key 112:resolve --value ${MAX_RETRIES}" "$STUB_LOG" || echo 0)"
+assert_eq "W3e: breaker-trip delegated with the delivery-failure reason" \
+  "1" "$(grep -c 'breaker-trip --issue 112 --phase resolve' "$STUB_LOG" || echo 0)"
+assert_eq "W3f: normal counter reset to 0 after trip" "0" "$(get_retry_count "112:resolve")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W4: no dispatch this cycle (MERGEABLE=UNKNOWN) → neither counter mutates
+check_pr_mergeable() { echo "UNKNOWN"; }
+export -f check_pr_mergeable
+_drop_sig 113 resolve "environmental:delivery_failure"
+_run_resolve_body 113
+assert_eq "W4: shadow counter untouched when no dispatch occurs" "0" "$(get_retry_count "113:resolve:delivery")"
+assert_eq "W4b: no dispatch" "0" "$(grep -c 'dispatch' "$STUB_LOG" || true)"
+check_pr_mergeable() { echo "CONFLICTING"; }
+export -f check_pr_mergeable
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W5: reset_retry clears the resolve shadow counter
+_drop_sig 114 resolve "environmental:delivery_failure"
+_run_resolve_body 114
+assert_eq "W5: shadow counter at 1 before reset" "1" "$(get_retry_count "114:resolve:delivery")"
+reset_retry "114:resolve"
+assert_eq "W5b: shadow counter cleared" "0" "$(get_retry_count "114:resolve:delivery")"
+
+> "$STUB_LOG"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"

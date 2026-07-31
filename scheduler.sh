@@ -396,6 +396,56 @@ check_failure_signature() {
     breaker-check-signature --issue "$issue_num" --phase "$phase"
 }
 
+# --- Skip the counted retry for a runner-side delivery failure (#279) ---
+# Bounded by a capped shadow counter ("<retry_key>:delivery") so a chronically-cursed
+# ticket's worst-case dispatch volume still matches today's behavior exactly once the
+# cap is reached (back-fill + trip). Reuses increment_retry's existing key/counter
+# adapter for the shadow counter — no new bash/python plumbing beyond breaker-set-retry.
+# Usage: DECISION=$(retry_or_skip_delivery_failure <issue_num> <phase> <sig_value> <retry_key> <ceiling> || echo "count")
+# Callers MUST append `|| echo "count"` at the capture site — see the plan's "Bash
+# mechanics note" for why (safe fail-toward-counted behavior under set -euo pipefail).
+# Echoes exactly one of (the diagnostic log line goes to stderr so it never pollutes
+# the captured decision):
+#   "count"          - sig_value is not environmental:delivery_failure; caller proceeds
+#                       with its existing get_retry_count/ceiling-check/increment_retry
+#                       sequence unchanged.
+#   "skip"           - delivery failure, under cap; delivery-skip counter incremented;
+#                       caller dispatches WITHOUT touching the normal retry counter.
+#   "trip:<reason>"  - delivery failure, cap reached; normal retry counter has been
+#                       back-filled via breaker-set-retry; caller calls trip_to_blocked
+#                       with the given reason and continues.
+retry_or_skip_delivery_failure() {
+  local issue_num="$1" phase="$2" sig_value="$3" retry_key="$4" ceiling="$5"
+  if [ "$sig_value" != "environmental:delivery_failure" ]; then echo "count"; return; fi
+  local dkey="${retry_key}:delivery"
+  local dcount
+  dcount=$(increment_retry "$dkey" || echo "")
+  case "$dcount" in
+    ''|*[!0-9]*) echo "count"; return ;;
+  esac
+  if [ "$dcount" -lt "$ceiling" ]; then
+    echo "[$(date -u +%FT%TZ)] delivery_gate issue=#${issue_num} phase=${phase} action=delivery_failure_skip count=${dcount}/${ceiling}" >&2
+    echo "skip"
+  else
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "$retry_key" --value "$dcount"
+    echo "trip:same failure signature 'environmental:delivery_failure' recorded ${dcount} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+  fi
+}
+
+# --- Shared "previous attempt hit a delivery failure" issue-comment note (#279) ---
+# Byte-identical to the inline construction previously duplicated in stage_plan and
+# stage_refine. Callers must set PREV_DELIVERY_SKIP (non-empty to include the note)
+# before calling; echoes the note text (or nothing) for capture via DELIVERY_NOTE=$(...).
+delivery_skip_note() {
+  if [ -n "$PREV_DELIVERY_SKIP" ]; then
+    cat <<EOF
+
+
+> ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget.
+EOF
+  fi
+}
+
 # --- Mergeable status for a PR: CONFLICTING, MERGEABLE, or UNKNOWN ---
 # UNKNOWN means GitHub hasn't finished computing mergeability — callers must skip.
 # --repo is required because the scheduler runs outside a git checkout.
@@ -793,16 +843,34 @@ stage_conflict_resolve() {
     if is_issue_running "$ISSUE"; then continue; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "resolve")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:resolve")
-    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
-      continue
+    # #279: the delivery-failure exemption's accounting (the "<key>:delivery" shadow
+    # counter) must increment at the actual dispatch point below, not here — this
+    # checkpoint only PEEKS the shadow counter to decide trip-vs-proceed, preserving
+    # the existing two-step shape (decide-to-trip here; count/skip at the CONFLICTING
+    # branch). See the "#279 skip-retry-counter design" spec's Requirement 2 for why
+    # this site doesn't call the shared retry_or_skip_delivery_failure helper the other
+    # three call sites use.
+    RESOLVE_DELIVERY_SKIP=""
+    if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
+      DPEEK=$(get_retry_count "${ISSUE}:resolve:delivery" || echo 0)
+      if [ "$DPEEK" -ge "$MAX_RETRIES" ]; then
+        STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "${ISSUE}:resolve" --value "$DPEEK"
+        trip_to_blocked "$ISSUE" "resolve" "same failure signature 'environmental:delivery_failure' recorded ${DPEEK} consecutive times (suspected runner prompt-delivery bug — see #279), retry budget exhausted"
+        continue
+      fi
+      RESOLVE_DELIVERY_SKIP=1
+    else
+      RETRIES=$(get_retry_count "${ISSUE}:resolve")
+      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+        continue
+      fi
     fi
 
     PR_NUM=$(get_pr_for_issue "$ISSUE")
@@ -812,7 +880,12 @@ stage_conflict_resolve() {
     case "$MERGEABLE" in
       CONFLICTING)
         echo "[$(date -u +%FT%TZ)] conflict_gate issue=#${ISSUE} pr=#${PR_NUM} mergeable=CONFLICTING action=dispatch_deconflict"
-        increment_retry "${ISSUE}:resolve" || true
+        if [ -n "$RESOLVE_DELIVERY_SKIP" ]; then
+          DCOUNT=$(increment_retry "${ISSUE}:resolve:delivery" || echo 0)
+          echo "[$(date -u +%FT%TZ)] delivery_gate issue=#${ISSUE} phase=resolve action=delivery_failure_skip count=${DCOUNT}/${MAX_RETRIES}" >&2
+        else
+          increment_retry "${ISSUE}:resolve" || true
+        fi
         if dispatch "Deconflict issue #${ISSUE}"; then
           DISPATCHED="Deconflict issue #${ISSUE}"
         fi
@@ -924,19 +997,29 @@ stage_blocked_retry() {
     if is_issue_running "$ISSUE"; then continue; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "implement")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "$ISSUE")
-    if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
-      continue
-    fi
-
-    increment_retry "$ISSUE"
+    DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES" || echo "count")
+    case "$DECISION" in
+      skip)
+        ;;
+      trip:*)
+        trip_to_blocked "$ISSUE" "implement" "${DECISION#trip:}"
+        continue
+        ;;
+      count|*)
+        RETRIES=$(get_retry_count "$ISSUE")
+        if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+          trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
+          continue
+        fi
+        increment_retry "$ISSUE"
+        ;;
+    esac
     # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
     # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
     # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
@@ -972,21 +1055,35 @@ stage_plan() {
     if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "plan")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:plan")
-    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
-      continue
-    fi
+    PREV_DELIVERY_SKIP=""
+    DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "plan" "$SIG_VALUE" "${ISSUE}:plan" "$REFINE_MAX_RETRIES" || echo "count")
+    case "$DECISION" in
+      skip)
+        PREV_DELIVERY_SKIP=1
+        ;;
+      trip:*)
+        trip_to_blocked "$ISSUE" "plan" "${DECISION#trip:}"
+        continue
+        ;;
+      count|*)
+        RETRIES=$(get_retry_count "${ISSUE}:plan")
+        if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+          trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+          continue
+        fi
+        increment_retry "${ISSUE}:plan"
+        ;;
+    esac
 
-    increment_retry "${ISSUE}:plan"
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.
+    DELIVERY_NOTE=$(delivery_skip_note)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -1020,21 +1117,35 @@ stage_refine() {
     if [ "$REFINE_RUNNING" -ge "$REFINE_WIP_LIMIT" ]; then break; fi
 
     SIG_RESULT=$(check_failure_signature "$ISSUE" "refine")
+    SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
     if echo "$SIG_RESULT" | grep -q "stuck=true"; then
-      SIG_VALUE=$(echo "$SIG_RESULT" | grep -o 'sig=.*' | cut -d= -f2-)
       trip_to_blocked "$ISSUE" "refine" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
       continue
     fi
 
-    RETRIES=$(get_retry_count "${ISSUE}:refine")
-    if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
-      trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
-      continue
-    fi
+    PREV_DELIVERY_SKIP=""
+    DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES" || echo "count")
+    case "$DECISION" in
+      skip)
+        PREV_DELIVERY_SKIP=1
+        ;;
+      trip:*)
+        trip_to_blocked "$ISSUE" "refine" "${DECISION#trip:}"
+        continue
+        ;;
+      count|*)
+        RETRIES=$(get_retry_count "${ISSUE}:refine")
+        if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+          trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+          continue
+        fi
+        increment_retry "${ISSUE}:refine"
+        ;;
+    esac
 
-    increment_retry "${ISSUE}:refine"
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.
+    DELIVERY_NOTE=$(delivery_skip_note)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true
