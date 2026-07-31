@@ -159,6 +159,7 @@ COST_MARKER="<!-- dark-factory-cost-report -->"
 REFINE_FAILURE_MARKER="<!-- df-refine-failure -->"
 FACTORY_FAILURE_MARKER="<!-- df-factory-failure -->"
 DF_POST_MORTEM_MARKER="<!-- df-post-mortem -->"
+DF_SESSION_WINDOW_PAUSE_MARKER="<!-- df-session-window-pause -->"
 
 # Idempotent marker-comment upsert — thin adapter over factory_core.providers' Tracker
 # (find-by-marker + PATCH/create, same semantics as board.py's post_or_update_comment).
@@ -421,6 +422,26 @@ post_cost_report() {
 # --- Error handler: move ticket back to Ready and post comment ---
 on_failure() {
   local EXIT_CODE=$?
+
+  if [ -n "${TMP_OUT:-}" ] && [ -f "$TMP_OUT" ] && _handle_session_window_pause "$TMP_OUT"; then
+    # _handle_session_window_pause already wrote the pause sentinel, recorded a `paused`
+    # run-record entry, and honored SESSION_WINDOW_BACKOFF_ENABLED — nothing left to do
+    # here except tell the issue and still report cost.
+    if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
+      local RESUME_EPOCH RESUME_ISO
+      RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/session-window-paused" 2>/dev/null || echo "")
+      RESUME_ISO=$(date -u -d "@${RESUME_EPOCH}" +%FT%TZ 2>/dev/null || echo "unknown")
+      post_or_update_comment "$DF_SESSION_WINDOW_PAUSE_MARKER" \
+        "${DF_SESSION_WINDOW_PAUSE_MARKER}
+⏸️ **Dark Factory — Paused** (session window)
+
+Claude session window exhausted mid-run. Dispatch resumes automatically at \`${RESUME_ISO}\`
+(scheduler-enforced) — no board change and no retry needed."
+    fi
+    post_cost_report || true
+    return
+  fi
+
   # Capture partial-failure record before any other action (non-fatal)
   # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
   # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
@@ -480,14 +501,17 @@ ${FOOTER}"
       _write_error_signature "$(_failure_phase_for_intent)" "$EXIT_CODE" "${TMP_OUT:-}"
       echo "Dark factory failed (exit $EXIT_CODE). Moving issue #$ISSUE_NUM back to Ready..."
       run_post_mortem "$EXIT_CODE" "${TMP_OUT:-}" || true
-      set_board_status "blocked" 2>/dev/null || true
+      local BOARD_MOVE_OK=true
+      set_board_status "blocked" 2>/dev/null || BOARD_MOVE_OK=false
+      local BOARD_NOTE="Issue has been moved to **Blocked**."
+      [ "$BOARD_MOVE_OK" = "true" ] || BOARD_NOTE="Attempted to move the issue to **Blocked**, but the board update failed — check board state manually."
       FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory)
       post_or_update_comment "$FACTORY_FAILURE_MARKER" \
         "${FACTORY_FAILURE_MARKER}
 ## Dark Factory Run — Failed
 
 The dark factory encountered an error (exit code $EXIT_CODE) and could not complete.
-Issue has been moved to **Blocked**.
+${BOARD_NOTE}
 
 \`\`\`bash
 # Retry

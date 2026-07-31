@@ -130,6 +130,13 @@ RUN_STARTED_AT=$(date -u -d '-5 minutes' +"%Y-%m-%dT%H:%M:%SZ")
 ISSUE_NUM=33
 INTENT=fix
 RUN_ID=test-run-f1
+# #292: on_failure() now guards on _handle_session_window_pause() FIRST, and this
+# fixture's rate-limit-flavored text would otherwise match that guard (taking the new
+# early-return pause path) before ever reaching _write_error_signature -- disable the
+# kill-switch so this section keeps exercising the on_failure()->_write_error_signature
+# wiring this test is actually about, independent of #292's guard (covered separately by
+# tests/test_entrypoint_session_window.sh).
+SESSION_WINDOW_BACKOFF_ENABLED=false
 
 # post_or_update_comment()/set_board_status()/run_post_mortem() shell out to the real
 # /opt/dark-factory providers/cli.py, bypassing the gh() stub above (it calls urllib
