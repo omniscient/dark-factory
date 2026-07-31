@@ -536,4 +536,8 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    } > "$ARTIFACTS_DIR/conformance.md"
    ```
 
-5. Exit non-zero (`exit 1`) — this prevents `push-and-pr` and `status-in-review` from running.
+5. Exit non-zero (`exit 1`) — kept for forward-compatibility, but the actual enforcement is the
+   `conformance-gate` DAG node (`workflows/archon-dark-factory.yaml`), which reads this file's
+   `STATUS:` line directly and blocks `push-and-pr` (and everything chained after it, including
+   `status-in-review`) on anything other than `PASS`/`SKIPPED`/`ERROR` — a `command:` node's
+   internal `exit 1` does not reliably surface as node failure to the DAG executor (#212, #271).

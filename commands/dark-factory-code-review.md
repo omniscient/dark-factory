@@ -221,4 +221,8 @@ else
 fi
 ```
 
-6. Exit non-zero (`exit 1`) — this halts `status-in-review` (the issue stays Blocked instead of moving to In Review).
+6. Exit non-zero (`exit 1`) — kept for forward-compatibility, but the actual enforcement is the
+   `review-gate` DAG node (`workflows/archon-dark-factory.yaml`), which reads this file's
+   `STATUS:` line directly and blocks `status-in-review` on anything other than
+   `PASS`/`SKIPPED`/`ERROR` — a `command:` node's internal `exit 1` does not reliably surface
+   as node failure to the DAG executor (#212, #271).
