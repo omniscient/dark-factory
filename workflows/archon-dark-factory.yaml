@@ -528,34 +528,9 @@ nodes:
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 120000
 
-  # Context budget telemetry — captures pre-prompt token estimate for implement/continue phase.
-  # INTENT is read from issue.json (new|continue); context_budget.py uses the distinct registry
-  # entries for each: "continue" includes pr_reviews, "new" does not (per _SECTION_REGISTRY).
   - id: budget-implement
     bash: |
-      ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
-      INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
-      _CLONE="${CLONE_DIR:-.}"
-      _RUN="${RUN_ID:-$(basename "${ARTIFACTS_DIR:-/tmp/budget}")}"
-      # Assert INTENT is a known scenario before invoking context_budget.py so that
-      # an unexpected value produces a visible error rather than a silent no-op.
-      case "$INTENT" in
-        new|continue) ;;
-        *) echo "budget-implement: unexpected INTENT='$INTENT'; expected new or continue" >&2; exit 1 ;;
-      esac
-      # memory-context.md is written inside the command session by memory_retrieve.py (Phase 1
-      # load). This applies to all of refine, plan, implement, continue — budget nodes always
-      # run before the command. Reported as dropped/empty_or_missing; this is expected.
-      python3 "$_CLONE/dark-factory/scripts/context_budget.py" \
-        --scenario "$INTENT" \
-        --issue-num "$ISSUE" \
-        --run-id "$_RUN" \
-        --artifacts-dir "$ARTIFACTS_DIR" \
-        --clone-dir "$_CLONE" \
-        --issue-json "$ARTIFACTS_DIR/issue.json" \
-        --memory-file "$ARTIFACTS_DIR/memory-context.md" \
-        --comment-digest-file "$ARTIFACTS_DIR/comment-digest.md" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+      bash "${CLONE_DIR:-.}/dark-factory/scripts/budget_context.sh"
     depends_on: [update-codeindex, fetch-issue, digest-comments]
     # OR-join: digest-comments runs only on continue; skipped on new.
     # none_failed_min_one_success ensures this node runs when digest-comments is skipped.
