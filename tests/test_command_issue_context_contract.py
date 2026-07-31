@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 COMMAND_DIR = Path(__file__).resolve().parents[1] / "commands"
@@ -47,16 +48,28 @@ def test_plan_command_oos_gate_allowlist_includes_spec_and_memory_prefixes():
     refine phase's own spec/memory commits (already on the branch when plan
     runs) as out-of-scope, or it silently deletes them."""
     text = (COMMAND_DIR / "dark-factory-plan.md").read_text(encoding="utf-8")
-    oos_lines = [line for line in text.splitlines() if "oos_excise.sh" in line]
-    assert oos_lines, "dark-factory-plan.md must call oos_excise.sh"
+    # Select the line carrying the "# TARGET-PATH" marker rather than the first
+    # line merely mentioning oos_excise.sh, so a prose reference above the code
+    # block or a second invocation can't cause this test to check the wrong line.
+    oos_lines = [
+        line
+        for line in text.splitlines()
+        if "oos_excise.sh" in line and "# TARGET-PATH" in line
+    ]
+    assert oos_lines, (
+        "dark-factory-plan.md must call oos_excise.sh on a line marked # TARGET-PATH"
+    )
     line = oos_lines[0]
-    for prefix in ("docs/superpowers/plans/", "docs/superpowers/specs/", ".archon/memory/"):
-        assert prefix in line, (
-            f"dark-factory-plan.md's oos_excise.sh invocation is missing allowed "
-            f"prefix {prefix!r} — line: {line!r}"
-        )
-    for stray in ("\"docs/\"", "\"scripts/\""):
-        assert stray not in line, (
-            f"dark-factory-plan.md's oos_excise.sh invocation over-widened to a bare "
-            f"prefix {stray!r} — line: {line!r}"
-        )
+
+    match = re.search(r'oos_excise\.sh"\s+"([^"]*)"', line)
+    assert match, (
+        f"could not extract the quoted allowed-prefixes argument from the "
+        f"oos_excise.sh invocation — line: {line!r}"
+    )
+    prefixes = set(match.group(1).split())
+
+    expected = {"docs/superpowers/plans/", "docs/superpowers/specs/", ".archon/memory/"}
+    assert prefixes == expected, (
+        f"dark-factory-plan.md's oos_excise.sh allowed-prefixes argument "
+        f"{prefixes!r} does not equal expected {expected!r} — line: {line!r}"
+    )

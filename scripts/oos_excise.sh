@@ -22,6 +22,9 @@ ARTIFACTS_DIR="${ARTIFACTS_DIR:?ARTIFACTS_DIR must be set}"
 # treats as ground truth, since callers frequently fail to export ISSUE_NUM into
 # the shell invocation that runs this script (#293).
 ISSUE_NUM="${ISSUE_NUM:-$(jq -r '.resolved_number // empty' "$ARTIFACTS_DIR/issue.json" 2>/dev/null || true)}"
+if [ -z "$ISSUE_NUM" ]; then
+  echo "oos_excise: ISSUE_NUM unset and issue.json unreadable" >&2
+fi
 
 OOS_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null | while read -r f; do
   ALLOWED=false

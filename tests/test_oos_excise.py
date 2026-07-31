@@ -214,6 +214,34 @@ class TestOosExciseScript:
         # prepends an abbreviated SHA that could coincidentally contain "293".
         assert "(#293)" in log, f"Issue number not in message (issue.json fallback failed): {log}"
 
+    def test_missing_issue_json_and_unset_issue_num_still_exits_zero(self, git_repo, tmp_path):
+        """Regression test for #293 review: when $ISSUE_NUM is unset AND
+        issue.json is missing/unreadable, the jq fallback must not turn the
+        OOS gate into a hard phase failure under `set -euo pipefail`. The
+        script should still exit 0 and commit (with a bare '(#)' issue
+        reference), and should warn on stderr instead of failing silently."""
+        artifacts = tmp_path / "artifacts"
+        artifacts.mkdir()
+        # Deliberately no issue.json written here.
+
+        oos_file = git_repo / "backend" / "oops.py"
+        oos_file.parent.mkdir(exist_ok=True)
+        oos_file.write_text("oops\n")
+        git("add", str(oos_file), cwd=str(git_repo))
+        git("commit", "-m", "oos", cwd=str(git_repo))
+
+        env = os.environ.copy()
+        env["ARTIFACTS_DIR"] = str(artifacts)
+        env.pop("ISSUE_NUM", None)
+
+        result = run_script("docs/", "plan", env, git_repo)
+        assert result.returncode == 0, result.stderr
+        log = git("log", "--oneline", "-1", cwd=str(git_repo)).stdout.strip()
+        assert "(#)" in log, f"expected bare '(#)' issue reference: {log}"
+        assert "issue.json unreadable" in result.stderr, (
+            f"expected a stderr warning about the unreadable issue.json fallback: {result.stderr!r}"
+        )
+
     def test_log_line_goes_to_stderr_not_stdout(self, git_repo, tmp_path):
         """The 'OOS gate: excising...' log line must appear on stderr, not stdout."""
         artifacts = tmp_path / "artifacts"
