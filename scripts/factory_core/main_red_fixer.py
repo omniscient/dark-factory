@@ -15,12 +15,11 @@ import subprocess
 from . import identity
 from .providers import get_codehost
 
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
-try:
-    from .adapter_defaults import DEFAULTS as _AD
-    _DEFAULT_ALLOWED_PATHS = _AD["safety"]["main_red_allowed_paths"]
-except Exception:
-    _DEFAULT_ALLOWED_PATHS = ["backend/", "frontend/", "alembic/", "dark-factory/smoke_gate.sh"]
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
+from .adapter_defaults import DEFAULTS as _AD
+
+_DEFAULT_ALLOWED_PATHS = _AD["safety"]["main_red_allowed_paths"]
 
 
 def _main_red_allowed_paths(clone_dir: str | None = None) -> list:

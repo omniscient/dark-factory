@@ -87,7 +87,9 @@ epic_autopilot:
   opt_out_label: no-autopilot # per-ticket veto label. env: EPIC_AUTOPILOT_OPT_OUT_LABEL overrides
   hard_exclude_paths:         # spec target paths matching any of these → excluded before Opus (fail-closed)
     # The first four (factory-self) are ignored when allow_self_improvement is true;
-    # the trading/auth entries below always apply.
+    # the trading/auth and Claude Skills entries below always apply.
+    # Kept byte-identical to adapter_defaults.DEFAULTS["safety"]["hard_exclude_paths"]
+    # (tests/test_adapter.py::test_config_yaml_hard_exclude_paths_matches_defaults).
     - "dark-factory/"
     - ".archon/"
     - "scheduler.sh"
@@ -96,6 +98,13 @@ epic_autopilot:
     - "app/tasks/trading.py"
     - "app/core/auth"
     - "app/routers/auth"
+    - ".claude/skills/"
+    - ".claude/settings.json"
+    - ".claude/settings.local.json"
+    - ".mcp.json"
+    - ".claude/plugins/"
+    - ".claude-plugin/"
+    - ".factory/hooks/"
   # When starved (a poll dispatched nothing) and main is green, review the refined, below-ceiling
   # children of in-progress epics with Opus and advance the low-risk ones via direct-to-pr.
   # See docs/superpowers/specs/2026-06-20-epic-autopilot-design.md

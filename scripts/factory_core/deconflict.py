@@ -10,14 +10,12 @@ _INCLUDED_EXTS = frozenset({
     ".yaml", ".yml", ".sh", ".sql", ".md",
 })
 
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
-try:
-    from .adapter_defaults import DEFAULTS as _AD
-    _DEFAULT_MODELS_INIT = _AD["deconflict"]["models_init"]
-    _DEFAULT_MIGRATIONS_DIR = _AD["deconflict"]["migrations_dir"]
-except Exception:
-    _DEFAULT_MODELS_INIT = "backend/app/models/__init__.py"
-    _DEFAULT_MIGRATIONS_DIR = "alembic/versions/"
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
+from .adapter_defaults import DEFAULTS as _AD
+
+_DEFAULT_MODELS_INIT = _AD["deconflict"]["models_init"]
+_DEFAULT_MIGRATIONS_DIR = _AD["deconflict"]["migrations_dir"]
 
 
 def _deconflict_models_init(clone_dir: str | None = None) -> str:

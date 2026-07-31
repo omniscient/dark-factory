@@ -51,19 +51,11 @@ from gate_blast_radius import parse_hotspots  # noqa: E402  # re-exported for te
 #   file match "^backend/app/routers/auth\.py$" in MIGRATION_SEED_AUTH_PATTERNS.
 #   Trading paths are added here (not in gate_blast_radius) per spec R4.
 #
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
-try:
-    from factory_core.adapter_defaults import DEFAULTS as _AD
-    SAFETY_PATH_PATTERNS = [re.compile(p) for p in _AD["safety"]["critical_diff_paths"]]
-except Exception:
-    SAFETY_PATH_PATTERNS = [
-        re.compile(r"^alembic/versions/"),
-        re.compile(r"^backend/app/routers/auth"),
-        re.compile(r"^backend/app/core/auth"),
-        re.compile(r"app/services/trading"),
-        re.compile(r"app/tasks/trading\.py"),
-        re.compile(r"^dark-factory/"),
-    ]
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
+from factory_core.adapter_defaults import DEFAULTS as _AD
+
+SAFETY_PATH_PATTERNS = [re.compile(p) for p in _AD["safety"]["critical_diff_paths"]]
 
 
 def _safety_path_patterns(clone_dir: str | None = None) -> list:
@@ -204,14 +196,9 @@ def _extract_spec_names(spec_file: str) -> set:
 # dots (e.g. r"settings\.json$"), which breaks a plain unescaped-dot
 # substring match; "settings" and "mcp" alone are unambiguous here.
 #
-# Re-exported from adapter_defaults so this and gate_blast_radius.py's
-# identical classification logic can't drift out of sync.
-try:
-    from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
-except Exception:
-    _SKILL_SECURITY_TOKENS = (
-        "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
-    )
+# Sole source of truth so this and gate_blast_radius.py's identical
+# classification logic can't drift out of sync.
+from factory_core.adapter_defaults import SKILL_SECURITY_TOKENS as _SKILL_SECURITY_TOKENS
 
 
 def _safety_signal(path: str, clone_dir: str | None = None) -> str:

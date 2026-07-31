@@ -479,6 +479,47 @@ def test_skill_scripts_and_settings_in_migration_seed_auth_patterns():
     assert any(p.search(".factory/hooks/validate") for p in patterns)
 
 
+# ── SKILL_SECURITY_TOKENS parity (diff_rank.py / gate_blast_radius.py) ─────────
+
+def test_skill_security_tokens_parity():
+    """diff_rank._SKILL_SECURITY_TOKENS and gate_blast_radius._SKILL_SECURITY_TOKENS
+    must both be the literal adapter_defaults.SKILL_SECURITY_TOKENS object, not copies."""
+    sys.path.insert(0, "scripts")
+    import diff_rank as dr
+    import gate_blast_radius as gbr
+    assert dr._SKILL_SECURITY_TOKENS is adapter_defaults.SKILL_SECURITY_TOKENS
+    assert gbr._SKILL_SECURITY_TOKENS is adapter_defaults.SKILL_SECURITY_TOKENS
+
+
+# ── config.yaml drift guard (#184) ──────────────────────────────────────────
+# config.yaml keeps its own copy of these safety constants for operator
+# visibility; these tests guarantee it cannot silently diverge from
+# adapter_defaults.DEFAULTS.
+
+def test_config_yaml_sensitive_keywords_matches_defaults():
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((repo_root / "config" / "config.yaml").read_text())
+    assert cfg["epic_autopilot"]["sensitive_keywords"] == \
+        adapter_defaults.DEFAULTS["safety"]["sensitive_keywords"]
+
+
+def test_config_yaml_hard_exclude_paths_matches_defaults():
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((repo_root / "config" / "config.yaml").read_text())
+    assert cfg["epic_autopilot"]["hard_exclude_paths"] == \
+        adapter_defaults.DEFAULTS["safety"]["hard_exclude_paths"]
+
+
+def test_config_yaml_dispatch_ceiling_keywords_matches_defaults():
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((repo_root / "config" / "config.yaml").read_text())
+    assert cfg["dispatch_ceiling"]["keywords"] == \
+        adapter_defaults.DEFAULTS["safety"]["dispatch_ceiling_keywords"]
+
+
 def test_dark_factory_own_adapter_yaml_has_skill_security_globs():
     """Guards the A4 merge-semantics gap: .factory/adapter.yaml list-replaces DEFAULTS,
     so it must carry the skill-security globs independently, not just inherit them."""

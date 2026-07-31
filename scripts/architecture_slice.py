@@ -17,40 +17,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 import token_estimate as te
 
 # ── Component → section map ────────────────────────────────────────────────────
-# Re-exported from adapter_defaults so DEFAULTS is the direction of truth.
+# adapter_defaults is the sole source of truth. A missing/broken import fails
+# loudly here instead of silently falling back to a stale copy.
 # Existing importers that read COMPONENT_SECTION_MAP directly still work.
 
-try:
-    from factory_core.adapter_defaults import DEFAULTS as _AD
-    COMPONENT_SECTION_MAP: dict[str, list[str]] = _AD["components"]
-except Exception:
-    COMPONENT_SECTION_MAP = {
-        "backend": [
-            "Scan Execution Flow",
-            "Backend Module Map",
-            "Error Tracking System",
-            "Celery Task Architecture",
-            "Test Architecture",
-        ],
-        "frontend": [
-            "Frontend Architecture",
-            "Backend Module Map",
-            "Error Tracking System",
-        ],
-        "dark-factory": [
-            "Service Topology",
-            "Celery Task Architecture",
-            "Metrics and Observability",
-        ],
-        "infrastructure": [
-            "Service Topology",
-            "IB Gateway Integration",
-            "Live Scanner",
-            "Celery Task Architecture",
-            "Catch Up Feature (Universe Aggregate Backfill)",
-            "Metrics and Observability",
-        ],
-    }
+from factory_core.adapter_defaults import DEFAULTS as _AD
+
+COMPONENT_SECTION_MAP: dict[str, list[str]] = _AD["components"]
 
 
 def _component_section_map(clone_dir: str | None) -> dict:
@@ -103,12 +76,15 @@ _INFRA_PATTERNS = [
 ]
 
 # ── Config defaults ────────────────────────────────────────────────────────────
+# Sourced from adapter_defaults (single source of truth) rather than a second
+# literal copy — the prior hardcoded _DEFAULT_SENSITIVE_KEYWORDS copy here had
+# drifted from adapter_defaults.DEFAULTS (missing the trailing "|/auth" term).
 
-_DEFAULT_SAFETY_KEYWORDS = r"migration|migrate|performance|perf|architectur|refactor"
-_DEFAULT_SENSITIVE_KEYWORDS = (
-    r"trading|ibkr|live order|notional|authentication|authorization"
-    r"|authn|authz|jwt|oauth|rbac"
-)
+_DEFAULT_SAFETY_KEYWORDS = _AD["safety"]["dispatch_ceiling_keywords"]
+_DEFAULT_SENSITIVE_KEYWORDS = _AD["safety"]["sensitive_keywords"]
+# Deliberately narrower than safety.hard_exclude_paths: this list only gates
+# the full-doc redaction fallback below (_check_safety_fallback), not the
+# blast-radius/epic-autopilot safety gates, so it stays its own definition.
 _DEFAULT_EXCLUDE_PATHS = [
     "app/services/trading",
     "app/tasks/trading.py",
