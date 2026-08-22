@@ -32,7 +32,11 @@ Consequence (per the issue): a failed board move still renders "Issue has been m
 review** while the issue is actually blocked) is therefore still misreported even after #292.
 
 This spec covers making that failure signal actually reach `entrypoint.sh`, without disturbing the
-five other, unrelated call sites that already depend on today's fire-and-forget behavior.
+five other, unrelated call sites that already depend on today's fire-and-forget behavior: the four
+direct Python callers of `board.set_board_status()` (`breaker.py`, `rescue.py`, `deconflict.py`,
+`epic_autopilot.py`) plus `scripts/factory_core/cli.py:11-13 _board_move`, which is
+`scheduler.sh:372-374 set_board_status()`'s path (callers at `scheduler.sh:267`, `308`, `759`,
+`820`, `955`). `scheduler.sh` is not touched and sees no behavior change.
 
 ---
 
@@ -42,8 +46,8 @@ Distilled from the issue's fix direction and the Q&A below:
 
 1. `board._item_edit_status` reports whether `gh project item-edit` actually succeeded (its exit
    code), instead of discarding it. On failure, the captured `gh` stderr is printed so a human
-   reading container logs can see why (requires switching its `subprocess.run` call to
-   `text=True`).
+   reading container logs can see why where stderr is not suppressed (`entrypoint.sh:154`, DAG
+   nodes; see Q&A 2) (requires switching its `subprocess.run` call to `text=True`).
 2. `board._find_item_by_number`'s transport-failure case (`gh project item-list` exits non-zero or
    its JSON is unparseable) becomes distinguishable, internally, from its genuine "item not on the
    board" case. The existing **public** `find_board_item(issue_num) -> str` wrapper keeps returning
@@ -55,7 +59,10 @@ Distilled from the issue's fix direction and the Q&A below:
    `epic_autopilot.py:544` — none of which handle exceptions) keeps its exact current contract:
    still returns `None`, still never raises, still silently proceeds on failure. It may call the
    same lower-level helpers as the fixed path but must not surface their new success/failure signal
-   to its callers. Zero behavior change for these four call sites.
+   to its callers. Zero behavior change for these four call sites, nor for the fifth caller of
+   the same function — `scripts/factory_core/cli.py:11-13 _board_move`, which is
+   `scheduler.sh:372-374 set_board_status()`'s path (callers at `scheduler.sh:267`, `308`, `759`,
+   `820`, `955`). `scheduler.sh` is not touched and sees no behavior change.
 4. `Tracker.set_status(self, id: str, canonical: str) -> bool` (`providers/tracker/base.py:30`) —
    the ABC's declared return type widens from `None` to `bool`. `True` means the item's status
    actually changed; `False` covers both "item not found on the board / no valid transition" and "a
@@ -77,11 +84,18 @@ Distilled from the issue's fix direction and the Q&A below:
    print `ERROR: board move to '<status>' failed for issue <id>` to stderr and `sys.exit(1)`,
    matching the existing `_preflight` convention (`providers/cli.py:127-133`: collect problems,
    print each as `ERROR: ...`, `sys.exit(1)`). Additionally wrap the call so a `RuntimeError`
-   raised by `JiraTracker` (or from `providers/tracker/github.py:214`'s `get_rate_budget`, reused
-   defensively) is caught, printed as `ERROR: {e}`, and also exits 1 — never a raw traceback.
+   raised by `JiraTracker._request` (`jira.py:70`) is caught, printed as `ERROR: {e}`, and also
+   exits 1 — never a raw traceback.
 8. No change to `entrypoint.sh`. Its `BOARD_MOVE_OK` guard already branches on the CLI process's
    exit code; it becomes live automatically once `cli.py` actually exits non-zero on failure. This
-   matches the issue's stated fix direction verbatim.
+   matches the issue's stated fix direction verbatim. All three `entrypoint.sh` call sites (`:154`,
+   `:506`, `:743`) are already guarded; the two unguarded DAG-node callers are handled by
+   Requirement 8a.
+8a. Append ` || echo "WARNING: board move to <status> failed for #$ISSUE — check board state
+   manually"` to the two DAG-node invocations (`workflows/archon-dark-factory.yaml:257` and
+   `:1195`) so a board-move failure stays advisory there — a successful merge/push must never be
+   reported as a failed run. This is a two-line edit to non-gate status nodes, listed here
+   explicitly so the conformance gate does not excise it as out of scope.
 9. Out of scope (per Q&A, do not touch): `board.set_board_status()`'s four direct Python callers
    (`breaker.py`, `rescue.py`, `deconflict.py`, `epic_autopilot.py`) do not gain any new
    failure-handling logic — that is a separate, larger behavior change (see Alternatives
@@ -89,10 +103,15 @@ Distilled from the issue's fix direction and the Q&A below:
    swallow-failure `subprocess.run(capture_output=True)` pattern (`_tracker_label`,
    `_tracker_comment`, `_tracker_resolve`, `_codehost_*`, etc.) — this issue is scoped to
    board-status specifically; the same pattern elsewhere is a separate, already-implied follow-up.
+   The shell callers of the `tracker set-status` verb (Assumptions, last bullet) are likewise not
+   touched, except for the two DAG-node guards in Requirement 8a.
 10. Tests (TDD, per CLAUDE.md):
     - `tests/test_factory_core_board.py`: existing `find_board_item`/`set_board_status` tests stay
       green unedited (Requirement 2/3). Add coverage for `_item_edit_status` returning `True`/`False`
       matching `gh`'s exit code, and for stderr being printed on failure.
+    - `tests/test_factory_core_board.py`: a test for `_find_item_by_number_checked` covering
+      `("", False)` on rc≠0, `("", False)` on unparseable JSON, and `("", True)` on an empty items
+      list.
     - `tests/test_provider_tracker_parity.py` (GitHubTracker, subprocess-mocked): extend
       `test_set_status_resolves_canonical_and_calls_item_edit` to assert a `True` return on success;
       extend `test_set_status_opaque_id_never_reaches_int` to assert a `False` return; add a new test
@@ -106,6 +125,8 @@ Distilled from the issue's fix direction and the Q&A below:
       `test_tracker_set_status_prints_error_and_exits_1_on_failure`, following the existing
       `test_preflight_ok_prints_ok_and_exits_0` / `test_preflight_failure_prints_every_problem_and_exits_1`
       pattern in the same file.
+    - `tests/test_provider_cli.py`: `test_tracker_set_status_catches_runtime_error_and_exits_1` —
+      a `RuntimeError` from `set_status` is printed as `ERROR: {e}` and exits 1, never a traceback.
 
 ---
 
@@ -172,9 +193,13 @@ Distilled from the issue's fix direction and the Q&A below:
 > `ERROR: {e}`, exit 1) so a Jira transport failure doesn't surface as a raw traceback; this reuses
 > the existing `RuntimeError` type rather than introducing a new one. Note for the conformance gate:
 > `tracker set-status` becomes the first `tracker` CLI subcommand to exit non-zero on a provider
-> result rather than `_print(...)`-ing it — deliberate, since `entrypoint.sh:506` branches on exit
-> code with stdout discarded (`2>/dev/null`), so keeping the bool off stdout also avoids a stray
-> `False`/`True` leaking into the run log.
+> result rather than `_print(...)`-ing it — deliberate, since `entrypoint.sh:506` and `:743` branch
+> on exit code with stderr discarded (`2>/dev/null`, added by #292 / cf4dd59); keeping the bool off
+> stdout avoids a stray `False`/`True` in the run log. Consequence: the `gh` stderr printed by
+> `_item_edit_status` and `cli.py`'s `ERROR` line are visible only at `:154` and in the DAG nodes; on
+> the `:506` Blocked path the failure is surfaced solely through `BOARD_NOTE`. Accepted for this
+> ticket (no `entrypoint.sh` change, per the issue); dropping the `2>/dev/null` at `:506` is a
+> follow-up.
 
 ---
 
@@ -238,6 +263,9 @@ def _tracker_set_status(args):
 **`entrypoint.sh`**: no change. `set_board_status()` (its bash wrapper) and the `BOARD_MOVE_OK`
 guard at `:506` already branch on this process's exit code.
 
+**`workflows/archon-dark-factory.yaml`** (`:257`, `:1195`): append the advisory
+`|| echo "WARNING: ..."` guard per Requirement 8a — two lines, no other DAG change.
+
 ---
 
 ## Alternatives Considered
@@ -279,6 +307,13 @@ guard at `:506` already branch on this process's exit code.
 - `gh project item-edit`'s stderr is safe to print to the container's stderr (no secrets expected in
   a `gh` CLI error message for this call shape) — consistent with how `JiraTracker.set_status`
   already prints its own diagnostic message today.
-- No other production code path calls `get_tracker().set_status(...)` directly other than
-  `cli.py:_tracker_set_status` (verified via repo-wide grep) — so widening its return type and exit
-  behavior has no other blast radius beyond the tests listed in Requirement 10.
+- The only Python caller of `Tracker.set_status` outside the trackers themselves is
+  `cli.py:_tracker_set_status` (`JiraTracker.resolve_item` at `jira.py:210` calls `self.set_status`
+  and ignores the return — unchanged). The CLI verb itself, however, has six shell callers whose
+  exit-code handling changes: `entrypoint.sh:154` (`|| echo WARNING`), `:506`
+  (`|| BOARD_MOVE_OK=false`), `:743` (`|| true`) — all already guarded;
+  `workflows/archon-dark-factory.yaml:257` (close node, after PR merge) and `:1195`
+  (status-in-review node) — NOT guarded (see Requirement 8a); and
+  `commands/dark-factory-code-review.md:173`, `dark-factory-conformance.md:522`,
+  `dark-factory-validate.md:97` — agent-executed, where a non-zero exit is reported to the agent,
+  not fatal.
