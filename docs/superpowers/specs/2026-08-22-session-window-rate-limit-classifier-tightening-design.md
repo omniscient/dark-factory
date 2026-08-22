@@ -499,6 +499,21 @@ that invokes it is not.
   it feature parity with the new backoff mechanism is a larger change than this ticket's scope
   (the ticket's stated purpose for touching it at all is closing the "escape hatch reopens Cause B"
   gap, not upgrading it to Cause-A awareness).
+- **All of this ticket's fixes take effect for `entrypoint.sh`'s own runtime calls only after the
+  next image rebuild/publish, not on merge.** `_handle_session_window_pause` and the new
+  Decision 5 `rate-limit-match` subcommand both invoke `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py`
+  — the one-time vendor of the *baked* `/opt/dark-factory/scripts` (see Assumptions) — not this
+  branch's edited canonical `scripts/factory_core/cli.py`. This is pre-existing behavior for
+  every change to `scripts/factory_core/*` (not introduced or worsened by this ticket; `entrypoint.sh`
+  already flags it as transitional via its own `df#14`/"P3 cleanup" comments), and the
+  image-publish pipeline is `deploy/**`/`.github/workflows/publish.yml`-gated, human-only, and out
+  of scope here. It does **not** affect verification: `tests/test_factory_core_session_window.py`
+  and `tests/test_factory_core_error_signature.py` import `scripts/factory_core/*` directly
+  (unprefixed), so pytest/conformance/code-review all exercise the actual fix. Only the *live
+  production dispatch path* — an operator's real `docker compose run` hitting a real Claude
+  rate-limit event — lags until the image carrying this fix is published. Worth calling out
+  explicitly in the Phase 6 PR/spec comment so a reviewer doesn't assume "tests pass" implies
+  "the #332 false pause stops recurring immediately on merge."
 
 ## Accepted trade-offs
 
@@ -524,12 +539,15 @@ that invokes it is not.
 - No caller of `RATE_LIMIT_RE`, `is_session_window_failure`, or `classify()` depends on matching
   any string beyond what's explicitly pinned in the existing test suites; all current callers
   (`cli.py`, `entrypoint.sh`, `scheduler.sh`) consume the boolean/enum result opaquely.
-- There is no separate "TARGET-PATH scaffold copy" of `session_window.py`/`error_signature.py`
-  that needs independent syncing: `$CLONE_DIR/dark-factory` (what `entrypoint.sh` resolves
-  `cli.py` under, e.g. `entrypoint.sh:14,556`) *is* the clone this ticket edits, produced by
-  `entrypoint.sh`'s own vendoring step (copying `/opt/dark-factory/scripts` in) — not a second
-  independently-maintained tree. (Revision 1 incorrectly assumed a syncing mechanism existed here;
-  corrected per operator review.)
+- `$CLONE_DIR/dark-factory/scripts` (what `entrypoint.sh` resolves `cli.py` under, e.g.
+  `entrypoint.sh:14,556`) is a **one-time vendor of the image-baked `/opt/dark-factory/scripts`**
+  (`entrypoint.sh:568-571`, only runs `cp -r` if the directory doesn't already exist), not a
+  synced mirror of this ticket's edits to the canonical `scripts/factory_core/*` — confirmed via
+  direct reading of `entrypoint.sh` and cross-checked against the twice-confirmed
+  `.archon/memory/codebase-patterns.md` TARGET-PATH entry (#294/#332). (Revision 1 assumed an
+  active sync mechanism existed; revision 2's first draft over-corrected to "it's the same tree as
+  the branch," which is also wrong. Both corrected here.) See the paired Known limitation below —
+  this has a real consequence for when this ticket's fix takes effect.
 
 ## Open questions (non-blocking)
 
