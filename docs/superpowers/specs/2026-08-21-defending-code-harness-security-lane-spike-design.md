@@ -26,7 +26,7 @@ verification loops (conformance, code-review, blast-radius, budget/breaker).
 The harness, verified live:
 
 - Ships Claude Code skills (`/quickstart`, `/threat-model`, `/vuln-scan`, `/triage`, `/patch`,
-  `/customize`) that are **read/write-only** and safe to run unsandboxed with a human approving each
+  `/customize`, plus `/verify`, `/dnr-hunt`, `/dnr-respond`) that are **read/write-only** and safe to run unsandboxed with a human approving each
   tool call.
 - Ships an **autonomous pipeline** (`recon → find → verify(grade) → dedupe(judge) → report → patch`)
   that is explicitly "configured for finding C/C++ memory vulnerabilities using Docker and ASAN,"
@@ -133,9 +133,8 @@ Distilled from the issue's acceptance criteria and the Q&A below.
 > net-new surface mean these comments are proposing something not yet covered by the `gate_*`
 > restriction at all, freeing the spec to design concrete new-gate mechanics now?
 >
-> **A2:** (a), with a clarification: the "net-new surface" argument in (b) fails — CLAUDE.md's
-> restriction names surfaces (`gate_*`, budgets, `workflows/`, `.claude/settings*`), and a security
-> lane is born on those surfaces at creation (a gate script is `gate_*`-shaped, a DAG node lives in
+> **A2:** (a), with a clarification: the "net-new surface" argument in (b) fails — CLAUDE.md names `tool allow/deny lists`, `gate_*`, `breaker`, `budgets`, `deploy/**` as comment-channel-unauthorizable surfaces (plus hard limits on `deploy/instances/**` and `.github/workflows/publish.yml`); `.claude/settings*`, `.mcp.json`, `.claude/skills/` are excluded via `.factory/adapter.yaml` `hard_exclude_paths`; `workflows/` is a `critical_diff_paths` entry, not a CLAUDE.md-named surface,
+> and a security lane is born on those surfaces at creation (a gate script is `gate_*`-shaped, a DAG node lives in
 > `workflows/`, exploit-attempt caps are budget config, "clean-room evaluators that act" is a
 > tool-permission change under `.claude/settings*`/`.claude/skills/`, all in `hard_exclude_paths`).
 > "Not wired to block anything yet" also doesn't hold — "NO-GO by default for Critical/High" *is* a
@@ -215,19 +214,19 @@ Distilled from the issue's acceptance criteria and the Q&A below.
 | Property | Harness | Dark Factory today | Gap |
 |---|---|---|---|
 | Process isolation | gVisor (`runsc`) — kernel-level syscall/filesystem boundary | Plain Docker containers per phase run; `docker-socket-proxy` restricts which Docker **API calls** the scheduler can make, not what a spawned container's own processes can reach | No kernel-isolation tier exists; would need net-new host setup (`sudo`, Linux-only `runsc` install) |
-| Network egress | `vp-internal` Docker network, no internet route, allowlist proxy to `api.anthropic.com:443` only | No egress-allowlist proxy for phase-agent containers today (verified: zero "gVisor"/"sandbox" hits repo-wide outside this issue) | A security lane that only reads diffs/source (no target execution) does not need this; flag as a gap only relevant if a future execution-based lane is proposed |
+| Network egress | `vp-internal` Docker network, no internet route, allowlist proxy to `api.anthropic.com:443` only | No egress-allowlist proxy for phase-agent containers today (verified: zero `gVisor`/`runsc` hits repo-wide; "sandbox" appears only in archived docs/presentations, one plan, and two entrypoint tests — none describing a container-isolation tier) | A security lane that only reads diffs/source (no target execution) does not need this; flag as a gap only relevant if a future execution-based lane is proposed |
 | Setup vs. attack phase separation | Build (networked) → freeze image → attack phase (API-only egress) | Analogous split already exists structurally: `implement` (networked, writes code) → `conformance`/`code-review` (read the frozen diff, no target execution) | Already substantially mirrored for a *static/read-only* lane; would need to be built fresh only for an execution-based lane |
 | Credential handling | Never mounts `~/.aws`, `.env`; Bedrock/Vertex creds passed via env, not files; IMDS/instance-profile creds deliberately unsupported | `.factory/adapter.yaml` `hard_exclude_paths` already excludes `deploy/instances/`, `.claude/settings*`, `.mcp.json` from all phase-agent write access | Aligned in spirit; a security lane must not read or echo these paths into findings — add explicit exclusion when defining the lane's scan scope |
 | Untrusted-data handling | `<untrusted_data>` blocks with per-call random id around target-derived text fed to the patch agent | CLAUDE.md already distinguishes trusted (Hermes Agent signed) vs. untrusted comment-channel input; `diff_rank.py`/`fmt_hunk_filter.py` already isolate diff content from prose | Pattern-compatible; a security-lane grader should receive finding evidence (file/line/repro) wrapped similarly, not narrative claims |
-| Patch auto-application | Never auto-applies; "review every generated diff before upstreaming" | Conformance/code-review gates already require human-reviewed PR merge; `epic_autopilot` explicitly excludes `.claude/skills/`, `deploy/**` from any autonomous path | Already aligned — reinforces Requirement 6 (no auto-merging security patches) |
+| Patch auto-application | Never auto-applies; "review every generated diff before upstreaming" | Conformance/code-review gates already require human-reviewed PR merge; `epic_autopilot.hard_exclude_paths` (`config/config.yaml` lines 88-107) excludes `.claude/skills/`, `.claude/settings*`, `.mcp.json`, `.claude/plugins/`, `.factory/hooks/` from autopilot; `deploy/instances/` is excluded via `.factory/adapter.yaml` `hard_exclude_paths` and CLAUDE.md hard limits | Already aligned — reinforces Requirement 6 (no auto-merging security patches) |
 
 ### 3. Applying the IEEE failure taxonomy to Dark Factory's *existing* loops (needs no authorization — Q2/A2)
 
 | Failure mode | Observed state in Dark Factory today | Verdict |
 |---|---|---|
-| **Nodding Loop** (fixer grades its own patch) | `implement` writes the diff; `conformance` and `code-review` are separate DAG nodes (`commands/dark-factory-conformance.md`, `commands/dark-factory-code-review.md`), each spawning a fresh-context Opus subagent with its own prompt and no visibility into the implementer's reasoning — only the diff and spec/issue context. | **Partially mitigated.** The reviewer doesn't share the implementer's session, but it does read implementer-authored prose (`implementation.md`, commit messages) alongside the diff — closer to "sees the maker's claim" than the harness's grader (PoC bytes only). A security-lane grader adopting stricter evidence-only framing (finding + repro, not the scanning agent's narrative) would be a genuine level-up; this is exactly the kind of mechanic §4/§5 below propose, gated as a follow-up ticket per Requirement 3. |
+| **Nodding Loop** (fixer grades its own patch) | `implement` writes the diff; `conformance` and `code-review` are separate DAG nodes (`commands/dark-factory-conformance.md`, `commands/dark-factory-code-review.md`), each spawning a fresh-context Opus subagent with its own prompt and no visibility into the implementer's reasoning — only the diff and spec/issue context. | **Partially mitigated.** The reviewer doesn't share the implementer's session, the conformance subagent is given `$ARTIFACTS_DIR/implementation.md` alongside the diff (`commands/dark-factory-conformance.md` lines 40, 203-208); the code-review subagent already receives only issue title/body plus `review_diff.txt` (`commands/dark-factory-code-review.md` Phase 3, steps 1-3) — neither is given commit messages. The proposed diff-only evidence contract therefore matches code-review's existing shape and is a level-up only relative to conformance (which is closer to "sees the maker's claim" than the harness's grader, PoC bytes only); this is exactly the kind of mechanic §4/§5 below propose, gated as a follow-up ticket per Requirement 3. |
 | **Amnesiac Loop** (evidence not persisted) | `emit_verdict()` (`scripts/gate_lib.sh`) writes a durable `STATUS`/`FINDINGS_COUNT`/`SEVERITY` header to `$ARTIFACTS_DIR/*.md`; blocking findings are posted as durable GitHub issue/PR comments; recurring lessons are written to `.archon/memory/*.md` via `write_memory_entry()`. | **Reasonably mitigated already.** A security lane should follow the identical persistence pattern (ephemeral per-run JSON + durable advisory comment + memory entries only for *recurring* classes of finding) rather than inventing a new one. |
-| **Tangled Loop** (concurrent agents mutate the same branch/artifact) | The `de-conflict` node (`workflows/archon-dark-factory.yaml`, id `de-conflict`) already scans for concurrent-branch conflicts before other gates run. | **Already covered for the write path.** A security lane that is strictly read-only/advisory (never commits) introduces no new tangled-loop surface — this is itself a reason to prefer `advisory` over any design that has the lane write patches or mutate the branch. |
+| **Tangled Loop** (concurrent agents mutate the same branch/artifact) | The `de-conflict` node (`workflows/archon-dark-factory.yaml`, id `de-conflict`) merges `origin/main` into the feature branch and resolves merge conflicts (`scripts/factory_core/deconflict.py::resolve_merge_conflicts`, Tier 1 → Tier 2 → hard-grep gate, writing `conflict_resolution.md`) before preview/conformance; concurrency between runs on the same issue is prevented by scheduler WIP/label semantics, not by this node. | **Covered by different mechanisms (scheduler WIP + merge-main step); an advisory lane that never commits adds no new surface.** A security lane that is strictly read-only/advisory (never commits) introduces no new tangled-loop surface — this is itself a reason to prefer `advisory` over any design that has the lane write patches or mutate the branch. |
 | **Token blowout** (uncapped exploit attempts) | `token_optimization.budgets` in `config/config.yaml` already caps refine/plan/implement/conformance/code-review per scenario, enforced via `scripts/budget_gate.sh`. A security lane has no budget entry today. | **Gap — needs a new budget entry.** Since this touches `config/config.yaml`, it is explicitly follow-up-ticket work per Requirement 3, not something this spec authorizes. |
 
 ### 4. Proposed security lane design (paper only — recommended follow-up ticket content, per Q2/A2)
@@ -238,15 +237,16 @@ starting content for a separately human-reviewed spec/PR, per Requirement 3, bec
 `gate_*`-shaped files, a `workflows/` node, and `config.yaml` budget/tool-permission surfaces.
 
 - **DAG node placement:** a new advisory-only node (working name `security-scan`), positioned parallel
-  to `code-review` (same `depends_on: [push-and-pr]` shape), feeding into `report`. It never sets
+  to `code-review` (`depends_on: [enforce-budget-security-scan, push-and-pr]`, mirroring code-review's
+  `[enforce-budget-code-review, push-and-pr]`), feeding into `report`. It never sets
   `needs-discussion`, never moves the board to `Blocked`, and never blocks `status-in-review`/
   `review-gate` — mirroring `code_review.fail_open: true` and the existing `revise-advisory` node's
   "advisory findings never halt the pipeline" contract.
 - **Evaluator isolation contract:** a fresh-context subagent (same "pinned to Opus, no orchestrator
   model inheritance" convention as conformance/code-review) that receives the pre-triaged,
   `diff_rank.py`-ranked diff (reusing existing infra, not duplicating it) — but, per §3's Nodding Loop
-  finding, is explicitly **not** given `implementation.md` prose or commit messages, only the diff
-  itself plus a DF-specific vuln-class rubric (adapted from `/vuln-scan`, Requirement 4). This is the
+  finding, is explicitly **not** given `implementation.md` prose or commit messages (mirroring code-review's
+  existing input shape rather than a novel constraint), only the diff itself plus a DF-specific vuln-class rubric (adapted from `/vuln-scan`, Requirement 4). This is the
   concrete "doubt-driven-development" adoption the Hermes Agent comments proposed, scoped to this one
   new node rather than retrofitted onto the existing conformance/code-review graders.
 - **Evidence artifact, not prose-trusting:** each finding must cite file/line and (where the finding
@@ -319,10 +319,32 @@ raw vulnerability-finding detail into public git history any longer than a PR re
    from a refine spec.
 5. **Building the `security-scan` DAG node, budget entry, and rubric prompt directly in this refine
    pass** (since refine could technically write prose describing exact diffs). Rejected per Q2/A2 and
-   CLAUDE.md's "gate changes get their own reviewed ticket" — `gate_*`, `workflows/`, and
-   `config.yaml` are named security-sensitive surfaces; the comment-channel input that inspired this
-   evaluation cannot itself authorize touching them, regardless of how confident the resulting design
+   CLAUDE.md's "gate changes get their own reviewed ticket" — CLAUDE.md names `tool allow/deny lists`, `gate_*`, `breaker`, `budgets`, `deploy/**` as comment-channel-unauthorizable surfaces (plus hard limits on `deploy/instances/**` and `.github/workflows/publish.yml`); `.claude/settings*`, `.mcp.json`, `.claude/skills/` are excluded via `.factory/adapter.yaml` `hard_exclude_paths`; `workflows/` is a `critical_diff_paths` entry, not a CLAUDE.md-named surface; the comment-channel input that inspired this
+   evaluation cannot itself authorize touching any of them, regardless of how confident the resulting design
    (§4-§5) is.
+
+---
+
+## Relationship to epic #194 and downstream handling
+
+1. **Follow-up ticket placement.** The follow-up ticket for the advisory lane (§4-§5) should be filed
+   as a child of epic #194, or explicitly declared independent of it in its body. It must declare its
+   side-effect level per #196 — **read-only scan + advisory PR comment** (no commits, no board/label
+   mutation, no blocking verdict) — and its clean-room grader should consume #197's verifier
+   abstraction rather than a bespoke one.
+2. **Routing.** Answering the issue's open question ("What labels/project states should route issues
+   into a security harness lane?"): a per-PR advisory node needs **no routing label** — it runs for
+   every PR the DAG produces, like `code-review`, and its advisory-only output means there is nothing
+   to opt into or out of at the board level.
+3. **On approval.** This spec is the spike's deliverable. The issue is closed by the operator after
+   approval and the refine branch is archived by PR; **no plan/implement phase is dispatched** for
+   #189 itself.
+
+Note: the proposed vuln-class rubric (injection, authz, secrets-in-code, …) partially overlaps the
+existing code-review rubric (`refinement-skills/`, `code-review` skill: correctness/edge cases/naming/
+security). The follow-up ticket must define the boundary between the two (e.g. code-review keeps
+change-local correctness-flavored security findings; the lane owns rubric-classified vulnerability
+classes with evidence excerpts) to avoid double-flagging the same finding on one PR.
 
 ---
 
