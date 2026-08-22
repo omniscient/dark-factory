@@ -9,6 +9,22 @@ export SCHEDULER_STATE_DIR="$TMP/state"; mkdir -p "$SCHEDULER_STATE_DIR"
 # shellcheck disable=SC2317
 gh() { :; }
 export -f gh
+# Stub python3 too: _smoke_on_red creates the regression ticket via
+# `python3 "$PROVIDERS_CLI" tracker create`. Left unstubbed, that call reaches the
+# real providers CLI — harmless in CI (no token) but inside a factory run container
+# it filed a genuine "main is red" ticket on every implement/validate test run (#348).
+STUB_LOG=$(mktemp "$TMP/stubs-XXXXXX.log")
+# shellcheck disable=SC2317
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  if echo "$*" | grep -q "tracker create"; then
+    echo "999"
+    return 0
+  fi
+  python "$@"
+}
+export -f python3
+export STUB_LOG
 source scripts/hooks.sh
 # 1) missing hook, non-gate → default no-op success
 run_hook validate || { echo "FAIL: missing non-gate hook must succeed"; exit 1; }
@@ -34,4 +50,8 @@ printf '#!/bin/sh\nexit 1\n' > "$TMP/.factory/hooks/smoke-gate"
 RC=$?
 [ "$RC" = "0" ] || { echo "FAIL: red smoke-gate must clean-halt with exit 0"; exit 1; }
 [ -f "$SCHEDULER_STATE_DIR/main-is-red" ] || { echo "FAIL: red hook must write sentinel"; exit 1; }
+# The red path must create its ticket through the stub, never the real providers CLI.
+CREATES=$(grep -c "python3.*tracker create" "$STUB_LOG" 2>/dev/null || true)
+[ "$CREATES" = "1" ] || { echo "FAIL: expected exactly one stubbed tracker create on red, got ${CREATES}"; exit 1; }
+[ "$(cat "$SCHEDULER_STATE_DIR/main-is-red-issue")" = "999" ] || { echo "FAIL: sentinel issue file must hold the stubbed ticket number"; exit 1; }
 echo PASS
