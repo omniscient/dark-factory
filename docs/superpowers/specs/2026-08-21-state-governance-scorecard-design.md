@@ -63,13 +63,16 @@ Distilled from the issue's acceptance criteria and the brainstorming Q&A:
    them are asking to expand a security-sensitive surface directly, but the *aggregate* ask (5 phases
    of a brand-new gate-adjacent subsystem in one size:M ticket) would.
 8. Epic-owned state classes (`harness_economics` → #234, `memory_intervention` → #241) get an
-   inventory row and a reserved `state_class` enum identifier each, with no sub-schema or checks
+   inventory row and a reserved `state_type` enum identifier each, with no sub-schema or checks
    designed here — that work belongs to their owning epics.
 9. Non-epic comment-sourced additions (agent/role-definition state, the five "loop move" classes, the
    three skill-validity dimensions) are folded into existing inventory rows rather than becoming new
    rows, per the repo's own prior scoping precedent (`.archon/memory/architecture.md`, issue #41: "scope
    the lens to the surfaces where it carries semantic meaning... rather than running it across every
    ...row too — the latter produces mostly-null cells and quadruples the document for no signal").
+10. The issue's `$ARTIFACTS_DIR/rollback-ledger.jsonl` artifact is explicitly **deferred** to the
+    live-capture follow-up (§Follow-ups) — it is a per-run runtime artifact and is out of scope for
+    this advisory-only, synthetic-fixture phase.
 
 ---
 
@@ -79,10 +82,10 @@ Distilled from the issue's acceptance criteria and the brainstorming Q&A:
 
 | State class | Authority | Scope | Mutability | Provenance | Recoverability | Actionability |
 |---|---|---|---|---|---|---|
-| **memory** (`.archon/memory/*.md` + `index.jsonl`) | Any phase agent via `memory_write.py`; no per-writer allowlist | `path-prefix` + `scope` tag in the markdown comment, but not enforced at write time | Markdown: 6-month expiry, REINFORCE, dedup (`memory_maintain.py`). `index.jsonl`: **append-only, never mutated** — expiry/supersession never propagates to it | Markdown: issue/source/agent/date in an HTML comment. `index.jsonl`: writer omits `id`/`source_file`/`path_prefixes`, so its own reader (`memory_retrieve.scan_index`) `continue`s past every row it writes — **provenance is recorded but not retrievable** | None — no rollback ledger; `INVALID:` tagging is a manual edit, not a tracked operation | Advisory (feeds future agent context; does not itself gate) |
+| **memory** (`.archon/memory/*.md` + `index.jsonl`) | Any phase agent via `memory_write.py`; no per-writer allowlist | `path-prefix` + `scope` tag in the markdown comment, but not enforced at write time | Markdown: 6-month expiry, dedup, promote (`memory_maintain.py`); REINFORCE in-place date refresh (`memory_write.py:161`). `index.jsonl`: **append-only, never mutated** — expiry/supersession never propagates to it | Markdown: issue/source/agent/date in an HTML comment. `index.jsonl`: writer omits `id`/`source_file`/`path_prefixes`, so its own reader (`memory_retrieve.scan_index`) `continue`s past every row it writes — **provenance is recorded but not retrievable** | None — no rollback ledger; `INVALID:` tagging is a manual edit, not a tracked operation | Advisory (feeds future agent context; does not itself gate) |
 | **issue / project-board / scheduler-queue state** | `scheduler.sh` + human maintainers, via the shared `omniscient` GitHub identity | Per-issue | Labels/board column mutate freely, no versioning | GitHub's own audit log only — Dark Factory artifacts don't separately record who/why moved a card | GitHub history only; no Dark Factory–side undo | **Policy/permission** — `ready-for-agent`/`needs-discussion`/`direct-to-pr` labels directly gate dispatch |
-| **branch / PR state** | Factory git identity (`factory@<repo>`) + human reviewers | Per-issue branch (`refine/issue-N`, `feat/issue-N`) | Force-push disallowed by policy; branches can be recreated | Git commit authorship + `Co-Authored-By` trailer (used by `fetch_scorecard.py::is_factory_commit`) | Strong — full git history, revert/reset available | External commitment |
-| **run artifacts / failure telemetry** (`runs.jsonl` via `run_record.py`) | `entrypoint.sh` / the running container itself | Per `run_id` × issue × stage | Append-only; no update/delete | Best-governed class in the repo today: `run_id`, `policy_version`, `gen_ai.*` fields all present | Durable (`scheduler_state` volume); on-disk retention/pruning policy not found in this pass — flagged as an open question | Evidence, but validation/conformance/review verdicts are also policy-actionable (`verdict_gate_check.sh` reads them to block a DAG node) |
+| **branch / PR state** | Factory git identity (`factory@<repo>`) + human reviewers | Per-issue branch (`refine/issue-N`, `feat/issue-N`) | No factory command force-pushes; branch-protection rules not verified in this pass. Branches can be recreated. | Git commit authorship — `fetch_scorecard.py::is_factory_commit` matches the *primary* author email against `FACTORY_EMAIL` (`factory@<repo>`); `Co-Authored-By` trailers are explicitly not consulted (`scripts/fetch_scorecard.py:36-37, 243-248`) | Strong — full git history, revert/reset available | External commitment |
+| **run artifacts / failure telemetry** (`runs.jsonl` via `run_record.py`) | `entrypoint.sh` / the running container itself | Per `run_id` × issue × stage | Append-only; no update/delete | Best-governed class in the repo today: `run_id`, `policy_version`, `gen_ai.*` fields all present | Durable (`scheduler_state` volume); on-disk retention/pruning policy not found in this pass — flagged as an open question | Evidence, but validation/conformance/review verdicts are also policy-actionable (`verdict_gate_check.sh` reads the `STATUS:` line of `$ARTIFACTS_DIR/conformance.md`/`review.md` to block a DAG node — it does not read `runs.jsonl`) |
 | **skills / hooks / MCP / tool-permission state** | Humans only, via reviewed PR | Repo-wide (not per-issue) | Git-versioned, no expiry | Git blame | Git revert | **Highest** — directly controls what tools/actions any agent may take. Listed in `epic_autopilot`'s `hard_exclude_paths` (fail-closed even under self-improvement); CLAUDE.md bars comment-channel authorization of this surface outright |
 | **agent / role definitions** (`commands/*.md`, `refinement-skills/*.md`) | Humans via reviewed PR (refine-phase agents may *propose* command prose, but activation is always a human merge) | Per-phase (1:1 with a workflow DAG node) | Git-versioned | Git blame + PR review | Git revert | Skill/permission-tier — a specialization of the row above. No "role registry" or "eval baseline" file exists in this repo today (unlike the Agency Agents framework referenced in the comments) — an inventory gap, not a defect |
 | **token / rollout policy flags** (`config/config.yaml` `enforce.*`, `*_autopilot.enabled`, kill-switches) | Human PR merge to `config.yaml`; **some flags have a second, less-visible authority channel** — env-var overrides (e.g. `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS`), and `main_red_autofix.enabled` requires *both* `config.yaml` and an uncommitted `.archon/.env` (the config file says so in its own comment) | Repo-wide | Toggled via reviewed config edits | Git history for `config.yaml`; **`.archon/.env` changes are never committed** — a provenance gap for any flag gated behind it | Git revert for `config.yaml` only | Policy — directly flips gate enforcement |
@@ -102,7 +105,7 @@ detail on the "skills/hooks/MCP" and "agent/role definitions" rows, not new rows
 ### Event/snapshot schema
 
 `state-lineage.jsonl` uses the issue's proposed nested envelope verbatim (`event_id`,
-`idempotency_key`, `operation`, `state_type`, `authority{actor,permission_epoch,approval_record}`,
+`idempotency_key`, `operation`, `state_type`, `entity_id`, `authority{actor,permission_epoch,approval_record}`,
 `scope{repo,issue,pr,agent_role}`, `provenance{source,trust_tier,run_id,commit}`,
 `mutability{status,supersedes,conflicts_with}`, `recoverability{transaction_id,rollback_handle,
 external_effects}`, `actionability`), with `state_type` restricted to the reserved enum:
@@ -112,8 +115,12 @@ memory | issue | project_status | branch | pr | skill | permission | artifact |
 external_commitment | mechanism_lineage | harness_economics | memory_intervention
 ```
 
-Three fields are **mandatory**, not free-form, because they are the join keys a later correlation
-with `runs.jsonl` needs:
+One field is added to the issue's envelope and is **required**: `entity_id` (string) — the stable
+identifier checks 2 and 3 group events by (for fixtures, derive it from the issue/PR/branch/memory-entry
+identity, e.g. `issue:190`, `pr:330`, `branch:refine/issue-190`, `memory:<entry-hash>`).
+
+Three further fields are **mandatory**, not free-form, because they are the join keys a later
+correlation with `runs.jsonl` needs:
 
 - `provenance.run_id` — the entrypoint's `RUN_ID` (`entrypoint.sh:95`, a uuid4 hex), also derivable
   as `basename "$ARTIFACTS_DIR"` (the workflow already does exactly this for bash nodes,
@@ -139,16 +146,16 @@ directly (`python3 scripts/state_governance_audit.py --fixtures evals/state-gove
 --out-dir $ARTIFACTS_DIR`), matching the existing standalone-script convention (`fetch_scorecard.py`,
 `gate_blast_radius.py`, `memory_write.py` — none of these route through `factory_core/cli.py`).
 
-Five deterministic checks, each a pure function over an ordered event sequence grouped by a stable
-entity identifier:
+Five deterministic checks, each a pure function over an ordered event sequence grouped by the required
+`entity_id` field (the stable entity identifier, §Event/snapshot schema):
 
 1. **Authority monotonicity** — an event's `authority.permission_epoch` must not exceed the epoch of
    the event its `approval_record` claims to derive from. Flags forged/inflated authority claims.
-2. **Scope non-expansion** — across a sequence of events sharing an entity, `scope` must not widen
+2. **Scope non-expansion** — across a sequence of events sharing an `entity_id`, `scope` must not widen
    (e.g. issue-scoped → repo-wide) without an explicit new authorizing event of equal or higher
    `permission_epoch`. Historical anchor: #292 (§Retrospective).
 3. **Deletion propagation** — every `tombstone`/`delete`/`quarantine` event must be reflected in any
-   later `retrieve`/`act` event that reads the same entity; a read that ignores an active tombstone
+   later `retrieve`/`act` event that reads the same `entity_id`; a read that ignores an active tombstone
    fails. Historical anchor: `.archon/memory/index.jsonl` never receiving `memory_maintain.py`'s
    expiry/supersession (found live in this repo during context assembly, see below).
 4. **Provenance preservation** — every event with `actionability != evidence` must carry a non-null
@@ -163,14 +170,28 @@ Exit code is always 0 — the caller reads the `STATUS`/score fields from the ou
 existing `gate_blast_radius.py` convention ("Exit 0 always — the caller reads STATUS from the
 output"). This ticket wires no caller.
 
+#### Scorecard output contract (minimum JSON shape)
+
+`state-governance-scorecard.json` has, at minimum:
+
+- top-level `STATUS`: `PASS | WARN | FAIL` (exit code is always 0 regardless);
+- `checks`: a list of `{name, verdict, violations: [...]}` objects, one per check, in the fixed order
+  listed above (`verdict` uses the same `PASS | WARN | FAIL` vocabulary);
+- an aggregate `score`: integer 0–100.
+
+This shape is the contract for the byte-stable regeneration test (§Fixture corpus) and for the future
+`state_governance.mode.<check>` knob (§Recommendation), which keys on `checks[].name`. Additional
+fields may be added, but these three must not be renamed or removed without a spec update.
+
 ### Fixture corpus and sample artifacts (AC5)
 
 Mirrors the existing `evals/behavioral-state/` + `tests/test_behavioral_state_fixtures.py` pattern
 (built for epic #241's groundwork) rather than the provider-contract style `tests/fixtures/jira/`:
 
 - `evals/state-governance/fixtures/<check>-{pass,fail}.jsonl` — one file per check per outcome (10
-  files), each a small synthetic `state-lineage.jsonl` event sequence with a committed `expected`
-  verdict sidecar or manifest entry.
+  files), each a small synthetic `state-lineage.jsonl` event sequence. Expected verdicts live in a single
+  committed `evals/state-governance/fixtures/manifest.json` mapping each fixture to its expected
+  verdict (no per-fixture sidecars).
 - `evals/state-governance/fixtures/realistic-run-01.jsonl` — one combined sequence exercising all 5
   checks together (11th file). Hard cap: no additional fixtures without a spec update.
 - `evals/state-governance/sample/state-governance-scorecard.{json,md}` — the committed, deterministic
@@ -188,7 +209,11 @@ context assembly (fabricated event data, real underlying gap — not fabricated 
   `source_file`/`path_prefixes`; `memory_retrieve.scan_index` (`scripts/memory_retrieve.py:335-353`)
   silently `continue`s past every row missing them, and `.archon/memory/records/` doesn't exist, so
   **zero index rows are ever retrievable by id today** — provenance is written but not preserved in a
-  usable form.
+  usable form. The `id`/`source_file`/`path_prefixes` schema the reader expects is the one
+  `scripts/memory_import.py` writes (documented `docs/dark-factory-memory-v2.md:24-25`); the defect is
+  schema divergence between `memory_write._write_index` and `memory_import`/`memory_retrieve`. Because
+  `retrieve_memory()` (`scripts/memory_retrieve.py`, ~475-480) falls back to the markdown scan when
+  `scan_index` yields no candidates, the practical effect is a dead index, not lost memory.
 - **deletion-propagation-fail**: modeled on `memory_maintain.py`'s expire/dedup/promote operations,
   which rewrite the markdown files but never touch `index.jsonl` — a tombstoned entry's `index.jsonl`
   row stays `"status": "active"` forever.
@@ -205,7 +230,9 @@ here so the scorecard's synthetic fixtures read as grounded rather than hypothet
 | Issue | What happened | Axis / check | Remediation (already shipped) |
 |---|---|---|---|
 | **#212** | A DAG push-gate node labeled an issue `spec-pending-review`/`plan-pending-review` based on the ephemeral, never-committed `$ARTIFACTS_DIR/refinement-status.md` STATUS marker, which can exist even when the actual commit failed — an authority-bearing decision keyed to non-durable state (`.archon/memory/architecture.md`, issue #212 entry) | **Provenance preservation** + authority monotonicity — the gate's authority derived from state with no durable provenance | `push_gate_check.sh` — now checks the committed artifact + `git rev-list` directly, not the ephemeral marker |
-| **#292** | `stage_orphan_sweep` (`scheduler.sh:1323`) ran *before* the session-window pause sentinel gate (`scheduler.sh:1325`), so a paused run's board status still mutated to `blocked` and posted a comment directly contradicting the just-posted "paused" comment — a scope/ordering escape (`.archon/memory/codebase-patterns.md`, issue #292 entry) | **Scope non-expansion** — a mutation escaped the boundary meant to contain it | Documented fix (gate `stage_orphan_sweep` behind the pause sentinel) — verify current status against `main` before citing as fully remediated in any downstream use of this table |
+| **#292** | After a session-window death, `entrypoint.sh` still posted a "Run — Failed / moved to Blocked" post-mortem comment, contradicting #35's no-failure-comment intent — an external commitment emitted from a state that should have suppressed it | **Actionability / authority** — an external commitment emitted from a state that should have suppressed it | `entrypoint.sh` post-mortem path (PR #330, merged 2026-07-31) |
+
+The code-review advisory on PR #330 (`.archon/memory/codebase-patterns.md` #292 entry: `stage_orphan_sweep` at `scheduler.sh:1323` runs before the pause sentinel is read at :1331) was **not** adopted and remains a live ordering gap on `main` (tracked as #334; reproduced 2026-08-21) — usable as scope-non-expansion fixture grounding.
 | **#305** | `session_window.py`'s fallback reset-time parser rolled a past wall-clock time forward a day instead of returning the literal past timestamp, manufacturing a ~22h false pause (`.archon/memory/architecture.md`, issue #305 entry) | **Rollback traceability / mutability** — a lossy, non-invertible transform destroyed the original parsed value, so nothing downstream could trace the pause back to its actual input | Parser corrected to return the literal (possibly past) value; downstream layers (buffer, scheduler's `now >= resume_epoch` gate) turn a past value into an effectively-immediate resume |
 
 Note: `evals/behavioral-state/baseline.md` (epic #241's corpus) already scores #212 twice
@@ -282,9 +309,6 @@ naming the exact future knob shape, for the (separately reviewed) Phase-5 ticket
 - Should `mechanism_lineage`'s `activation_status` lifecycle eventually be enforced by real code
   (e.g. a registry file), or does it stay a documentation-only convention? No current owner or epic
   claims it; flagged for whoever picks up the Bilevel Autoresearch thread next.
-- Is #292's `stage_orphan_sweep` ordering fix (cited in `.archon/memory/codebase-patterns.md`) fully
-  landed on current `main`, or still pending? This spec cites the *documented* fix; the retrospective
-  table should be re-verified against `main` before being reused as evidence elsewhere.
 
 ---
 
