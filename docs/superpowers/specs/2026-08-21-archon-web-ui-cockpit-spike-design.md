@@ -130,7 +130,7 @@ proves insufficient does adopting Archon's Postgres schema become worth its cost
 
 **Phase 4 — Guarded workflow-builder support: not recommended, with a reopen trigger, not a permanent no.**
 Any real edit path must terminate in a commit to `workflows/archon-dark-factory.yaml` on a branch, with
-a PR. Archon's `WorkflowBuilderPage` writes to the per-container `.archon/workflows/` copy, which
+a PR. Archon's workflow builder (`packages/web/src/components/workflows/WorkflowBuilder.tsx`) saves to `<cwd>/.archon/workflows/`; the only place Dark Factory ever materializes that directory is the run container's throwaway copy (`entrypoint.sh:574-577`), which
 `entrypoint.sh:577` explicitly excludes from ever being committed — an edit made there is unreachable
 from any commit and dies with the container. This is the same failure class as a prior memory
 precedent on this repo (#212: DAG-gating logic must check the committed file on the branch, never an
@@ -211,7 +211,7 @@ even though no ticket tracks them yet.
    `scheduler.sh`, creating exactly the kind of drifting second copy CLAUDE.md's "never weaken safety
    gates" rule exists to prevent, and requires exposing Docker-socket-level access to an unauthenticated
    server.
-3. **Support live editing of `workflows/archon-dark-factory.yaml` via Archon's WorkflowBuilderPage now,
+3. **Support live editing of `workflows/archon-dark-factory.yaml` via Archon's WorkflowBuilder component now,
    with a "PR review" step bolted on.** Rejected: any such edit path is unreachable from a real commit
    under the current container lifecycle, and even a hypothetical future version would need to clear a
    higher review bar (`critical_diff_paths`) than the issue's own "PR-reviewed" framing implies.
