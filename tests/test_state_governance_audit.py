@@ -21,10 +21,12 @@ from state_governance_audit import (  # noqa: E402
     compute_scorecard,
     load_events,
 )
+from state_governance_audit import write_json, write_markdown  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _FIXTURES_DIR = _REPO_ROOT / "evals" / "state-governance" / "fixtures"
 _MANIFEST = _FIXTURES_DIR / "manifest.json"
+_SAMPLE_DIR = _REPO_ROOT / "evals" / "state-governance" / "sample"
 
 
 def _event(**overrides):
@@ -199,3 +201,24 @@ class TestManifestFixtures:
             assert verdict == spec["expected_verdict"], (
                 f"{fname}: expected {spec['expected_verdict']}, got {verdict}"
             )
+
+
+class TestSampleRegeneration:
+    def test_sample_matches_fresh_regeneration(self):
+        events = load_events(_FIXTURES_DIR / "realistic-run-01.jsonl")
+        scorecard = compute_scorecard(events, now="2026-08-22T00:00:00Z", run_id="state-governance-sample-v1")
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            write_json(scorecard, tmp_path / "state-governance-scorecard.json")
+            write_markdown(scorecard, tmp_path / "state-governance-scorecard.md")
+
+            fresh_json = (tmp_path / "state-governance-scorecard.json").read_text(encoding="utf-8")
+            fresh_md = (tmp_path / "state-governance-scorecard.md").read_text(encoding="utf-8")
+
+        committed_json = (_SAMPLE_DIR / "state-governance-scorecard.json").read_text(encoding="utf-8")
+        committed_md = (_SAMPLE_DIR / "state-governance-scorecard.md").read_text(encoding="utf-8")
+
+        assert fresh_json == committed_json
+        assert fresh_md == committed_md

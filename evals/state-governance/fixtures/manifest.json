@@ -8,5 +8,6 @@
   "provenance-preservation-pass.jsonl": {"check": "provenance_preservation", "expected_verdict": "PASS"},
   "provenance-preservation-fail.jsonl": {"check": "provenance_preservation", "expected_verdict": "FAIL"},
   "rollback-traceability-pass.jsonl": {"check": "rollback_traceability", "expected_verdict": "PASS"},
-  "rollback-traceability-fail.jsonl": {"check": "rollback_traceability", "expected_verdict": "FAIL"}
+  "rollback-traceability-fail.jsonl": {"check": "rollback_traceability", "expected_verdict": "FAIL"},
+  "realistic-run-01.jsonl": {"check": "combined", "expected_verdict": "FAIL"}
 }
