@@ -96,8 +96,10 @@ def _rescue_blocked(args):
 
 
 def _session_window_check(args):
+    import base64
+    import json as _json
     import time
-    from factory_core.session_window import check_and_pause
+    from factory_core.session_window import check_and_pause, match_snippet
     tmp_out_path = Path(args.tmp_out)
     text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
     resume_epoch = check_and_pause(
@@ -109,6 +111,13 @@ def _session_window_check(args):
     )
     if resume_epoch is not None:
         print(f"matched=true resume_epoch={resume_epoch}")
+        snippet = match_snippet(text)
+        if snippet is not None:
+            payload = dict(snippet)
+            if isinstance(payload["window"], dict):
+                payload["window"] = _json.dumps(payload["window"])
+            encoded = base64.b64encode(_json.dumps(payload).encode()).decode()
+            print(f"snippet_b64={encoded}")
     else:
         print("matched=false resume_epoch=0")
 

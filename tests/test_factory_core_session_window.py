@@ -331,6 +331,7 @@ def test_match_snippet_falls_through_to_substring_when_only_allowed_events():
     assert result["matched"] == "session limit reached"
 
 
+import base64
 import subprocess
 import sys as _sys
 
@@ -371,3 +372,44 @@ def test_cli_session_window_check_unmatched(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "matched=false" in result.stdout
     assert not (state_dir / "session-window-paused").exists()
+
+
+def test_cli_session_window_check_matched_includes_snippet_b64(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("429 too many requests, session limit reached")
+    state_dir = tmp_path / "state"
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "session-window-check",
+         "--tmp-out", str(tmp_out),
+         "--state-dir", str(state_dir),
+         "--buffer-minutes", "5",
+         "--fallback-minutes", "30"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = [l for l in result.stdout.splitlines() if l.startswith("snippet_b64=")]
+    assert len(lines) == 1
+    import json as _json
+    decoded = _json.loads(base64.b64decode(lines[0].split("=", 1)[1]).decode())
+    assert decoded["matched"] == "session limit reached"
+    assert decoded["branch"] == "usage/session-limit"
+
+
+def test_cli_session_window_check_unmatched_has_no_snippet_b64(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("unrelated stack trace")
+    state_dir = tmp_path / "state"
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "session-window-check",
+         "--tmp-out", str(tmp_out),
+         "--state-dir", str(state_dir),
+         "--buffer-minutes", "5",
+         "--fallback-minutes", "30"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "snippet_b64=" not in result.stdout
