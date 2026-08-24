@@ -68,6 +68,54 @@ def test_set_board_status_no_item_skips_edit(monkeypatch):
     assert not any("item-edit" in " ".join(c) for c in calls)
 
 
+def test_item_edit_status_returns_true_on_success(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok())
+    assert board._item_edit_status("ITEM42", "opt_abc") is True
+
+
+def test_item_edit_status_returns_false_and_prints_stderr_on_failure(monkeypatch, capsys):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+        subprocess.CompletedProcess([], 1, stdout="", stderr="permission denied"))
+    assert board._item_edit_status("ITEM42", "opt_abc") is False
+    err = capsys.readouterr().err
+    assert "ITEM42" in err
+    assert "permission denied" in err
+
+
+def test_find_item_by_number_checked_transport_failure(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+        subprocess.CompletedProcess([], 1, stdout="", stderr="rate limited"))
+    assert board._find_item_by_number_checked("42") == ("", False)
+
+
+def test_find_item_by_number_checked_unparseable_json(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+        subprocess.CompletedProcess([], 0, stdout="not json", stderr=""))
+    assert board._find_item_by_number_checked("42") == ("", False)
+
+
+def test_find_item_by_number_checked_genuinely_absent(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _items([]))
+    assert board._find_item_by_number_checked("42") == ("", True)
+
+
+def test_find_item_by_number_checked_found(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _items([
+        {"id": "ITEM42", "content": {"number": 42, "type": "Issue"}},
+    ]))
+    assert board._find_item_by_number_checked("42") == ("ITEM42", True)
+
+
+def test_set_board_status_still_returns_none(monkeypatch):
+    # Pins Requirement 3 / Design Decision 3: set_board_status's 4 direct callers
+    # (breaker.py, rescue.py, deconflict.py, epic_autopilot.py) must see zero
+    # behavior change even though the helpers it calls now report bool/tuple.
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _items([
+        {"id": "ITEM42", "content": {"number": 42, "type": "Issue"}},
+    ]) if "item-list" in cmd else _ok())
+    assert board.set_board_status(42, "opt_abc") is None
+
+
 def test_post_or_update_comment_new_comment(monkeypatch):
     calls = []
     def fake(cmd, **kw):

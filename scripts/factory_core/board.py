@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 
 from . import identity
@@ -19,35 +20,49 @@ STATUS_BACKLOG = identity.STATUS["backlog"]
 STATUS_REFINED = identity.STATUS["refined"]
 
 
-def _find_item_by_number(number: str) -> str:
+def _find_item_by_number_checked(number: str) -> tuple[str, bool]:
     """Project-item lookup by issue number, compared as strings so an opaque
-    Tracker id (e.g. "PROJ-123") never needs int() coercion to reach this call."""
+    Tracker id (e.g. "PROJ-123") never needs int() coercion to reach this call.
+    Returns (item_id_or_"", lookup_ok) -- lookup_ok is False only when the gh
+    call itself failed (non-zero rc or unparseable JSON), True (with item_id
+    == "") when the call succeeded but no matching item was found."""
     r = subprocess.run(
         ["gh", "project", "item-list", str(PROJECT_NUMBER),
          "--owner", OWNER, "--format", "json", "--limit", "200"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
-        return ""
+        return "", False
     try:
-        for item in json.loads(r.stdout).get("items", []):
+        items = json.loads(r.stdout).get("items", [])
+    except json.JSONDecodeError:
+        return "", False
+    try:
+        for item in items:
             c = item.get("content", {})
             if str(c.get("number")) == number and c.get("type") == "Issue":
-                return item["id"]
-    except (json.JSONDecodeError, KeyError):
-        pass
-    return ""
+                return item["id"], True
+    except KeyError:
+        return "", False
+    return "", True
 
 
-def _item_edit_status(item_id: str, option_id: str) -> None:
-    subprocess.run(
+def _find_item_by_number(number: str) -> str:
+    return _find_item_by_number_checked(number)[0]
+
+
+def _item_edit_status(item_id: str, option_id: str) -> bool:
+    r = subprocess.run(
         ["gh", "project", "item-edit",
          "--project-id", PROJECT_ID,
          "--id", item_id,
          "--field-id", STATUS_FIELD,
          "--single-select-option-id", option_id],
-        capture_output=True,
+        capture_output=True, text=True,
     )
+    if r.returncode != 0:
+        print(f"board: item-edit failed for {item_id}: {r.stderr.strip()}", file=sys.stderr)
+    return r.returncode == 0
 
 
 def find_board_item(issue_num: int) -> str:
