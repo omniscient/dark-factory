@@ -45,7 +45,14 @@ def _tracker_get_rate_budget(args):
 
 
 def _tracker_set_status(args):
-    get_tracker().set_status(args.id, args.status)
+    try:
+        ok = get_tracker().set_status(args.id, args.status)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ok:
+        print(f"ERROR: board move to {args.status!r} failed for issue {args.id}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _tracker_label(args):
