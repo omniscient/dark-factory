@@ -149,7 +149,7 @@ class JiraTracker(Tracker):
             })
         return results
 
-    def set_status(self, id: str, canonical: str) -> None:
+    def set_status(self, id: str, canonical: str) -> bool:
         target_name = self._canonical_to_name.get(canonical, canonical)
         data = self._request("GET", f"/issue/{id}/transitions")
         match = next(
@@ -162,9 +162,10 @@ class JiraTracker(Tracker):
                 f"jira: no transition to status {target_name!r} for {id}; leaving unchanged",
                 file=sys.stderr,
             )
-            return
+            return False
         self._request("POST", f"/issue/{id}/transitions",
                        json_body={"transition": {"id": match["id"]}})
+        return True
 
     def _current_labels(self, id: str) -> set:
         data = self._request("GET", f"/issue/{id}", params={"fields": "labels"})

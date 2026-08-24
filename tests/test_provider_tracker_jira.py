@@ -225,12 +225,13 @@ def test_set_status_finds_transition_and_posts_its_id(monkeypatch):
         return {}
 
     monkeypatch.setattr(JiraTracker, "_request", fake_request)
-    tracker.set_status("PROJ-1", "in_review")
+    result = tracker.set_status("PROJ-1", "in_review")
 
     get_call, post_call = calls
     assert get_call[:2] == ("GET", "/issue/PROJ-1/transitions")
     assert post_call[:2] == ("POST", "/issue/PROJ-1/transitions")
     assert post_call[2] == {"transition": {"id": "41"}}  # "Send to Review" -> In review
+    assert result is True
 
 
 def test_set_status_missing_transition_edge_fails_soft(monkeypatch, capsys):
@@ -245,13 +246,14 @@ def test_set_status_missing_transition_edge_fails_soft(monkeypatch, capsys):
         return {"transitions": []}  # no edges available
 
     monkeypatch.setattr(JiraTracker, "_request", fake_request)
-    tracker.set_status("PROJ-1", "in_review")  # must not raise
+    result = tracker.set_status("PROJ-1", "in_review")  # must not raise
 
     assert calls == ["GET"]  # no POST attempted
     err = capsys.readouterr().err
     assert "jira:" in err
     assert "PROJ-1" in err
     assert "in review" in err.lower() or "In review" in err
+    assert result is False
 
 
 def test_add_label_reads_then_puts_merged_labels(monkeypatch):
