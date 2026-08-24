@@ -145,6 +145,40 @@ def check_scope_non_expansion(events):
     return verdict, violations
 
 
+def check_provenance_preservation(events):
+    """Every event with actionability != evidence must carry a non-null provenance.source
+    and (run_id or commit); policy/permission/skill/external_commitment additionally need
+    trust_tier in {trusted, reviewed}."""
+    violations = []
+    for e in events:
+        actionability = e.get("actionability")
+        if actionability is None or actionability == "evidence":
+            continue
+        prov = e.get("provenance") or {}
+        source = prov.get("source")
+        has_join_key = bool(prov.get("run_id") or prov.get("commit"))
+        if not source or not has_join_key:
+            violations.append({
+                "event_id": e.get("event_id"),
+                "entity_id": e.get("entity_id"),
+                "reason": "missing provenance.source or both run_id/commit join keys",
+            })
+            continue
+        if actionability in _HIGH_ACTIONABILITY:
+            trust_tier = prov.get("trust_tier")
+            if trust_tier not in ("trusted", "reviewed"):
+                violations.append({
+                    "event_id": e.get("event_id"),
+                    "entity_id": e.get("entity_id"),
+                    "reason": (
+                        f"actionability={actionability} requires provenance.trust_tier "
+                        f"trusted|reviewed, got {trust_tier!r}"
+                    ),
+                })
+    verdict = "FAIL" if violations else "PASS"
+    return verdict, violations
+
+
 def check_deletion_propagation(events):
     """Every tombstone/delete/quarantine event must be reflected in any later 'act' event
     reading the same entity_id; an 'act' event that still reports mutability.status=active

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from state_governance_audit import check_authority_monotonicity  # noqa: E402
 from state_governance_audit import check_scope_non_expansion  # noqa: E402
 from state_governance_audit import check_deletion_propagation  # noqa: E402
+from state_governance_audit import check_provenance_preservation  # noqa: E402
 
 
 def _event(**overrides):
@@ -110,4 +111,30 @@ class TestDeletionPropagation:
         e1 = _event(event_id="d1", entity_id="memory:z", operation="act",
                      mutability={"status": "active", "supersedes": [], "conflicts_with": []})
         verdict, violations = check_deletion_propagation([e1])
+        assert verdict == "PASS"
+
+
+class TestProvenancePreservation:
+    def test_evidence_actionability_is_exempt(self):
+        e1 = _event(event_id="p1", actionability="evidence",
+                     provenance={"source": None, "trust_tier": None, "run_id": None, "commit": None})
+        verdict, violations = check_provenance_preservation([e1])
+        assert verdict == "PASS"
+
+    def test_advisory_missing_source_fails(self):
+        e1 = _event(event_id="p1", actionability="advisory",
+                     provenance={"source": None, "trust_tier": None, "run_id": None, "commit": None})
+        verdict, violations = check_provenance_preservation([e1])
+        assert verdict == "FAIL"
+
+    def test_policy_missing_trust_tier_fails(self):
+        e1 = _event(event_id="p1", actionability="policy",
+                     provenance={"source": "git", "trust_tier": "untrusted", "run_id": None, "commit": "abc"})
+        verdict, violations = check_provenance_preservation([e1])
+        assert verdict == "FAIL"
+
+    def test_policy_with_reviewed_trust_tier_passes(self):
+        e1 = _event(event_id="p1", actionability="policy",
+                     provenance={"source": "git", "trust_tier": "reviewed", "run_id": None, "commit": "abc"})
+        verdict, violations = check_provenance_preservation([e1])
         assert verdict == "PASS"
