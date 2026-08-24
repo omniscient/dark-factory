@@ -254,7 +254,8 @@ nodes:
       echo "PR #$PR_NUM merged successfully"
 
       # Move the sub-issue to Done (never the epic — it stays In Progress)
-      python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done
+      python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done \
+        || echo "WARNING: board move to done failed for #$ISSUE — check board state manually"
       echo "Moved issue #$ISSUE to Done"
       gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
       echo "CLOSED"
@@ -1192,7 +1193,8 @@ nodes:
       fi
       echo "Moving issue #${ISSUE} to In Review..."
       python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
-        tracker set-status --id "$ISSUE" --status in_review
+        tracker set-status --id "$ISSUE" --status in_review \
+        || echo "WARNING: board move to in_review failed for #$ISSUE — check board state manually"
       echo "Moved issue #$ISSUE to In Review"
     depends_on: [push-and-pr, push-resolve, code-review, revise-advisory, review-gate]
     # OR-join: push-and-pr/code-review/revise-advisory (new/continue) vs push-resolve (resolve) are
