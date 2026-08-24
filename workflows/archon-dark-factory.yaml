@@ -254,9 +254,11 @@ nodes:
       echo "PR #$PR_NUM merged successfully"
 
       # Move the sub-issue to Done (never the epic — it stays In Progress)
-      python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done \
-        || echo "WARNING: board move to done failed for #$ISSUE — check board state manually"
-      echo "Moved issue #$ISSUE to Done"
+      if python3 "$_PCLI" tracker set-status --id "$ISSUE" --status done; then
+        echo "Moved issue #$ISSUE to Done"
+      else
+        echo "WARNING: board move to done failed for #$ISSUE — check board state manually"
+      fi
       gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
       echo "CLOSED"
     depends_on: [parse-intent, fetch-issue]
@@ -1192,10 +1194,12 @@ nodes:
         exit 0
       fi
       echo "Moving issue #${ISSUE} to In Review..."
-      python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
-        tracker set-status --id "$ISSUE" --status in_review \
-        || echo "WARNING: board move to in_review failed for #$ISSUE — check board state manually"
-      echo "Moved issue #$ISSUE to In Review"
+      if python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py" \
+        tracker set-status --id "$ISSUE" --status in_review; then
+        echo "Moved issue #$ISSUE to In Review"
+      else
+        echo "WARNING: board move to in_review failed for #$ISSUE — check board state manually"
+      fi
     depends_on: [push-and-pr, push-resolve, code-review, revise-advisory, review-gate]
     # OR-join: push-and-pr/code-review/revise-advisory (new/continue) vs push-resolve (resolve) are
     # mutually exclusive. Tolerate skipped siblings; still skip if a real upstream failed.

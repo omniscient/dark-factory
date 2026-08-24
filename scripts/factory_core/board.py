@@ -32,10 +32,12 @@ def _find_item_by_number_checked(number: str) -> tuple[str, bool]:
         capture_output=True, text=True,
     )
     if r.returncode != 0:
+        print(f"board: item-list failed: {r.stderr.strip()}", file=sys.stderr)
         return "", False
     try:
         items = json.loads(r.stdout).get("items", [])
     except json.JSONDecodeError:
+        print(f"board: item-list returned unparseable JSON: {r.stdout.strip()[:200]!r}", file=sys.stderr)
         return "", False
     try:
         for item in items:

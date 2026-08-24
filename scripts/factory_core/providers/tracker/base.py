@@ -30,8 +30,13 @@ class Tracker(ABC):
     def set_status(self, id: str, canonical: str) -> bool:
         """Move an item to one of the seven canonical statuses. Returns True iff
         the item's status actually changed; False for "not found on the board /
-        no valid transition" or "operation failed" -- implementations must not
-        raise for either case."""
+        no valid transition" -- implementations must not raise for that case.
+        For "operation failed" (e.g. a transport/API error attempting the move),
+        an implementation may either return False or raise, depending on
+        whether the underlying transport already distinguishes that failure
+        mode for callers (see JiraTracker.set_status, which lets `_request`'s
+        RuntimeError on HTTP errors propagate by design; callers are expected
+        to handle it)."""
 
     @abstractmethod
     def add_label(self, id: str, name: str) -> None:

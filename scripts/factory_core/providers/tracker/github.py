@@ -5,6 +5,7 @@ not asserted by inspection (spec requirement 3)."""
 import json
 import re
 import subprocess
+import sys
 
 from factory_core import board, identity
 from factory_core.providers.tracker.base import Tracker
@@ -140,7 +141,11 @@ class GitHubTracker(Tracker):
 
     def set_status(self, id: str, canonical: str) -> bool:
         item_id, lookup_ok = board._find_item_by_number_checked(id)
-        if not lookup_ok or not item_id:
+        if not lookup_ok:
+            print(f"github: board item-list lookup failed for #{id}; leaving unchanged", file=sys.stderr)
+            return False
+        if not item_id:
+            print(f"github: #{id} not found on the board; leaving unchanged", file=sys.stderr)
             return False
         return board._item_edit_status(item_id, identity.STATUS[canonical])
 
