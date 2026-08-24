@@ -56,7 +56,7 @@ class TestAuthorityMonotonicity:
         assert verdict == "PASS"
         assert violations == []
 
-    def test_inflated_epoch_fails(self):
+    def test_increase_with_lower_epoch_nonhuman_approval_fails(self):
         e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 2, "approval_record": None})
         e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "a1"})
         verdict, violations = check_authority_monotonicity([e1, e2])
@@ -64,10 +64,61 @@ class TestAuthorityMonotonicity:
         assert len(violations) == 1
         assert violations[0]["event_id"] == "a2"
 
-    def test_unresolved_approval_record_is_not_a_violation(self):
-        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 5, "approval_record": "no-such-event"})
+    def test_increase_without_approval_record_fails(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 99, "approval_record": None})
+        verdict, violations = check_authority_monotonicity([e1, e2])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "a2"
+
+    def test_increase_with_dangling_approval_record_fails(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 2, "approval_record": "no-such-event"})
+        verdict, violations = check_authority_monotonicity([e1, e2])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "a2"
+
+    def test_increase_authorized_by_equal_or_higher_epoch_approval_passes(self):
+        grant = _event(event_id="g1", entity_id="permission:grant",
+                       authority={"actor": "scheduler", "permission_epoch": 5, "approval_record": None})
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "g1"})
+        verdict, violations = check_authority_monotonicity([grant, e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
+
+    def test_increase_authorized_by_human_actor_approval_passes(self):
+        grant = _event(event_id="h1", entity_id="permission:human-grant",
+                       authority={"actor": "human", "permission_epoch": 1, "approval_record": None})
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 9, "approval_record": "h1"})
+        verdict, violations = check_authority_monotonicity([grant, e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
+
+    def test_first_appearance_is_baseline_even_with_high_epoch(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 99, "approval_record": None})
         verdict, violations = check_authority_monotonicity([e1])
         assert verdict == "PASS"
+        assert violations == []
+
+    def test_epoch_decrease_needs_no_approval(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 5, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 2, "approval_record": None})
+        verdict, violations = check_authority_monotonicity([e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
+
+    def test_entities_are_tracked_independently(self):
+        e1 = _event(event_id="a1", entity_id="memory:x",
+                    authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", entity_id="memory:y",
+                    authority={"actor": "x", "permission_epoch": 9, "approval_record": None})
+        verdict, violations = check_authority_monotonicity([e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
 
 
 class TestScopeNonExpansion:

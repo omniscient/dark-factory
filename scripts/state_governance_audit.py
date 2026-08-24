@@ -80,29 +80,56 @@ def _group_by_entity(events):
 
 
 def check_authority_monotonicity(events):
-    """An event's authority.permission_epoch must not exceed the epoch of the event its
-    approval_record claims to derive from (approval_record holds another event's event_id)."""
+    """An event may not raise authority.permission_epoch above the prior event of the same
+    entity_id (file order) unless the increase is authorized: its approval_record must
+    resolve to an existing event whose own permission_epoch is >= the new epoch, or whose
+    authority.actor is "human" (human approvals may grant any epoch). A missing or dangling
+    approval_record on an epoch increase is a violation. An entity's first appearance is
+    baseline; non-increasing epochs need no approval. Flags forged/inflated authority
+    claims (Gate-3 rounds 1 and 2 on #190)."""
     by_id = {e.get("event_id"): e for e in events}
     violations = []
+    prev_epoch_by_entity = {}
     for e in events:
+        entity_id = e.get("entity_id")
         auth = e.get("authority") or {}
         epoch = auth.get("permission_epoch")
+        if entity_id is None or epoch is None:
+            continue
+        prev_epoch = prev_epoch_by_entity.get(entity_id)
+        prev_epoch_by_entity[entity_id] = epoch
+        if prev_epoch is None or epoch <= prev_epoch:
+            continue  # first appearance is baseline; non-increasing epochs are fine
         approval_record = auth.get("approval_record")
-        if epoch is None or not approval_record:
-            continue
-        ref = by_id.get(approval_record)
-        if ref is None:
-            continue
-        ref_epoch = (ref.get("authority") or {}).get("permission_epoch")
-        if ref_epoch is not None and epoch > ref_epoch:
-            violations.append({
-                "event_id": e.get("event_id"),
-                "entity_id": e.get("entity_id"),
-                "reason": (
-                    f"permission_epoch {epoch} exceeds approval_record "
-                    f"{approval_record}'s epoch {ref_epoch}"
-                ),
-            })
+        if not approval_record:
+            reason = (
+                f"permission_epoch increased {prev_epoch} -> {epoch} "
+                f"with no approval_record"
+            )
+        else:
+            ref = by_id.get(approval_record)
+            if ref is None:
+                reason = (
+                    f"permission_epoch increased {prev_epoch} -> {epoch} but "
+                    f"approval_record {approval_record} does not resolve to any event"
+                )
+            else:
+                ref_auth = ref.get("authority") or {}
+                ref_epoch = ref_auth.get("permission_epoch")
+                if ref_auth.get("actor") == "human":
+                    continue  # human approvals may grant any epoch
+                if ref_epoch is not None and ref_epoch >= epoch:
+                    continue  # authorized by an event of equal-or-higher epoch
+                reason = (
+                    f"permission_epoch increased {prev_epoch} -> {epoch} but "
+                    f"approval_record {approval_record} has epoch {ref_epoch} < {epoch} "
+                    f"and its actor is not human"
+                )
+        violations.append({
+            "event_id": e.get("event_id"),
+            "entity_id": entity_id,
+            "reason": reason,
+        })
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
 
