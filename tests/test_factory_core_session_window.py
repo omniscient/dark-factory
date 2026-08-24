@@ -11,6 +11,7 @@ from factory_core.session_window import (
     write_pause_sentinel,
     check_and_pause,
     RATE_LIMIT_RE,
+    match_snippet,
 )
 
 
@@ -288,6 +289,46 @@ def test_is_session_window_failure_true_for_allowed_marker_plus_human_readable_t
         "You've hit your session limit · resets 11:10pm (UTC)"
     )
     assert is_session_window_failure(text) is True
+
+
+def test_match_snippet_none_when_no_pause_worthy_signal():
+    assert match_snippet("unrelated stack trace") is None
+
+
+def test_match_snippet_substring_path_returns_matched_offset_window_branch():
+    text = "noise noise " + ("x" * 100) + " session limit reached " + ("y" * 100)
+    result = match_snippet(text, radius=20)
+    assert result["matched"] == "session limit reached"
+    assert result["branch"] == "usage/session-limit"
+    assert result["offset"] == text.index("session limit reached")
+    assert "session limit reached" in result["window"]
+    assert len(result["window"]) <= len("session limit reached") + 40
+
+
+def test_match_snippet_credit_branch():
+    result = match_snippet("insufficient credit balance, please top up")
+    assert result["branch"] == "credit-balance"
+
+
+def test_match_snippet_structured_path_returns_first_non_allowed_event():
+    text = (
+        '{"rateLimitInfo":{"status":"allowed","resetsAt":1},"msg":"claude.rate_limit_event"}\n'
+        '{"rateLimitInfo":{"status":"rejected","resetsAt":2},"msg":"claude.rate_limit_event"}'
+    )
+    result = match_snippet(text)
+    assert result == {
+        "matched": "claude.rate_limit_event",
+        "offset": text.find("claude.rate_limit_event"),
+        "window": {"rateLimitInfo": {"status": "rejected", "resetsAt": 2}, "msg": "claude.rate_limit_event"},
+        "branch": "status=rejected",
+    }
+
+
+def test_match_snippet_falls_through_to_substring_when_only_allowed_events():
+    text = ('{"rateLimitInfo":{"status":"allowed","resetsAt":1},"msg":"claude.rate_limit_event"}\n'
+            "session limit reached")
+    result = match_snippet(text)
+    assert result["matched"] == "session limit reached"
 
 
 import subprocess

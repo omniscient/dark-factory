@@ -188,6 +188,37 @@ def write_pause_sentinel(resume_epoch: int, state_dir: Path) -> None:
     tmp.rename(path)
 
 
+_RE_CREDIT_ONLY = re.compile(_RE_CREDIT, re.IGNORECASE)
+
+
+def match_snippet(text: str, radius: int = 80) -> Optional[dict]:
+    """Return the match that caused a pause, plus context, or None if the text doesn't
+    represent a pause-worthy failure. Used to make a session-window pause diagnosable
+    after the container that produced it is gone."""
+    for event in _structured_events(text):
+        status = _structured_status(event)
+        if status == "allowed":
+            continue  # neutral -- keep looking, then fall through to the substring path
+        offset = text.find(_STRUCTURED_MARKER)
+        return {
+            "matched": _STRUCTURED_MARKER,
+            "offset": offset,
+            "window": event,
+            "branch": f"status={status}",
+        }
+    match = _SESSION_EXHAUSTION_RE.search(text)
+    if match is None:
+        return None
+    start, end = max(0, match.start() - radius), min(len(text), match.end() + radius)
+    branch = "credit-balance" if _RE_CREDIT_ONLY.search(match.group(0)) else "usage/session-limit"
+    return {
+        "matched": match.group(0),
+        "offset": match.start(),
+        "window": text[start:end],
+        "branch": branch,
+    }
+
+
 def check_and_pause(
     text: str,
     state_dir: Path,
