@@ -312,6 +312,24 @@ naming the exact future knob shape, for the (separately reviewed) Phase-5 ticket
 
 ---
 
+## Follow-ups
+
+Named, out-of-scope-for-this-ticket work referenced elsewhere in this spec:
+
+- **Live-capture adapters** (§Alternatives considered #2): wire `memory_write.py`,
+  `run_record.py`, and `entrypoint.sh` to emit real `state-lineage.jsonl` events instead
+  of the synthetic fixture corpus this ticket ships. Touches `entrypoint.sh`/the
+  workflow DAG, so it needs its own reviewed ticket per CLAUDE.md.
+- **`rollback-ledger.jsonl`** (Requirement 10): the issue's proposed per-run runtime
+  rollback-ledger artifact. Depends on the live-capture adapters above existing first.
+- **Fix the three real defects found during this ticket's context assembly** (§Fixture
+  corpus, §Alternatives considered #4): `.archon/memory/index.jsonl` rows omitting
+  `id`/`source_file`/`path_prefixes` (provenance-preservation gap),
+  `memory_maintain.py`'s expiry/supersession never propagating to `index.jsonl`
+  (deletion-propagation gap), and `memory_write.py:95`'s hardcoded
+  `"project": "markethawk"` (scope-non-expansion gap). This ticket's job is the
+  detector, not the fix — these are filed separately.
+
 ## Assumptions (flagged)
 
 - `scripts/state_governance_audit.py` is invoked as a standalone script (not a `factory_core/cli.py`
