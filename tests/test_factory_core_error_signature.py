@@ -133,6 +133,25 @@ def test_rate_limit_session_limit_string(tmp_path):
     assert json.loads(sig_file.read_text())["signature"] == "environmental:rate_limit"
 
 
+def test_classify_rejects_sha_embedded_429_negative():
+    assert _classify(text="fixed in abc4291f2e") != "environmental:rate_limit"
+
+
+def test_classify_rejects_dollar_figure_negative():
+    assert _classify(text="cost $0.429 total this run") != "environmental:rate_limit"
+
+
+def test_classify_rejects_issue_reference_negative():
+    assert _classify(text="see #429 for context") != "environmental:rate_limit"
+
+
+def test_classify_http_429_rate_limit_exceeded_is_environmental():
+    # Transient-429-still-classifies-for-the-breaker case (Decision 3): real for the
+    # breaker even though the paired is_session_window_failure test in
+    # test_factory_core_session_window.py asserts False for the same string.
+    assert _classify(text="HTTP 429 — rate limit exceeded") == "environmental:rate_limit"
+
+
 def test_cli_error_signature_write_missing_text_file_is_empty_text(tmp_path):
     result = subprocess.run(
         [_sys.executable, CLI, "error-signature-write",
