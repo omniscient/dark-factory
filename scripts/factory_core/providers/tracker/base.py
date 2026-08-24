@@ -27,8 +27,11 @@ class Tracker(ABC):
         """Epic -> children (sub-issues / epic-link issues)."""
 
     @abstractmethod
-    def set_status(self, id: str, canonical: str) -> None:
-        """Move an item to one of the seven canonical statuses."""
+    def set_status(self, id: str, canonical: str) -> bool:
+        """Move an item to one of the seven canonical statuses. Returns True iff
+        the item's status actually changed; False for "not found on the board /
+        no valid transition" or "operation failed" -- implementations must not
+        raise for either case."""
 
     @abstractmethod
     def add_label(self, id: str, name: str) -> None:
