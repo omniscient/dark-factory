@@ -228,3 +228,97 @@ def check_deletion_propagation(events):
                     })
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
+
+
+CHECK_FUNCS = {
+    "authority_monotonicity": check_authority_monotonicity,
+    "scope_non_expansion": check_scope_non_expansion,
+    "deletion_propagation": check_deletion_propagation,
+    "provenance_preservation": check_provenance_preservation,
+    "rollback_traceability": check_rollback_traceability,
+}
+
+
+def compute_scorecard(events, now, run_id):
+    checks = []
+    fail_count = 0
+    for name in CHECK_NAMES:
+        verdict, violations = CHECK_FUNCS[name](events)
+        if verdict == "FAIL":
+            fail_count += 1
+        checks.append({"name": name, "verdict": verdict, "violations": violations})
+    status = "FAIL" if fail_count else "PASS"
+    score = round(100 * (len(CHECK_NAMES) - fail_count) / len(CHECK_NAMES))
+    return {
+        "STATUS": status,
+        "generated_at": now,
+        "run_id": run_id,
+        "event_count": len(events),
+        "checks": checks,
+        "score": score,
+    }
+
+
+def write_json(scorecard, out_path):
+    out_path.write_text(json.dumps(scorecard, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+
+def write_markdown(scorecard, out_path):
+    lines = [
+        "# Dark Factory State Governance Scorecard",
+        "",
+        f"Generated: {scorecard['generated_at']}",
+        f"Run: {scorecard['run_id']}",
+        "",
+        f"**STATUS:** {scorecard['STATUS']} — **Score:** {scorecard['score']}/100 "
+        f"— **Events evaluated:** {scorecard['event_count']}",
+        "",
+        "## Checks",
+        "",
+        "| Check | Verdict | Violations |",
+        "|---|---|---|",
+    ]
+    for c in scorecard["checks"]:
+        lines.append(f"| {c['name']} | {c['verdict']} | {len(c['violations'])} |")
+    lines.append("")
+    for c in scorecard["checks"]:
+        if not c["violations"]:
+            continue
+        lines.append(f"### {c['name']} violations")
+        lines.append("")
+        for v in c["violations"]:
+            lines.append(f"- `{v.get('entity_id')}` / `{v.get('event_id')}`: {v.get('reason')}")
+        lines.append("")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--fixtures", required=True, help="Directory of *.jsonl fixtures, or a single .jsonl file")
+    p.add_argument("--out-dir", required=True, help="Directory to write state-governance-scorecard.{json,md}")
+    p.add_argument("--now", default="", help="Fixed generated_at timestamp (default: current UTC time)")
+    p.add_argument("--run-id", default="", help="Fixed run_id for the scorecard (default: 'adhoc')")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    now = args.now
+    if not now:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run_id = args.run_id or "adhoc"
+
+    events = load_events(args.fixtures)
+    scorecard = compute_scorecard(events, now, run_id)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_json(scorecard, out_dir / "state-governance-scorecard.json")
+    write_markdown(scorecard, out_dir / "state-governance-scorecard.md")
+
+    print(f"STATUS: {scorecard['STATUS']}", file=sys.stderr)
+    print(f"score: {scorecard['score']}/100 over {len(CHECK_NAMES)} checks", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

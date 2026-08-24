@@ -4,6 +4,7 @@ No subprocess, no network — check-function tests use inline event dicts; the
 regeneration test (Task 8) diffs freshly-computed output against the committed sample.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -14,6 +15,16 @@ from state_governance_audit import check_scope_non_expansion  # noqa: E402
 from state_governance_audit import check_deletion_propagation  # noqa: E402
 from state_governance_audit import check_provenance_preservation  # noqa: E402
 from state_governance_audit import check_rollback_traceability  # noqa: E402
+from state_governance_audit import (  # noqa: E402
+    CHECK_FUNCS,
+    CHECK_NAMES,
+    compute_scorecard,
+    load_events,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_FIXTURES_DIR = _REPO_ROOT / "evals" / "state-governance" / "fixtures"
+_MANIFEST = _FIXTURES_DIR / "manifest.json"
 
 
 def _event(**overrides):
@@ -159,3 +170,32 @@ class TestRollbackTraceability:
                      recoverability={"transaction_id": "txn-1", "rollback_handle": None, "external_effects": []})
         verdict, violations = check_rollback_traceability([e1])
         assert verdict == "PASS"
+
+
+class TestComputeScorecard:
+    def test_all_pass_scores_100(self):
+        e1 = _event(event_id="e1", actionability="evidence")
+        scorecard = compute_scorecard([e1], now="2026-01-01T00:00:00Z", run_id="t")
+        assert scorecard["STATUS"] == "PASS"
+        assert scorecard["score"] == 100
+        assert [c["name"] for c in scorecard["checks"]] == CHECK_NAMES
+
+    def test_one_failing_check_drops_score_and_status(self):
+        e1 = _event(event_id="e1", actionability="external_commitment",
+                     recoverability={"transaction_id": None, "rollback_handle": None, "external_effects": []})
+        scorecard = compute_scorecard([e1], now="2026-01-01T00:00:00Z", run_id="t")
+        assert scorecard["STATUS"] == "FAIL"
+        assert scorecard["score"] == 80
+
+
+class TestManifestFixtures:
+    def test_every_manifest_entry_matches_its_check_function(self):
+        manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+        for fname, spec in manifest.items():
+            if spec["check"] == "combined":
+                continue
+            events = load_events(_FIXTURES_DIR / fname)
+            verdict, _ = CHECK_FUNCS[spec["check"]](events)
+            assert verdict == spec["expected_verdict"], (
+                f"{fname}: expected {spec['expected_verdict']}, got {verdict}"
+            )
