@@ -268,3 +268,46 @@ def test_preflight_failure_prints_every_problem_and_exits_1(monkeypatch, capsys)
     err = capsys.readouterr().err
     assert "ERROR: GH_TOKEN is not set. Add it to .archon/.env" in err
     assert "ERROR: Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env" in err
+
+
+def test_tracker_set_status_exits_0_on_success(monkeypatch):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeTracker:
+        def set_status(self, id, canonical):
+            return True
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(sys, "argv", ["cli.py", "tracker", "set-status", "--id", "42", "--status", "blocked"])
+    cli_mod.main()  # must not raise / must not SystemExit
+
+
+def test_tracker_set_status_prints_error_and_exits_1_on_failure(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeTracker:
+        def set_status(self, id, canonical):
+            return False
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(sys, "argv", ["cli.py", "tracker", "set-status", "--id", "42", "--status", "blocked"])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR:" in err
+    assert "42" in err
+    assert "blocked" in err
+
+
+def test_tracker_set_status_catches_runtime_error_and_exits_1(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeTracker:
+        def set_status(self, id, canonical):
+            raise RuntimeError("jira: POST /issue/42/transitions failed (500): boom")
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(sys, "argv", ["cli.py", "tracker", "set-status", "--id", "42", "--status", "blocked"])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR: jira: POST /issue/42/transitions failed (500): boom" in err

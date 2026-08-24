@@ -79,7 +79,7 @@ def test_set_status_resolves_canonical_and_calls_item_edit(monkeypatch):
             ))
         return _ok()
     monkeypatch.setattr(subprocess, "run", fake)
-    GitHubTracker().set_status("42", "in_review")
+    result = GitHubTracker().set_status("42", "in_review")
     edit = next(c for c in calls if "item-edit" in c)
     assert edit == [
         "gh", "project", "item-edit",
@@ -88,13 +88,26 @@ def test_set_status_resolves_canonical_and_calls_item_edit(monkeypatch):
         "--field-id", identity.STATUS_FIELD,
         "--single-select-option-id", identity.STATUS["in_review"],
     ]
+    assert result is True
 
 
 def test_set_status_opaque_id_never_reaches_int(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout='{"items": []}'))[1])
-    GitHubTracker().set_status("PROJ-123", "blocked")  # must not raise ValueError from int()
+    result = GitHubTracker().set_status("PROJ-123", "blocked")  # must not raise ValueError from int()
     assert not any("item-edit" in c for c in calls)
+    assert result is False
+
+
+def test_set_status_item_edit_failure_returns_false(monkeypatch):
+    def fake(cmd, **kw):
+        if "item-list" in cmd:
+            return _ok(stdout=json.dumps(
+                {"items": [{"id": "ITEM42", "content": {"number": 42, "type": "Issue"}}]}
+            ))
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="denied")
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert GitHubTracker().set_status("42", "blocked") is False
 
 
 def test_add_label_matches_breaker_trip_to_blocked(monkeypatch):
