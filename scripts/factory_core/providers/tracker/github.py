@@ -138,11 +138,11 @@ class GitHubTracker(Tracker):
                 break
         return results
 
-    def set_status(self, id: str, canonical: str) -> None:
-        item_id = board._find_item_by_number(id)
-        if not item_id:
-            return
-        board._item_edit_status(item_id, identity.STATUS[canonical])
+    def set_status(self, id: str, canonical: str) -> bool:
+        item_id, lookup_ok = board._find_item_by_number_checked(id)
+        if not lookup_ok or not item_id:
+            return False
+        return board._item_edit_status(item_id, identity.STATUS[canonical])
 
     def add_label(self, id: str, name: str) -> None:
         subprocess.run(
