@@ -143,3 +143,32 @@ def check_scope_non_expansion(events):
             prev = (width, epoch)
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
+
+
+def check_deletion_propagation(events):
+    """Every tombstone/delete/quarantine event must be reflected in any later 'act' event
+    reading the same entity_id; an 'act' event that still reports mutability.status=active
+    after a tombstone ignores it."""
+    violations = []
+    for entity_id, group in _group_by_entity(events).items():
+        if entity_id is None:
+            continue
+        tombstoned = False
+        for e in group:
+            op = e.get("operation")
+            if op in _TOMBSTONE_OPS:
+                tombstoned = True
+                continue
+            if op == "act" and tombstoned:
+                status = (e.get("mutability") or {}).get("status")
+                if status in _ACTIVE_STATUSES:
+                    violations.append({
+                        "event_id": e.get("event_id"),
+                        "entity_id": entity_id,
+                        "reason": (
+                            "act event reads entity as mutability.status=active after a "
+                            "tombstone/delete/quarantine event"
+                        ),
+                    })
+    verdict = "FAIL" if violations else "PASS"
+    return verdict, violations

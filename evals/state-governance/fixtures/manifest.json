@@ -2,5 +2,7 @@
   "authority-monotonicity-pass.jsonl": {"check": "authority_monotonicity", "expected_verdict": "PASS"},
   "authority-monotonicity-fail.jsonl": {"check": "authority_monotonicity", "expected_verdict": "FAIL"},
   "scope-non-expansion-pass.jsonl": {"check": "scope_non_expansion", "expected_verdict": "PASS"},
-  "scope-non-expansion-fail.jsonl": {"check": "scope_non_expansion", "expected_verdict": "FAIL"}
+  "scope-non-expansion-fail.jsonl": {"check": "scope_non_expansion", "expected_verdict": "FAIL"},
+  "deletion-propagation-pass.jsonl": {"check": "deletion_propagation", "expected_verdict": "PASS"},
+  "deletion-propagation-fail.jsonl": {"check": "deletion_propagation", "expected_verdict": "FAIL"}
 }

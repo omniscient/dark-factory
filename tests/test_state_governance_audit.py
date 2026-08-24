@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from state_governance_audit import check_authority_monotonicity  # noqa: E402
 from state_governance_audit import check_scope_non_expansion  # noqa: E402
+from state_governance_audit import check_deletion_propagation  # noqa: E402
 
 
 def _event(**overrides):
@@ -84,4 +85,29 @@ class TestScopeNonExpansion:
                      authority={"actor": "x", "permission_epoch": 1, "approval_record": None},
                      scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
         verdict, violations = check_scope_non_expansion([e1, e2])
+        assert verdict == "PASS"
+
+
+class TestDeletionPropagation:
+    def test_act_after_tombstone_reflecting_status_passes(self):
+        e1 = _event(event_id="d1", entity_id="memory:z", operation="tombstone",
+                     mutability={"status": "tombstoned", "supersedes": [], "conflicts_with": []})
+        e2 = _event(event_id="d2", entity_id="memory:z", operation="act",
+                     mutability={"status": "tombstoned", "supersedes": [], "conflicts_with": []})
+        verdict, violations = check_deletion_propagation([e1, e2])
+        assert verdict == "PASS"
+
+    def test_act_after_tombstone_ignoring_status_fails(self):
+        e1 = _event(event_id="d1", entity_id="memory:z", operation="tombstone",
+                     mutability={"status": "tombstoned", "supersedes": [], "conflicts_with": []})
+        e2 = _event(event_id="d2", entity_id="memory:z", operation="act",
+                     mutability={"status": "active", "supersedes": [], "conflicts_with": []})
+        verdict, violations = check_deletion_propagation([e1, e2])
+        assert verdict == "FAIL"
+        assert violations[0]["event_id"] == "d2"
+
+    def test_act_before_any_tombstone_is_fine(self):
+        e1 = _event(event_id="d1", entity_id="memory:z", operation="act",
+                     mutability={"status": "active", "supersedes": [], "conflicts_with": []})
+        verdict, violations = check_deletion_propagation([e1])
         assert verdict == "PASS"
