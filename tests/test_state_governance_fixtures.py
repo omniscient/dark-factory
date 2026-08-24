@@ -3,7 +3,7 @@
 Modeled on tests/test_behavioral_state_fixtures.py (#242). Guards the synthetic
 state-lineage.jsonl corpus scripts/state_governance_audit.py's 5 checks are validated
 against: every event must carry the full envelope from
-docs/superpowers/specs/2026-08-21-state-governance-scorecard-design.md, and the corpus
+docs/archive/2026-08-21-state-governance-scorecard-design.md, and the corpus
 must stay within its 11-file hard cap (10 pass/fail + 1 combined).
 """
 
