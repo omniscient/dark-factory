@@ -13,6 +13,7 @@ from state_governance_audit import check_authority_monotonicity  # noqa: E402
 from state_governance_audit import check_scope_non_expansion  # noqa: E402
 from state_governance_audit import check_deletion_propagation  # noqa: E402
 from state_governance_audit import check_provenance_preservation  # noqa: E402
+from state_governance_audit import check_rollback_traceability  # noqa: E402
 
 
 def _event(**overrides):
@@ -137,4 +138,24 @@ class TestProvenancePreservation:
         e1 = _event(event_id="p1", actionability="policy",
                      provenance={"source": "git", "trust_tier": "reviewed", "run_id": None, "commit": "abc"})
         verdict, violations = check_provenance_preservation([e1])
+        assert verdict == "PASS"
+
+
+class TestRollbackTraceability:
+    def test_advisory_actionability_is_exempt(self):
+        e1 = _event(event_id="r1", actionability="advisory",
+                     recoverability={"transaction_id": None, "rollback_handle": None, "external_effects": []})
+        verdict, violations = check_rollback_traceability([e1])
+        assert verdict == "PASS"
+
+    def test_external_commitment_without_handle_fails(self):
+        e1 = _event(event_id="r1", actionability="external_commitment",
+                     recoverability={"transaction_id": None, "rollback_handle": None, "external_effects": []})
+        verdict, violations = check_rollback_traceability([e1])
+        assert verdict == "FAIL"
+
+    def test_external_commitment_with_transaction_id_passes(self):
+        e1 = _event(event_id="r1", actionability="external_commitment",
+                     recoverability={"transaction_id": "txn-1", "rollback_handle": None, "external_effects": []})
+        verdict, violations = check_rollback_traceability([e1])
         assert verdict == "PASS"

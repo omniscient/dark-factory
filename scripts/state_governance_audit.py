@@ -179,6 +179,28 @@ def check_provenance_preservation(events):
     return verdict, violations
 
 
+def check_rollback_traceability(events):
+    """Every event with actionability in {policy, permission, skill, external_commitment}
+    must carry a non-null recoverability.rollback_handle or transaction_id."""
+    violations = []
+    for e in events:
+        actionability = e.get("actionability")
+        if actionability not in _HIGH_ACTIONABILITY:
+            continue
+        rec = e.get("recoverability") or {}
+        if not rec.get("rollback_handle") and not rec.get("transaction_id"):
+            violations.append({
+                "event_id": e.get("event_id"),
+                "entity_id": e.get("entity_id"),
+                "reason": (
+                    f"actionability={actionability} has no recoverability.rollback_handle "
+                    f"or transaction_id"
+                ),
+            })
+    verdict = "FAIL" if violations else "PASS"
+    return verdict, violations
+
+
 def check_deletion_propagation(events):
     """Every tombstone/delete/quarantine event must be reflected in any later 'act' event
     reading the same entity_id; an 'act' event that still reports mutability.status=active
