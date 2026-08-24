@@ -10,6 +10,7 @@ from factory_core.session_window import (
     compute_resume_epoch,
     write_pause_sentinel,
     check_and_pause,
+    RATE_LIMIT_RE,
 )
 
 
@@ -160,7 +161,7 @@ def test_write_pause_sentinel_creates_state_dir(tmp_path):
 
 
 def test_check_and_pause_writes_sentinel_and_returns_epoch(tmp_path):
-    text = "429 rate limit hit"
+    text = "429 too many requests, session limit reached"
     epoch = check_and_pause(text, tmp_path, now_epoch=1_000_000,
                              buffer_minutes=5, fallback_minutes=30)
     assert epoch == 1_000_000 + 1800
@@ -171,6 +172,66 @@ def test_check_and_pause_returns_none_and_writes_nothing_when_no_match(tmp_path)
     epoch = check_and_pause("unrelated", tmp_path, 1_000_000, 5, 30)
     assert epoch is None
     assert not (tmp_path / "session-window-paused").exists()
+
+
+def test_is_session_window_failure_false_for_bare_429_rate_limit_hit():
+    # Regression lock for the two-tier split: transient-shaped text (matches
+    # RATE_LIMIT_RE via _RE_429/_RE_RATE_LIMIT) must not buy a factory pause.
+    assert is_session_window_failure("429 rate limit hit") is False
+
+
+def test_is_session_window_failure_false_for_transient_429_rate_limit_exceeded():
+    # Real for the breaker (see test_classify_http_429_rate_limit_exceeded_is_environmental
+    # in test_factory_core_error_signature.py) but not a session-window exhaustion.
+    assert is_session_window_failure("HTTP 429 — rate limit exceeded") is False
+
+
+def test_is_session_window_failure_true_for_reset_line_without_session_or_usage_word():
+    assert is_session_window_failure("You've hit your limit · resets 1:40pm (UTC)") is True
+
+
+def test_is_session_window_failure_true_for_claude_ai_usage_limit_reached_epoch_suffix():
+    # Claude Code CLI's non-interactive output shape. No dedicated "|<epoch>"-suffix
+    # parser is specified by any Decision in the spec, so only the classification is
+    # asserted here -- resume-epoch derivation falls back to fallback_minutes. The spec's
+    # own phrasing is conditional on this ("where the epoch suffix is parsed by...").
+    assert is_session_window_failure("Claude AI usage limit reached|1736899200") is True
+
+
+def test_rate_limit_re_rejects_own_module_comment_style_text():
+    # "exhaustion" (not "exhausted") -- the fixed shape no longer collides.
+    assert RATE_LIMIT_RE.search("# Guard against rate limit exhaustion") is None
+
+
+def test_rate_limit_re_rejects_quoted_old_regex_source():
+    old_source = 'r"usage limit|rate limit|429|credit balance|session limit"'
+    assert RATE_LIMIT_RE.search(old_source) is None
+
+
+def test_rate_limit_re_rejects_sha_embedded_429():
+    assert RATE_LIMIT_RE.search("fixed in abc4291f2e") is None
+
+
+def test_rate_limit_re_rejects_dollar_figure():
+    assert RATE_LIMIT_RE.search("cost $0.429 total this run") is None
+
+
+def test_rate_limit_re_rejects_issue_reference():
+    assert RATE_LIMIT_RE.search("see #429 for context") is None
+
+
+def test_rate_limit_re_rejects_scheduler_rate_limit_log_prose():
+    # Forward regression lock: scheduler.sh emits "rate_limit remaining=..." (underscore),
+    # which never collided with the space-delimited pre-fix regex either.
+    assert RATE_LIMIT_RE.search("rate_limit remaining=4000 sleeping=30s until_reset") is None
+
+
+def test_rate_limit_re_rejects_session_window_gate_log_prose():
+    assert RATE_LIMIT_RE.search("session_window_gate=active resume_at=1784739600") is None
+
+
+def test_rate_limit_re_still_matches_http_429_rate_limit_exceeded():
+    assert RATE_LIMIT_RE.search("HTTP 429 — rate limit exceeded") is not None
 
 
 import subprocess

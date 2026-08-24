@@ -9,12 +9,63 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-RATE_LIMIT_RE = re.compile(
-    r"usage limit|rate limit|429|credit balance|session limit", re.IGNORECASE
+_HTTP_ERR_CTX = (
+    r"(?:https?|http/\d(?:\.\d)?|status(?:\s+code)?|code|error|err"
+    r"|response|responded|returned|got|api)"
 )
-# Backward-compatible alias for existing in-module references; new external
-# consumers should import the public RATE_LIMIT_RE name above.
-_SUBSTRING_RE = RATE_LIMIT_RE
+
+# "429" requires HTTP/error context on one side; guards against a preceding digit+dot
+# ($0.429), '#'/':' (#429, file.py:429), or being embedded in an alphanumeric run (a SHA).
+_RE_429 = (
+    r"(?:"
+    r"\b" + _HTTP_ERR_CTX + r"\b[\s:=,/\"'|-]{0,4}(?<![\w.#$])429(?![\w.])"
+    r"|"
+    r"(?<![\w.#$:])429(?![\w.])[\s:,()-]{0,3}(?:too\s+many\s+requests|rate[\s_-]?limit)"
+    r")"
+)
+
+# "rate limit" requires an exhaustion/throttle verb in the same clause (bounded [^.\n]{0,40}
+# gap, not `.*`, so it can't bridge across log lines or sentences).
+_RE_RATE_LIMIT = (
+    r"(?:rate[ _-]?limit(?:s|ed|ing)?\b[^.\n]{0,40}?"
+    r"\b(?:exceeded|reached|hit|exhausted|throttl\w*|too\s+many\s+requests)\b"
+    r"|\b(?:hit|exceeded|reached)\s+(?:the\s+|a\s+|your\s+|our\s+)?rate[ _-]?limit(?:s|ed)?\b"
+    r"|\bbeing\s+rate[ _-]?limited\b)"
+)
+
+# "usage"/"session"/"weekly"/"5-hour limit" -- a pre-verb branch (real phrasing puts the
+# verb before the noun, "hit your usage limit"), plus a reset-line shape naming neither
+# "session" nor "usage" ("You've hit your limit · resets 1:40pm (UTC)").
+_RE_USAGE_SESSION = (
+    r"(?:(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b[^.\n]{0,40}?"
+    r"\b(?:reached|exceeded|exhausted|hit|resets?|will\s+reset)\b"
+    r"|\b(?:hit|reached|exceeded|exhausted|used\s+up|out\s+of)\s+"
+    r"(?:your\s+|the\s+|my\s+|its\s+)?(?:\w+\s+){0,2}?"
+    r"(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b"
+    r"|\blimit\b[^.\n]{0,40}?\bresets\s+\d{1,2}(?::\d{2})?\s*[ap]m\s*\()"
+)
+
+# "credit balance" needs the same tightening even with no false-positive example in the
+# issue: the bare regex source string is checked into the repo, so an agent quoting it
+# would self-trigger. Anchored on Anthropic's actual API message.
+_RE_CREDIT = (
+    r"(?:credit\s+balance\b[^.\n]{0,30}?\b(?:too\s+low|insufficient|exhausted|depleted|is\s+0)\b"
+    r"|\b(?:insufficient|low|zero|no)\s+credit\s+balance\b)"
+)
+
+RATE_LIMIT_RE = re.compile(
+    "|".join([_RE_429, _RE_RATE_LIMIT, _RE_USAGE_SESSION, _RE_CREDIT]),
+    re.IGNORECASE,
+)
+
+# Strict subset of RATE_LIMIT_RE used ONLY by the pause gate: a transient
+# 429/"rate limit exceeded" is real for the breaker's environmental:rate_limit bucket
+# (error_signature.py, unchanged import of RATE_LIMIT_RE above) but is not a session/
+# window/balance exhaustion and must not buy a 30-minute factory-wide halt.
+_SESSION_EXHAUSTION_RE = re.compile(
+    "|".join([_RE_USAGE_SESSION, _RE_CREDIT]),
+    re.IGNORECASE,
+)
 _STRUCTURED_MARKER = "claude.rate_limit_event"
 _HUMAN_RESET_RE = re.compile(
     r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
@@ -25,7 +76,7 @@ MAX_SESSION_WINDOW_HOURS = 5
 
 
 def is_session_window_failure(text: str) -> bool:
-    return _STRUCTURED_MARKER in text or bool(_SUBSTRING_RE.search(text))
+    return _STRUCTURED_MARKER in text or bool(_SESSION_EXHAUSTION_RE.search(text))
 
 
 def parse_structured_reset_epoch(text: str) -> Optional[int]:
