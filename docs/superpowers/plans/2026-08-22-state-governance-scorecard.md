@@ -1325,7 +1325,7 @@ details to the implementation; each is pinned here so no task below is ambiguous
    Confirm no regressions outside the two new `test_state_governance_*.py` files and that
    both are fully green.
 
-2. Run the remaining CI jobs exactly as `.github/workflows/ci.yml` does (this ticket
+2. Run the CI jobs relevant to this change as `.github/workflows/ci.yml` does (this ticket
    touches no workflow/DAG file, but CI runs these alongside pytest). Use
    `tests/test_smoke_gate.sh`, not the bare `smoke_gate.sh` — the bare script is the live,
    side-effecting production gate (it runs real `gh issue`/`tracker` calls and mutates
@@ -1351,10 +1351,10 @@ details to the implementation; each is pinned here so no task below is ambiguous
    Expected: both `diff` commands produce no output.
 
 4. Confirm the final tree only contains the planned files. Use the two-dot form — memory
-   `[PATTERN]` #250: three-dot (`origin/main...HEAD`) also includes commits `main` merged
+  (Three-dot per memory `[PATTERN]` #266 — set detection with two-dot flags files `main` changed independently after the fork, the exact deletion incident on the #251 branch. #250's two-dot rule covers single-file content equality only.)
    independently after this branch forked, producing false-positive OOS hits:
    ```bash
-   git diff --name-only origin/main HEAD
+   git diff --name-only origin/main...HEAD
    ```
    Expected: `docs/superpowers/plans/2026-08-22-state-governance-scorecard.md`,
    `docs/superpowers/specs/2026-08-21-state-governance-scorecard-design.md`,
