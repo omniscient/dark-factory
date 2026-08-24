@@ -276,16 +276,18 @@ def test_set_status_moves_through_canonical_vocabulary(tracker_and_controller):
     id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
     controller.seed_item(id1, status="ready")
 
-    tracker.set_status(id1, "in_review")
+    result = tracker.set_status(id1, "in_review")
     assert controller.items[id1]["status"] == "in_review"
+    assert result is True
 
 
 def test_set_status_unknown_item_is_safe_noop(tracker_and_controller):
     tracker, controller = tracker_and_controller
     unknown_id = "999" if isinstance(tracker, GitHubTracker) else "PROJ-999"
 
-    tracker.set_status(unknown_id, "in_review")  # must not raise
+    result = tracker.set_status(unknown_id, "in_review")  # must not raise
     assert unknown_id not in controller.items
+    assert result is False
 
 
 def test_get_children_returns_list_of_actual_children_and_empty_when_none(tracker_and_controller):
