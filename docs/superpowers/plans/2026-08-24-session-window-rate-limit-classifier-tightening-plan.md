@@ -85,6 +85,7 @@ error_signature.py classify()
 | `tests/test_factory_core_session_window.py` | Modified — regex-tightening fixtures, Cause-A structured-status fixtures, `match_snippet` unit tests, `rate-limit-match` CLI test |
 | `tests/test_factory_core_error_signature.py` | Modified — breaker-side regression fixtures (no code change to `error_signature.py` itself — it inherits the tightened regex via its existing import) |
 | `tests/test_entrypoint_session_window.sh` | Modified — Case A updated to the real pino payload shape, new `status=allowed` regression case, classification-summary/run-record-detail assertions on Case D |
+| `.github/workflows/ci.yml` | Modified — add `- run: bash tests/test_entrypoint_session_window.sh` to the `tests:` job (after `test_entrypoint_current_run.sh`); this file is the direct #332 regression lock and was never CI-enforced (reviewer amendment 2026-08-24) |
 
 ---
 
@@ -1178,9 +1179,23 @@ git commit -m "test(error-signature): lock in the tightened RATE_LIMIT_RE's brea
 
 ---
 
+## Task 8: Enforce the shell regression test in CI (reviewer amendment 2026-08-24)
+
+`tests/test_entrypoint_session_window.sh` is not in `.github/workflows/ci.yml`'s test
+list — a pre-existing gap, but this ticket makes that file the direct #332 regression
+lock (Case A2) and the only executable check on the Decision-4 comment/run-record
+plumbing, so leaving it CI-unenforced would let a future regression merge green.
+
+1. Edit `.github/workflows/ci.yml`: in the `tests:` job's step list, insert
+   `      - run: bash tests/test_entrypoint_session_window.sh`
+   immediately after the `- run: bash tests/test_entrypoint_current_run.sh` line.
+   Touch nothing else in the file (`publish.yml` is hard-excluded; `ci.yml` is not).
+2. Verify locally: `bash tests/test_entrypoint_session_window.sh` exits 0.
+3. Commit: `ci: enforce tests/test_entrypoint_session_window.sh (#344)`.
+
 ## Final verification
 
-After Task 7, run the full suite once to confirm the whole ticket is green together:
+After Task 8, run the full suite once to confirm the whole ticket is green together:
 
 ```bash
 python -m pytest tests/ -v
@@ -1190,6 +1205,8 @@ bash -n entrypoint.sh
 
 Expected: `python -m pytest tests/ -v` reports `0 failed`; the shell test reports every
 `PASS:` line and `FAILED=0`; `bash -n` produces no output.
+Also confirm `git diff origin/main...HEAD -- .github/workflows/ci.yml` shows exactly the
+one inserted `- run:` line from Task 8.
 
 ## Note for implementation (not a task — carries no action item)
 
