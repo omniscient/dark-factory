@@ -18,6 +18,14 @@ treats the marker's mere presence as exhaustion — it never reads the payload's
 (this document) adds that fix as a co-equal, higher-priority decision and folds the operator's
 required test/detail-plumbing corrections into Decisions 1, 3, and 4 below.
 
+**Revision 2 reviewer amendments** (2026-08-24): (1) Decision 2 now iterates **all**
+`claude.rate_limit_event` marker lines — any non-`allowed` event classifies as exhaustion, and
+`allowed`-only events are neutral (fall through to the substring branch) rather than a veto;
+(2) Decision 6 pins the Claude Code non-interactive epoch-suffixed fixture
+`Claude AI usage limit reached|1736899200` as a positive; (3) the Cause B / Decision 5 claim
+that the `entrypoint.sh` duplicate grep is reached only with the kill-switch off is corrected —
+it is reached whenever `_handle_session_window_pause` returns 1.
+
 ## Problem
 
 On 2026-08-21 21:14–21:15Z, a #332 implement run was classified as a Claude Max 5h session-window
@@ -96,16 +104,18 @@ failures as `environmental:rate_limit` for the circuit breaker (`scheduler.sh`'s
 `environmental:rate_limit` silently burns the full retry ceiling instead of tripping early.
 
 **A third, byte-for-byte duplicate of the Cause-B pattern lives in `entrypoint.sh`** as a hardcoded
-bash fallback, reached only when the `SESSION_WINDOW_BACKOFF_ENABLED` kill-switch is off (default:
-on):
+bash fallback, reached whenever `_handle_session_window_pause` returns 1 — kill-switch off,
+`session-window-check` failure, **or** no pause-gate match (`entrypoint.sh:784-789`; the grep is
+not inside any kill-switch conditional):
 
 ```bash
 if grep -qiE "usage limit|rate limit|429|credit balance|session limit" "$TMP_OUT"; then
 ```
 
 This is the exact pattern the primary path is being fixed to stop using, sitting one branch away
-in the same file, reachable specifically when an operator disables the new backoff path (e.g.
-because it's misbehaving) — the escape hatch would land the operator back on Cause B.
+in the same file — and because it runs on *every* path where the new backoff mechanism declines
+to pause, not only when an operator has switched it off, any text the tightened pause gate
+correctly declines still gets a second, coarse look from this legacy grep.
 
 ## Decision
 
@@ -189,13 +199,17 @@ no periods, so the bounded `{0,40}` gap is exercised maximally) completes in ~11
 ```python
 # scripts/factory_core/session_window.py
 
-def _structured_event(text: str) -> Optional[dict]:
-    """Return the parsed claude.rate_limit_event payload from `text`, or None if absent
-    or unparseable. Accepts both the real Claude Code CLI shape (pino-style: a "msg" field,
-    rate-limit fields nested under "rateLimitInfo") and the #292-assumed shape (a top-level
-    "event" field, resetsAt at the top level) — the latter is not known to be emitted by any
-    real Claude Code output, but every currently-pinned fixture uses it, and nothing here
-    depends on the shapes being mutually exclusive."""
+def _structured_events(text: str) -> list:
+    """Return every parsed claude.rate_limit_event payload in `text`, in order of
+    appearance (empty list if none parses). Accepts both the real Claude Code CLI shape
+    (pino-style: a "msg" field, rate-limit fields nested under "rateLimitInfo") and the
+    #292-assumed shape (a top-level "event" field, resetsAt at the top level) — the
+    latter is not known to be emitted by any real Claude Code output, but every
+    currently-pinned fixture uses it, and nothing here depends on the shapes being
+    mutually exclusive. Returning ALL events, not the first that parses, is load-bearing:
+    a healthy run's early status=allowed marker must not shadow a later genuine rejection
+    in the same stdout."""
+    events = []
     for line in text.splitlines():
         if _STRUCTURED_MARKER not in line:
             continue
@@ -207,8 +221,8 @@ def _structured_event(text: str) -> Optional[dict]:
         except json.JSONDecodeError:
             continue
         if event.get("event") == _STRUCTURED_MARKER or event.get("msg") == _STRUCTURED_MARKER:
-            return event
-    return None
+            events.append(event)
+    return events
 
 
 def _structured_status(event: dict) -> Optional[str]:
@@ -225,24 +239,39 @@ def _structured_resets_at(event: dict):
     return event.get("resetsAt")
 ```
 
-`parse_structured_reset_epoch` becomes a thin wrapper: call `_structured_event`, read
-`_structured_resets_at`, and apply the existing int/float-vs-ISO-8601 handling
-(`session_window.py:48-54`) to whichever value it returns — unchanged beyond the lookup path.
+`parse_structured_reset_epoch` becomes a thin wrapper: call `_structured_events`, take the
+**first non-`allowed` event** (the one that justified classifying the run as exhausted), read
+`_structured_resets_at` on it (`rateLimitInfo.resetsAt`, falling back to top-level `resetsAt`),
+and apply the existing int/float-vs-ISO-8601 handling (`session_window.py:48-54`) to whichever
+value it returns — unchanged beyond the lookup path. `allowed` events never contribute a reset
+epoch: the reset time that drives the pause must come from the same event that caused it.
 
-`is_session_window_failure` treats a structured event's `status == "allowed"` as **not** a
-failure, and any other status (including `"rejected"` or absent — the #292 shape never carried
-`status`, so `None != "allowed"` correctly still counts as exhaustion) as a match:
+`is_session_window_failure` iterates **all** structured events: the run classifies as exhaustion
+if **any** event has `status != "allowed"` (including `"rejected"` or absent — the #292 shape
+never carried `status`, so `None != "allowed"` correctly still counts as exhaustion). When only
+`allowed` events exist they are **neutral**, not a veto: the function still falls through to
+`_SESSION_EXHAUSTION_RE` over the full text rather than returning `False`:
 
 ```python
 def is_session_window_failure(text: str) -> bool:
-    event = _structured_event(text)
-    if event is not None:
-        return _structured_status(event) != "allowed"
+    events = _structured_events(text)
+    if any(_structured_status(e) != "allowed" for e in events):
+        return True
     return bool(_SESSION_EXHAUSTION_RE.search(text))  # see Decision 3
 ```
 
 This is the fix for the actual #332 trigger: a `status=allowed` marker line, present in every
 healthy run, now correctly falls through to "not a failure" instead of unconditionally pausing.
+
+**Why any-event with neutral-`allowed`, not first-marker-wins:** every healthy run emits an early
+`allowed` marker, so a design that returns whatever the first parseable marker line says — or
+that lets an `allowed` event veto the substring branch — would let that early line shadow a
+later genuine `rejected` marker, or human-readable reset text ("You've hit your session limit ·
+resets ...") appearing in the same stdout. That recreates exactly the #35/#292 insta-death mode:
+the classifier waves the run through, the immediate retry burns against a genuinely exhausted
+window, and the retry ceiling is ground down instead of pausing once. The reset epoch accordingly
+comes from the first non-`allowed` event's `rateLimitInfo.resetsAt`/top-level `resetsAt` (see
+`parse_structured_reset_epoch` above), never from an `allowed` event.
 
 **Caveat flagged, not resolved, by this spec:** the exact real payload field names above
 (`rateLimitInfo`, `msg`, nested `resetsAt` as an epoch int) are per the operator's review of
@@ -301,10 +330,9 @@ def match_snippet(text: str, radius: int = 80) -> Optional[dict]:
     """Return the match that caused a pause, plus context, or None if the text doesn't
     represent a pause-worthy failure. Used to make a session-window pause diagnosable
     after the container that produced it is gone."""
-    event = _structured_event(text)
-    if event is not None:
+    for event in _structured_events(text):
         if _structured_status(event) == "allowed":
-            return None
+            continue  # neutral — keep looking, then fall through to the substring path
         offset = text.find(_STRUCTURED_MARKER)
         return {"matched": _STRUCTURED_MARKER, "offset": offset, "window": event}
     match = _SESSION_EXHAUSTION_RE.search(text)
@@ -352,7 +380,9 @@ Add a classify-only CLI subcommand that reuses the canonical Python regex and wr
 # prints "matched=true"/"matched=false"; never touches SCHEDULER_STATE_DIR
 ```
 
-`entrypoint.sh`'s kill-switch-off fallback branch:
+`entrypoint.sh`'s legacy fallback branch (reached whenever `_handle_session_window_pause`
+returns 1 — kill-switch off, `session-window-check` failure, or no pause-gate match;
+`entrypoint.sh:784-789`):
 
 ```bash
 if python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-match \
@@ -361,11 +391,15 @@ if python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-matc
 
 replacing the hardcoded `grep -qiE "usage limit|rate limit|429|credit balance|session limit"
 "$TMP_OUT"`. Note this classify-only path uses `RATE_LIMIT_RE` (the breaker-shared, less-narrow
-regex), matching the kill-switch-off fallback's pre-existing behavior of pausing on any
-rate-limit-shaped text — it is not in scope to also give the legacy fallback the Decision 2/3
-structured-marker and narrow-pause-gate treatment, since that path only runs at all when an
-operator has explicitly disabled the new backoff mechanism and reverted to the old coarse
-behavior on purpose. Scope fence: **only** the match-detection line changes. The reset-time
+regex), matching the legacy fallback's pre-existing behavior of reacting to any rate-limit-shaped
+text — it is not in scope to also give the legacy fallback the Decision 2/3 structured-marker and
+narrow-pause-gate treatment (no entrypoint *behavior* change in this ticket beyond de-duplicating
+the match pattern). Consequence to state plainly: because this fallback runs on every no-pause
+outcome of `_handle_session_window_pause`, post-fix a transient 429 that the Decision 3 pause
+gate correctly excludes but that still matches the legacy `RATE_LIMIT_RE` will route to the
+legacy in-container sleep loop **in the default config** — the tightened gate narrows the
+factory-wide pause, not this in-container sleep. Scope fence: **only** the match-detection line
+changes. The reset-time
 parsing (`RESET_TIME`/`RESET_TZ` via `grep -ioP`), the `SLEEP_SECS` math, the 90000s failsafe cap,
 and the kill-switch semantics are byte-identical before and after.
 
@@ -380,6 +414,14 @@ and the kill-switch semantics are byte-identical before and after.
     near future must make `is_session_window_failure` return `True`, and `compute_resume_epoch`
     must equal `resetsAt + buffer_minutes*60` (not the fallback) — proving the nested-path parse,
     not just the boolean.
+  - An `allowed`-line-then-`rejected`-line fixture — both real-shape marker lines in the same
+    text, the `allowed` one first — must classify as exhaustion and pause with the **rejected**
+    event's `resetsAt + buffer` (not the fallback, and not anything derived from the `allowed`
+    line): the direct lock on the any-event rule, proving an early healthy marker cannot shadow
+    a later genuine rejection.
+  - An `allowed` marker line plus human-readable `"You've hit your session limit · resets ..."`
+    text in the same stdout must classify as exhaustion (pauses): `allowed` events are neutral,
+    so the substring branch still runs over the full text.
   - The existing `#292`-shape fixtures (`test_is_session_window_failure_detects_structured_signal`,
     `test_parse_structured_reset_epoch_parses_resetsAt`, `..._real_claude_rate_limit_event_payload`,
     `..._handles_epoch_int_resetsat`, `test_compute_resume_epoch_prefers_structured_over_fallback`,
@@ -414,9 +456,15 @@ and the kill-switch semantics are byte-identical before and after.
     separate `classify()` test (below) asserts the same string IS `environmental:rate_limit`.
   - Add a positive for the new reset-line-without-session/usage shape:
     `"You've hit your limit · resets 1:40pm (UTC)"`.
+  - Add the pinned positive fixture `Claude AI usage limit reached|1736899200` — the Claude Code
+    non-interactive epoch-suffixed shape — asserting it classifies as exhaustion
+    (`is_session_window_failure` is `True`; at minimum the run pauses) and, where the epoch
+    suffix is parsed by the human-reset path or the fallback, that the resume time derives from
+    the `1736899200` epoch rather than the flat `fallback_minutes` default.
   - Add a `match_snippet` unit test for the substring path (matched text, offset, bounded window)
     and one for the structured path (`matched == "claude.rate_limit_event"`, `window` is the
-    parsed dict, `None` when `status == "allowed"`).
+    first non-`allowed` event's parsed dict; when only `allowed` events exist it falls through
+    to the substring path — a substring match if one exists, else `None`).
 
 `tests/test_factory_core_error_signature.py`:
 - Existing `test_rate_limit`, `test_rate_limit_session_limit_string`, and
@@ -493,12 +541,14 @@ that invokes it is not.
 - This ticket does not touch `scheduler.sh`'s `stage_orphan_sweep`-runs-before-the-sentinel-gate
   ordering bug (#334) referenced in the issue's knock-on-effects — that is a separate,
   already-identified ticket and out of scope here.
-- The `entrypoint.sh` kill-switch-off fallback (Decision 5) keeps using the breaker-shared
+- The `entrypoint.sh` legacy grep fallback (Decision 5) keeps using the breaker-shared
   `RATE_LIMIT_RE`, not the narrower Decision 3 pause-only predicate or the Decision 2
-  structured-marker fix — it is an explicitly-opted-into legacy path, not the default, and giving
-  it feature parity with the new backoff mechanism is a larger change than this ticket's scope
-  (the ticket's stated purpose for touching it at all is closing the "escape hatch reopens Cause B"
-  gap, not upgrading it to Cause-A awareness).
+  structured-marker fix — and it is reached on every `_handle_session_window_pause` no-pause
+  outcome (`entrypoint.sh:784-789`), not only when the kill-switch is off, so in the default
+  config a transient 429 excluded by the pause gate can still land in the legacy in-container
+  sleep loop. Giving it feature parity with the new backoff mechanism is a larger change than
+  this ticket's scope (the ticket's stated purpose for touching it at all is closing the "escape
+  hatch reopens Cause B" gap, not upgrading it to Cause-A awareness).
 - **All of this ticket's fixes take effect for `entrypoint.sh`'s own runtime calls only after the
   next image rebuild/publish, not on merge.** `_handle_session_window_pause` and the new
   Decision 5 `rate-limit-match` subcommand both invoke `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py`
