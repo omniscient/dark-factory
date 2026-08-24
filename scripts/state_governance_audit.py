@@ -77,3 +77,31 @@ def _group_by_entity(events):
     for e in events:
         groups.setdefault(e.get("entity_id"), []).append(e)
     return groups
+
+
+def check_authority_monotonicity(events):
+    """An event's authority.permission_epoch must not exceed the epoch of the event its
+    approval_record claims to derive from (approval_record holds another event's event_id)."""
+    by_id = {e.get("event_id"): e for e in events}
+    violations = []
+    for e in events:
+        auth = e.get("authority") or {}
+        epoch = auth.get("permission_epoch")
+        approval_record = auth.get("approval_record")
+        if epoch is None or not approval_record:
+            continue
+        ref = by_id.get(approval_record)
+        if ref is None:
+            continue
+        ref_epoch = (ref.get("authority") or {}).get("permission_epoch")
+        if ref_epoch is not None and epoch > ref_epoch:
+            violations.append({
+                "event_id": e.get("event_id"),
+                "entity_id": e.get("entity_id"),
+                "reason": (
+                    f"permission_epoch {epoch} exceeds approval_record "
+                    f"{approval_record}'s epoch {ref_epoch}"
+                ),
+            })
+    verdict = "FAIL" if violations else "PASS"
+    return verdict, violations

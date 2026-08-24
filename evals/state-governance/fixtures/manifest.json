@@ -1,0 +1,4 @@
+{
+  "authority-monotonicity-pass.jsonl": {"check": "authority_monotonicity", "expected_verdict": "PASS"},
+  "authority-monotonicity-fail.jsonl": {"check": "authority_monotonicity", "expected_verdict": "FAIL"}
+}
