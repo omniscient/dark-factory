@@ -413,3 +413,29 @@ def test_cli_session_window_check_unmatched_has_no_snippet_b64(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "snippet_b64=" not in result.stdout
+
+
+def test_cli_rate_limit_match_true(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("429 too many requests, rate limit exceeded")
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "rate-limit-match", "--tmp-out", str(tmp_out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "matched=true"
+
+
+def test_cli_rate_limit_match_false(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("unrelated stack trace")
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "rate-limit-match", "--tmp-out", str(tmp_out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "matched=false"

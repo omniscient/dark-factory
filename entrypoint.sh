@@ -825,7 +825,8 @@ while true; do
       rm -f "$TMP_OUT"
       exit 0
     fi
-    if grep -qiE "usage limit|rate limit|429|credit balance|session limit" "$TMP_OUT"; then
+    if python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-match \
+        --tmp-out "$TMP_OUT" | grep -q '^matched=true$'; then
       # Kill-switch fallback (SESSION_WINDOW_BACKOFF_ENABLED=false): old sleep-forever
       # behavior, unchanged.
       # Attempt to parse specific reset time from: "You've hit your session limit · resets 11:10pm (America/Toronto)"

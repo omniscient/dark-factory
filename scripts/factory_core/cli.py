@@ -122,6 +122,14 @@ def _session_window_check(args):
         print("matched=false resume_epoch=0")
 
 
+def _rate_limit_match(args):
+    from factory_core.session_window import RATE_LIMIT_RE
+    tmp_out_path = Path(args.tmp_out)
+    text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
+    matched = bool(RATE_LIMIT_RE.search(text))
+    print(f"matched={'true' if matched else 'false'}")
+
+
 def _error_signature_write(args):
     from factory_core.error_signature import classify, write_signature
     text = ""
@@ -281,6 +289,10 @@ def main():
     sw.add_argument("--buffer-minutes", type=int, default=5)
     sw.add_argument("--fallback-minutes", type=int, default=30)
     sw.set_defaults(func=_session_window_check)
+
+    rlm = sub.add_parser("rate-limit-match")
+    rlm.add_argument("--tmp-out", required=True)
+    rlm.set_defaults(func=_rate_limit_match)
 
     esw = sub.add_parser("error-signature-write")
     esw.add_argument("--issue", type=int, required=True)
