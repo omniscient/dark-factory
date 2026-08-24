@@ -79,57 +79,83 @@ def _group_by_entity(events):
     return groups
 
 
+def _resolve_approval(event, seen_by_id, required_epoch):
+    """Resolve `event`'s authority.approval_record under the shared authorization rules
+    (Gate-3 round 3 on #190). Returns (authorized: bool, reason: str or None).
+
+    An approval_record authorizes only if ALL hold:
+    - it is present (non-empty);
+    - it is not the event's own event_id (self-approval never authorizes);
+    - it resolves to an event ALREADY SEEN before this one in file order (a later or
+      dangling reference never retroactively authorizes);
+    - the approval event is linked to the governed entity: its entity_id equals the
+      event's entity_id, OR its subject_entity_id field equals the event's entity_id;
+    - its authority.actor is "human" (human approvals may grant any epoch), OR its
+      authority.permission_epoch is >= required_epoch.
+    """
+    auth = event.get("authority") or {}
+    approval_record = auth.get("approval_record")
+    if not approval_record:
+        return False, "no approval_record"
+    if approval_record == event.get("event_id"):
+        return False, (
+            f"approval_record {approval_record} is the event itself "
+            f"(self-approval never authorizes)"
+        )
+    ref = seen_by_id.get(approval_record)
+    if ref is None:
+        return False, (
+            f"approval_record {approval_record} does not resolve to any "
+            f"previously-seen event (later or dangling references never authorize)"
+        )
+    entity_id = event.get("entity_id")
+    if ref.get("entity_id") != entity_id and ref.get("subject_entity_id") != entity_id:
+        return False, (
+            f"approval_record {approval_record} is not linked to entity {entity_id} "
+            f"(neither its entity_id nor its subject_entity_id matches)"
+        )
+    ref_auth = ref.get("authority") or {}
+    if ref_auth.get("actor") == "human":
+        return True, None  # human approvals may grant any epoch
+    ref_epoch = ref_auth.get("permission_epoch")
+    if ref_epoch is not None and required_epoch is not None and ref_epoch >= required_epoch:
+        return True, None  # authorized by an event of equal-or-higher epoch
+    return False, (
+        f"approval_record {approval_record} has epoch {ref_epoch} < {required_epoch} "
+        f"and its actor is not human"
+    )
+
+
 def check_authority_monotonicity(events):
     """An event may not raise authority.permission_epoch above the prior event of the same
-    entity_id (file order) unless the increase is authorized: its approval_record must
-    resolve to an existing event whose own permission_epoch is >= the new epoch, or whose
-    authority.actor is "human" (human approvals may grant any epoch). A missing or dangling
-    approval_record on an epoch increase is a violation. An entity's first appearance is
-    baseline; non-increasing epochs need no approval. Flags forged/inflated authority
-    claims (Gate-3 rounds 1 and 2 on #190)."""
-    by_id = {e.get("event_id"): e for e in events}
+    entity_id (file order) unless the increase is authorized per _resolve_approval: the
+    approval_record must be a previously-seen, non-self event linked to the escalated
+    entity (same entity_id, or subject_entity_id pointing at it) whose permission_epoch
+    is >= the new epoch or whose authority.actor is "human". A missing, dangling, later,
+    self-referencing, or entity-unlinked approval_record on an epoch increase is a
+    violation. An entity's first appearance is baseline; non-increasing epochs need no
+    approval. Flags forged/inflated authority claims (Gate-3 rounds 1-3 on #190)."""
     violations = []
     prev_epoch_by_entity = {}
+    seen_by_id = {}
     for e in events:
         entity_id = e.get("entity_id")
         auth = e.get("authority") or {}
         epoch = auth.get("permission_epoch")
         if entity_id is None or epoch is None:
+            seen_by_id[e.get("event_id")] = e
             continue
         prev_epoch = prev_epoch_by_entity.get(entity_id)
         prev_epoch_by_entity[entity_id] = epoch
-        if prev_epoch is None or epoch <= prev_epoch:
-            continue  # first appearance is baseline; non-increasing epochs are fine
-        approval_record = auth.get("approval_record")
-        if not approval_record:
-            reason = (
-                f"permission_epoch increased {prev_epoch} -> {epoch} "
-                f"with no approval_record"
-            )
-        else:
-            ref = by_id.get(approval_record)
-            if ref is None:
-                reason = (
-                    f"permission_epoch increased {prev_epoch} -> {epoch} but "
-                    f"approval_record {approval_record} does not resolve to any event"
-                )
-            else:
-                ref_auth = ref.get("authority") or {}
-                ref_epoch = ref_auth.get("permission_epoch")
-                if ref_auth.get("actor") == "human":
-                    continue  # human approvals may grant any epoch
-                if ref_epoch is not None and ref_epoch >= epoch:
-                    continue  # authorized by an event of equal-or-higher epoch
-                reason = (
-                    f"permission_epoch increased {prev_epoch} -> {epoch} but "
-                    f"approval_record {approval_record} has epoch {ref_epoch} < {epoch} "
-                    f"and its actor is not human"
-                )
-        violations.append({
-            "event_id": e.get("event_id"),
-            "entity_id": entity_id,
-            "reason": reason,
-        })
+        if prev_epoch is not None and epoch > prev_epoch:
+            authorized, why = _resolve_approval(e, seen_by_id, epoch)
+            if not authorized:
+                violations.append({
+                    "event_id": e.get("event_id"),
+                    "entity_id": entity_id,
+                    "reason": f"permission_epoch increased {prev_epoch} -> {epoch}: {why}",
+                })
+        seen_by_id[e.get("event_id")] = e
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
 
@@ -143,31 +169,37 @@ def _scope_width(scope):
 
 
 def check_scope_non_expansion(events):
-    """Across events sharing an entity_id (in file order), scope must not widen without a
-    new authorizing event of equal or higher permission_epoch than the prior event."""
+    """Across events sharing an entity_id (in file order), scope must not widen
+    (per _scope_width) unless the widening event carries an approval_record that
+    resolves per _resolve_approval: a previously-seen, non-self event linked to the
+    widened entity (same entity_id, or subject_entity_id pointing at it) whose
+    permission_epoch is >= the widening event's epoch or whose authority.actor is
+    "human". A widening event's self-declared epoch never authorizes on its own
+    (Gate-3 round 3 on #190)."""
     violations = []
-    for entity_id, group in _group_by_entity(events).items():
+    prev_width_by_entity = {}
+    seen_by_id = {}
+    for e in events:
+        entity_id = e.get("entity_id")
         if entity_id is None:
+            seen_by_id[e.get("event_id")] = e
             continue
-        prev = None
-        for e in group:
-            width = _scope_width(e.get("scope"))
+        width = _scope_width(e.get("scope"))
+        prev_width = prev_width_by_entity.get(entity_id)
+        prev_width_by_entity[entity_id] = width
+        if prev_width is not None and width > prev_width:
             epoch = (e.get("authority") or {}).get("permission_epoch")
-            if prev is not None:
-                prev_width, prev_epoch = prev
-                if width > prev_width and (
-                    epoch is None or prev_epoch is None or epoch < prev_epoch
-                ):
-                    violations.append({
-                        "event_id": e.get("event_id"),
-                        "entity_id": entity_id,
-                        "reason": (
-                            f"scope widened (width {prev_width} -> {width}) without an "
-                            f"authorizing event of equal or higher permission_epoch "
-                            f"(prev={prev_epoch}, this={epoch})"
-                        ),
-                    })
-            prev = (width, epoch)
+            authorized, why = _resolve_approval(e, seen_by_id, epoch)
+            if not authorized:
+                violations.append({
+                    "event_id": e.get("event_id"),
+                    "entity_id": entity_id,
+                    "reason": (
+                        f"scope widened (width {prev_width} -> {width}) "
+                        f"without valid authorization: {why}"
+                    ),
+                })
+        seen_by_id[e.get("event_id")] = e
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
 

@@ -81,7 +81,7 @@ class TestAuthorityMonotonicity:
         assert violations[0]["event_id"] == "a2"
 
     def test_increase_authorized_by_equal_or_higher_epoch_approval_passes(self):
-        grant = _event(event_id="g1", entity_id="permission:grant",
+        grant = _event(event_id="g1", entity_id="permission:grant", subject_entity_id="memory:x",
                        authority={"actor": "scheduler", "permission_epoch": 5, "approval_record": None})
         e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
         e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "g1"})
@@ -90,10 +90,50 @@ class TestAuthorityMonotonicity:
         assert violations == []
 
     def test_increase_authorized_by_human_actor_approval_passes(self):
-        grant = _event(event_id="h1", entity_id="permission:human-grant",
+        grant = _event(event_id="h1", entity_id="permission:human-grant", subject_entity_id="memory:x",
                        authority={"actor": "human", "permission_epoch": 1, "approval_record": None})
         e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
         e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 9, "approval_record": "h1"})
+        verdict, violations = check_authority_monotonicity([grant, e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
+
+    def test_self_referencing_approval_record_fails(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "a2"})
+        verdict, violations = check_authority_monotonicity([e1, e2])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "a2"
+        assert "self-approval" in violations[0]["reason"]
+
+    def test_approval_event_appearing_after_escalation_fails(self):
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "g1"})
+        grant = _event(event_id="g1", entity_id="permission:grant", subject_entity_id="memory:x",
+                       authority={"actor": "human", "permission_epoch": 9, "approval_record": None})
+        verdict, violations = check_authority_monotonicity([e1, e2, grant])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "a2"
+
+    def test_unlinked_entity_approval_fails(self):
+        grant = _event(event_id="g1", entity_id="permission:other-entity",
+                       authority={"actor": "human", "permission_epoch": 9, "approval_record": None})
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 5, "approval_record": "g1"})
+        verdict, violations = check_authority_monotonicity([grant, e1, e2])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "a2"
+        assert "not linked" in violations[0]["reason"]
+
+    def test_subject_linked_human_grant_accepted(self):
+        grant = _event(event_id="g1", entity_id="permission:separate-approver",
+                       subject_entity_id="memory:x",
+                       authority={"actor": "human", "permission_epoch": 1, "approval_record": None})
+        e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 1, "approval_record": None})
+        e2 = _event(event_id="a2", authority={"actor": "x", "permission_epoch": 7, "approval_record": "g1"})
         verdict, violations = check_authority_monotonicity([grant, e1, e2])
         assert verdict == "PASS"
         assert violations == []
@@ -142,6 +182,46 @@ class TestScopeNonExpansion:
         verdict, violations = check_scope_non_expansion([e1, e2])
         assert verdict == "FAIL"
         assert violations[0]["event_id"] == "s2"
+
+    def test_unauthorized_same_epoch_widening_fails(self):
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": None, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([e1, e2])
+        assert verdict == "FAIL"
+        assert len(violations) == 1
+        assert violations[0]["event_id"] == "s2"
+        assert "no approval_record" in violations[0]["reason"]
+
+    def test_authorized_widening_via_subject_linked_human_approval_passes(self):
+        approval = _event(event_id="ap1", entity_id="permission:approver",
+                          subject_entity_id="memory:y",
+                          authority={"actor": "human", "permission_epoch": 1, "approval_record": None},
+                          scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "human"})
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": "ap1"},
+                     scope={"repo": "omniscient/dark-factory", "issue": None, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([approval, e1, e2])
+        assert verdict == "PASS"
+        assert violations == []
+
+    def test_widening_with_self_referencing_approval_fails(self):
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": "s2"},
+                     scope={"repo": "omniscient/dark-factory", "issue": None, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([e1, e2])
+        assert verdict == "FAIL"
+        assert violations[0]["event_id"] == "s2"
+        assert "self-approval" in violations[0]["reason"]
 
     def test_narrowing_never_violates(self):
         e1 = _event(event_id="s1", entity_id="memory:y",
