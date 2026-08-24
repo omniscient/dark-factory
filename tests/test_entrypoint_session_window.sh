@@ -55,13 +55,13 @@ assert_true() {
   if eval "$1"; then assert_eq "$desc" "0" "0"; else assert_eq "$desc" "0" "1"; fi
 }
 
-echo "--- A: matched (structured rate_limit_event line) ---"
+echo "--- A: matched (structured rate_limit_event line, real pino shape, status=rejected) ---"
 SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-XXXXXX)
 NOW=$(date -u +%s)
-RESET_ISO=$(date -u -d "@$((NOW+600))" +%Y-%m-%dT%H:%M:%SZ)
+RESET_EPOCH=$((NOW+600))
 TMP_OUT=$(mktemp /tmp/ep-sw-out-XXXXXX)
-printf 'some claude output\n{"event":"claude.rate_limit_event","resetsAt":"%s"}\n' \
-  "$RESET_ISO" > "$TMP_OUT"
+printf 'some claude output\n{"level":40,"time":%s000,"rateLimitInfo":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}\n' \
+  "$NOW" "$RESET_EPOCH" > "$TMP_OUT"
 
 SESSION_WINDOW_BACKOFF_ENABLED=true
 SESSION_WINDOW_BUFFER_MINUTES=5
@@ -74,6 +74,19 @@ SENTINEL_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null 
 EXPECTED_EPOCH=$((NOW + 600 + 300))
 DIFF=$((SENTINEL_EPOCH - EXPECTED_EPOCH)); DIFF=${DIFF#-}
 assert_true "resume epoch within 2s of resetsAt+buffer" "[ '$DIFF' -le 2 ]"
+
+echo ""
+echo "--- A2: unmatched (structured rate_limit_event line, status=allowed) — direct #332 regression lock ---"
+rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+TMP_OUT_ALLOWED=$(mktemp /tmp/ep-sw-out-allowed-XXXXXX)
+printf 'some claude output\n{"level":40,"rateLimitInfo":{"status":"allowed","resetsAt":%s,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}\n' \
+  "$((NOW+18000))" > "$TMP_OUT_ALLOWED"
+_handle_session_window_pause "$TMP_OUT_ALLOWED"
+RC_ALLOWED=$?
+assert_eq "status=allowed only → returns 1 (falls through)" "1" "$RC_ALLOWED"
+assert_true "no sentinel written for status=allowed" \
+  "[ ! -f '${SCHEDULER_STATE_DIR}/session-window-paused' ]"
+rm -f "$TMP_OUT_ALLOWED"
 
 echo ""
 echo "--- B: unmatched (unrelated failure) — falls through to normal failure path ---"

@@ -38,7 +38,7 @@ def test_parse_structured_reset_epoch_none_when_absent():
     assert parse_structured_reset_epoch("no structured line here") is None
 
 
-def test_parse_structured_reset_epoch_real_claude_rate_limit_event_payload():
+def test_parse_structured_reset_epoch_assumed_292_payload_shape():
     # Pinned to the payload shape documented in
     # docs/archive/2026-07-13-scheduler-session-window-backoff-design.md — the
     # structured log line the Claude Code runner emits into the captured run output.
@@ -232,6 +232,62 @@ def test_rate_limit_re_rejects_session_window_gate_log_prose():
 
 def test_rate_limit_re_still_matches_http_429_rate_limit_exceeded():
     assert RATE_LIMIT_RE.search("HTTP 429 — rate limit exceeded") is not None
+
+
+def test_is_session_window_failure_false_for_status_allowed_real_shape():
+    # The literal #332 trigger: every healthy run emits this marker.
+    text = ('{"level":40,"time":1784739600123,"rateLimitInfo":{"status":"allowed",'
+            '"resetsAt":1784739600,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}')
+    assert is_session_window_failure(text) is False
+
+
+def test_compute_resume_epoch_none_for_status_allowed_real_shape():
+    text = ('{"level":40,"rateLimitInfo":{"status":"allowed","resetsAt":1784739600,'
+            '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}')
+    assert compute_resume_epoch(text, now_epoch=1784730000, buffer_minutes=5, fallback_minutes=30) is None
+
+
+def test_is_session_window_failure_true_for_status_rejected_real_shape():
+    text = ('{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":1784739600,'
+            '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}')
+    assert is_session_window_failure(text) is True
+
+
+def test_compute_resume_epoch_uses_nested_resetsAt_for_status_rejected():
+    text = ('{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":1784739600,'
+            '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}')
+    now = 1784730000
+    result = compute_resume_epoch(text, now, buffer_minutes=5, fallback_minutes=30)
+    assert result == 1784739600 + 5 * 60
+
+
+def test_is_session_window_failure_true_when_allowed_precedes_rejected():
+    # Direct lock on the any-event rule: an early healthy marker must not shadow a
+    # later genuine rejection in the same stdout.
+    text = (
+        '{"rateLimitInfo":{"status":"allowed","resetsAt":1784730000},"msg":"claude.rate_limit_event"}\n'
+        '{"rateLimitInfo":{"status":"rejected","resetsAt":1784739600},"msg":"claude.rate_limit_event"}'
+    )
+    assert is_session_window_failure(text) is True
+
+
+def test_compute_resume_epoch_uses_rejected_not_shadowed_by_earlier_allowed():
+    text = (
+        '{"rateLimitInfo":{"status":"allowed","resetsAt":1784730000},"msg":"claude.rate_limit_event"}\n'
+        '{"rateLimitInfo":{"status":"rejected","resetsAt":1784739600},"msg":"claude.rate_limit_event"}'
+    )
+    result = compute_resume_epoch(text, 1784730000, buffer_minutes=5, fallback_minutes=30)
+    assert result == 1784739600 + 300
+
+
+def test_is_session_window_failure_true_for_allowed_marker_plus_human_readable_text():
+    # allowed events are neutral, not a veto -- the substring branch still runs over
+    # the full text.
+    text = (
+        '{"rateLimitInfo":{"status":"allowed","resetsAt":1784730000},"msg":"claude.rate_limit_event"}\n'
+        "You've hit your session limit · resets 11:10pm (UTC)"
+    )
+    assert is_session_window_failure(text) is True
 
 
 import subprocess

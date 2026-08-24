@@ -67,19 +67,16 @@ _SESSION_EXHAUSTION_RE = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURED_MARKER = "claude.rate_limit_event"
-_HUMAN_RESET_RE = re.compile(
-    r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
-)
-# Physical invariant: a Claude Max session window is fixed at 5h, so no true resume can
-# ever be more than 5h out. Hardcoded, not a config.yaml key -- see #305.
-MAX_SESSION_WINDOW_HOURS = 5
 
 
-def is_session_window_failure(text: str) -> bool:
-    return _STRUCTURED_MARKER in text or bool(_SESSION_EXHAUSTION_RE.search(text))
-
-
-def parse_structured_reset_epoch(text: str) -> Optional[int]:
+def _structured_events(text: str) -> list:
+    """Return every parsed claude.rate_limit_event payload in `text`, in order of
+    appearance. Accepts both the real Claude Code CLI shape (pino-style: a "msg" field,
+    fields nested under "rateLimitInfo") and the #292-assumed shape (top-level "event"
+    and "resetsAt"). Returning ALL events, not the first that parses, is load-bearing: a
+    healthy run's early status=allowed marker must not shadow a later genuine rejection.
+    """
+    events = []
     for line in text.splitlines():
         if _STRUCTURED_MARKER not in line:
             continue
@@ -90,7 +87,45 @@ def parse_structured_reset_epoch(text: str) -> Optional[int]:
             event = json.loads(match.group(0))
         except json.JSONDecodeError:
             continue
-        resets_at = event.get("resetsAt")
+        if event.get("event") == _STRUCTURED_MARKER or event.get("msg") == _STRUCTURED_MARKER:
+            events.append(event)
+    return events
+
+
+def _structured_status(event: dict) -> Optional[str]:
+    info = event.get("rateLimitInfo")
+    if isinstance(info, dict) and "status" in info:
+        return info["status"]
+    return event.get("status")  # None for the #292 assumed shape, which never carried status
+
+
+def _structured_resets_at(event: dict):
+    info = event.get("rateLimitInfo")
+    if isinstance(info, dict) and "resetsAt" in info:
+        return info["resetsAt"]
+    return event.get("resetsAt")
+
+
+_HUMAN_RESET_RE = re.compile(
+    r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
+)
+# Physical invariant: a Claude Max session window is fixed at 5h, so no true resume can
+# ever be more than 5h out. Hardcoded, not a config.yaml key -- see #305.
+MAX_SESSION_WINDOW_HOURS = 5
+
+
+def is_session_window_failure(text: str) -> bool:
+    events = _structured_events(text)
+    if any(_structured_status(e) != "allowed" for e in events):
+        return True
+    return bool(_SESSION_EXHAUSTION_RE.search(text))
+
+
+def parse_structured_reset_epoch(text: str) -> Optional[int]:
+    for event in _structured_events(text):
+        if _structured_status(event) == "allowed":
+            continue
+        resets_at = _structured_resets_at(event)
         if not resets_at:
             continue
         # Handle an epoch (int/float, seconds since epoch) resetsAt in addition to the
