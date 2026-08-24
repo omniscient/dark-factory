@@ -105,3 +105,41 @@ def check_authority_monotonicity(events):
             })
     verdict = "FAIL" if violations else "PASS"
     return verdict, violations
+
+
+def _scope_width(scope):
+    """0 = narrow (issue- or pr-scoped), 1 = wide (repo-wide, no issue/pr)."""
+    scope = scope or {}
+    if scope.get("issue") or scope.get("pr"):
+        return 0
+    return 1
+
+
+def check_scope_non_expansion(events):
+    """Across events sharing an entity_id (in file order), scope must not widen without a
+    new authorizing event of equal or higher permission_epoch than the prior event."""
+    violations = []
+    for entity_id, group in _group_by_entity(events).items():
+        if entity_id is None:
+            continue
+        prev = None
+        for e in group:
+            width = _scope_width(e.get("scope"))
+            epoch = (e.get("authority") or {}).get("permission_epoch")
+            if prev is not None:
+                prev_width, prev_epoch = prev
+                if width > prev_width and (
+                    epoch is None or prev_epoch is None or epoch < prev_epoch
+                ):
+                    violations.append({
+                        "event_id": e.get("event_id"),
+                        "entity_id": entity_id,
+                        "reason": (
+                            f"scope widened (width {prev_width} -> {width}) without an "
+                            f"authorizing event of equal or higher permission_epoch "
+                            f"(prev={prev_epoch}, this={epoch})"
+                        ),
+                    })
+            prev = (width, epoch)
+    verdict = "FAIL" if violations else "PASS"
+    return verdict, violations

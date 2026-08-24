@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from state_governance_audit import check_authority_monotonicity  # noqa: E402
+from state_governance_audit import check_scope_non_expansion  # noqa: E402
 
 
 def _event(**overrides):
@@ -50,4 +51,37 @@ class TestAuthorityMonotonicity:
     def test_unresolved_approval_record_is_not_a_violation(self):
         e1 = _event(event_id="a1", authority={"actor": "x", "permission_epoch": 5, "approval_record": "no-such-event"})
         verdict, violations = check_authority_monotonicity([e1])
+        assert verdict == "PASS"
+
+
+class TestScopeNonExpansion:
+    def test_widen_with_equal_epoch_passes(self):
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 3, "approval_record": "s1"},
+                     scope={"repo": "omniscient/dark-factory", "issue": None, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([e1, e2])
+        assert verdict == "PASS"
+
+    def test_widen_with_lower_epoch_fails(self):
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 2, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 1, "approval_record": None},
+                     scope={"repo": "omniscient/markethawk", "issue": None, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([e1, e2])
+        assert verdict == "FAIL"
+        assert violations[0]["event_id"] == "s2"
+
+    def test_narrowing_never_violates(self):
+        e1 = _event(event_id="s1", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 1, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": None, "pr": None, "agent_role": "refine"})
+        e2 = _event(event_id="s2", entity_id="memory:y",
+                     authority={"actor": "x", "permission_epoch": 1, "approval_record": None},
+                     scope={"repo": "omniscient/dark-factory", "issue": 190, "pr": None, "agent_role": "refine"})
+        verdict, violations = check_scope_non_expansion([e1, e2])
         assert verdict == "PASS"
