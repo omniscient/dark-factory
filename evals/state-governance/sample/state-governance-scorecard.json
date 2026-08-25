@@ -1,0 +1,40 @@
+{
+  "STATUS": "FAIL",
+  "generated_at": "2026-08-22T00:00:00Z",
+  "run_id": "state-governance-sample-v1",
+  "event_count": 6,
+  "checks": [
+    {
+      "name": "authority_monotonicity",
+      "verdict": "PASS",
+      "violations": []
+    },
+    {
+      "name": "scope_non_expansion",
+      "verdict": "PASS",
+      "violations": []
+    },
+    {
+      "name": "deletion_propagation",
+      "verdict": "FAIL",
+      "violations": [
+        {
+          "event_id": "evt-real-f",
+          "entity_id": "memory:index-defect",
+          "reason": "act event reads entity as mutability.status=active after a tombstone/delete/quarantine event"
+        }
+      ]
+    },
+    {
+      "name": "provenance_preservation",
+      "verdict": "PASS",
+      "violations": []
+    },
+    {
+      "name": "rollback_traceability",
+      "verdict": "PASS",
+      "violations": []
+    }
+  ],
+  "score": 80
+}
