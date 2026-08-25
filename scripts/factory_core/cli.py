@@ -123,10 +123,18 @@ def _session_window_check(args):
 
 
 def _rate_limit_match(args):
-    from factory_core.session_window import RATE_LIMIT_RE
+    # Gate-3 F2 (#344): backed by the SAME strict classification as the pause gate
+    # (is_session_window_failure: structured rejected/legacy-no-status events plus
+    # _SESSION_EXHAUSTION_RE), not the broad RATE_LIMIT_RE. Under the broad regex a
+    # transient "HTTP 429 Too Many Requests" failed the pause gate, then matched here
+    # and trapped entrypoint.sh's legacy fallback in an infinite sleep/retry loop with
+    # no post-mortem, no error signature, and no exit. matched=false now routes such
+    # text to the normal failure path (post-mortem + error signature + exit).
+    # CLI contract unchanged: exit 0, print matched=true|false.
+    from factory_core.session_window import is_session_window_failure
     tmp_out_path = Path(args.tmp_out)
     text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
-    matched = bool(RATE_LIMIT_RE.search(text))
+    matched = is_session_window_failure(text)
     print(f"matched={'true' if matched else 'false'}")
 
 

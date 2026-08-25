@@ -106,6 +106,26 @@ def _structured_resets_at(event: dict):
     return event.get("resetsAt")
 
 
+def _is_exhaustion_event(event: dict) -> bool:
+    """True iff this structured event represents an actual session-window exhaustion
+    (Gate-3 F1, #344). Two shapes qualify:
+
+    - status == "rejected" (from rateLimitInfo.status or top-level status): the request
+      was actually refused.
+    - NO status field anywhere: the legacy #292 shape
+      {"event":"claude.rate_limit_event","resetsAt":...} predates the status field and
+      was only emitted on actual rejection, so it must keep pausing (the spec keeps it
+      as a second accepted shape).
+
+    Any PRESENT status other than "rejected" -- "allowed", "allowed_warning"
+    (approaching the limit, requests still served), or any future value -- is
+    non-pausing: treating every non-"allowed" status as exhaustion would let a healthy
+    run's allowed_warning marker buy a factory-wide pause of up to 5h.
+    """
+    status = _structured_status(event)
+    return status == "rejected" or status is None
+
+
 _HUMAN_RESET_RE = re.compile(
     r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
 )
@@ -116,15 +136,17 @@ MAX_SESSION_WINDOW_HOURS = 5
 
 def is_session_window_failure(text: str) -> bool:
     events = _structured_events(text)
-    if any(_structured_status(e) != "allowed" for e in events):
+    if any(_is_exhaustion_event(e) for e in events):
         return True
+    # Non-exhaustion events (allowed/allowed_warning/unknown) are neutral, not a veto:
+    # still scan the full text for the human-readable exhaustion phrasing.
     return bool(_SESSION_EXHAUSTION_RE.search(text))
 
 
 def parse_structured_reset_epoch(text: str) -> Optional[int]:
     for event in _structured_events(text):
-        if _structured_status(event) == "allowed":
-            continue
+        if not _is_exhaustion_event(event):
+            continue  # read the reset only from events that classify as exhaustion
         resets_at = _structured_resets_at(event)
         if not resets_at:
             continue
@@ -196,9 +218,9 @@ def match_snippet(text: str, radius: int = 80) -> Optional[dict]:
     represent a pause-worthy failure. Used to make a session-window pause diagnosable
     after the container that produced it is gone."""
     for event in _structured_events(text):
-        status = _structured_status(event)
-        if status == "allowed":
+        if not _is_exhaustion_event(event):
             continue  # neutral -- keep looking, then fall through to the substring path
+        status = _structured_status(event)
         offset = text.find(_STRUCTURED_MARKER)
         return {
             "matched": _STRUCTURED_MARKER,

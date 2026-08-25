@@ -291,6 +291,57 @@ def test_is_session_window_failure_true_for_allowed_marker_plus_human_readable_t
     assert is_session_window_failure(text) is True
 
 
+def test_is_session_window_failure_false_for_status_allowed_warning_nested(tmp_path):
+    # Gate-3 F1 (#344): "allowed_warning" means approaching the limit, requests still
+    # served -- it must NOT buy a factory-wide pause, and no sentinel may be written.
+    text = ('{"level":40,"rateLimitInfo":{"status":"allowed_warning","resetsAt":1784739600,'
+            '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}')
+    assert is_session_window_failure(text) is False
+    assert check_and_pause(text, tmp_path, 1784730000, 5, 30) is None
+    assert not (tmp_path / "session-window-paused").exists()
+
+
+def test_is_session_window_failure_false_for_status_allowed_warning_top_level(tmp_path):
+    text = '{"event":"claude.rate_limit_event","status":"allowed_warning","resetsAt":1784739600}'
+    assert is_session_window_failure(text) is False
+    assert check_and_pause(text, tmp_path, 1784730000, 5, 30) is None
+    assert not (tmp_path / "session-window-paused").exists()
+
+
+def test_allowed_warning_plus_human_reset_text_pauses_via_substring_path():
+    # A present non-"rejected" status is neutral, not a veto: the substring path still
+    # runs over the full text, and the resume epoch comes from the human reset text
+    # (fallback parser), NOT from the allowed_warning event's resetsAt.
+    now = int(datetime(2026, 7, 13, 20, 0, tzinfo=timezone.utc).timestamp())
+    text = ('{"rateLimitInfo":{"status":"allowed_warning","resetsAt":1784739600},'
+            '"msg":"claude.rate_limit_event"}\n'
+            "You've hit your session limit · resets 11:10pm (UTC)")
+    assert is_session_window_failure(text) is True
+    assert parse_structured_reset_epoch(text) is None
+    expected = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp()) + 300
+    assert compute_resume_epoch(text, now, buffer_minutes=5, fallback_minutes=30) == expected
+
+
+def test_legacy_no_status_shape_still_pauses_with_resets_at_plus_buffer():
+    # The legacy #292 shape predates the status field and was only emitted on actual
+    # rejection: it must keep pausing, using its own resetsAt + buffer.
+    now = int(datetime(2026, 7, 13, 20, 0, tzinfo=timezone.utc).timestamp())
+    text = '{"event":"claude.rate_limit_event","resetsAt":"2026-07-13T23:10:00Z"}'
+    assert is_session_window_failure(text) is True
+    expected = int(datetime(2026, 7, 13, 23, 10, tzinfo=timezone.utc).timestamp()) + 300
+    assert compute_resume_epoch(text, now, buffer_minutes=5, fallback_minutes=30) == expected
+
+
+def test_is_session_window_failure_false_for_unknown_future_status(tmp_path):
+    # Any PRESENT status other than "rejected" -- including values that don't exist
+    # yet -- is non-pausing. Only "rejected" or a status-less legacy event pauses.
+    text = ('{"rateLimitInfo":{"status":"throttled_soft","resetsAt":1784739600},'
+            '"msg":"claude.rate_limit_event"}')
+    assert is_session_window_failure(text) is False
+    assert check_and_pause(text, tmp_path, 1784730000, 5, 30) is None
+    assert not (tmp_path / "session-window-paused").exists()
+
+
 def test_match_snippet_none_when_no_pause_worthy_signal():
     assert match_snippet("unrelated stack trace") is None
 
@@ -415,17 +466,46 @@ def test_cli_session_window_check_unmatched_has_no_snippet_b64(tmp_path):
     assert "snippet_b64=" not in result.stdout
 
 
-def test_cli_rate_limit_match_true(tmp_path):
+def _run_rate_limit_match(tmp_path, text):
     tmp_out = tmp_path / "run.out"
-    tmp_out.write_text("429 too many requests, rate limit exceeded")
-    result = subprocess.run(
+    tmp_out.write_text(text)
+    return subprocess.run(
         [_sys.executable,
          str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
          "rate-limit-match", "--tmp-out", str(tmp_out)],
         capture_output=True, text=True,
     )
+
+
+def test_cli_rate_limit_match_true_for_rejected_structured_line(tmp_path):
+    # Gate-3 F2 (#344): rate-limit-match is backed by the same strict classification
+    # as the pause gate (is_session_window_failure), so a real structured rejection
+    # still matches.
+    result = _run_rate_limit_match(
+        tmp_path,
+        '{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":1784739600,'
+        '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}',
+    )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "matched=true"
+
+
+def test_cli_rate_limit_match_true_for_human_reset_text(tmp_path):
+    result = _run_rate_limit_match(
+        tmp_path, "You've hit your session limit · resets 11:10pm (UTC)"
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "matched=true"
+
+
+def test_cli_rate_limit_match_false_for_transient_http_429(tmp_path):
+    # Gate-3 F2 (#344): a transient "HTTP 429 Too Many Requests" fails the strict
+    # pause gate AND now fails rate-limit-match, so in entrypoint.sh it no longer
+    # enters the legacy infinite sleep/retry fallback loop -- a non-match routes the
+    # run to the normal failure path (post-mortem + error signature + exit).
+    result = _run_rate_limit_match(tmp_path, "HTTP 429 Too Many Requests")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "matched=false"
 
 
 def test_cli_rate_limit_match_false(tmp_path):
