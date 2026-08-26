@@ -9,26 +9,78 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+_HTTP_ERR_CTX = (
+    r"(?:https?|http/\d(?:\.\d)?|status(?:\s+code)?|code|error|err"
+    r"|response|responded|returned|got|api)"
+)
+
+# "429" requires HTTP/error context on one side; guards against a preceding digit+dot
+# ($0.429), '#'/':' (#429, file.py:429), or being embedded in an alphanumeric run (a SHA).
+_RE_429 = (
+    r"(?:"
+    r"\b" + _HTTP_ERR_CTX + r"\b[\s:=,/\"'|-]{0,4}(?<![\w.#$])429(?![\w.])"
+    r"|"
+    r"(?<![\w.#$:])429(?![\w.])[\s:,()-]{0,3}(?:too\s+many\s+requests|rate[\s_-]?limit)"
+    r")"
+)
+
+# "rate limit" requires an exhaustion/throttle verb in the same clause (bounded [^.\n]{0,40}
+# gap, not `.*`, so it can't bridge across log lines or sentences).
+_RE_RATE_LIMIT = (
+    r"(?:rate[ _-]?limit(?:s|ed|ing)?\b[^.\n]{0,40}?"
+    r"\b(?:exceeded|reached|hit|exhausted|throttl\w*|too\s+many\s+requests)\b"
+    r"|\b(?:hit|exceeded|reached)\s+(?:the\s+|a\s+|your\s+|our\s+)?rate[ _-]?limit(?:s|ed)?\b"
+    r"|\bbeing\s+rate[ _-]?limited\b)"
+)
+
+# "usage"/"session"/"weekly"/"5-hour limit" -- a pre-verb branch (real phrasing puts the
+# verb before the noun, "hit your usage limit"), plus a reset-line shape naming neither
+# "session" nor "usage" ("You've hit your limit · resets 1:40pm (UTC)").
+_RE_USAGE_SESSION = (
+    # Gate-3 (2026-08-25): no reset-verbs in branch 1 -- "usage limit resets every 5
+    # hours" is documentation prose and "Approaching usage limit resets at 3pm" is a
+    # warning banner, not exhaustion; the real reset-line shape is branch 3. The
+    # fixed-width lookbehinds keep approaching/nearing warning banners out entirely.
+    r"(?:(?<!approaching\s)(?<!nearing\s)(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b[^.\n]{0,40}?"
+    r"\b(?:reached|exceeded|exhausted|hit)\b"
+    r"|\b(?:hit|reached|exceeded|exhausted|used\s+up|out\s+of)\s+"
+    r"(?:your\s+|the\s+|my\s+|its\s+)?(?:\w+\s+){0,2}?"
+    r"(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b"
+    r"|\blimit\b[^.\n]{0,40}?\bresets\s+\d{1,2}(?::\d{2})?\s*[ap]m\s*\()"
+)
+
+# "credit balance" needs the same tightening even with no false-positive example in the
+# issue: the bare regex source string is checked into the repo, so an agent quoting it
+# would self-trigger. Anchored on Anthropic's actual API message.
+_RE_CREDIT = (
+    r"(?:credit\s+balance\b[^.\n]{0,30}?\b(?:too\s+low|insufficient|exhausted|depleted|is\s+0)\b"
+    r"|\b(?:insufficient|low|zero|no)\s+credit\s+balance\b)"
+)
+
 RATE_LIMIT_RE = re.compile(
-    r"usage limit|rate limit|429|credit balance|session limit", re.IGNORECASE
+    "|".join([_RE_429, _RE_RATE_LIMIT, _RE_USAGE_SESSION, _RE_CREDIT]),
+    re.IGNORECASE,
 )
-# Backward-compatible alias for existing in-module references; new external
-# consumers should import the public RATE_LIMIT_RE name above.
-_SUBSTRING_RE = RATE_LIMIT_RE
+
+# Strict subset of RATE_LIMIT_RE used ONLY by the pause gate: a transient
+# 429/"rate limit exceeded" is real for the breaker's environmental:rate_limit bucket
+# (error_signature.py, unchanged import of RATE_LIMIT_RE above) but is not a session/
+# window/balance exhaustion and must not buy a 30-minute factory-wide halt.
+_SESSION_EXHAUSTION_RE = re.compile(
+    "|".join([_RE_USAGE_SESSION, _RE_CREDIT]),
+    re.IGNORECASE,
+)
 _STRUCTURED_MARKER = "claude.rate_limit_event"
-_HUMAN_RESET_RE = re.compile(
-    r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
-)
-# Physical invariant: a Claude Max session window is fixed at 5h, so no true resume can
-# ever be more than 5h out. Hardcoded, not a config.yaml key -- see #305.
-MAX_SESSION_WINDOW_HOURS = 5
 
 
-def is_session_window_failure(text: str) -> bool:
-    return _STRUCTURED_MARKER in text or bool(_SUBSTRING_RE.search(text))
-
-
-def parse_structured_reset_epoch(text: str) -> Optional[int]:
+def _structured_events(text: str) -> list:
+    """Return every parsed claude.rate_limit_event payload in `text`, in order of
+    appearance. Accepts both the real Claude Code CLI shape (pino-style: a "msg" field,
+    fields nested under "rateLimitInfo") and the #292-assumed shape (top-level "event"
+    and "resetsAt"). Returning ALL events, not the first that parses, is load-bearing: a
+    healthy run's early status=allowed marker must not shadow a later genuine rejection.
+    """
+    events = []
     for line in text.splitlines():
         if _STRUCTURED_MARKER not in line:
             continue
@@ -39,7 +91,67 @@ def parse_structured_reset_epoch(text: str) -> Optional[int]:
             event = json.loads(match.group(0))
         except json.JSONDecodeError:
             continue
-        resets_at = event.get("resetsAt")
+        if event.get("event") == _STRUCTURED_MARKER or event.get("msg") == _STRUCTURED_MARKER:
+            events.append(event)
+    return events
+
+
+def _structured_status(event: dict) -> Optional[str]:
+    info = event.get("rateLimitInfo")
+    if isinstance(info, dict) and "status" in info:
+        return info["status"]
+    return event.get("status")  # None for the #292 assumed shape, which never carried status
+
+
+def _structured_resets_at(event: dict):
+    info = event.get("rateLimitInfo")
+    if isinstance(info, dict) and "resetsAt" in info:
+        return info["resetsAt"]
+    return event.get("resetsAt")
+
+
+def _is_exhaustion_event(event: dict) -> bool:
+    """True iff this structured event represents an actual session-window exhaustion
+    (Gate-3 F1, #344). Two shapes qualify:
+
+    - status == "rejected" (from rateLimitInfo.status or top-level status): the request
+      was actually refused.
+    - NO status field anywhere: the legacy #292 shape
+      {"event":"claude.rate_limit_event","resetsAt":...} predates the status field and
+      was only emitted on actual rejection, so it must keep pausing (the spec keeps it
+      as a second accepted shape).
+
+    Any PRESENT status other than "rejected" -- "allowed", "allowed_warning"
+    (approaching the limit, requests still served), or any future value -- is
+    non-pausing: treating every non-"allowed" status as exhaustion would let a healthy
+    run's allowed_warning marker buy a factory-wide pause of up to 5h.
+    """
+    status = _structured_status(event)
+    return status == "rejected" or status is None
+
+
+_HUMAN_RESET_RE = re.compile(
+    r"resets\s+([0-9]{1,2}:[0-9]{2}[ap]m)\s*\(([^)]+)\)", re.IGNORECASE
+)
+# Physical invariant: a Claude Max session window is fixed at 5h, so no true resume can
+# ever be more than 5h out. Hardcoded, not a config.yaml key -- see #305.
+MAX_SESSION_WINDOW_HOURS = 5
+
+
+def is_session_window_failure(text: str) -> bool:
+    events = _structured_events(text)
+    if any(_is_exhaustion_event(e) for e in events):
+        return True
+    # Non-exhaustion events (allowed/allowed_warning/unknown) are neutral, not a veto:
+    # still scan the full text for the human-readable exhaustion phrasing.
+    return bool(_SESSION_EXHAUSTION_RE.search(text))
+
+
+def parse_structured_reset_epoch(text: str) -> Optional[int]:
+    for event in _structured_events(text):
+        if not _is_exhaustion_event(event):
+            continue  # read the reset only from events that classify as exhaustion
+        resets_at = _structured_resets_at(event)
         if not resets_at:
             continue
         # Handle an epoch (int/float, seconds since epoch) resetsAt in addition to the
@@ -100,6 +212,37 @@ def write_pause_sentinel(resume_epoch: int, state_dir: Path) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(str(resume_epoch))
     tmp.rename(path)
+
+
+_RE_CREDIT_ONLY = re.compile(_RE_CREDIT, re.IGNORECASE)
+
+
+def match_snippet(text: str, radius: int = 80) -> Optional[dict]:
+    """Return the match that caused a pause, plus context, or None if the text doesn't
+    represent a pause-worthy failure. Used to make a session-window pause diagnosable
+    after the container that produced it is gone."""
+    for event in _structured_events(text):
+        if not _is_exhaustion_event(event):
+            continue  # neutral -- keep looking, then fall through to the substring path
+        status = _structured_status(event)
+        offset = text.find(_STRUCTURED_MARKER)
+        return {
+            "matched": _STRUCTURED_MARKER,
+            "offset": offset,
+            "window": event,
+            "branch": f"status={status}",
+        }
+    match = _SESSION_EXHAUSTION_RE.search(text)
+    if match is None:
+        return None
+    start, end = max(0, match.start() - radius), min(len(text), match.end() + radius)
+    branch = "credit-balance" if _RE_CREDIT_ONLY.search(match.group(0)) else "usage/session-limit"
+    return {
+        "matched": match.group(0),
+        "offset": match.start(),
+        "window": text[start:end],
+        "branch": branch,
+    }
 
 
 def check_and_pause(

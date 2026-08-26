@@ -252,20 +252,49 @@ _handle_session_window_pause() {
     return 1
   fi
 
-  local matched resume_epoch
+  local matched resume_epoch snippet_b64
   matched=$(echo "$sw_result" | grep -o 'matched=[a-z]*' | cut -d= -f2)
   resume_epoch=$(echo "$sw_result" | grep -o 'resume_epoch=[0-9]*' | cut -d= -f2)
   [ "$matched" = "true" ] || return 1
+  snippet_b64=$(echo "$sw_result" | grep -o 'snippet_b64=[A-Za-z0-9+/=]*' | cut -d= -f2-)
 
   local resume_iso
   resume_iso=$(date -u -d "@${resume_epoch}" +%FT%TZ 2>/dev/null || echo "unknown")
   echo "session-window exhausted — dispatch paused until ${resume_iso}"
+
+  # Not the system of record (stderr is discarded under production -d --rm dispatch) --
+  # these three globals (no `local`) are the handoff to on_failure()'s comment builder:
+  # on_failure() invokes THIS function once, directly in its own `if` condition
+  # (entrypoint.sh:426); since that's a plain function call, not a subshell, the globals
+  # set here are still visible in on_failure()'s body right after the call returns.
+  SESSION_WINDOW_MATCHED_PATTERN=""
+  SESSION_WINDOW_MATCH_OFFSET=""
+  SESSION_WINDOW_MATCH_BRANCH=""
+  local detail_args=()
+  if [ -n "$snippet_b64" ]; then
+    echo "session-window match snippet (base64): ${snippet_b64}" >&2
+    # Plain string concatenation, not an f-string: the script runs inside bash single
+    # quotes, so python's own double-quoted dict keys need no escaping -- backslash-
+    # escaping them inside an f-string expression is a SyntaxError on every Python
+    # version (the trailing `2>/dev/null` would otherwise swallow that error silently).
+    eval "$(echo "$snippet_b64" | base64 -d 2>/dev/null | python3 -c '
+import json, sys, shlex
+d = json.load(sys.stdin)
+print("SESSION_WINDOW_MATCHED_PATTERN=" + shlex.quote(str(d.get("matched", ""))))
+print("SESSION_WINDOW_MATCH_OFFSET=" + shlex.quote(str(d.get("offset", ""))))
+print("SESSION_WINDOW_MATCH_BRANCH=" + shlex.quote(str(d.get("branch", ""))))
+' 2>/dev/null)"
+    detail_args=(--detail "matched_pattern=${SESSION_WINDOW_MATCHED_PATTERN}" \
+      "match_offset=${SESSION_WINDOW_MATCH_OFFSET}" "snippet_b64=b64:${snippet_b64}")
+  fi
+
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
     --run-id "${RUN_ID:-unknown}" \
     --issue "${ISSUE_NUM:-0}" \
     --intent "${INTENT:-unknown}" \
     --stage paused \
-    --verdict paused || true
+    --verdict paused \
+    "${detail_args[@]}" || true
   return 0
 }
 
@@ -428,16 +457,26 @@ on_failure() {
     # run-record entry, and honored SESSION_WINDOW_BACKOFF_ENABLED — nothing left to do
     # here except tell the issue and still report cost.
     if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
-      local RESUME_EPOCH RESUME_ISO
+      local RESUME_EPOCH RESUME_ISO SUMMARY_LINE SAFE_MATCHED_PATTERN
       RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/session-window-paused" 2>/dev/null || echo "")
       RESUME_ISO=$(date -u -d "@${RESUME_EPOCH}" +%FT%TZ 2>/dev/null || echo "unknown")
+      SUMMARY_LINE=""
+      if [ -n "${SESSION_WINDOW_MATCHED_PATTERN:-}" ]; then
+        SAFE_MATCHED_PATTERN=$(printf '%s' "${SESSION_WINDOW_MATCHED_PATTERN}" | tr -d '`')
+        if [ "${SESSION_WINDOW_MATCHED_PATTERN}" = "claude.rate_limit_event" ]; then
+          SUMMARY_LINE="Classification: matched \`${SAFE_MATCHED_PATTERN}\` (${SESSION_WINDOW_MATCH_BRANCH})"
+        else
+          SUMMARY_LINE="Classification: matched \`${SAFE_MATCHED_PATTERN}\` (${SESSION_WINDOW_MATCH_BRANCH} branch) at offset ${SESSION_WINDOW_MATCH_OFFSET}"
+        fi
+      fi
       post_or_update_comment "$DF_SESSION_WINDOW_PAUSE_MARKER" \
         "${DF_SESSION_WINDOW_PAUSE_MARKER}
 ⏸️ **Dark Factory — Paused** (session window)
 
 Claude session window exhausted mid-run. Dispatch resumes automatically at \`${RESUME_ISO}\`
 (scheduler-enforced). The scheduler reconciles this issue's board state on its next poll —
-no action needed."
+no action needed.
+${SUMMARY_LINE}"
     fi
     post_cost_report || true
     return
@@ -786,7 +825,8 @@ while true; do
       rm -f "$TMP_OUT"
       exit 0
     fi
-    if grep -qiE "usage limit|rate limit|429|credit balance|session limit" "$TMP_OUT"; then
+    if python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-match \
+        --tmp-out "$TMP_OUT" | grep -q '^matched=true$'; then
       # Kill-switch fallback (SESSION_WINDOW_BACKOFF_ENABLED=false): old sleep-forever
       # behavior, unchanged.
       # Attempt to parse specific reset time from: "You've hit your session limit · resets 11:10pm (America/Toronto)"

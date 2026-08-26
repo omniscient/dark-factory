@@ -55,13 +55,13 @@ assert_true() {
   if eval "$1"; then assert_eq "$desc" "0" "0"; else assert_eq "$desc" "0" "1"; fi
 }
 
-echo "--- A: matched (structured rate_limit_event line) ---"
+echo "--- A: matched (structured rate_limit_event line, real pino shape, status=rejected) ---"
 SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-XXXXXX)
 NOW=$(date -u +%s)
-RESET_ISO=$(date -u -d "@$((NOW+600))" +%Y-%m-%dT%H:%M:%SZ)
+RESET_EPOCH=$((NOW+600))
 TMP_OUT=$(mktemp /tmp/ep-sw-out-XXXXXX)
-printf 'some claude output\n{"event":"claude.rate_limit_event","resetsAt":"%s"}\n' \
-  "$RESET_ISO" > "$TMP_OUT"
+printf 'some claude output\n{"level":40,"time":%s000,"rateLimitInfo":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}\n' \
+  "$NOW" "$RESET_EPOCH" > "$TMP_OUT"
 
 SESSION_WINDOW_BACKOFF_ENABLED=true
 SESSION_WINDOW_BUFFER_MINUTES=5
@@ -74,6 +74,19 @@ SENTINEL_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null 
 EXPECTED_EPOCH=$((NOW + 600 + 300))
 DIFF=$((SENTINEL_EPOCH - EXPECTED_EPOCH)); DIFF=${DIFF#-}
 assert_true "resume epoch within 2s of resetsAt+buffer" "[ '$DIFF' -le 2 ]"
+
+echo ""
+echo "--- A2: unmatched (structured rate_limit_event line, status=allowed) — direct #332 regression lock ---"
+rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
+TMP_OUT_ALLOWED=$(mktemp /tmp/ep-sw-out-allowed-XXXXXX)
+printf 'some claude output\n{"level":40,"rateLimitInfo":{"status":"allowed","resetsAt":%s,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}\n' \
+  "$((NOW+18000))" > "$TMP_OUT_ALLOWED"
+_handle_session_window_pause "$TMP_OUT_ALLOWED"
+RC_ALLOWED=$?
+assert_eq "status=allowed only → returns 1 (falls through)" "1" "$RC_ALLOWED"
+assert_true "no sentinel written for status=allowed" \
+  "[ ! -f '${SCHEDULER_STATE_DIR}/session-window-paused' ]"
+rm -f "$TMP_OUT_ALLOWED"
 
 echo ""
 echo "--- B: unmatched (unrelated failure) — falls through to normal failure path ---"
@@ -135,10 +148,10 @@ post_or_update_comment() {
 COST_REPORT_CALLS=0
 post_cost_report() { COST_REPORT_CALLS=$((COST_REPORT_CALLS+1)); }
 
-RESET_ISO_D=$(date -u -d "@$(( $(date -u +%s) + 600 ))" +%Y-%m-%dT%H:%M:%SZ)
+RESET_EPOCH_D=$(( $(date -u +%s) + 600 ))
 TMP_OUT=$(mktemp /tmp/ep-sw-out-d-XXXXXX)
-printf 'some claude output\n{"event":"claude.rate_limit_event","resetsAt":"%s"}\n' \
-  "$RESET_ISO_D" > "$TMP_OUT"
+printf 'some claude output\n{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":%s,"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}\n' \
+  "$RESET_EPOCH_D" > "$TMP_OUT"
 
 false
 on_failure
@@ -171,6 +184,50 @@ assert_true "runs.jsonl records no failed stage for this run" \
   "! grep -q '\"stage\": \"failed\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
 assert_true "no error signature written on the paused path" \
   "[ ! -d '${SCHEDULER_STATE_DIR}/error-signatures' ]"
+assert_true "pause comment includes a classification summary line" \
+  "grep -q 'Classification: matched' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
+assert_true "pause comment classification names the rejected status" \
+  "grep -q 'status=rejected' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
+assert_true "runs.jsonl paused record includes matched_pattern detail" \
+  "grep -q 'claude.rate_limit_event' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
+
+rm -f "$TMP_OUT"
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- D2: on_failure() guard — substring-path classification summary (branch label, no backticks in matched text) ---"
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-d2-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-sw-artifacts-d2-XXXXXX)
+export ARTIFACTS_DIR
+ISSUE_NUM=292
+INTENT=fix
+RUN_ID=test-run-d2
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+SESSION_WINDOW_BACKOFF_ENABLED=true
+
+run_post_mortem() { :; }
+set_board_status() { return 0; }
+COMMENT_LOG_DIR=$(mktemp -d /tmp/ep-sw-comments-d2-XXXXXX)
+post_or_update_comment() {
+  local marker="$1" body="$2"
+  local safe
+  safe=$(echo "$marker" | tr -cd 'a-zA-Z0-9')
+  echo "$body" > "${COMMENT_LOG_DIR}/${safe}.md"
+}
+post_cost_report() { :; }
+
+TMP_OUT=$(mktemp /tmp/ep-sw-out-d2-XXXXXX)
+printf "You've hit your session limit · resets 11:10pm (UTC)\n" > "$TMP_OUT"
+
+false
+on_failure
+set +e  # see the comment on section D's on_failure() call for why this is required
+
+assert_true "substring-path pause comment names the usage/session-limit branch with an offset" \
+  "grep -q 'usage/session-limit branch) at offset' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
+assert_true "substring-path matched text has no stray backtick in the comment" \
+  "! grep -qE 'matched \`[^\`]*\`[^\`]*\`' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
 
 rm -f "$TMP_OUT"
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"

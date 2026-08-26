@@ -96,8 +96,10 @@ def _rescue_blocked(args):
 
 
 def _session_window_check(args):
+    import base64
+    import json as _json
     import time
-    from factory_core.session_window import check_and_pause
+    from factory_core.session_window import check_and_pause, match_snippet
     tmp_out_path = Path(args.tmp_out)
     text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
     resume_epoch = check_and_pause(
@@ -109,8 +111,31 @@ def _session_window_check(args):
     )
     if resume_epoch is not None:
         print(f"matched=true resume_epoch={resume_epoch}")
+        snippet = match_snippet(text)
+        if snippet is not None:
+            payload = dict(snippet)
+            if isinstance(payload["window"], dict):
+                payload["window"] = _json.dumps(payload["window"])
+            encoded = base64.b64encode(_json.dumps(payload).encode()).decode()
+            print(f"snippet_b64={encoded}")
     else:
         print("matched=false resume_epoch=0")
+
+
+def _rate_limit_match(args):
+    # Gate-3 F2 (#344): backed by the SAME strict classification as the pause gate
+    # (is_session_window_failure: structured rejected/legacy-no-status events plus
+    # _SESSION_EXHAUSTION_RE), not the broad RATE_LIMIT_RE. Under the broad regex a
+    # transient "HTTP 429 Too Many Requests" failed the pause gate, then matched here
+    # and trapped entrypoint.sh's legacy fallback in an infinite sleep/retry loop with
+    # no post-mortem, no error signature, and no exit. matched=false now routes such
+    # text to the normal failure path (post-mortem + error signature + exit).
+    # CLI contract unchanged: exit 0, print matched=true|false.
+    from factory_core.session_window import is_session_window_failure
+    tmp_out_path = Path(args.tmp_out)
+    text = tmp_out_path.read_text(errors="replace") if tmp_out_path.exists() else ""
+    matched = is_session_window_failure(text)
+    print(f"matched={'true' if matched else 'false'}")
 
 
 def _error_signature_write(args):
@@ -272,6 +297,10 @@ def main():
     sw.add_argument("--buffer-minutes", type=int, default=5)
     sw.add_argument("--fallback-minutes", type=int, default=30)
     sw.set_defaults(func=_session_window_check)
+
+    rlm = sub.add_parser("rate-limit-match")
+    rlm.add_argument("--tmp-out", required=True)
+    rlm.set_defaults(func=_rate_limit_match)
 
     esw = sub.add_parser("error-signature-write")
     esw.add_argument("--issue", type=int, required=True)
