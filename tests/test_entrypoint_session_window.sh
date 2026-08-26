@@ -12,6 +12,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# entrypoint.sh hardcodes /opt/dark-factory/scripts/* for identity and the providers
+# CLI, which only exists in the factory image. Point both at the repo checkout so this
+# test runs on a bare CI runner (mirrors tests/test_entrypoint_current_run.sh).
+_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export IDENTITY_SH="${IDENTITY_SH:-$_REPO_DIR/scripts/identity.sh}"
+export FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-$_REPO_DIR/scripts/factory_core/providers/cli.py}"
 export GH_TOKEN="stub-token"
 export CLAUDE_CODE_OAUTH_TOKEN="stub-token"
 
