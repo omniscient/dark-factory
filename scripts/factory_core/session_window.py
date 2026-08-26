@@ -37,8 +37,12 @@ _RE_RATE_LIMIT = (
 # verb before the noun, "hit your usage limit"), plus a reset-line shape naming neither
 # "session" nor "usage" ("You've hit your limit · resets 1:40pm (UTC)").
 _RE_USAGE_SESSION = (
-    r"(?:(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b[^.\n]{0,40}?"
-    r"\b(?:reached|exceeded|exhausted|hit|resets?|will\s+reset)\b"
+    # Gate-3 (2026-08-25): no reset-verbs in branch 1 -- "usage limit resets every 5
+    # hours" is documentation prose and "Approaching usage limit resets at 3pm" is a
+    # warning banner, not exhaustion; the real reset-line shape is branch 3. The
+    # fixed-width lookbehinds keep approaching/nearing warning banners out entirely.
+    r"(?:(?<!approaching\s)(?<!nearing\s)(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b[^.\n]{0,40}?"
+    r"\b(?:reached|exceeded|exhausted|hit)\b"
     r"|\b(?:hit|reached|exceeded|exhausted|used\s+up|out\s+of)\s+"
     r"(?:your\s+|the\s+|my\s+|its\s+)?(?:\w+\s+){0,2}?"
     r"(?:usage|session|weekly|5[ _-]?hour)[ _-]?limits?\b"

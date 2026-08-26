@@ -519,3 +519,23 @@ def test_cli_rate_limit_match_false(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "matched=false"
+
+
+def test_reset_prose_and_warning_banners_do_not_pause():
+    """Gate-3 round 3 (2026-08-25): reset-verbs dropped from _RE_USAGE_SESSION branch 1;
+    warning banners and doc prose about limits resetting are not exhaustion, and the
+    archived plan quotes such strings (self-quoting hazard)."""
+    for text in (
+        "Approaching usage limit · resets at 3pm",
+        "the usage limit resets every 5 hours (docs)",
+        "Note: session limit resets at midnight; see docs",
+        "Approaching usage limit — hit 80%",
+        "nearing session limit, hit the docs for details",
+    ):
+        assert not is_session_window_failure(text), text
+    for text in (
+        "You've hit your usage limit",
+        "You've hit your session limit · resets 9:20pm (America/Toronto)",
+        "You've hit your limit · resets 1:40pm (UTC)",
+    ):
+        assert is_session_window_failure(text), text
