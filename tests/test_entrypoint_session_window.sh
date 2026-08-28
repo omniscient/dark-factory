@@ -80,6 +80,12 @@ SENTINEL_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null 
 EXPECTED_EPOCH=$((NOW + 600 + 300))
 DIFF=$((SENTINEL_EPOCH - EXPECTED_EPOCH)); DIFF=${DIFF#-}
 assert_true "resume epoch within 2s of resetsAt+buffer" "[ '$DIFF' -le 2 ]"
+assert_true "session-window-pause-signature-write drop file written for issue+phase" \
+  "[ -f '${SCHEDULER_STATE_DIR}/error-signatures/35.implement.sig' ]"
+SIG_JSON=$(cat "${SCHEDULER_STATE_DIR}/error-signatures/35.implement.sig" 2>/dev/null || echo '{}')
+assert_eq "drop file carries the pause signature" \
+  "environmental:session_window_pause" \
+  "$(echo "$SIG_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("signature",""))')"
 
 echo ""
 echo "--- A2: unmatched (structured rate_limit_event line, status=allowed) — direct #332 regression lock ---"
@@ -114,6 +120,22 @@ assert_eq "kill-switch off → returns 1" "1" "$RC3"
 assert_true "no sentinel written when kill-switch off" \
   "[ ! -f '${SCHEDULER_STATE_DIR}/session-window-paused' ]"
 SESSION_WINDOW_BACKOFF_ENABLED=true
+
+echo ""
+echo "--- A7: session-window-pause-signature-write skipped when ISSUE_NUM is unset ---"
+A7_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-a7-XXXXXX)
+SAVED_STATE_DIR="$SCHEDULER_STATE_DIR"
+SAVED_ISSUE_NUM="$ISSUE_NUM"
+SCHEDULER_STATE_DIR="$A7_STATE_DIR"
+unset ISSUE_NUM
+_handle_session_window_pause "$TMP_OUT"
+RC_A7=$?
+assert_eq "matched → still returns 0 with ISSUE_NUM unset" "0" "$RC_A7"
+assert_true "no drop file written when ISSUE_NUM is unset" \
+  "[ ! -d '${A7_STATE_DIR}/error-signatures' ]"
+ISSUE_NUM="$SAVED_ISSUE_NUM"
+SCHEDULER_STATE_DIR="$SAVED_STATE_DIR"
+rm -rf "$A7_STATE_DIR"
 
 rm -f "$TMP_OUT" "$TMP_OUT2"
 rm -rf "$SCHEDULER_STATE_DIR"
@@ -188,8 +210,11 @@ assert_true "runs.jsonl records a paused stage" \
   "grep -q '\"stage\": \"paused\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
 assert_true "runs.jsonl records no failed stage for this run" \
   "! grep -q '\"stage\": \"failed\"' '${SCHEDULER_STATE_DIR}/runs.jsonl'"
-assert_true "no error signature written on the paused path" \
-  "[ ! -d '${SCHEDULER_STATE_DIR}/error-signatures' ]"
+assert_true "session-window pause signature written for the paused run" \
+  "[ -f '${SCHEDULER_STATE_DIR}/error-signatures/292.implement.sig' ]"
+assert_eq "pause signature drop file carries the pause classification, not a classify() output" \
+  "environmental:session_window_pause" \
+  "$(python3 -c "import json; print(json.load(open('${SCHEDULER_STATE_DIR}/error-signatures/292.implement.sig'))['signature'])")"
 assert_true "pause comment includes a classification summary line" \
   "grep -q 'Classification: matched' '${COMMENT_LOG_DIR}/dfsessionwindowpause.md'"
 assert_true "pause comment classification names the rejected status" \
