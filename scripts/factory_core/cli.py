@@ -157,6 +157,11 @@ def _error_signature_write(args):
     print(f"signature={signature}")
 
 
+def _session_window_pause_signature_write(args):
+    from factory_core.error_signature import SESSION_WINDOW_PAUSE_SIGNATURE, write_signature
+    write_signature(args.issue, args.phase, SESSION_WINDOW_PAUSE_SIGNATURE, 0, Path(args.state_dir))
+
+
 def _cost_report_check(args):
     import json
     from factory_core import cost_report, run_record
@@ -315,6 +320,12 @@ def main():
                       dest="delivery_failure_max_seconds")
     esw.add_argument("--state-dir", default="/var/lib/dark-factory")
     esw.set_defaults(func=_error_signature_write)
+
+    swp = sub.add_parser("session-window-pause-signature-write")
+    swp.add_argument("--issue", type=int, required=True)
+    swp.add_argument("--phase", required=True)
+    swp.add_argument("--state-dir", default="/var/lib/dark-factory")
+    swp.set_defaults(func=_session_window_pause_signature_write)
 
     bcs = sub.add_parser("breaker-check-signature")
     bcs.add_argument("--issue", type=int, required=True)
