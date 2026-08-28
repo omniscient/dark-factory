@@ -37,6 +37,29 @@ python3() {
 reset_python3_stub() { PROVIDERS_CLI_OUTPUT=""; }
 export -f gh docker set_board_status python3
 
+# ---- Subprocess-visible stubs ----
+# The exported bash functions above are invisible to non-bash children: the python3 stub
+# forwards every non-providers CLI call (FACTORY_CORE_CLI board-move / rescue-blocked /
+# epic-autopilot / marker ...) to the real interpreter, which imports board.py and spawns
+# `gh project item-list --limit 200` via PATH — a real GraphQL query costing ~101 points.
+# Nine such calls per suite run (~900 points) exhausted the shared 5,000/hr GitHub GraphQL
+# budget whenever an implement agent iterated on this suite inside a run container
+# (2026-08-28: every push-and-pr for #334/#341/#342 failed on the drained pool).
+# A PATH shim re-enters bash so the exported stub function handles the call instead.
+# Child calls are logged to SHIM_LOG (not STUB_LOG) so the in-process call counts the
+# sections below assert on are unchanged; the function runs with STUB_LOG=/dev/null.
+STUB_BIN=$(mktemp -d /tmp/sched-test-bin-XXXXXX)
+SHIM_LOG="$STUB_BIN/calls.log"; : > "$SHIM_LOG"; export SHIM_LOG
+for _stub_cmd in gh docker; do
+  printf '#!/usr/bin/env bash
+echo "%s $*" >> "$SHIM_LOG"
+STUB_LOG=/dev/null %s "$@"
+' "$_stub_cmd" "$_stub_cmd" > "$STUB_BIN/$_stub_cmd"
+  chmod +x "$STUB_BIN/$_stub_cmd"
+done
+unset _stub_cmd
+export PATH="$STUB_BIN:$PATH"
+
 # ---- Source scheduler helpers only ----
 # Point the state dir at a temp dir BEFORE sourcing: scheduler.sh derives STATE_FILE
 # and RECHECK_STAMP_FILE from it (and mkdir-s it), so tests must not touch the real
@@ -1790,6 +1813,11 @@ rm -rf "$SCHEDULER_STATE_DIR"
 echo ""
 echo "--- #341 drift lock: rollback_paused_retry is wired at exactly the four spec sites (refine, plan, blocked_retry, conflict_resolve) ---"
 assert_eq "rollback_paused_retry wired 4x in scheduler.sh" "4" "$(grep -c 'rollback_paused_retry "\$ISSUE"' "$SCHED")"
+
+echo "--- Subprocess stub shim: gh spawned from a real python child must hit the stub, not the real binary ---"
+_SHIM_OUT=$("$_REAL_PY3" -c 'import subprocess; r = subprocess.run(["gh", "project", "item-list", "1", "--format", "json"], capture_output=True, text=True); print(r.returncode, r.stdout.strip())')
+assert_eq "python-spawned gh returns the stub's rc 0 and no output" "0 " "$_SHIM_OUT"
+assert_eq "python-spawned gh call landed in SHIM_LOG" "1" "$(grep -c '^gh project item-list 1 --format json$' "$SHIM_LOG")"
 
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]
