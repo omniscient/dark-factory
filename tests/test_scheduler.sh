@@ -1515,6 +1515,8 @@ _run_blocked_retry_body() {
     return
   fi
 
+  rollback_paused_retry "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES"
+
   DECISION=$(retry_or_skip_delivery_failure "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES" || echo "count")
   case "$DECISION" in
     skip) ;;
@@ -1562,6 +1564,18 @@ assert_eq "V3b: breaker-trip delegated" \
 assert_eq "V3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "102")"
 
 > "$STUB_LOG"
+
+# V4: dispatch → pause → resume leaves the implement (bare-key) retry counter net-unchanged
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 103 implement "substantive:test_failure:1"
+_run_blocked_retry_body 103
+assert_eq "V4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "103")"
+_drop_sig 103 implement "environmental:session_window_pause"
+_run_blocked_retry_body 103
+assert_eq "V4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "103")"
+assert_eq "V4c: dispatched again" "2" "$(grep -c 'dispatch Fix issue #103' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
 
 # ==========================================
 # W: stage_conflict_resolve (resolve) — delivery-failure retry exemption (#279)

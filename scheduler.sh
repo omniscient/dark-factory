@@ -1034,6 +1034,8 @@ stage_blocked_retry() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES"
+
     DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES" || echo "count")
     case "$DECISION" in
       skip)
