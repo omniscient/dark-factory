@@ -1428,6 +1428,11 @@ _run_plan_body() {
     return
   fi
 
+  rollback_paused_retry "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES"
+
+  PREV_SESSION_WINDOW_PAUSE=""
+  [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
   PREV_DELIVERY_SKIP=""
   DECISION=$(retry_or_skip_delivery_failure "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES" || echo "count")
   case "$DECISION" in
@@ -1447,7 +1452,8 @@ _run_plan_body() {
   if [ -n "$PREV_DELIVERY_SKIP" ]; then
     DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
   fi
-  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}" > /dev/null
+  SESSION_WINDOW_NOTE=$(session_window_pause_note)
+  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}" > /dev/null
   dispatch "Plan issue #${issue}" > /dev/null
 }
 
@@ -1474,6 +1480,19 @@ assert_eq "U3: back-fill delegates to breaker-set-retry with the shadow count" \
 assert_eq "U3b: breaker-trip delegated" \
   "1" "$(grep -c 'breaker-trip --issue 92 --phase plan' "$STUB_LOG" || echo 0)"
 assert_eq "U3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "92:plan")"
+
+> "$STUB_LOG"
+
+# U4: dispatch → pause → resume leaves the plan retry counter net-unchanged
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 93 plan "substantive:test_failure:1"
+_run_plan_body 93
+assert_eq "U4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "93:plan")"
+_drop_sig 93 plan "environmental:session_window_pause"
+_run_plan_body 93
+assert_eq "U4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "93:plan")"
+assert_eq "U4c: comment carries the real session_window_pause_note() output" \
+  "1" "$(grep -c 'was paused for a Claude session-window exhaustion' "$STUB_LOG" || echo 0)"
 
 > "$STUB_LOG"
 
