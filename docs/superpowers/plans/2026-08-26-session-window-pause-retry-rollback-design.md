@@ -1134,9 +1134,7 @@ precedent, but not the intent here).
    `tests/test_factory_core_error_signature.py`.
 
 2. Run the two local-only bash suites this ticket touches (both `bash -n`-clean and functionally
-   green — **note for the record**: neither `tests/test_scheduler.sh` nor
-   `tests/test_entrypoint_session_window.sh` is wired into `.github/workflows/ci.yml`; this is a
-   pre-existing gap the #279 tests they mirror already have, not something this ticket introduces or
+   green — **note for the record**: `tests/test_scheduler.sh` is not wired into `.github/workflows/ci.yml` (pre-existing gap, same as the #279 tests it mirrors); `tests/test_entrypoint_session_window.sh` IS run by CI's tests job since PR #357, so Task 3's assertions get CI coverage, not something this ticket introduces or
    is expected to fix):
 
    ```bash
