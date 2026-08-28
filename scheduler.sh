@@ -464,6 +464,19 @@ EOF
   fi
 }
 
+# --- Shared "previous attempt hit a confirmed session-window pause" issue-comment note (#341) ---
+# Callers must set PREV_SESSION_WINDOW_PAUSE (non-empty to include the note) before calling.
+session_window_pause_note() {
+  if [ -n "$PREV_SESSION_WINDOW_PAUSE" ]; then
+    cat <<EOF
+
+
+> ⏸️ The previous attempt was paused for a Claude session-window exhaustion and was not
+> counted against the retry budget.
+EOF
+  fi
+}
+
 # --- Mergeable status for a PR: CONFLICTING, MERGEABLE, or UNKNOWN ---
 # UNKNOWN means GitHub hasn't finished computing mergeability — callers must skip.
 # --repo is required because the scheduler runs outside a git checkout.
