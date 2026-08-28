@@ -396,6 +396,24 @@ check_failure_signature() {
     breaker-check-signature --issue "$issue_num" --phase "$phase"
 }
 
+# --- Session-window pause rollback (corrects history; unconditional, never deferred) ---
+# Usage: rollback_paused_retry <issue_num> <phase> <sig_value> <retry_key> <ceiling>
+# When sig_value is "environmental:session_window_pause" (written only by
+# entrypoint.sh's _handle_session_window_pause, gated by #344's structured-evidence
+# classifier), the prior dispatch for retry_key never reached a verdict — its optimistic
+# increment_retry is decremented (clamped at 0) so the caller's immediately-following
+# get_retry_count/ceiling-check/increment_retry sequence treats this attempt as if the
+# paused one had never counted. No-op for every other sig_value (including "").
+rollback_paused_retry() {
+  local issue_num="$1" phase="$2" sig_value="$3" retry_key="$4" ceiling="$5"
+  [ "$sig_value" = "environmental:session_window_pause" ] || return 0
+  local cur new
+  cur=$(get_retry_count "$retry_key")
+  new=$(( cur > 0 ? cur - 1 : 0 ))
+  STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "$retry_key" --value "$new"
+  echo "[$(date -u +%FT%TZ)] session_window_gate issue=#${issue_num} phase=${phase} action=retry_decrement count=${new}/${ceiling}" >&2
+}
+
 # --- Skip the counted retry for a runner-side delivery failure (#279) ---
 # Bounded by a capped shadow counter ("<retry_key>:delivery") so a chronically-cursed
 # ticket's worst-case dispatch volume still matches today's behavior exactly once the

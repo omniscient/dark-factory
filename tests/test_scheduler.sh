@@ -189,6 +189,64 @@ assert_eq "K10: reason string embeds the signature" \
 > "$STUB_LOG"
 
 # ==========================================
+# B3: environmental:session_window_pause never trips the early-stuck breaker
+# ==========================================
+echo ""
+echo "--- B3: session_window_pause repeat never trips ---"
+echo '{}' > "$STATE_FILE"
+
+_drop_sig 53 plan "environmental:session_window_pause"
+check_failure_signature "53" "plan" > /dev/null
+_drop_sig 53 plan "environmental:session_window_pause"
+RESULT_PAUSE=$(check_failure_signature "53" "plan")
+assert_eq "environmental:session_window_pause repeat never trips" "1" \
+  "$(echo "$RESULT_PAUSE" | grep -c 'stuck=false')"
+
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+# ==========================================
+# B4: rollback_paused_retry (#341 session-window pause rollback)
+# ==========================================
+echo ""
+echo "--- B4: rollback_paused_retry ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+# B4a: non-pause signature is a no-op
+increment_retry "120:refine"
+rollback_paused_retry 120 refine "substantive:test_failure:1" "120:refine" 3
+assert_eq "B4a: non-pause signature does not decrement" "1" "$(get_retry_count "120:refine")"
+
+# B4b: empty signature is a no-op
+rollback_paused_retry 120 refine "" "120:refine" 3
+assert_eq "B4b: empty signature does not decrement" "1" "$(get_retry_count "120:refine")"
+
+# B4c: pause signature decrements by 1
+rollback_paused_retry 120 refine "environmental:session_window_pause" "120:refine" 3
+assert_eq "B4c: pause signature decrements the counter" "0" "$(get_retry_count "120:refine")"
+
+# B4d: clamps at 0 — a pause observed when the counter is already 0 (e.g. after a
+# reset_retry) does not go negative
+rollback_paused_retry 120 refine "environmental:session_window_pause" "120:refine" 3
+assert_eq "B4d: decrement clamps at 0" "0" "$(get_retry_count "120:refine")"
+
+# B4e: delegates to breaker-set-retry (not increment_retry) for the write
+> "$STUB_LOG"
+increment_retry "121:refine"
+increment_retry "121:refine"
+rollback_paused_retry 121 refine "environmental:session_window_pause" "121:refine" 3
+assert_eq "B4e: delegates to breaker-set-retry with the decremented value" \
+  "1" "$(grep -c 'breaker-set-retry --key 121:refine --value 1' "$STUB_LOG" || echo 0)"
+
+# B4f: logs the decrement action to stderr with issue/phase/action/count
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+increment_retry "122:resolve"
+LOG_LINE=$(rollback_paused_retry 122 resolve "environmental:session_window_pause" "122:resolve" 3 2>&1 >/dev/null)
+assert_eq "B4f: log line names issue/phase/action/count" "1" \
+  "$(echo "$LOG_LINE" | grep -c 'session_window_gate issue=#122 phase=resolve action=retry_decrement count=0/3')"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# ==========================================
 # C: dispatch() exit-code capture (fails until Task 3)
 # ==========================================
 echo ""
