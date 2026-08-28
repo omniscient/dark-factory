@@ -880,6 +880,8 @@ stage_conflict_resolve() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "resolve" "$SIG_VALUE" "${ISSUE}:resolve" "$MAX_RETRIES"
+
     # #279: the delivery-failure exemption's accounting (the "<key>:delivery" shadow
     # counter) must increment at the actual dispatch point below, not here — this
     # checkpoint only PEEKS the shadow counter to decide trip-vs-proceed, preserving

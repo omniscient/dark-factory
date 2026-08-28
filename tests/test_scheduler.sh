@@ -1597,6 +1597,8 @@ _run_resolve_body() {
     return
   fi
 
+  rollback_paused_retry "$issue" "resolve" "$SIG_VALUE" "${issue}:resolve" "$MAX_RETRIES"
+
   RESOLVE_DELIVERY_SKIP=""
   if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
     DPEEK=$(get_retry_count "${issue}:resolve:delivery" || echo 0)
@@ -1690,6 +1692,28 @@ _run_resolve_body 114
 assert_eq "W5: shadow counter at 1 before reset" "1" "$(get_retry_count "114:resolve:delivery")"
 reset_retry "114:resolve"
 assert_eq "W5b: shadow counter cleared" "0" "$(get_retry_count "114:resolve:delivery")"
+
+> "$STUB_LOG"
+
+# W6: dispatch → pause → resume leaves the resolve retry counter net-unchanged (resolve's
+# ceiling-check/increment are not adjacent, unlike the other three sites — the rollback
+# must still land at the shared checkpoint)
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+_drop_sig 115 resolve "substantive:test_failure:1"
+_run_resolve_body 115
+assert_eq "W6a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "115:resolve")"
+_drop_sig 115 resolve "environmental:session_window_pause"
+_run_resolve_body 115
+assert_eq "W6b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "115:resolve")"
+assert_eq "W6c: dispatched again" "2" "$(grep -c 'dispatch Deconflict issue #115' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W7: clamp at 0 for resolve
+_drop_sig 116 resolve "environmental:session_window_pause"
+_run_resolve_body 116
+assert_eq "W7: counter clamped at 0, not negative, after the new dispatch's own +1" \
+  "1" "$(get_retry_count "116:resolve")"
 
 > "$STUB_LOG"
 
