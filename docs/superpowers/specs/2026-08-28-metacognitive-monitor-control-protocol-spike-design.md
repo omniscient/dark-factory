@@ -82,7 +82,7 @@ rationale, intervention-outcome delta):
 | Memory intervention provenance/confidence/security | #247 | No |
 | Harness-swap / orchestration ablation replay | #240 | Partial — `harness_economics` gives cost/token deltas, not quality |
 | Monitor/control/outcome event schema itself | This spike, §4.2 | N/A (new) |
-| Side-effect-level *enforcement* (permission profiles) | #196 | N/A (schema exists, enforcement doesn't) |
+| Side-effect-level *enforcement* (permission profiles) | #196 | N/A (schema exists; zero entries declared in the self-target adapter; enforcement doesn't) |
 | Verifier abstraction generalized across loops | #197 | N/A |
 | Declarative stop conditions enforced by breaker | #198 | Partial — breaker already stops on repeated signature |
 | State governance / provenance for injected advisory state | #190, #247 | Partial — #190 scorecard exists for other state classes |
@@ -271,8 +271,11 @@ Eight control actions per the issue's own enumeration, mapped to **existing** en
 | `escalate` | `breaker.trip_to_blocked` (Blocked + `needs-discussion` + `factory-regression` + comment) | Human review of Blocked ticket |
 | `stop` | Scheduler dispatch-skip (WIP/ceiling/breaker gates already refuse to dispatch) | Scheduler poll loop |
 
-Every named `.factory/adapter.yaml` `loops:` entry already declares `side_effect_level` (1–6),
-`verifier`, `stop_condition`, `failure_behavior`, and `handoff` (epic #194 A1, `adapter.py`). This
+The `loops:` entry schema (`verifier`, `stop_condition`, `failure_behavior`, `side_effect_level` 1–6,
+`handoff`) exists in `adapter.py::_validate_loop` (epic #194 A1,
+`docs/archive/2026-07-07-adapter-schema-v2-loops-design.md`), but `.factory/adapter.yaml` on `main`
+declares **no** `loops:` entries today (top-level keys: `schema_version`, `components`, `safety`,
+`memory_routing`). This
 spike recommends any future control-action ↔ permission enforcement (i.e., "which control actions
 are auto-executable at which side-effect level") be designed as an **extension of that existing
 per-loop schema**, not a parallel permission system — but the enforcement itself is #196's scope
@@ -288,15 +291,15 @@ paper design; it is **not** a diff against `adapter.py`, `.factory/adapter.yaml`
 `monitor-events.jsonl` (the new Layer 2 stream), and `request-ledger.jsonl` (cost/token, subject to
 its existing 100 MB × 3 rotation — bounding how far back request-level evidence survives). None of
 these are reachable from the refine container (they live on `dark_factory_state`, not the clone),
-so the *instance* layer (which run IDs qualify, minimum-N per phase) is deferred to a follow-up
-ticket that runs with volume access.
+so the *instance* layer (which run IDs qualify, minimum-N per phase) is deferred to **#240**
+(harness-swap replay benchmark), whose fixture inventory is the same data — see the #240 row in §4.10.
 
 **Anti-leakage rules (finished, normative — not deferred):**
 
 1. **Cut rule:** the replay input for a given intervention pivot point includes only events with
    `at` timestamps strictly before that pivot's `control_decision` event.
 2. **Redaction:** all post-pivot `verify_outcome` events, downstream gate verdicts, and the run's
-   final `outcome.state` (`run_record.py`'s existing outcome computation) are redacted from any
+   final `harness_economics.outcome.state` (`run_record.py::_compute_outcome`) are redacted from any
    input the (fast or slow) monitor sees when a replay asks "what would the monitor have decided
    here."
 3. **Time-ordered hold-out:** fixtures are partitioned by wall-clock run date, not shuffled — a
@@ -367,9 +370,9 @@ or comment action is required by this spike. When #239 is re-refined, its spec m
 
 | Ticket | Amendment |
 |---|---|
-| #235 (harness economics ledger) | Log monitor/control event counts and monitor-attributable spend (§4.8) as an additional `harness_economics` sub-field once §4.2 Layer 1 exists — additive, no schema break. |
+| #234 epic (harness economics) — **#235 is closed/shipped**, so this routes to the future ticket that builds §4.2 Layer 1 | Log monitor/control event counts and monitor-attributable spend (§4.8) as an additional `harness_economics` sub-field once §4.2 Layer 1 exists — additive, no schema break. |
 | #238 (failure-spend taxonomy) | Owns: normalized repeated-failure fingerprint (extensible tuple, v1 = today's signature string per Q2), intra-run/tool-call-level repeat detection, the strategy-change-before-retry precondition, and any `escalate`→`replan` control remap. This spike explicitly hands these to #238 rather than designing them itself. |
-| #240 (harness-swap replay benchmark) | Add reflection-only, fast-monitor-only, slow-monitor-only, and dual-monitor replay variants (§4.7's rows) to its existing ablation harness; measure intervention utility (§4.8) alongside its current cost/token deltas. |
+| #240 (harness-swap replay benchmark) | Own the §4.6 fixture *instance* layer (run-ID qualification, minimum-N per phase). Add reflection-only, fast-monitor-only, slow-monitor-only, and dual-monitor replay variants (§4.7's rows) to its existing ablation harness; measure intervention utility (§4.8) alongside its current cost/token deltas. |
 | #245 (memory intervention trigger/silence policy) | Expand trigger/silence policy to include progress-delta, evidence-coverage, and knowledge-boundary signals from §4.2's schema, while preserving the #241 memory worker's explicit non-planner boundary (non-goal, unchanged). |
 | #246 (memory intervention A/B/ablation) | Add calibration, selective-risk, false-intervention, and high-confidence-failure metrics (§4.8) to its existing staged-rollout evaluation plan. |
 | #247 (memory provenance/confidence/security) | Treat monitor/control state (§4.2) as governed, provenance-linked, untrusted advisory state — same authority model as injected memory reminders; #247 is the natural home for enforcing "slow-monitor output cannot self-approve" at the schema-validation layer. |
@@ -399,6 +402,20 @@ At every stage, a stalled/negative-signal result is itself a valid spike outcome
 does not presuppose the loop ships.
 
 ---
+
+## Verdicts
+
+- **#239:** RE-REFINE (not drop, not re-scope). The routing premise survives, but its authorization
+  model must adopt the §4.9 delta verbatim; keep `Depends on: #288` until this spec is archived.
+- **#241 children (#242–#247, Wave 3):** may proceed on these assumptions: (1) the memory worker
+  stays non-planner; (2) monitor/control output is untrusted advisory state governed like injected
+  reminders (#247); (3) no child may build a slow-monitor, an auto-executing control action, or a
+  replan remap — those wait on #238 / #196 / a future gate ticket of their own; (4) #245/#246/#247
+  take the §4.10 amendments as scope additions, not re-refinements.
+- **Disposition:** this spike closes by archiving this spec to `docs/archive/` (precedent #189,
+  #207, #311); there is no plan phase. On close the file moves to `docs/archive/`, which honors the
+  issue's "the issue report is the artifact" intent — the Phase 6 issue comment is the summary,
+  this archived file is the durable decision report.
 
 ## Alternatives Considered
 
@@ -433,8 +450,8 @@ does not presuppose the loop ships.
 - Whether the slow-monitor's model pin should follow the `epic_autopilot`-style Opus-only pattern
   or the `cheap_model_first`/`escalation.opus_only_for` tiering already in `config/config.yaml` —
   left to the follow-up ticket that actually builds the slow-monitor DAG node.
-- Exact minimum-N and phase-coverage targets for the fixture instance layer (§4.6) — left to the
-  follow-up ticket with volume access, since refine cannot inspect the actual population size.
+- Exact minimum-N and phase-coverage targets for the fixture instance layer (§4.6) — left to
+  #240, which runs with volume access, since refine cannot inspect the actual population size.
 
 ## Assumptions (flagged)
 
