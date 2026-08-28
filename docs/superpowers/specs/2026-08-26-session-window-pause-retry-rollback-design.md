@@ -2,8 +2,8 @@
 
 **Issue:** omniscient/dark-factory#341
 **Status:** new spec, refined 2026-08-26 against current `main` (post-#344 merge, `dc2e4ab`).
-**Depends on:** #344 (merged) — tightened `session_window.py`'s classifier to require structured
-`status=rejected` evidence (or explicit human-reset text) before calling a run "paused," closing the
+**Depends on:** #344 (merged) — tightened `session_window.py`'s classifier to require a structured
+exhaustion event (`status=rejected`, or the legacy no-status `claude.rate_limit_event` shape) or explicit usage/session/credit exhaustion phrasing (`_SESSION_EXHAUSTION_RE`) before calling a run "paused," closing the
 false-positive-pause hole that made this ticket's original evidence (the #19/#207 incident) ambiguous.
 **Related:** #279 (`docs/archive/2026-07-28-delivery-failure-retry-exemption-design.md`) — the directly
 analogous "an attempt that never produced a verdict must not consume a retry" change this spec extends
@@ -347,6 +347,16 @@ existing implement/resolve asymmetry.
   `record_failure_signature` expects, independent of `classify()`.
 
 ---
+
+## Reviewer notes (2026-08-27)
+
+- CI does not run `tests/test_scheduler.sh`; this ticket's dispatch/pause/resume tests are
+  local-only (same pre-existing gap as the #279 tests they mirror). The plan's final
+  verification must run `bash tests/test_scheduler.sh` explicitly and state the gap; wiring the
+  scheduler suite into CI is a separate ticket — do not add the ci.yml line here.
+- When copying the `_write_error_signature` guard, use the existing `return 0` form (not bare
+  `return`) — it matters under `set -e` at end of function.
+
 
 ## Alternatives Considered
 
