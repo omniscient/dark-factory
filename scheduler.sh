@@ -1180,6 +1180,7 @@ declare -A STAGE_GUARD=(
   [stage_blocked_retry]=red_or_paused
   [stage_plan]=paused_only
   [stage_refine]=paused_only
+  [stage_orphan_sweep]=paused_only
 )
 declare -A STAGE_SKIP_ACTION=(
   [stage_conflict_resolve]=skip_deconflict
@@ -1187,6 +1188,7 @@ declare -A STAGE_SKIP_ACTION=(
   [stage_blocked_retry]=skip_blocked_retry
   [stage_plan]=skip_plan
   [stage_refine]=skip_refine
+  [stage_orphan_sweep]=skip_orphan_sweep
 )
 STAGE_ORDER=(stage_conflict_resolve stage_review_triage stage_ready_implement stage_blocked_retry stage_plan stage_refine)
 
@@ -1319,15 +1321,13 @@ while true; do
     continue
   fi
 
-  # --- Sweep: recover orphaned "In progress" items (see stage_orphan_sweep) ---
-  stage_orphan_sweep
-
   # --- Read session-window-paused sentinel (written by entrypoint.sh on a detected
   # Claude Max session-window exhaustion, #35) — self-clearing, no recheck dispatch
-  # needed since the resume time is already known from the embedded epoch. Read
-  # BEFORE the main-is-red block below so main_red_recheck_check/main_red_fixer_check
-  # can also honor the pause (they must not dispatch "Recheck main"/"Fix main" into an
-  # exhausted window). ---
+  # needed since the resume time is already known from the embedded epoch. Read BEFORE
+  # stage_orphan_sweep so a run paused this cycle isn't misclassified as orphaned before
+  # its pause is known (#334), and BEFORE the main-is-red block below so
+  # main_red_recheck_check/main_red_fixer_check can also honor the pause (they must not
+  # dispatch "Recheck main"/"Fix main" into an exhausted window). ---
   SESSION_WINDOW_PAUSED=false
   if [ -f "${SCHEDULER_STATE_DIR}/session-window-paused" ]; then
     SW_RESUME_EPOCH=$(cat "${SCHEDULER_STATE_DIR}/session-window-paused" 2>/dev/null || echo 0)
@@ -1344,6 +1344,11 @@ while true; do
       rm -f "${SCHEDULER_STATE_DIR}/session-window-paused"
     fi
   fi
+
+  # --- Sweep: recover orphaned "In progress" items (see stage_orphan_sweep). Deferred,
+  # not suppressed, while a session-window pause is active — fires normally the first
+  # cycle after resume_at or once the sentinel is absent (#334). ---
+  dispatch_stage stage_orphan_sweep
 
   # --- Read main-is-red sentinel (written by smoke_gate.sh in dispatched containers) ---
   # When present, skip Priority 1.5/2/3 (implementation dispatches); 1/4/5 continue,
