@@ -15,7 +15,7 @@ the session-window-paused sentinel (scheduler.sh:1325-1346). `stage_orphan_sweep
 
 A session-window pause is not a crash: `entrypoint.sh`'s `_handle_session_window_pause()`
 deliberately writes the pause sentinel, records a `paused` run-record entry, and lets the container
-exit cleanly (its error handler *did* run) — by design, per the comment at `entrypoint.sh:426-444`,
+exit cleanly (its error handler *did* run) — by design, per the comment at `entrypoint.sh:455-458 (pause branch in `on_failure()`) and entrypoint.sh:477-478 (pause comment body)`,
 so "the scheduler reconciles this issue's board state on its next poll." Because the sweep runs
 before the sentinel is read, that first reconciliation poll sees "no running container" and
 misclassifies the paused run as orphaned, before the very next few lines of the same cycle would
@@ -212,6 +212,15 @@ add cases asserting `dispatch_stage stage_orphan_sweep` is skipped under
 `MAIN_IS_RED=true`), and that `stage_orphan_sweep` is absent from `STAGE_ORDER`.
 
 ---
+
+## CI-enforcement note (reviewer amendment, 2026-08-27)
+
+`.github/workflows/ci.yml` does not run `tests/test_scheduler.sh`, so the new R-tests are
+locally runnable but CI-unenforced. The plan's final verification must run
+`bash tests/test_scheduler.sh` explicitly and state this gap; wiring the scheduler suite into
+CI is a separate ticket (it must first be proven portable on a bare runner, as
+`tests/test_entrypoint_session_window.sh` had to be for #355) — do not add the ci.yml line as a
+side effect of this ticket.
 
 ## Alternatives Considered
 
