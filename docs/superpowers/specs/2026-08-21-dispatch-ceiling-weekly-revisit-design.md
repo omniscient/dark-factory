@@ -168,6 +168,20 @@ deliberate, intentional commit of that file this command produces, on its own
 branch). Guard: stage only the `ABOVE_CEILING_KEYWORDS` line, never `git add -f` the whole file,
 since it's a gitignored secrets file and a populated copy would leak into a public PR.
 
+## Operator amendment (2026-08-27): XL-bucket filing is policy-closed
+
+Issue #331 ("Revisit XL=always-above-ceiling rule") was closed 2026-08-22 by an operator
+**policy decision**, not by resolution: XL tickets keep parking for human pairing, because the
+L+XL bucket's success signal is L-dominated and XL epics are exactly where a human gate is
+cheapest relative to blast radius; the decision explicitly asked this lineage to stop re-filing
+the observation (this was the fourth filing after #29/#31/#331). Therefore the XL-bucket
+duplicate guard in this run changes semantics: when `L_NEEDS_ISSUE` is true, the implement agent
+must check for an open matching issue **or** the closed #331 policy decision — and in either
+case SKIP filing, citing #331's closing comment in the analysis comment instead. A new XL-bucket
+issue may be filed only if a human has explicitly reversed the #331 policy decision in the
+meantime (check #331's timeline for a reopen or a reversal comment). The plan phase must carry
+this guard in place of the open-issues-only check.
+
 ## Alternatives Considered
 
 1. **Proceed with `UNTIL=2026-08-21` and let implement re-run the full analysis regardless,
