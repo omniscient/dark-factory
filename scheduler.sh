@@ -396,6 +396,24 @@ check_failure_signature() {
     breaker-check-signature --issue "$issue_num" --phase "$phase"
 }
 
+# --- Session-window pause rollback (corrects history; unconditional, never deferred) ---
+# Usage: rollback_paused_retry <issue_num> <phase> <sig_value> <retry_key> <ceiling>
+# When sig_value is "environmental:session_window_pause" (written only by
+# entrypoint.sh's _handle_session_window_pause, gated by #344's structured-evidence
+# classifier), the prior dispatch for retry_key never reached a verdict — its optimistic
+# increment_retry is decremented (clamped at 0) so the caller's immediately-following
+# get_retry_count/ceiling-check/increment_retry sequence treats this attempt as if the
+# paused one had never counted. No-op for every other sig_value (including "").
+rollback_paused_retry() {
+  local issue_num="$1" phase="$2" sig_value="$3" retry_key="$4" ceiling="$5"
+  [ "$sig_value" = "environmental:session_window_pause" ] || return 0
+  local cur new
+  cur=$(get_retry_count "$retry_key")
+  new=$(( cur > 0 ? cur - 1 : 0 ))
+  STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-set-retry --key "$retry_key" --value "$new"
+  echo "[$(date -u +%FT%TZ)] session_window_gate issue=#${issue_num} phase=${phase} action=retry_decrement count=${new}/${ceiling}" >&2
+}
+
 # --- Skip the counted retry for a runner-side delivery failure (#279) ---
 # Bounded by a capped shadow counter ("<retry_key>:delivery") so a chronically-cursed
 # ticket's worst-case dispatch volume still matches today's behavior exactly once the
@@ -442,6 +460,19 @@ delivery_skip_note() {
 
 
 > ℹ️ The previous attempt hit a runner-side delivery failure (empty prompt, [#279](https://github.com/${FACTORY_REPO_SLUG}/issues/279)) and was not counted against the retry budget.
+EOF
+  fi
+}
+
+# --- Shared "previous attempt hit a confirmed session-window pause" issue-comment note (#341) ---
+# Callers must set PREV_SESSION_WINDOW_PAUSE (non-empty to include the note) before calling.
+session_window_pause_note() {
+  if [ -n "$PREV_SESSION_WINDOW_PAUSE" ]; then
+    cat <<EOF
+
+
+> ⏸️ The previous attempt was paused for a Claude session-window exhaustion and was not
+> counted against the retry budget.
 EOF
   fi
 }
@@ -849,6 +880,8 @@ stage_conflict_resolve() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "resolve" "$SIG_VALUE" "${ISSUE}:resolve" "$MAX_RETRIES"
+
     # #279: the delivery-failure exemption's accounting (the "<key>:delivery" shadow
     # counter) must increment at the actual dispatch point below, not here — this
     # checkpoint only PEEKS the shadow counter to decide trip-vs-proceed, preserving
@@ -1003,6 +1036,8 @@ stage_blocked_retry() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES"
+
     DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "implement" "$SIG_VALUE" "$ISSUE" "$MAX_RETRIES" || echo "count")
     case "$DECISION" in
       skip)
@@ -1061,6 +1096,11 @@ stage_plan() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "plan" "$SIG_VALUE" "${ISSUE}:plan" "$REFINE_MAX_RETRIES"
+
+    PREV_SESSION_WINDOW_PAUSE=""
+    [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
     PREV_DELIVERY_SKIP=""
     DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "plan" "$SIG_VALUE" "${ISSUE}:plan" "$REFINE_MAX_RETRIES" || echo "count")
     case "$DECISION" in
@@ -1083,7 +1123,8 @@ stage_plan() {
 
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     DELIVERY_NOTE=$(delivery_skip_note)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}
+    SESSION_WINDOW_NOTE=$(session_window_pause_note)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -1123,6 +1164,11 @@ stage_refine() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES"
+
+    PREV_SESSION_WINDOW_PAUSE=""
+    [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
     PREV_DELIVERY_SKIP=""
     DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES" || echo "count")
     case "$DECISION" in
@@ -1145,7 +1191,8 @@ stage_refine() {
 
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     DELIVERY_NOTE=$(delivery_skip_note)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}
+    SESSION_WINDOW_NOTE=$(session_window_pause_note)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true

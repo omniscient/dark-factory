@@ -163,3 +163,40 @@ def test_cli_error_signature_write_missing_text_file_is_empty_text(tmp_path):
     )
     assert result.returncode == 0
     assert "signature=environmental:delivery_failure" in result.stdout
+
+
+def test_session_window_pause_signature_constant():
+    from factory_core.error_signature import SESSION_WINDOW_PAUSE_SIGNATURE
+    assert SESSION_WINDOW_PAUSE_SIGNATURE == "environmental:session_window_pause"
+
+
+def test_cli_session_window_pause_signature_write_end_to_end(tmp_path):
+    result = subprocess.run(
+        [_sys.executable, CLI, "session-window-pause-signature-write",
+         "--issue", "19", "--phase", "plan",
+         "--state-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    sig_file = tmp_path / "error-signatures" / "19.plan.sig"
+    data = json.loads(sig_file.read_text())
+    assert data == {
+        "signature": "environmental:session_window_pause",
+        "phase": "plan",
+        "exit_code": 0,
+    }
+
+
+def test_cli_session_window_pause_signature_write_independent_of_classify(tmp_path):
+    # Direct write, not routed through classify() — arbitrary/absent text must not change
+    # the outcome (contrast test_cli_error_signature_write_missing_text_file_is_empty_text,
+    # which DOES route through classify() and yields environmental:delivery_failure).
+    result = subprocess.run(
+        [_sys.executable, CLI, "session-window-pause-signature-write",
+         "--issue", "20", "--phase", "refine",
+         "--state-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    sig_file = tmp_path / "error-signatures" / "20.refine.sig"
+    assert json.loads(sig_file.read_text())["signature"] == "environmental:session_window_pause"

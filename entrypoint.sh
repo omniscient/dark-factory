@@ -288,6 +288,13 @@ print("SESSION_WINDOW_MATCH_BRANCH=" + shlex.quote(str(d.get("branch", ""))))
       "match_offset=${SESSION_WINDOW_MATCH_OFFSET}" "snippet_b64=b64:${snippet_b64}")
   fi
 
+  if [ -n "${ISSUE_NUM:-}" ]; then
+    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-pause-signature-write \
+      --issue "$ISSUE_NUM" \
+      --phase "$(_failure_phase_for_intent)" \
+      --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" || true
+  fi
+
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
     --run-id "${RUN_ID:-unknown}" \
     --issue "${ISSUE_NUM:-0}" \

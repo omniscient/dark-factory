@@ -189,6 +189,64 @@ assert_eq "K10: reason string embeds the signature" \
 > "$STUB_LOG"
 
 # ==========================================
+# B3: environmental:session_window_pause never trips the early-stuck breaker
+# ==========================================
+echo ""
+echo "--- B3: session_window_pause repeat never trips ---"
+echo '{}' > "$STATE_FILE"
+
+_drop_sig 53 plan "environmental:session_window_pause"
+check_failure_signature "53" "plan" > /dev/null
+_drop_sig 53 plan "environmental:session_window_pause"
+RESULT_PAUSE=$(check_failure_signature "53" "plan")
+assert_eq "environmental:session_window_pause repeat never trips" "1" \
+  "$(echo "$RESULT_PAUSE" | grep -c 'stuck=false')"
+
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+# ==========================================
+# B4: rollback_paused_retry (#341 session-window pause rollback)
+# ==========================================
+echo ""
+echo "--- B4: rollback_paused_retry ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+
+# B4a: non-pause signature is a no-op
+increment_retry "120:refine"
+rollback_paused_retry 120 refine "substantive:test_failure:1" "120:refine" 3
+assert_eq "B4a: non-pause signature does not decrement" "1" "$(get_retry_count "120:refine")"
+
+# B4b: empty signature is a no-op
+rollback_paused_retry 120 refine "" "120:refine" 3
+assert_eq "B4b: empty signature does not decrement" "1" "$(get_retry_count "120:refine")"
+
+# B4c: pause signature decrements by 1
+rollback_paused_retry 120 refine "environmental:session_window_pause" "120:refine" 3
+assert_eq "B4c: pause signature decrements the counter" "0" "$(get_retry_count "120:refine")"
+
+# B4d: clamps at 0 — a pause observed when the counter is already 0 (e.g. after a
+# reset_retry) does not go negative
+rollback_paused_retry 120 refine "environmental:session_window_pause" "120:refine" 3
+assert_eq "B4d: decrement clamps at 0" "0" "$(get_retry_count "120:refine")"
+
+# B4e: delegates to breaker-set-retry (not increment_retry) for the write
+> "$STUB_LOG"
+increment_retry "121:refine"
+increment_retry "121:refine"
+rollback_paused_retry 121 refine "environmental:session_window_pause" "121:refine" 3
+assert_eq "B4e: delegates to breaker-set-retry with the decremented value" \
+  "1" "$(grep -c 'breaker-set-retry --key 121:refine --value 1' "$STUB_LOG" || echo 0)"
+
+# B4f: logs the decrement action to stderr with issue/phase/action/count
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+increment_retry "122:resolve"
+LOG_LINE=$(rollback_paused_retry 122 resolve "environmental:session_window_pause" "122:resolve" 3 2>&1 >/dev/null)
+assert_eq "B4f: log line names issue/phase/action/count" "1" \
+  "$(echo "$LOG_LINE" | grep -c 'session_window_gate issue=#122 phase=resolve action=retry_decrement count=0/3')"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# ==========================================
 # C: dispatch() exit-code capture (fails until Task 3)
 # ==========================================
 echo ""
@@ -1305,6 +1363,11 @@ _run_refine_body() {
     return
   fi
 
+  rollback_paused_retry "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES"
+
+  PREV_SESSION_WINDOW_PAUSE=""
+  [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
   PREV_DELIVERY_SKIP=""
   DECISION=$(retry_or_skip_delivery_failure "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES" || echo "count")
   case "$DECISION" in
@@ -1324,7 +1387,8 @@ _run_refine_body() {
   if [ -n "$PREV_DELIVERY_SKIP" ]; then
     DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
   fi
-  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}" > /dev/null
+  SESSION_WINDOW_NOTE=$(session_window_pause_note)
+  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}" > /dev/null
   dispatch "Refine issue #${issue}" > /dev/null
 }
 
@@ -1371,6 +1435,45 @@ assert_eq "T3d: normal counter reset to 0 after trip (trip_to_blocked's existing
 
 > "$STUB_LOG"
 
+# T4: dispatch → pause → resume leaves the normal retry counter net-unchanged (#341
+# acceptance test)
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 83 refine "substantive:test_failure:1"
+_run_refine_body 83
+assert_eq "T4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "83:refine")"
+_drop_sig 83 refine "environmental:session_window_pause"
+_run_refine_body 83
+assert_eq "T4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "83:refine")"
+assert_eq "T4c: dispatched again (not skipped, just not double-counted)" \
+  "2" "$(grep -c 'dispatch Refine issue #83' "$STUB_LOG" || echo 0)"
+assert_eq "T4d: comment carries the real session_window_pause_note() output" \
+  "1" "$(grep -c 'was paused for a Claude session-window exhaustion' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# T5: clamp at 0 — a pause observed with no prior increment does not go negative and
+# does not block the next dispatch
+_drop_sig 84 refine "environmental:session_window_pause"
+_run_refine_body 84
+assert_eq "T5: counter clamped at 0, not negative, after the new dispatch's own +1" \
+  "1" "$(get_retry_count "84:refine")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# T6: the drop file is consumed exactly once — a second read without a new pause does
+# not see a stale pause signature
+_drop_sig 85 refine "substantive:test_failure:1"
+_run_refine_body 85
+_drop_sig 85 refine "environmental:session_window_pause"
+_run_refine_body 85
+assert_eq "T6a: one observed pause nets the counter unchanged (2 dispatches, 1 rollback)" \
+  "1" "$(get_retry_count "85:refine")"
+SIG_RESULT_T6=$(check_failure_signature "85" "refine")
+assert_eq "T6b: drop file consumed — second read returns no signature" \
+  "1" "$(echo "$SIG_RESULT_T6" | grep -c 'sig=$')"
+
+> "$STUB_LOG"
+
 # ==========================================
 # U: stage_plan — delivery-failure retry exemption wiring (#279)
 # ==========================================
@@ -1389,6 +1492,11 @@ _run_plan_body() {
     trip_to_blocked "$issue" "plan" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
     return
   fi
+
+  rollback_paused_retry "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES"
+
+  PREV_SESSION_WINDOW_PAUSE=""
+  [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
 
   PREV_DELIVERY_SKIP=""
   DECISION=$(retry_or_skip_delivery_failure "$issue" "plan" "$SIG_VALUE" "${issue}:plan" "$REFINE_MAX_RETRIES" || echo "count")
@@ -1409,7 +1517,8 @@ _run_plan_body() {
   if [ -n "$PREV_DELIVERY_SKIP" ]; then
     DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
   fi
-  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}" > /dev/null
+  SESSION_WINDOW_NOTE=$(session_window_pause_note)
+  gh issue comment "$issue" --repo test/repo --body "Starting plan.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}" > /dev/null
   dispatch "Plan issue #${issue}" > /dev/null
 }
 
@@ -1439,6 +1548,19 @@ assert_eq "U3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "92
 
 > "$STUB_LOG"
 
+# U4: dispatch → pause → resume leaves the plan retry counter net-unchanged
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 93 plan "substantive:test_failure:1"
+_run_plan_body 93
+assert_eq "U4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "93:plan")"
+_drop_sig 93 plan "environmental:session_window_pause"
+_run_plan_body 93
+assert_eq "U4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "93:plan")"
+assert_eq "U4c: comment carries the real session_window_pause_note() output" \
+  "1" "$(grep -c 'was paused for a Claude session-window exhaustion' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"
+
 # ==========================================
 # V: stage_blocked_retry (implement) — delivery-failure retry exemption (#279)
 # ==========================================
@@ -1457,6 +1579,8 @@ _run_blocked_retry_body() {
     trip_to_blocked "$issue" "implement" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
     return
   fi
+
+  rollback_paused_retry "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES"
 
   DECISION=$(retry_or_skip_delivery_failure "$issue" "implement" "$SIG_VALUE" "$issue" "$MAX_RETRIES" || echo "count")
   case "$DECISION" in
@@ -1506,6 +1630,18 @@ assert_eq "V3c: normal counter reset to 0 after trip" "0" "$(get_retry_count "10
 
 > "$STUB_LOG"
 
+# V4: dispatch → pause → resume leaves the implement (bare-key) retry counter net-unchanged
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 103 implement "substantive:test_failure:1"
+_run_blocked_retry_body 103
+assert_eq "V4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "103")"
+_drop_sig 103 implement "environmental:session_window_pause"
+_run_blocked_retry_body 103
+assert_eq "V4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "103")"
+assert_eq "V4c: dispatched again" "2" "$(grep -c 'dispatch Fix issue #103' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
 # ==========================================
 # W: stage_conflict_resolve (resolve) — delivery-failure retry exemption (#279)
 # ==========================================
@@ -1525,6 +1661,8 @@ _run_resolve_body() {
     trip_to_blocked "$issue" "resolve" "same failure signature '${SIG_VALUE}' recorded on two consecutive attempts — halting retries"
     return
   fi
+
+  rollback_paused_retry "$issue" "resolve" "$SIG_VALUE" "${issue}:resolve" "$MAX_RETRIES"
 
   RESOLVE_DELIVERY_SKIP=""
   if [ "$SIG_VALUE" = "environmental:delivery_failure" ]; then
@@ -1622,11 +1760,36 @@ assert_eq "W5b: shadow counter cleared" "0" "$(get_retry_count "114:resolve:deli
 
 > "$STUB_LOG"
 
+# W6: dispatch → pause → resume leaves the resolve retry counter net-unchanged (resolve's
+# ceiling-check/increment are not adjacent, unlike the other three sites — the rollback
+# must still land at the shared checkpoint)
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+_drop_sig 115 resolve "substantive:test_failure:1"
+_run_resolve_body 115
+assert_eq "W6a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "115:resolve")"
+_drop_sig 115 resolve "environmental:session_window_pause"
+_run_resolve_body 115
+assert_eq "W6b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "115:resolve")"
+assert_eq "W6c: dispatched again" "2" "$(grep -c 'dispatch Deconflict issue #115' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# W7: clamp at 0 for resolve
+_drop_sig 116 resolve "environmental:session_window_pause"
+_run_resolve_body 116
+assert_eq "W7: counter clamped at 0, not negative, after the new dispatch's own +1" \
+  "1" "$(get_retry_count "116:resolve")"
+
+> "$STUB_LOG"
+
 # ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
 rm -rf "$SCHEDULER_STATE_DIR"
 echo ""
+echo "--- #341 drift lock: rollback_paused_retry is wired at exactly the four spec sites (refine, plan, blocked_retry, conflict_resolve) ---"
+assert_eq "rollback_paused_retry wired 4x in scheduler.sh" "4" "$(grep -c 'rollback_paused_retry "\$ISSUE"' "$SCHED")"
+
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]

@@ -25,6 +25,14 @@ _TEST_FAILURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Written directly by entrypoint.sh's _handle_session_window_pause() via a dedicated CLI
+# subcommand, bypassing classify() entirely — the pause classification already happened in
+# session_window.py before that function returns 0. Included here (not just as a bash literal)
+# so scheduler.sh's hardcoded comparison and this module's writer share one canonical source
+# a reader can find by grepping the module, mirroring how "environmental:delivery_failure" is
+# both classify()'s return value and retry_or_skip_delivery_failure()'s bash literal.
+SESSION_WINDOW_PAUSE_SIGNATURE = "environmental:session_window_pause"
+
 
 def classify(
     text: str,
