@@ -163,3 +163,8 @@ def test_cli_error_signature_write_missing_text_file_is_empty_text(tmp_path):
     )
     assert result.returncode == 0
     assert "signature=environmental:delivery_failure" in result.stdout
+
+
+def test_session_window_pause_signature_constant():
+    from factory_core.error_signature import SESSION_WINDOW_PAUSE_SIGNATURE
+    assert SESSION_WINDOW_PAUSE_SIGNATURE == "environmental:session_window_pause"
