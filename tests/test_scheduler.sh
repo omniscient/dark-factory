@@ -1723,5 +1723,8 @@ assert_eq "W7: counter clamped at 0, not negative, after the new dispatch's own 
 rm -f "$STATE_FILE" "$STUB_LOG"
 rm -rf "$SCHEDULER_STATE_DIR"
 echo ""
+echo "--- #341 drift lock: rollback_paused_retry is wired at exactly the four spec sites (refine, plan, blocked_retry, conflict_resolve) ---"
+assert_eq "rollback_paused_retry wired 4x in scheduler.sh" "4" "$(grep -c 'rollback_paused_retry "\$ISSUE"' "$SCHED")"
+
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]
