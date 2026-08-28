@@ -1154,6 +1154,11 @@ stage_refine() {
       continue
     fi
 
+    rollback_paused_retry "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES"
+
+    PREV_SESSION_WINDOW_PAUSE=""
+    [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
     PREV_DELIVERY_SKIP=""
     DECISION=$(retry_or_skip_delivery_failure "$ISSUE" "refine" "$SIG_VALUE" "${ISSUE}:refine" "$REFINE_MAX_RETRIES" || echo "count")
     case "$DECISION" in
@@ -1176,7 +1181,8 @@ stage_refine() {
 
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     DELIVERY_NOTE=$(delivery_skip_note)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}
+    SESSION_WINDOW_NOTE=$(session_window_pause_note)
+    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true

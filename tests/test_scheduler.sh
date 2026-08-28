@@ -1298,6 +1298,11 @@ _run_refine_body() {
     return
   fi
 
+  rollback_paused_retry "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES"
+
+  PREV_SESSION_WINDOW_PAUSE=""
+  [ "$SIG_VALUE" = "environmental:session_window_pause" ] && PREV_SESSION_WINDOW_PAUSE=1
+
   PREV_DELIVERY_SKIP=""
   DECISION=$(retry_or_skip_delivery_failure "$issue" "refine" "$SIG_VALUE" "${issue}:refine" "$REFINE_MAX_RETRIES" || echo "count")
   case "$DECISION" in
@@ -1317,7 +1322,8 @@ _run_refine_body() {
   if [ -n "$PREV_DELIVERY_SKIP" ]; then
     DELIVERY_NOTE=" was not counted against the retry budget (runner-side delivery failure, #279)."
   fi
-  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}" > /dev/null
+  SESSION_WINDOW_NOTE=$(session_window_pause_note)
+  gh issue comment "$issue" --repo test/repo --body "Starting refine.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}" > /dev/null
   dispatch "Refine issue #${issue}" > /dev/null
 }
 
@@ -1361,6 +1367,45 @@ assert_eq "T3c: breaker-trip delegated with the delivery-failure reason" \
   "1" "$(grep -c 'breaker-trip --issue 82 --phase refine' "$STUB_LOG" || echo 0)"
 assert_eq "T3d: normal counter reset to 0 after trip (trip_to_blocked's existing reset_retry)" \
   "0" "$(get_retry_count "82:refine")"
+
+> "$STUB_LOG"
+
+# T4: dispatch → pause → resume leaves the normal retry counter net-unchanged (#341
+# acceptance test)
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+_drop_sig 83 refine "substantive:test_failure:1"
+_run_refine_body 83
+assert_eq "T4a: first (pre-pause) dispatch increments as normal" "1" "$(get_retry_count "83:refine")"
+_drop_sig 83 refine "environmental:session_window_pause"
+_run_refine_body 83
+assert_eq "T4b: rollback + this dispatch's own increment net to no change" "1" "$(get_retry_count "83:refine")"
+assert_eq "T4c: dispatched again (not skipped, just not double-counted)" \
+  "2" "$(grep -c 'dispatch Refine issue #83' "$STUB_LOG" || echo 0)"
+assert_eq "T4d: comment carries the real session_window_pause_note() output" \
+  "1" "$(grep -c 'was paused for a Claude session-window exhaustion' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# T5: clamp at 0 — a pause observed with no prior increment does not go negative and
+# does not block the next dispatch
+_drop_sig 84 refine "environmental:session_window_pause"
+_run_refine_body 84
+assert_eq "T5: counter clamped at 0, not negative, after the new dispatch's own +1" \
+  "1" "$(get_retry_count "84:refine")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# T6: the drop file is consumed exactly once — a second read without a new pause does
+# not see a stale pause signature
+_drop_sig 85 refine "substantive:test_failure:1"
+_run_refine_body 85
+_drop_sig 85 refine "environmental:session_window_pause"
+_run_refine_body 85
+assert_eq "T6a: one observed pause nets the counter unchanged (2 dispatches, 1 rollback)" \
+  "1" "$(get_retry_count "85:refine")"
+SIG_RESULT_T6=$(check_failure_signature "85" "refine")
+assert_eq "T6b: drop file consumed — second read returns no signature" \
+  "1" "$(echo "$SIG_RESULT_T6" | grep -c 'sig=$')"
 
 > "$STUB_LOG"
 
