@@ -7,13 +7,16 @@ token-efficient by design")
 **Depends on / consumes:** omniscient/dark-factory#208 (transparent model proxy +
 request-ledger, merged — `scripts/factory_core/model_proxy.py`); omniscient/dark-factory#235
 (`harness_economics`/`factory_cpm` computation, merged — `scripts/factory_core/run_record.py`);
-omniscient/dark-factory#335 (replay benchmark suite, merged — `bench/`); omniscient/dark-factory#48
+commit `0401772` (replay benchmark suite `bench/`, MarketHawk-era issue #335, pre-extraction — dark-factory#335 is an unrelated providers fix); omniscient/dark-factory#48
 (skill-modularization eval harness, merged — `evals/skill_flow_eval.py`)
 **Related, explicitly deferred (see [Non-goals](#non-goals)):** omniscient/dark-factory#241
 (proactive-memory epic — no code yet); a #311-derived contract/trajectory-evalset follow-up (no
 ticket number assigned yet)
-**Operator note (issue #240, 2026-08-28 comment):** refine as a spec-only, Wave 1 deliverable;
-spec gate reviewed by the operator, not auto-merged on grace timer.
+**Operator note (issue #240, 2026-08-28 comment):** Wave 1 deliverable; spec gate reviewed by the
+operator, not auto-merged on grace timer. The note's "spec-only" clause applies to tickets that
+say *spike* — #240 is `test(economics)`, size M, and **implements the instrument** (code + tests,
+CI-runnable with no model access); only the live n≥1 bench execution and its results table are
+deferred to an operator-run follow-up.
 
 ---
 
@@ -27,7 +30,7 @@ change can be promoted or rolled back on evidence, not vibes.
 Codebase research for this spec found that **most of the substrate already exists**, split
 across two systems that have never been joined:
 
-- `bench/` (built under #335) is a locked, 10-task replay fixture set (`bench/suite.json`) with
+- `bench/` (built under MarketHawk-era #335, commit `0401772`) is a locked, 10-task replay fixture set (`bench/suite.json`) with
   a live re-execution runner (`bench/run_suite.sh`, `archon workflow run archon-dark-factory
   "Fix issue #N"` under `BENCH_MODE=stub`) and a `pass^k` outcome scorer. `docs/parity-p2.md`
   (2026-07-06) already ran a real two-harness replay across this suite — with gate criteria
@@ -41,7 +44,7 @@ across two systems that have never been joined:
 
 The gap: `bench/run_suite.sh` calls `archon workflow run` directly, bypassing `entrypoint.sh`
 entirely. `run-record assemble` and `post_cost_report` are called only from `entrypoint.sh`
-(lines 890–905), so **replay runs never produce a `run-record.json` and `harness_economics`
+(`entrypoint.sh:890-905`, success path; failure paths at `:488-512` and `:575`), so **replay runs never produce a `run-record.json` and `harness_economics`
 never fires on them.** #240's real, bounded deliverable is closing that gap — wiring economics
 into the replay path — not inventing new replay or economics machinery.
 
@@ -67,13 +70,14 @@ Both are scored against the same `bench/suite.json` fixture population where pos
 2. **"Replay" means using the existing `bench/` machinery**, not building new live-execution
    infrastructure. This refine run cannot execute code or commit anything outside
    `docs/superpowers/specs/` and `.archon/memory/` (OOS excision), so this spec fixes methodology,
-   variant schema, and pre-registered gate criteria; a later (non-refine) ticket executes and
-   fills in results — mirroring the `#189` precedent that a live-benchmark spike's execution
-   cannot happen inside a refine run.
+   variant schema, and pre-registered gate criteria, and the **implement phase builds the
+   instrument** listed under Deliverables below (code + CI-runnable tests). Only the live n≥1 bench
+   execution and the filled-in results table are deferred to an operator-run follow-up — mirroring
+   the `#189` precedent that live-benchmark execution cannot happen inside a factory run.
 3. **Both tiers must report economics and quality/outcome together**, per the issue's own
    acceptance bar ("token savings alone cannot pass").
 4. **The worked example variant is `token_optimization.enforce_budgets`**
-   (`config/config.yaml:122`), not a net-new mechanism from the referenced paper (cache-shape
+   (`config/config.yaml:124`), not a net-new mechanism from the referenced paper (cache-shape
    discipline, structured incremental compaction, etc.). It is the only real, already-shipped,
    already-toggleable harness change in the repo with existing calibration data
    (`evals/reports/budget-calibration-scorecard-2026-07-03.md`,
@@ -111,6 +115,7 @@ Both are scored against the same `bench/suite.json` fixture population where pos
    variant:
      variant_id: string          # e.g. "budget-enforce-on", "budget-enforce-off"
      dimension: economics | memory_intervention | contract_trajectory   # see reserved dimensions
+     fixture_set: bench/suite.json            # or evals/behavioral-state/fixtures (#311 follow-up)
      image: string (optional)    # docker image ref; omitted = current default
      config_overlay: {...}       # config.yaml key overrides; omitted = current default
      env: {...}                  # env var overrides (e.g. TOKEN_OPTIMIZATION_ENFORCE_BUDGETS)
@@ -121,7 +126,7 @@ Both are scored against the same `bench/suite.json` fixture population where pos
    silently no-op.
 4. **Worked example — two arms, one suite, one env var:**
    - Arm A (`budget-enforce-off`): `env.TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false` (kill-switch,
-     confirmed live in `scripts/budget_gate.sh:50` — `false|0|no` forces observe mode; it cannot
+     confirmed live in `scripts/budget_gate.sh:50-51` — `false|0|no` forces observe mode; it cannot
      force enforcement on, so this is the only reachable "disabled" arm).
    - Arm B (`budget-enforce-on`, baseline/current default): env unset, config as committed
      today (`enforce_budgets: true`, per-scenario `enforce` flags as in `config/config.yaml`).
@@ -132,8 +137,8 @@ Both are scored against the same `bench/suite.json` fixture population where pos
      is a signal the benchmark itself (not the harness) is broken, before any promotion decision
      is made on its output.
 5. **Fixture health caveat to carry into execution:** `bench/suite.json`'s tasks were authored
-   pre-extraction (nested MarketHawk paths); per `.archon/memory/dark-factory-ops.md` and
-   `docs/parity-p2.md` §4a, roughly 6/10 tasks currently score "expected-fail-both" on outcome for
+   pre-extraction (nested MarketHawk paths); per `docs/parity-p2.md` §4a (6 fails: #224 plus 5
+   expected-fail-both), roughly 6/10 tasks currently score "expected-fail-both" on outcome for
    unrelated path/tooling reasons, leaving ~3-4 S-bucket tasks with real outcome-discriminating
    power. This does **not** block the economics dimension — tokens/task, cost/task, wall-clock,
    and failure_spend remain measurable on expected-fail-both tasks — but the outcome/quality
@@ -154,7 +159,14 @@ Both are scored against the same `bench/suite.json` fixture population where pos
 
 ### Gate criteria (pre-registered before execution, per the `parity-p2.md` discipline)
 
-A later execution ticket must pin, before collecting numbers:
+**Quality metric definition.** Quality = the bench oracle `pass^k`. `harness_economics.outcome.score`
+and `factory_cpm` (from `run_record.py::_compute_outcome`, policy 1.0) are reported alongside but
+flagged "stub-mode, not gate-bearing": under `BENCH_MODE=stub` the outcome is always
+`produced_ungated`/1.0 or failed/0. `retry_spend` and `ledger_mechanics` are `null` unless
+`--ledger-path` points at the proxy ledger (`MODEL_PROXY_LEDGER_PATH`, `run_record.py:430`); the
+bench host path has no proxy, so both are expected `null` and the compare must not treat that as 0.
+
+The operator-run execution follow-up must pin, before collecting numbers:
 - An outcome non-inferiority bound (mirroring `parity-p2.md`'s `c_ext ≥ c_base − 1` per size
   bucket, adapted to arms instead of images).
 - A `tokens_per_task` / `cost_per_task` improvement threshold for the "improvement" arm to be
@@ -196,13 +208,62 @@ does not implement:
 - `dimension: contract_trajectory` — Comment 2's 4 variants (final-artifact/gate checks;
   reflection/critic only; resolved completion contract only; completion contract + observable
   partial-order trajectory verifier), seeded with #300/#271/#279/#280/#293/#305 as representative
-  failures. **Recommended follow-up:** a ticket that designs the trajectory-event schema (explicitly
+  failures. Per the #311 spike spec (`docs/archive/2026-08-28-contract-driven-execution-trajectory-conformance-spike-design.md`),
+  four of those six are already repaired on main (#271→PR #328, #279→#325, #280→#323,
+  #293→#338), so their fixtures must be reconstructed from pre-fix history, and #311 recommends
+  extending the existing `evals/behavioral-state/` corpus (10 fixtures / 7 categories,
+  `pivot_event_index` prefix/suffix anti-leakage rubric) and `evals/state-governance/` rather than
+  a new corpus. The variant schema therefore carries a `fixture_set` field (`fixture_set:
+  bench/suite.json | evals/behavioral-state/fixtures`) so that follow-up plugs in without a schema
+  break. **Recommended follow-up:** a ticket that designs the trajectory-event schema (explicitly
   *not* raw chain-of-thought, per Comment 2) and its verifier, then plugs into this substrate as
   its `dimension` value; promotion for any resulting mandatory class still follows
   `replay → shadow → advisory → blocking` per Comment 2.
 
 Attempting to run either dimension against today's schema must fail with an error naming the
 relevant tracking ticket, not silently no-op or silently produce empty results.
+
+## Deliverables (implement phase)
+
+1. `bench/run_suite.sh` — per invocation set `RUN_ID` and `RUN_STARTED_AT`, `export ARTIFACTS_DIR`
+   (the DAG only defaults it at `workflows/archon-dark-factory.yaml:590`; `mkdir -p "$ARTIFACTS_DIR"`
+   at `:129` runs with it unset on the bench path today), capture `archon workflow cost --last
+   --json --quiet` to a temp file, then call `scripts/factory_core/cli.py run-record assemble
+   --run-id --issue --intent implement --started-at --artifacts-dir --archon-cost-json --out-file
+   bench/results/<RUN_TS>-<issue>-r<idx>-run-record.json --status <completed|failed by ARCHON_RC>`.
+   Replace `get_last_run_cost_cents()` with reading `totals.cost_usd` from that record; a missing
+   value yields `cost_cents: null, cost_unavailable: true` — never 0.
+2. `bench/compare_variants.py` (new; CLI `--variants variants.yaml --results-dir bench/results
+   --out report.md|.json`) — loads two arms' run-records plus the existing `*-run.json`, joins on
+   `issue`/`run`, emits the promotion/rollback table in the format above.
+3. `bench/variants.example.yaml` — the two `enforce_budgets` arms in the variant schema.
+4. Tier B: `evals/skill_flow_eval.py` gains `--economics-boundary <sha>`, and
+   `mine_cost_report_population` gains `cost_per_task` / `tokens_per_task` / `wall_clock` columns.
+   Tier B reads issue comments over the REST API only and never runs in CI.
+
+## Tests (CI-runnable; `.github/workflows/ci.yml` runs `python -m pytest tests/` plus the bash suites, with no model access)
+
+- `tests/test_bench_compare.py` with deterministic fixture run-records under `tests/fixtures/bench/`
+  (two arms × 3 tasks, hand-written JSON using `run_record.py`'s exact `harness_economics` keys):
+  paired-median delta; `cost_unavailable` propagates (never 0); `dimension: memory_intervention` /
+  `contract_trajectory` raise `NotImplementedError("reserved for #241")` / `("#311 follow-up")`;
+  non-`economics` config keys must be equal in both arms or the compare refuses; `rollback_tier:
+  none` when a variant has `image` and no `env`.
+- `tests/test_bench_suite.py` extended: `bash -n bench/run_suite.sh`, and a stubbed `archon` on
+  PATH (the PATH-shim pattern from `tests/test_scheduler.sh`, PR #366) asserting a run-record file
+  is written with `--status` derived from the stub's exit code.
+- `tests/test_skill_flow_eval.py` extended with a fixture cost-report comment body for the new
+  columns and the `--economics-boundary` split.
+
+## Non-goals
+
+- No new DAG node or gate; no breaker, budget, or `config/config.yaml` changes; nothing under
+  `deploy/**`.
+- No #246 judge and no #311 contract/trajectory verifier — both are reserved dimensions only.
+- No live execution in CI; no `post_cost_report` call from the bench path; no refresh of
+  `bench/suite.json`.
+- Phases other than implement (refine/plan/continue/main-red from the issue's Scope) are out of
+  scope for Tier A.
 
 ## Alternatives Considered
 
@@ -224,17 +285,15 @@ relevant tracking ticket, not silently no-op or silently produce empty results.
    calibration data as a sanity check. The image-swap variant is kept as a second, reserved
    `dimension: economics` candidate for a follow-up backfill, not dropped.
 
-## Open Questions (non-blocking)
+## Decisions (formerly open questions — settled at the spec gate)
 
-- Should Tier A's per-run economics artifacts (`bench/results/<run>-run-record.json`) be
-  committed to the repo (like `bench/baseline.md`) or treated as local/gitignored scratch
-  (`bench/.gitignore` already excludes some `results/` content)? Recommend gitignored, with only
-  the rendered scorecard/report committed — mirrors how `bench/results/` is already treated today.
-- Exact `pass^k` k value and n for the execution ticket's gate criteria are left to that ticket,
-  consistent with `parity-p2.md`'s own precedent of pinning criteria immediately before that
-  specific run rather than baking a fixed n into the schema.
-- Whether `bench/find_eligible.py` should be re-run to refresh `bench/suite.json` before or as
-  part of the execution ticket, given the ~6/10 "expected-fail-both" staleness noted above.
+- Per-run economics artifacts (`bench/results/<run>-run-record.json`) are **gitignored** (already
+  covered by `bench/.gitignore`'s `results/*.json`); only the rendered report is committed under
+  `bench/`.
+- `pass^k` uses **k = n** by default (`run_suite.sh --k` overrides), matching `parity-p2.md`'s
+  practice of pinning criteria immediately before the specific run.
+- `bench/suite.json` is **not** re-locked in this ticket; a `bench/find_eligible.py` refresh is the
+  execution follow-up's first step if outcome discrimination is needed.
 
 ## Assumptions (flagged)
 
@@ -244,11 +303,11 @@ relevant tracking ticket, not silently no-op or silently produce empty results.
   separate follow-up, not part of this ticket's worked example.
 - `config/config.yaml`'s inline comment claiming `enforce_budgets` has "NO env override" is stale;
   `.archon/memory/dark-factory-ops.md` already marks the corresponding entry `[INVALID]` and
-  records the correct, live `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` kill-switch semantics (#732,
-  `scripts/budget_gate.sh:50`). This spec relies on the live behavior, not the stale comment. The
+  records the correct, live `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` kill-switch semantics (MarketHawk-era #732 — see
+  `.archon/memory/dark-factory-ops.md:74-75`; `scripts/budget_gate.sh:50-51`). This spec relies on the live behavior, not the stale comment. The
   stale comment itself is a one-line follow-up (config.yaml's `token_optimization` block is a gate
   surface per CLAUDE.md, so it gets its own ticket rather than an incidental fix here).
-- The operator's "spec-only... spike" framing is read as: this spec fixes methodology, schema, and
-  pre-registered gate criteria now; a separate (non-refine) execution ticket runs the benchmark and
-  fills in the results table, consistent with the `#189` refine/implement split precedent for
-  live-benchmark spikes.
+- This ticket implements the instrument (Deliverables section: `bench/run_suite.sh` run-record
+  wiring, `bench/compare_variants.py`, `bench/variants.example.yaml`, the Tier B flags, and their
+  tests); only the live n≥1 bench execution and the results table are deferred to an operator-run
+  follow-up. The opt-in note's "spec-only" clause is for spikes; #240 is not one.
