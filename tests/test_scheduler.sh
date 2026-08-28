@@ -1168,6 +1168,71 @@ assert_eq "R8: stage_review_triage is in STAGE_ORDER" \
 assert_eq "R8b: stage_review_triage guard type is none" \
   "none" "${STAGE_GUARD[stage_review_triage]}"
 
+# R9: dispatch_stage(stage_orphan_sweep) is a no-op when SESSION_WINDOW_PAUSED=true — the
+# guard must fire before the sweep's body (set_board_status/gh calls) ever runs (#334).
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=true
+IN_PROGRESS='[{"content":{"number":961,"title":"t"},"labels":[]}]'
+: > "$STUB_LOG"
+STDOUT_R9=$(dispatch_stage stage_orphan_sweep 2>&1)
+assert_eq "R9: dispatch_stage(stage_orphan_sweep) skips on session_window_paused" \
+  "1" "$(echo "$STDOUT_R9" | grep -c 'action=skip_orphan_sweep')"
+assert_eq "R9b: no set_board_status call when skipped" \
+  "0" "$(grep -c 'set_board_status' "$STUB_LOG" || true)"
+assert_eq "R9c: no gh comment call when skipped" \
+  "0" "$(grep -c 'gh issue comment' "$STUB_LOG" || true)"
+
+# R10: dispatch_stage(stage_orphan_sweep) still sweeps normally when SESSION_WINDOW_PAUSED=false
+# (regression guard: unpaused orphan recovery is unchanged).
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false
+IN_PROGRESS='[{"content":{"number":962,"title":"t"},"labels":[]}]'
+: > "$STUB_LOG"
+STDOUT_R10=$(dispatch_stage stage_orphan_sweep 2>&1)
+assert_eq "R10: dispatch_stage(stage_orphan_sweep) does not skip when unpaused" \
+  "0" "$(echo "$STDOUT_R10" | grep -c 'action=skip_orphan_sweep')"
+assert_eq "R10b: sweep runs and moves orphaned issue 962 to blocked" \
+  "1" "$(echo "$STDOUT_R10" | grep -c 'sweep=orphaned_in_progress issue=#962 action=move_to_blocked')"
+assert_eq "R10c: set_board_status called for issue 962" \
+  "1" "$(grep -c 'set_board_status 962' "$STUB_LOG" || true)"
+
+# R11: dispatch_stage(stage_orphan_sweep) still sweeps when MAIN_IS_RED=true and
+# SESSION_WINDOW_PAUSED=false — confirms guard type is paused_only, not red_or_paused: a
+# genuinely dead container must still be recovered to Blocked while main is red.
+MAIN_IS_RED=true; SESSION_WINDOW_PAUSED=false
+IN_PROGRESS='[{"content":{"number":963,"title":"t"},"labels":[]}]'
+: > "$STUB_LOG"
+STDOUT_R11=$(dispatch_stage stage_orphan_sweep 2>&1)
+assert_eq "R11: dispatch_stage(stage_orphan_sweep) does not skip when only main_red is true" \
+  "0" "$(echo "$STDOUT_R11" | grep -c 'action=skip_orphan_sweep')"
+assert_eq "R11b: sweep runs and moves orphaned issue 963 to blocked under main_red" \
+  "1" "$(echo "$STDOUT_R11" | grep -c 'sweep=orphaned_in_progress issue=#963 action=move_to_blocked')"
+
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; IN_PROGRESS='[]'
+
+# R12: stage_orphan_sweep is board reconciliation, not a dispatch decision — it must stay out of
+# STAGE_ORDER (mirrors R7b's pattern for stage_epic_autopilot) while still being a STAGE_GUARD
+# key of type paused_only (unlike stage_epic_autopilot, which keeps its own compound condition).
+assert_eq "R12: stage_orphan_sweep not in STAGE_ORDER" \
+  "0" "$(printf '%s\n' "${STAGE_ORDER[@]}" | grep -c '^stage_orphan_sweep$')"
+assert_eq "R12b: stage_orphan_sweep is a STAGE_GUARD key with type paused_only" \
+  "paused_only" "${STAGE_GUARD[stage_orphan_sweep]:-}"
+
+# R13: static source-text check — the session-window-paused sentinel read must appear BEFORE
+# the stage_orphan_sweep dispatch call, which must appear BEFORE the main-is-red block, in
+# scheduler.sh's actual poll-loop source. R9-R12 only prove the guard-table binding; this
+# proves the physical reorder itself, which is otherwise unreachable under
+# SCHEDULER_SOURCE_ONLY=1 (the poll loop never executes in tests) (#334). Each grep is
+# `|| true`-guarded on its own assignment: scheduler.sh's `set -euo pipefail` (line 2) is
+# inherited into this shell via `source`, so an ungated failing pipeline in a bare assignment
+# (not just as a captured argument, which is what R9b/R9c/R10c above do) would abort the whole
+# test run on a zero-match grep.
+SENTINEL_LINE=$(grep -nF '[ -f "${SCHEDULER_STATE_DIR}/session-window-paused" ]; then' "$SCHED" | head -1 | cut -d: -f1) || true
+SWEEP_CALL_LINE=$(grep -nF 'dispatch_stage stage_orphan_sweep' "$SCHED" | head -1 | cut -d: -f1) || true
+MAIN_RED_LINE=$(grep -nF '[ -f "${SCHEDULER_STATE_DIR}/main-is-red" ]' "$SCHED" | head -1 | cut -d: -f1) || true
+assert_eq "R13: sentinel read precedes stage_orphan_sweep dispatch (source order)" \
+  "1" "$([ -n "$SENTINEL_LINE" ] && [ -n "$SWEEP_CALL_LINE" ] && [ "$SENTINEL_LINE" -lt "$SWEEP_CALL_LINE" ] 2>/dev/null && echo 1 || echo 0)"
+assert_eq "R13b: stage_orphan_sweep dispatch precedes main-is-red block (source order)" \
+  "1" "$([ -n "$SWEEP_CALL_LINE" ] && [ -n "$MAIN_RED_LINE" ] && [ "$SWEEP_CALL_LINE" -lt "$MAIN_RED_LINE" ] 2>/dev/null && echo 1 || echo 0)"
+
 # ==========================================
 # S: retry_or_skip_delivery_failure (#279 skip-retry-counter exemption)
 # ==========================================
