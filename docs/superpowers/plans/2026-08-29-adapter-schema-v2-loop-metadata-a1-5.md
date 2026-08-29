@@ -100,8 +100,20 @@ All commands below run from the repo root (`/workspace/dark-factory`). Per accum
 memory (`.archon/memory/codebase-patterns.md`, issue #42), this spec and this plan do
 **not** transfer automatically from this `refine/issue-301-...` branch to the
 `feat/issue-301-...` branch the implementation phase runs on — the first thing the
-implement phase must do is copy `docs/superpowers/specs/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md`
-and this plan file onto its branch and commit them, before starting Task 1.
+implement phase must do, before starting Task 1, is carry both files over and commit
+them:
+
+```bash
+git fetch origin refine/issue-301-feat-adapter---schema-v2-----research-dr
+B=origin/refine/issue-301-feat-adapter---schema-v2-----research-dr
+for f in docs/superpowers/specs/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md docs/superpowers/plans/2026-08-29-adapter-schema-v2-loop-metadata-a1-5.md; do git show "$B:$f" > "$f"; done
+git add docs/superpowers && git commit -m "docs: carry #301 spec and plan onto feat branch"
+```
+
+Archiving: do NOT move the spec/plan manually. The workflow's push node archives both
+into `docs/archive/` automatically (`workflows/archon-dark-factory.yaml`, "Archive
+spec/plan for this issue before pushing"); the README `loops` row added in Task 7
+already cites the post-archive path.
 
 ---
 
@@ -328,7 +340,25 @@ Task 2's implementation commit is the single point where the whole suite goes gr
        )
        with pytest.raises(adapter.AdapterError, match=r"missing required block 'discovery'"):
            adapter.load(str(tmp_path))
+
+
+   def test_dark_factory_own_adapter_yaml_loads_clean_after_reshape():
+       """Spec R1 fail-open precondition: the live .factory/adapter.yaml declares no
+       loops:, so the breaking reshape must not raise on it (an AdapterError would
+       silently drop every safety override back to DEFAULTS)."""
+       from pathlib import Path
+       repo_root = Path(__file__).resolve().parents[1]
+       raw = yaml.safe_load((repo_root / ".factory" / "adapter.yaml").read_text())
+       assert "loops" not in raw
+       merged = adapter.load(str(repo_root))
+       assert merged["loops"] == []
+       assert merged["safety"]["hard_exclude_paths"] == raw["safety"]["hard_exclude_paths"]
    ```
+
+   The last test (`test_dark_factory_own_adapter_yaml_loads_clean_after_reshape`) passes
+   both before and after Task 2 — it is not a red/green case but the spec R1 fail-open
+   precondition guard (acceptance criterion: `.factory/adapter.yaml` still loads
+   byte-identical); keep it.
 
 7. **Reshape `test_run_record.py`'s loop-surfacing fixture** — replace
    `test_assemble_surfaces_loops_from_adapter` (`tests/test_run_record.py:1035-1074`)
@@ -1201,15 +1231,19 @@ Satisfies the spec's final acceptance-criteria bullet. Documentation-only; no te
    to:
 
    ```markdown
-   | `schema_version` | `int` | Inert metadata; never gates validation. |
+   | `schema_version` | `int` | Integer, inert (never gates validation). |
    ```
 
    and add a new row after the `token_optimization` row (currently line 174), before
    the closing `All keys are optional...` sentence:
 
    ```markdown
-   | `loops` | `list[map]` | Declarative loop entries (Loop Engineering five-move shape: `discovery`/`handoff`/`verification`/`persistence`/`scheduling`, all required, plus optional `human_checkpoint`/`budget_caps` and optional metadata `role_card`/`economics`/`skills`); parse/validate/surface only, no runtime enforcement yet. See `docs/superpowers/specs/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md`. |
+   | `loops` | `list[map]` | Declarative loop entries (Loop Engineering five-move shape: `discovery`/`handoff`/`verification`/`persistence`/`scheduling`, all required, plus optional `human_checkpoint`/`budget_caps` and optional metadata `role_card`/`economics`/`skills`); parse/validate/surface only, no runtime enforcement yet. See `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md` (#301). |
    ```
+
+   The row cites the **post-archive** spec path on purpose: the workflow's push node
+   moves the spec into `docs/archive/` before the PR is opened (see the Archiving note
+   under File Structure), so a `docs/superpowers/specs/` link would be stale on the PR.
 
 2. **Verify by inspection** (no automated test covers README prose):
 
@@ -1243,6 +1277,15 @@ Satisfies the spec's final acceptance-criteria bullet. Documentation-only; no te
    runs `smoke_gate.sh` and the workflow DAG checks, unaffected here since this change
    touches no scheduler/workflow files.
 
+   1b. Then run CI's shell set (the `bash tests/*.sh` lines of `.github/workflows/ci.yml`):
+
+   ```bash
+   grep -o 'bash tests/[A-Za-z0-9_]*\.sh' .github/workflows/ci.yml | while read -r c; do $c || exit 1; done
+   ```
+
+   Expected: exit code 0. `smoke_gate.sh` and the workflow DAG checks are not exercised
+   by this change.
+
 2. **Spot-check the stale-comment fix landed** (spec asked for it "in passing" — verify
    it's not forgotten):
 
@@ -1271,6 +1314,7 @@ Satisfies the spec's final acceptance-criteria bullet. Documentation-only; no te
    optional field at once" entry (Task 5), R5 `contract`/`memory_intervention`
    reservation (Task 6), unchanged duplicate-name/not-a-list/not-a-mapping errors
    (untouched A1 tests, still passing per Task 1 step 5), unchanged no-`loops:` parity
-   (untouched A1 tests), README table (Task 7). No gaps remain.
+   (untouched A1 tests) plus the live `.factory/adapter.yaml` load guard (Task 1
+   step 6), README table (Task 7). No gaps remain.
 
 5. No commit — this task only verifies Tasks 1-7's commits are collectively green.
