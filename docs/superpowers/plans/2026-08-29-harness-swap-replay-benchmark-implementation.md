@@ -39,13 +39,11 @@ Python 3 (stdlib + PyYAML, already a test dependency), bash, pytest. No new depe
 | `bench/compare_variants.py` | New — variant-pair comparison CLI |
 | `bench/variants.example.yaml` | New — worked-example variant declaration |
 | `evals/skill_flow_eval.py` | Modified — economics columns + `--economics-boundary` |
-| `evals/skill_flow_scorecard.py` | Modified — render df#240 Tier B economics columns |
 | `tests/test_bench_suite.py` | Modified — run-record wiring tests |
 | `tests/test_bench_compare.py` | New — `compare_variants.py` unit tests |
 | `tests/fixtures/bench/budget-enforce-off-sample-run-record.json` | New — hand-written run-record fixture |
 | `tests/fixtures/bench/budget-enforce-on-sample-run-record.json` | New — hand-written run-record fixture |
 | `tests/test_skill_flow_eval.py` | Modified — economics column + boundary tests |
-| `tests/test_skill_flow_scorecard.py` | Modified — economics-section rendering tests |
 
 ## Preamble note for the implement phase (memory patterns, issues #42 and #242)
 
@@ -80,10 +78,17 @@ Append to `tests/test_bench_suite.py`:
 
 import os
 import subprocess
+import sys
+
+import pytest
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="bash/fcntl subprocess test — Linux CI and the factory image only")
 class TestRunRecordWiring:
     """Exercises bench/run_suite.sh end-to-end against a stubbed `archon` binary on
+    PATH. Requires the `python3` that bash resolves to have `pyyaml` (adapter.py import) and
+    `aiohttp` (model_proxy.py, imported by run_record.py) — true on CI (setup-python first on
+    PATH) and in the factory image; a red run here is an interpreter mismatch before anything else.
     PATH — the PATH-shim pattern from tests/test_scheduler.sh (PR #366), adapted to a
     Python subprocess test since run_suite.sh is invoked as a real bash subprocess here
     (unlike test_scheduler.sh, which sources scheduler.sh in-process).
@@ -159,7 +164,13 @@ exit 0
         bin_dir.mkdir()
         self._write_archon_stub(bin_dir)
         env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo)}
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
         subprocess.run(
             ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999",
              "--variant-id", "budget-enforce-on"],
@@ -187,7 +198,13 @@ exit 0
         bin_dir.mkdir()
         self._write_archon_stub(bin_dir, archon_rc=1)
         env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo)}
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
         subprocess.run(
             ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999"],
             cwd=repo, env=env, check=True, capture_output=True, text=True,
@@ -217,7 +234,13 @@ exit 0
 """)
         stub.chmod(0o755)
         env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo)}
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
         subprocess.run(
             ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999"],
             cwd=repo, env=env, check=True, capture_output=True, text=True,
@@ -1202,13 +1225,15 @@ git commit -m "feat(bench): add variants.example.yaml — enforce_budgets on/off
 
 ---
 
-## Task 4 — `evals/skill_flow_eval.py` + `skill_flow_scorecard.py`: economics columns, `--economics-boundary`, rendering
+## Task 4 — `evals/skill_flow_eval.py`: economics columns + `--economics-boundary`
 
 ### Files
 - `evals/skill_flow_eval.py`
-- `evals/skill_flow_scorecard.py`
 - `tests/test_skill_flow_eval.py`
-- `tests/test_skill_flow_scorecard.py`
+
+(The scorecard renderer `evals/skill_flow_scorecard.py` is NOT touched: the spec's Deliverables
+name only the mined columns and the `--economics-boundary` flag, and there is no call site for a
+rendered economics section yet. Rendering is a follow-up when a consumer exists.)
 
 ### Step 4.1 — Write failing test: new columns on `_cost_report_pr_stats`
 
@@ -1344,7 +1369,7 @@ Add to `build_arg_parser()`:
         help=(
             "Commit SHA bracketing an enforce_budgets enforcement-live boundary "
             "(df#240 Tier B). Run once per boundary — refine/plan share the T3b commit "
-            "(#733), conformance/code-review share the T6 commit (#719); this flag takes "
+            "(#733), conformance/code-review share the T6 commit (see config.yaml's enforce block comments); this flag takes "
             "one SHA per invocation, not a pair, so the operator runs the script twice."
         ),
     )
@@ -1424,107 +1449,6 @@ git add evals/skill_flow_eval.py tests/test_skill_flow_eval.py
 git commit -m "feat(evals): extend skill_flow_eval.py with economics columns + --economics-boundary (df#240 Tier B)"
 ```
 
-### Step 4.8 — Extend `evals/skill_flow_scorecard.py`'s renderer with the same economics columns
-
-Spec Architecture §Tier B item 2: "extend the existing scorecard renderer
-(`evals/skill_flow_scorecard.py`'s pattern) with the same economics columns Tier A produces,
-so a reviewer reads one joined report, not two." `render_report()` is not currently called
-from `skill_flow_eval.py`'s `run()`/`main()` — it is invoked separately when a scorecard
-markdown doc is generated — so this step extends its signature only; no new call site.
-
-Write the failing test first. Append to `tests/test_skill_flow_scorecard.py`:
-
-```python
-def test_render_report_includes_economics_section_when_provided():
-    economics = {
-        "refine": {
-            "before": {"cost_per_task": 0.50, "tokens_per_task": 40000, "wall_clock": 300},
-            "after": {"cost_per_task": 0.35, "tokens_per_task": 28000, "wall_clock": 210},
-        },
-    }
-    md = sfs.render_report([], generated_at="2026-08-29T00:00:00+00:00", economics=economics)
-    assert "## Economics (df#240 Tier B)" in md
-    assert "refine" in md
-    assert "0.5" in md or "0.50" in md
-    assert "0.35" in md
-
-
-def test_render_report_omits_economics_section_when_not_provided():
-    md = sfs.render_report([], generated_at="2026-08-29T00:00:00+00:00")
-    assert "## Economics (df#240 Tier B)" not in md
-```
-
-Run: `python -m pytest tests/test_skill_flow_scorecard.py -k economics -v` → **fails**
-(`render_report() got an unexpected keyword argument 'economics'`).
-
-Implement — edit `evals/skill_flow_scorecard.py`:
-
-```python
-def render_report(rows: list[dict], generated_at: str, economics: dict | None = None) -> str:
-    lines = [
-        "# Skill-Modularization Scorecard",
-        "",
-        "**Issue:** [#48](https://github.com/omniscient/dark-factory/issues/48)",
-        "**Script:** `evals/skill_flow_eval.py`",
-        f"**Generated:** {generated_at}",
-        "",
-        "**Scope:** current-flow vs. skill-modularized prompt flow (token count, tool calls, "
-        "runtime, quality/safety, trigger accuracy) only. Whole-harness \"Harness Effect\" "
-        "economics is out of scope for this ticket — see omniscient/dark-factory#240 in Epic #234.",
-        "",
-        "---",
-        "",
-        "## Scenario → Tier → Mechanism → Rollout",
-        "",
-        "| Scenario | Tier | Mechanism | Rollout Recommendation | Confounds |",
-        "|---|---|---|---|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row['scenario']} | {row['tier']} | {row['mechanism']} | {row['rollout']} | {row.get('confounds', '')} |"
-        )
-    if economics:
-        lines += [
-            "",
-            "---",
-            "",
-            "## Economics (df#240 Tier B)",
-            "",
-            "Mined via `skill_flow_eval.py --economics-boundary <sha>` — before/after an "
-            "enforce_budgets enforcement-live boundary (T3b `#733` for refine/plan, T6 `#719` "
-            "for conformance/code-review). Coverage may be partial (#64); see `n_with_data` in "
-            "the underlying population JSON before treating a delta as conclusive.",
-            "",
-            "| Scenario | cost/task (before → after) | tokens/task (before → after) | "
-            "wall_clock s (before → after) |",
-            "|---|---|---|---|",
-        ]
-        for scenario, pop in economics.items():
-            before, after = pop["before"], pop["after"]
-            lines.append(
-                f"| {scenario} | {before['cost_per_task']} → {after['cost_per_task']} | "
-                f"{before['tokens_per_task']} → {after['tokens_per_task']} | "
-                f"{before['wall_clock']} → {after['wall_clock']} |"
-            )
-    lines += [
-        "",
-        "---",
-        "",
-        "*Generated by `evals/skill_flow_eval.py`*",
-    ]
-    return "\n".join(lines) + "\n"
-```
-
-Run: `python -m pytest tests/test_skill_flow_scorecard.py -v` → all **pass** (new tests green,
-existing three unaffected since `economics` defaults to `None`).
-
-### Step 4.9 — Commit
-
-```bash
-git add evals/skill_flow_scorecard.py tests/test_skill_flow_scorecard.py
-git commit -m "feat(evals): render df#240 Tier B economics columns in the skill-flow scorecard"
-```
-
 ---
 
 ## Task 5 — Full-suite verification
@@ -1537,6 +1461,8 @@ used inside `entrypoint.sh`/DAG bash nodes):
 
 ```bash
 PYTHONPATH=scripts python -m pytest tests/ -v
+python -m pytest tests/ -q
+bash -n bench/run_suite.sh
 bash tests/test_smoke_gate.sh
 python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
 python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
