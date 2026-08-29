@@ -297,3 +297,186 @@ def test_find_eligible_has_required_functions():
     import find_eligible
     for fn in ("get_pre_pr_sha", "get_pr_test_files", "get_size_label", "fetch_closed_issues_with_prs"):
         assert hasattr(find_eligible, fn), f"find_eligible.py missing function: {fn}"
+
+
+# ---------------------------------------------------------------------------
+# run-record wiring (issue #240)
+# ---------------------------------------------------------------------------
+
+import os
+import subprocess
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash/fcntl subprocess test — Linux CI and the factory image only")
+class TestRunRecordWiring:
+    """Exercises bench/run_suite.sh end-to-end against a stubbed `archon` binary on
+    PATH. Requires the `python3` that bash resolves to have `pyyaml` (adapter.py import) and
+    `aiohttp` (model_proxy.py, imported by run_record.py) — true on CI (setup-python first on
+    PATH) and in the factory image; a red run here is an interpreter mismatch before anything else.
+    PATH — the PATH-shim pattern from tests/test_scheduler.sh (PR #366), adapted to a
+    Python subprocess test since run_suite.sh is invoked as a real bash subprocess here
+    (unlike test_scheduler.sh, which sources scheduler.sh in-process).
+
+    Note: run_suite.sh:61 runs `git config --global --add safe.directory "$REPO_ROOT"` for
+    every invocation (Docker host-mount ownership workaround) — this mutates the test
+    runner's global gitconfig as a side effect. Harmless (idempotent, additive-only) but
+    real; not scoped to the temp repo."""
+
+    def _write_archon_stub(self, bin_dir: Path, *, archon_rc: int = 0) -> None:
+        stub = bin_dir / "archon"
+        stub.write_text(f"""#!/usr/bin/env bash
+set -e
+if [ "$1 $2" = "workflow run" ]; then
+  ISSUE_ARG="$4"
+  ISSUE_NUM=$(echo "$ISSUE_ARG" | grep -oE '[0-9]+')
+  git branch "feat/issue-${{ISSUE_NUM}}-bench-stub" 2>/dev/null || true
+  exit {archon_rc}
+elif [ "$1 $2" = "workflow cost" ]; then
+  cat <<'EOF'
+{{"run_id": "stub-run", "nodes": [
+  {{"nodeId": "implement", "modelUsage": {{"claude-sonnet-4-5-20250929": {{}}}},
+   "inputTokens": 100, "outputTokens": 2000, "costUsd": 0.05, "durationMs": 1000}}
+]}}
+EOF
+  exit 0
+fi
+exit 0
+""")
+        stub.chmod(0o755)
+
+    def _make_repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+        (repo / "bench").mkdir()
+        suite = {
+            "version": 1,
+            "tasks": [{
+                "issue": 99999, "title": "stub task", "size": "S",
+                "pre_pr_sha": "0" * 40, "golden_pr": 1,
+                "oracle_tests": ["tests/does_not_exist.py"], "oracle_cmd": "pytest",
+            }],
+        }
+        (repo / "bench" / "suite.json").write_text(json.dumps(suite))
+        (repo / "bench" / ".gitignore").write_text("results/*.json\n__pycache__/\n*.pyc\n")
+        run_suite_src = _BENCH_DIR / "run_suite.sh"
+        (repo / "bench" / "run_suite.sh").write_text(run_suite_src.read_text())
+        (repo / "bench" / "run_suite.sh").chmod(0o755)
+        # run-record assemble needs scripts/factory_core/ available at REPO_ROOT
+        import shutil
+        shutil.copytree(
+            Path(__file__).resolve().parents[1] / "scripts",
+            repo / "scripts",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+        # pre_pr_sha must resolve — amend to point at HEAD so `git checkout -f <sha>` works
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        suite["tasks"][0]["pre_pr_sha"] = sha
+        (repo / "bench" / "suite.json").write_text(json.dumps(suite))
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "pin sha"], cwd=repo, check=True)
+        return repo
+
+    def test_run_produces_run_record_with_harness_economics(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        self._write_archon_stub(bin_dir)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
+        subprocess.run(
+            ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999",
+             "--variant-id", "budget-enforce-on"],
+            cwd=repo, env=env, check=True, capture_output=True, text=True,
+        )
+        records = list((repo / "bench" / "results").glob("*-run-record.json"))
+        assert records, "no *-run-record.json written by run_suite.sh"
+        data = json.loads(records[0].read_text())
+        assert "harness_economics" in data
+        assert data["harness_economics"]["cost_per_task"] == pytest.approx(0.05)
+        assert data["harness_economics"]["tokens_per_task"] == 2100
+
+        agg = list((repo / "bench" / "results").glob("*-run.json"))
+        assert agg, "no aggregate *-run.json written"
+        agg_data = json.loads(agg[0].read_text())
+        run_entry = agg_data["tasks"][0]["runs"][0]
+        assert run_entry["variant_id"] == "budget-enforce-on", (
+            "aggregate run entry must carry variant_id verbatim (not parsed from run_id) so "
+            "compare_variants.py can join without prefix-collision risk"
+        )
+
+    def test_run_status_failed_when_archon_exits_nonzero(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        self._write_archon_stub(bin_dir, archon_rc=1)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
+        subprocess.run(
+            ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999"],
+            cwd=repo, env=env, check=True, capture_output=True, text=True,
+        )
+        records = list((repo / "bench" / "results").glob("*-run-record.json"))
+        assert records, "no *-run-record.json written on the failure path"
+        data = json.loads(records[0].read_text())
+        assert data["status"] == "failed"
+        assert data["harness_economics"]["outcome"]["state"] == "failed"
+        assert data["harness_economics"]["outcome"]["score"] == 0.0
+
+    def test_cost_unavailable_never_coerced_to_zero(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "archon"
+        stub.write_text("""#!/usr/bin/env bash
+if [ "$1 $2" = "workflow run" ]; then
+  ISSUE_NUM=$(echo "$4" | grep -oE '[0-9]+')
+  git branch "feat/issue-${ISSUE_NUM}-bench-stub" 2>/dev/null || true
+  exit 0
+elif [ "$1 $2" = "workflow cost" ]; then
+  echo "not json" >&2
+  exit 1
+fi
+exit 0
+""")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+               "BENCH_MODE": "stub", "BENCH_TARGET_DIR": str(repo),
+               # Hermetic: `run-record assemble` also writes a durable copy to
+               # SCHEDULER_STATE_DIR/run-records/ (default /var/lib/dark-factory) — inside a
+               # factory container that is the mounted production state volume (#300/#362 class).
+               "SCHEDULER_STATE_DIR": str(tmp_path / "state"),
+               "MODEL_PROXY_LEDGER_PATH": str(tmp_path / "no-ledger.jsonl"),
+               "SEQ_URL": "http://127.0.0.1:9"}
+        subprocess.run(
+            ["bash", str(repo / "bench" / "run_suite.sh"), "--n", "1", "--issues", "99999"],
+            cwd=repo, env=env, check=True, capture_output=True, text=True,
+        )
+        run_json = list((repo / "bench" / "results").glob("*-run.json"))
+        assert run_json
+        data = json.loads(run_json[0].read_text())
+        run_entry = data["tasks"][0]["runs"][0]
+        assert run_entry["cost_unavailable"] is True
+        assert run_entry["cost_cents"] is None
+
+
+def test_run_suite_syntax_is_valid():
+    rc = subprocess.run(["bash", "-n", str(_BENCH_DIR / "run_suite.sh")])
+    assert rc.returncode == 0

@@ -275,6 +275,7 @@ def test_mine_cost_report_population_parses_real_example(monkeypatch):
         "n_total": 0, "n_with_data": 0,
         "avg_input_tokens": None, "avg_output_tokens": None,
         "avg_duration_ms": None, "avg_cost_usd": None,
+        "tokens_per_task": None, "cost_per_task": None, "wall_clock": None,
     }
     after = result["after"]
     assert after["n_total"] == 1
@@ -305,6 +306,37 @@ def test_mine_cost_report_population_intent_filter_selects_continue_only(monkeyp
     assert after["avg_duration_ms"] == pytest.approx(184000.0)
 
 
+def test_cost_report_pr_stats_includes_economics_columns(monkeypatch):
+    """mine_cost_report_population must carry the same cost_per_task/tokens_per_task/
+    wall_clock columns Tier A's harness_economics produces (issue #240 Tier B), computed
+    from the same avg_* fields _cost_report_pr_stats already returns."""
+    prs = [_factory_pr(1, 73, "2026-07-10T18:00:00Z")]
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": _REAL_COST_REPORT_BODY}])
+
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    result = sfe.mine_cost_report_population("omniscient/dark-factory", prs, boundary, "implement")
+    stats = result["after"]
+    assert stats["n_with_data"] == 1  # sanity: the PR must actually be counted, not filtered out
+    assert stats["tokens_per_task"] == pytest.approx(stats["avg_input_tokens"] + stats["avg_output_tokens"])
+    assert stats["cost_per_task"] == pytest.approx(stats["avg_cost_usd"])
+    assert stats["wall_clock"] == pytest.approx(stats["avg_duration_ms"] / 1000)
+
+
+def test_cost_report_pr_stats_economics_columns_null_when_no_data(monkeypatch):
+    prs = [_factory_pr(1, 73, "2026-07-10T18:00:00Z")]
+    monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
+    monkeypatch.setattr(sfe, "_fetch_issue_comments", lambda repo, num: [{"body": "no cost report here"}])
+
+    boundary = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+    result = sfe.mine_cost_report_population("omniscient/dark-factory", prs, boundary, "implement")
+    stats = result["after"]
+    assert stats["n_with_data"] == 0  # sanity: this is the "PR has no parseable cost data" path
+    assert stats["tokens_per_task"] is None
+    assert stats["cost_per_task"] is None
+    assert stats["wall_clock"] is None
+
+
 def test_mine_cost_report_population_skips_pr_with_no_cost_comment(monkeypatch):
     prs = [_factory_pr(1, 73, "2026-07-10T18:00:00Z")]
     monkeypatch.setattr(sfe.fsc, "FACTORY_EMAIL", "factory@dark-factory")
@@ -317,6 +349,7 @@ def test_mine_cost_report_population_skips_pr_with_no_cost_comment(monkeypatch):
         "n_total": 1, "n_with_data": 0,
         "avg_input_tokens": None, "avg_output_tokens": None,
         "avg_duration_ms": None, "avg_cost_usd": None,
+        "tokens_per_task": None, "cost_per_task": None, "wall_clock": None,
     }
 
 
@@ -524,3 +557,39 @@ def test_run_writes_results_json(monkeypatch, tmp_path):
 
     written = list((tmp_path / "results").glob("skill-flow-population-*.json"))
     assert len(written) == 1
+
+
+def test_build_arg_parser_has_economics_boundary_default_none():
+    args = sfe.build_arg_parser().parse_args([])
+    assert args.economics_boundary is None
+
+
+def test_build_arg_parser_economics_boundary_override():
+    args = sfe.build_arg_parser().parse_args(["--economics-boundary", "abc123"])
+    assert args.economics_boundary == "abc123"
+
+
+def test_run_omits_economics_key_when_boundary_not_passed(monkeypatch, tmp_path):
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", lambda: [])
+    monkeypatch.setattr(sfe, "mine_conformance_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_code_review_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_cost_report_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_label_incidence", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "merge_boundary_date", lambda *a, **k: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    args = sfe.build_arg_parser().parse_args(["--no-cross-repo", "--repo-root", str(tmp_path)])
+    report = sfe.run(args)
+    assert "economics" not in report
+
+
+def test_run_includes_economics_key_when_boundary_passed(monkeypatch, tmp_path):
+    monkeypatch.setattr(sfe.fsc, "fetch_prs", lambda: [])
+    monkeypatch.setattr(sfe, "mine_conformance_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_code_review_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_cost_report_population", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "mine_label_incidence", lambda *a, **k: {"before": {}, "after": {}})
+    monkeypatch.setattr(sfe, "merge_boundary_date", lambda *a, **k: datetime(2026, 1, 1, tzinfo=timezone.utc))
+    args = sfe.build_arg_parser().parse_args(
+        ["--no-cross-repo", "--repo-root", str(tmp_path), "--economics-boundary", "deadbeef"]
+    )
+    report = sfe.run(args)
+    assert set(report["economics"].keys()) == {"refine", "plan", "implement", "conformance", "code-review"}
