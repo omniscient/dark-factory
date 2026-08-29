@@ -1,6 +1,7 @@
 """Load + validate <clone>/.factory/adapter.yaml, deep-merged over adapter_defaults.DEFAULTS."""
 import argparse, copy, os, sys
 from . import adapter_defaults
+from . import verifier as _verifier
 
 class AdapterError(Exception):
     pass
@@ -238,6 +239,10 @@ def load(clone_dir: str) -> dict:
         seen_names = set()
         for i, entry in enumerate(data["loops"]):
             _validate_loop(entry, i)
+            try:
+                _verifier.assert_verifier_independent(entry)
+            except _verifier.VerifierError as exc:
+                raise AdapterError(str(exc)) from exc
             name = entry.get("name")
             if name in seen_names:
                 raise AdapterError(f"loops[{i}] ('{name}'): duplicate loop name '{name}'")

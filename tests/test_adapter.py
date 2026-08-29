@@ -987,3 +987,19 @@ def test_dark_factory_own_adapter_yaml_has_skill_security_globs():
         assert re.search(r"settings\\?\.json", joined), f"{key} missing settings.json glob"
         assert "factory/hooks" in joined, f"{key} missing .factory/hooks glob"
     assert not any("SKILL" in p for p in data["safety"]["migration_seed_auth_patterns"])
+
+
+def test_adapter_load_rejects_loop_whose_verifier_is_its_own_manifest(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["verification"]["verifier"] = parsed["loops"][0]["handoff"]["manifest"]
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=r"verifier.*must not be a path the loop"):
+        adapter.load(str(tmp_path))
+
+
+def test_adapter_load_accepts_loop_with_independent_verifier(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["name"] == "nightly-scan-triage"
