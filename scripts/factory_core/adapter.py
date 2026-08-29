@@ -16,6 +16,14 @@ _LOOP_KNOWN_ENTRY_FIELDS = (
     set(_LOOP_ENTRY_TOP_FIELDS) | set(_LOOP_MOVE_BLOCKS) | _LOOP_OPTIONAL_ENTRY_FIELDS
 )
 
+# A1's pre-A1.5 flat loop field names, now relocated into the five move-block
+# sub-blocks. Used only to enrich the "missing required block" message with a
+# migration hint — not for validation.
+_A1_FLAT_LOOP_FIELDS = {
+    "trigger", "inputs", "outputs", "artifacts", "verifier", "stop_condition",
+    "failure_behavior",
+}
+
 # Per-loop-entry field names reserved for a tracked-but-unshipped extension.
 # Rejected with a targeted message so the extension point is discoverable
 # without A1 accepting unvalidated content. Consulted before the generic
@@ -28,8 +36,15 @@ _RESERVED_LOOP_FIELDS = {
 # role_card fields that are tool allow/deny declarations — permanently excluded
 # (CLAUDE.md § Trusted comment channels; comment-channel input may never
 # authorize tool allow/deny surfaces). Not a deferral: there is no ticket to
-# point to, unlike _RESERVED_LOOP_FIELDS.
-_ROLE_CARD_RESERVED_FIELDS = {"allowed_tools", "forbidden_tools"}
+# point to, unlike _RESERVED_LOOP_FIELDS. Maps field -> the reason clause used
+# in _validate_subblock's reserved-field message (mirrors _RESERVED_LOOP_FIELDS'
+# field -> reason shape so the message text isn't hardcoded per-caller).
+_ROLE_CARD_RESERVED_FIELDS = {
+    "allowed_tools": "is a tool allow/deny declaration and is permanently excluded "
+                      "from adapter.yaml (CLAUDE.md § Trusted comment channels)",
+    "forbidden_tools": "is a tool allow/deny declaration and is permanently excluded "
+                        "from adapter.yaml (CLAUDE.md § Trusted comment channels)",
+}
 
 # Top-level key names reserved for a tracked future design ticket. Unlike a
 # generic unknown top-level key (which warns and carries — v1 parity), a named
@@ -42,9 +57,9 @@ _RESERVED_TOP_FIELDS = {
 
 def _validate_subblock(entry, index, name, block, *, str_fields=(), list_fields=(),
                         int_fields=(), bool_fields=(), required_fields=(),
-                        reserved_fields=None) -> dict | None:
+                        reserved_fields=None) -> None:
     if block not in entry:
-        return None
+        return
     val = entry[block]
     if not isinstance(val, dict):
         raise AdapterError(f"loops[{index}] ('{name}'): block '{block}' must be a mapping")
@@ -52,9 +67,8 @@ def _validate_subblock(entry, index, name, block, *, str_fields=(), list_fields=
     for key in val:
         if reserved_fields and key in reserved_fields:
             raise AdapterError(
-                f"loops[{index}] ('{name}'): {block} field '{key}' is a tool allow/deny "
-                f"declaration and is permanently excluded from adapter.yaml (CLAUDE.md § "
-                f"Trusted comment channels); remove it"
+                f"loops[{index}] ('{name}'): {block} field '{key}' "
+                f"{reserved_fields[key]}; remove it"
             )
         if key not in known:
             raise AdapterError(f"loops[{index}] ('{name}'): block '{block}': unknown field '{key}'")
@@ -86,7 +100,6 @@ def _validate_subblock(entry, index, name, block, *, str_fields=(), list_fields=
             if not isinstance(v, bool):
                 raise AdapterError(
                     f"loops[{index}] ('{name}'): block '{block}': field '{field}' must be a bool")
-    return val
 
 
 def _validate_loop(entry, index: int) -> None:
@@ -94,17 +107,29 @@ def _validate_loop(entry, index: int) -> None:
         raise AdapterError(f"loops[{index}] must be a mapping, got {type(entry).__name__}")
     name = entry.get("name", "?")
 
+    # Reserved-field check runs before the move-block presence loop below (and
+    # before the generic unknown-field scan) so a reserved-but-unshipped field
+    # (e.g. memory_intervention, contract) on an otherwise-incomplete entry
+    # gets the targeted reserved-field message, not a generic missing-block
+    # error — matching this section's own stated intent (see comment above
+    # _RESERVED_LOOP_FIELDS).
+    for key in entry:
+        if key in _RESERVED_LOOP_FIELDS:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): field '{key}' is reserved for "
+                f"{_RESERVED_LOOP_FIELDS[key]} and is not accepted in this schema; remove it"
+            )
+
     for block in _LOOP_MOVE_BLOCKS:
         if block not in entry:
-            raise AdapterError(f"loops[{index}] ('{name}'): missing required block '{block}'")
+            msg = f"loops[{index}] ('{name}'): missing required block '{block}'"
+            if _A1_FLAT_LOOP_FIELDS & set(entry):
+                msg += (" (schema v2 moved A1's flat loop fields into "
+                         "discovery/handoff/verification/persistence/scheduling)")
+            raise AdapterError(msg)
 
     for key in entry:
         if key not in _LOOP_KNOWN_ENTRY_FIELDS:
-            if key in _RESERVED_LOOP_FIELDS:
-                raise AdapterError(
-                    f"loops[{index}] ('{name}'): field '{key}' is reserved for "
-                    f"{_RESERVED_LOOP_FIELDS[key]} and is not accepted in this schema; remove it"
-                )
             raise AdapterError(f"loops[{index}] ('{name}'): unknown field '{key}'")
 
     for field in _LOOP_ENTRY_TOP_FIELDS:
