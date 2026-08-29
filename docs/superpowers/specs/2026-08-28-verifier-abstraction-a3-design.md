@@ -255,8 +255,9 @@ references re-verified against `main` `707533d` during the 2026-08-29 operator r
 9. **Behaviour-preservation invariant.** For every artifact shape a factory writer
    produces today, `_parse_artifact_stage(name, content)` returns a dict equal to
    main's result, and `verdict_gate_check.sh` is not modified. Proven by a golden
-   corpus `tests/fixtures/verdicts/` (one file per writer path: conformance
-   PASS-with-VERDICT/CYCLES and BLOCKED-critical; review empty-diff PASS, FAIL_OPEN
+   corpus `tests/fixtures/verdicts/` (one file per writer path: conformance PASS-with-VERDICT/CYCLES, BLOCKED-critical and SKIPPED
+   (`commands/dark-factory-conformance.md:35` writes `STATUS: SKIPPED` + `REASON:
+   conformance.enabled=false` and no other fields); review empty-diff PASS, FAIL_OPEN
    ERROR, zero-findings PASS, emit_verdict PASS+THRESHOLD, BLOCKED; blast
    SKIPPED/PASS/HUMAN_REQUIRED; validation prose PASS/FAIL; conflict_resolution
    `CONFLICT_VERDICT=`/`**Status:**`) with expected JSON captured from main *before*
