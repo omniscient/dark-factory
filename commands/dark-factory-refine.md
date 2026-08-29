@@ -52,8 +52,9 @@ Do NOT create or modify any other files. Do NOT implement code, write tests, or 
 3. Read `/opt/refinement-skills/orchestrator-prompt.md` — a short persona stub; your full process
    instructions are Phases 1–6 below (this file), not a separate document.
 4. Read `/opt/refinement-skills/product-owner-prompt.md` — you will pass this to subagents
-5. Read `/opt/dark-factory/config/config.yaml` for pipeline configuration
-6. Compute the affected file set and load memory context:
+5. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the product-owner subagent spawned in Phase 4; if the file is absent (image predates it), continue — the inline pin is authoritative.
+6. Read `/opt/dark-factory/config/config.yaml` for pipeline configuration
+7. Compute the affected file set and load memory context:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
@@ -98,8 +99,7 @@ Follow this process:
 2. For each question, spawn a product-owner subagent using the Agent tool:
    - `description`: "Product owner: <short question summary>"
    - `prompt`: Content of `product-owner-prompt.md` with the $ISSUE_CONTEXT, $QA_HISTORY, and $QUESTION placeholders replaced with actual values
-   - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (do not let it inherit the orchestrator's model)
-   - The subagent needs Glob, Grep, and Read tools to explore the codebase
+   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (do not let it inherit the orchestrator's model)
 3. If the subagent returns a response starting with `UNCERTAIN:`:
    - Post a comment on the issue explaining the question and context gathered so far
    - Run: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`

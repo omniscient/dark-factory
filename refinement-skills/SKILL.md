@@ -48,3 +48,7 @@ See `config.yaml` for tunable parameters.
 - `product-owner-prompt.md` — Persona for the Q&A subagent (adjustable)
 - `architect-prompt.md` — Persona for the plan reviewer (adjustable)
 - `orchestrator-prompt.md` — Persona stub for the brainstorming orchestrator — full process lives in `dark-factory-refine.md`
+
+See `refinement-skills/VERIFIER-CONTRACT.md` for the shared checker-invocation
+contract (model pin, read access, clone-live-first resolution) and the
+target-registered verifier registration contract.

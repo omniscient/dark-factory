@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Shared gate functions sourced by dark-factory-conformance.md and dark-factory-code-review.md.
 # Do not add gate-specific logic here — only the three shared primitives.
+# emit_verdict()'s STATUS/GATE_TYPE/FINDINGS_COUNT/SEVERITY shape is canonically
+# documented in scripts/factory_core/verdict.py (the Python-side parser/formatter)
+# and /opt/refinement-skills/VERIFIER-CONTRACT.md — keep this file's format byte-identical.
 # Do NOT add set -euo pipefail: this file is sourced and must not alter caller shell options.
 
 GATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
