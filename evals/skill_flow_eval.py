@@ -384,14 +384,24 @@ def _cost_report_pr_stats(prs: list[dict], repo: str, node_id: str, intent_filte
             "n_total": n_total, "n_with_data": 0,
             "avg_input_tokens": None, "avg_output_tokens": None,
             "avg_duration_ms": None, "avg_cost_usd": None,
+            "tokens_per_task": None, "cost_per_task": None, "wall_clock": None,
         }
+    avg_input = sum(p["input_tokens"] for p in per_pr_avgs) / n_with_data
+    avg_output = sum(p["output_tokens"] for p in per_pr_avgs) / n_with_data
+    avg_duration = sum(p["duration_ms"] for p in per_pr_avgs) / n_with_data
+    avg_cost = sum(p["cost_usd"] for p in per_pr_avgs) / n_with_data
     return {
         "n_total": n_total,
         "n_with_data": n_with_data,
-        "avg_input_tokens": sum(p["input_tokens"] for p in per_pr_avgs) / n_with_data,
-        "avg_output_tokens": sum(p["output_tokens"] for p in per_pr_avgs) / n_with_data,
-        "avg_duration_ms": sum(p["duration_ms"] for p in per_pr_avgs) / n_with_data,
-        "avg_cost_usd": sum(p["cost_usd"] for p in per_pr_avgs) / n_with_data,
+        "avg_input_tokens": avg_input,
+        "avg_output_tokens": avg_output,
+        "avg_duration_ms": avg_duration,
+        "avg_cost_usd": avg_cost,
+        # Same semantics as run_record.py's harness_economics (df#240 Tier A): tokens_per_task
+        # = input+output, cost_per_task = cost_usd, wall_clock = duration in seconds (not ms).
+        "tokens_per_task": avg_input + avg_output,
+        "cost_per_task": avg_cost,
+        "wall_clock": avg_duration / 1000,
     }
 
 
@@ -423,6 +433,18 @@ _TIER2_COST_REPORT_NODE: dict[str, tuple[str, str | None]] = {
     "refine": ("refine", None),
     "plan_narrative": ("plan", None),
     "continue": ("implement", "continue"),
+}
+
+# scenario -> (workflow node_id, intent_filter) for df#240 Tier B's --economics-boundary mining.
+# Deliberately its own table (not a reuse of _TIER2_COST_REPORT_NODE above): the economics pass
+# covers all five factory phases against ONE boundary per invocation, while _TIER2_COST_REPORT_NODE
+# covers three scenarios each against their own boundary_sha from SCENARIO_MAP.
+_ECONOMICS_NODES: dict[str, tuple[str, str | None]] = {
+    "refine": ("refine", None),
+    "plan": ("plan", None),
+    "implement": ("implement", None),
+    "conformance": ("conformance", None),
+    "code-review": ("code-review", None),
 }
 
 
@@ -496,6 +518,15 @@ def build_arg_parser():
     parser.add_argument("--output-dir", default="evals")
     parser.add_argument("--since", default="2026-05-01")
     parser.add_argument("--until", default=None)
+    parser.add_argument(
+        "--economics-boundary", default=None,
+        help=(
+            "Commit SHA bracketing an enforce_budgets enforcement-live boundary "
+            "(df#240 Tier B). Run once per boundary — refine/plan share the T3b commit "
+            "(#733), conformance/code-review share the T6 commit (see config.yaml's enforce block comments); this flag takes "
+            "one SHA per invocation, not a pair, so the operator runs the script twice."
+        ),
+    )
     return parser
 
 
@@ -537,6 +568,17 @@ def run(args, write_json: bool = False) -> dict:
                     args.repo, windowed_prs, boundary, node_id, intent_filter=intent_filter
                 ),
             }
+
+    # ── df#240 Tier B: economics-boundary mining (optional; never runs unless requested,
+    # and never in CI — this hits the live gh REST API like everything else in run()). ──
+    if args.economics_boundary:
+        econ_boundary = merge_boundary_date(args.repo_root, args.economics_boundary)
+        report["economics"] = {
+            scenario: mine_cost_report_population(
+                args.repo, windowed_prs, econ_boundary, node_id, intent_filter=intent_filter
+            )
+            for scenario, (node_id, intent_filter) in _ECONOMICS_NODES.items()
+        }
 
     if not args.no_cross_repo:
         conformance_boundary = merge_boundary_date(

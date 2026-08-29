@@ -1,0 +1,31 @@
+# Worked example for bench/compare_variants.py — issue #240.
+# Two arms, one suite, one env var: token_optimization.enforce_budgets off vs. on.
+# Order matters: compare_variants.py treats variants[0] as the baseline ("before") and renders
+# the report row + gate verdict for variants[1] (the candidate). The spec's worked example
+# evaluates enforcement ON as the candidate, so OFF is listed first.
+# The OFF arm is the only reachable "disabled" arm — TOKEN_OPTIMIZATION_ENFORCE_BUDGETS is a
+# kill-only override (scripts/budget_gate.sh:50-51); it cannot force enforcement on, so the ON
+# arm is unset env / committed config as-is, not a second explicit override.
+#
+# Fixture-health caveat (spec Architecture §Tier A item 5): ~6/10 bench/suite.json tasks
+# currently score "expected-fail-both" on outcome for unrelated pre-extraction path/tooling
+# reasons (docs/parity-p2.md §4a), leaving ~3-4 S-bucket tasks with real outcome-discriminating
+# power. Economics (tokens/cost/wall-clock) remains measurable on all 10 regardless — only the
+# outcome/quality delta should be read against the known-good subset, or re-locked first via
+# bench/find_eligible.py.
+#
+# Usage (operator-run execution follow-up, not run in CI):
+#   bench/run_suite.sh --variant-id budget-enforce-on  --issues 224,332,289 --n 3
+#   TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false bench/run_suite.sh --variant-id budget-enforce-off --issues 224,332,289 --n 3
+#   python3 bench/compare_variants.py --variants bench/variants.example.yaml \
+#     --results-dir bench/results --out bench/results/enforce-budgets-report.md
+variants:
+  - variant_id: budget-enforce-off      # baseline ("before")
+    dimension: economics
+    fixture_set: bench/suite.json
+    env:
+      TOKEN_OPTIMIZATION_ENFORCE_BUDGETS: "false"
+  - variant_id: budget-enforce-on       # candidate ("after") — the row the report renders
+    dimension: economics
+    fixture_set: bench/suite.json
+    env: {}
