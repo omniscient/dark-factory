@@ -125,8 +125,14 @@ def determine_rollback_tier(variant: dict) -> str:
 def _load_run_records(results_dir: Path) -> dict[str, dict]:
     records = {}
     for f in Path(results_dir).glob("*-run-record.json"):
-        data = json.loads(f.read_text())
-        records[data["run_id"]] = data
+        try:
+            data = json.loads(f.read_text())
+            run_id = data["run_id"]
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"{f}: not a run-record (missing/invalid run_id or JSON): {exc}") from exc
+        if "harness_economics" not in data:
+            raise ValueError(f"{f}: run-record has no harness_economics block (pre-#235 record?)")
+        records[run_id] = data
     return records
 
 
@@ -228,6 +234,9 @@ def build_report(variants: list[dict], joined: dict[str, dict],
                   improvement_threshold: "float | None" = None) -> dict:
     before_id, after_id = [v["variant_id"] for v in variants][:2]
     economics_deltas = {m: paired_median_delta(joined, m) for m in _ECONOMICS_METRICS}
+    # How many (before, after) pairs each median rests on — a null-cost run (cost_unavailable)
+    # drops out of that metric only, so n_pairs is the reader's guard against a "median of 1".
+    n_pairs = {m: len(paired_values(joined, m)) for m in _ECONOMICS_METRICS}
     outcome_pairs = [
         (joined[before_id][k]["pass_k"], joined[after_id][k]["pass_k"])
         for k in joined[before_id] if k in joined[after_id]
@@ -262,6 +271,7 @@ def build_report(variants: list[dict], joined: dict[str, dict],
         "baseline_variant_id": before_id,
         "outcome_delta_pass_k": outcome_delta,
         "economics_delta": economics_deltas,
+        "n_pairs": n_pairs,
         # Stub-mode, not gate-bearing — see Gate-criteria section. Reported for visibility only;
         # never fed into gate_verdict above (that uses outcome_delta_pass_k, the real quality
         # metric, exactly as the spec requires).
@@ -282,8 +292,10 @@ def build_report(variants: list[dict], joined: dict[str, dict],
 
 def render_markdown(report: dict) -> str:
     econ = report["economics_delta"]
+    n_pairs = report.get("n_pairs", {})
     econ_str = "; ".join(
-        f"{k}: {v:+.4g}" if v is not None else f"{k}: n/a" for k, v in econ.items()
+        (f"{k}: {v:+.4g} (n={n_pairs.get(k, '?')})" if v is not None else f"{k}: n/a (n=0)")
+        for k, v in econ.items()
     )
     outcome = (
         f"{report['outcome_delta_pass_k']:+.4f}"

@@ -307,6 +307,8 @@ def test_build_report_carries_stub_mode_score_and_cpm_not_gate_bearing(tmp_path)
 def test_variants_example_yaml_loads_and_validates():
     example = _BENCH_DIR / "variants.example.yaml"
     variants = cv.load_variants(example)
-    assert [v["variant_id"] for v in variants] == ["budget-enforce-on", "budget-enforce-off"]
+    # variants[0] is the baseline ("before"), variants[1] the candidate whose row the report
+    # renders — the spec's worked example evaluates enforcement ON as the candidate.
+    assert [v["variant_id"] for v in variants] == ["budget-enforce-off", "budget-enforce-on"]
     cv.assert_only_economics_keys_differ(variants)  # must not raise
-    assert cv.determine_rollback_tier(variants[1]) == "0"
+    assert cv.determine_rollback_tier(variants[0]) == "0"  # env-override arm: tier 0 rollback

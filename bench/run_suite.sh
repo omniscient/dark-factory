@@ -30,6 +30,11 @@ set -euo pipefail
 
 # BENCH_TARGET_DIR: run the suite against a target clone (extracted-factory parity runs)
 REPO_ROOT="${BENCH_TARGET_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+# FACTORY_ROOT: the dark-factory checkout this script ships from. Factory tooling
+# (scripts/factory_core/cli.py) always resolves from here — never from REPO_ROOT, which
+# is the benchmark *target* clone when BENCH_TARGET_DIR is set (MarketHawk vendors the
+# factory under dark-factory/, so "$REPO_ROOT/scripts/..." does not exist there).
+FACTORY_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/bench"
 RESULTS_DIR="$BENCH_DIR/results"
 
@@ -222,7 +227,7 @@ for t in tasks:
 
     RUN_RECORD_FILE="$RESULTS_DIR/${RUN_ID}-run-record.json"
     RUN_STATUS="failed"; [ "$ARCHON_RC" -eq 0 ] && RUN_STATUS="completed"
-    python3 "$REPO_ROOT/scripts/factory_core/cli.py" run-record assemble \
+    python3 "$FACTORY_ROOT/scripts/factory_core/cli.py" run-record assemble \
       --run-id "$RUN_ID" \
       --issue "$ISSUE" \
       --intent implement \
