@@ -2,8 +2,9 @@
 
 **Issue:** #198 · **Epic:** #194 · **Spec:** `docs/superpowers/specs/2026-08-29-loop-declarative-stop-conditions-a4-design.md`
 **Depends on:** #195 (shipped), #301 (merged to `main` via PR #369 — verified below), #197 (spec+plan
-approved on `refine/issue-197-refactor-gates---verifier-abstraction-ex`, **not yet merged, no code
-exists anywhere for it yet**)
+approved on `refine/issue-197-refactor-gates---verifier-abstraction-ex`; implementation on
+`origin/feat/issue-197-refactor-gates---verifier-abstraction-ex` at `e852ecf`, **not yet merged to
+`main`** — signatures verified below)
 
 ## Pre-flight: dependency state re-verified against `main` (2026-08-29)
 
@@ -21,23 +22,36 @@ Per the spec's own Sequencing note ("the plan phase re-verifies both file/functi
   between this branch and `main` (verified: empty `git diff`), so every task below that touches those
   six files is written directly against this branch's current content with no re-verification risk.
   Task 1 (the `adapter.py`/`test_adapter.py` task) is written against `main`'s content instead
-  (quoted in-place below) — **the implement phase must first bring this branch up to date with
-  `main`** (a `deconflict`/merge step, out of this plan document's own scope) before Task 1 can be
-  applied; if the merge lands #301's code with any field-name deviation from what's quoted here,
-  re-verify against the merged tree before editing.
-- **#197 has no code anywhere** — not on `main`, not on its own `refine/issue-197-...` branch (which
-  carries only its spec and plan documents; `scripts/factory_core/verifier.py` and `verdict.py` do
-  not exist in either place). The issue's `Depends on: #197` line already gates the scheduler's
-  *implementation* dispatch (`Fix issue #198`) until #197 is Done — this plan does not need to
-  invent a second gate. Tasks 16–17 (the R5/R6 predicate-class seam) are written against the exact
-  function/CLI signatures #197's own approved spec and plan commit to
-  (`scripts/factory_core/verifier.py`: `resolve_verifier`, `run_verifier`, `normalize_verdict`,
-  `assert_verifier_independent`; `scripts/factory_core/verdict.py`: `parse_verdict`,
-  `format_verdict`) — **the implementer must re-verify these names against `main` immediately
-  before starting Task 17** (Task 16's predicate script itself has no #197 dependency and can be
-  built any time), per the spec's own re-verify-before-building-on-a-dependency
-  convention, and adjust only if #197 shipped with different names than its approved spec commits
-  to.
+  (quoted in-place below). **No merge step is needed and none must be attempted:** the workflow's
+  `setup-branch` node (`workflows/archon-dark-factory.yaml`, `git checkout -b "$BRANCH"`) creates
+  `feat/issue-198-*` from the freshly cloned `main`, so the feat branch already carries #301's code
+  and Task 1 applies directly. If `main` has moved and `adapter.py`'s `scheduling`
+  `_validate_subblock` call deviates from what is quoted here, re-verify against the checked-out
+  tree before editing.
+- **#197's code exists on `origin/feat/issue-197-refactor-gates---verifier-abstraction-ex`
+  (`e852ecf`), not yet on `main`** (operator review, 2026-08-29). The issue's `Depends on: #197`
+  line already gates the scheduler's *implementation* dispatch (`Fix issue #198`) until #197 is
+  Done — this plan does not need to invent a second gate. Every signature Tasks 16–17 call was
+  verified directly against that branch's `scripts/factory_core/verifier.py`:
+  - `resolve_verifier(clone_dir: str, verifier_path: str) -> str` — a plain `os.path.join`, no
+    existence check.
+  - `run_verifier(resolved_path: str, env: dict, timeout: int = 300) -> tuple[int, str]` — passes
+    `env` to the child **verbatim** (so the `CLONE_DIR` fixture seam below holds by construction);
+    **raises `VerifierError`** (does not return a verdict) on a missing/non-executable path
+    (`os.access(X_OK)` guard), timeout, or a process that cannot start — `STATUS: BLOCKED`
+    synthesis for those cases lives in `resolve_and_run`, not in `run_verifier`.
+  - `normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str` — `gate_type` is a
+    required positional; bare exit 0 → `STATUS: PASS`, non-zero → `STATUS: BLOCKED`/high.
+  - `verdict.py`: `parse_verdict(content)`, `format_verdict(gate_type, status, findings_count,
+    severity)`.
+  - The CLI (`python -m factory_core.verifier`) takes `--clone-dir --loop-name --verifier-path
+    [--timeout --issue-num --factory-repo-slug --side-effect-level] run --out`; `gate_type` is
+    derived as `loop:<loop-name>` and there is **no `--gate-type` flag** — which is why Task 17
+    uses the Python API (the spec's own stated fallback, R6) and adds no CLI flag.
+
+  **The implementer must still re-verify these names against `main` immediately before starting
+  Task 17** (Task 16's predicate script itself has no #197 dependency and can be built any time)
+  and adjust only if #197 merged with a different shape than `e852ecf`.
 - **Implement-phase reminder (memory pattern, issue #42):** a refine-phase spec/plan approved on a
   sibling `refine/issue-198-...` branch does not transfer automatically onto the `feat/issue-198-...`
   branch implementation happens on — the implement phase must itself copy
@@ -50,9 +64,22 @@ Per the spec's own Sequencing note ("the plan phase re-verifies both file/functi
   `docs/superpowers/specs/` path (archiving both broke CI on PR #215, since a test and the README both
   pin the spec path there).
 
+  **Exact first action on the feat branch, before Task 1** (the conformance gate greps
+  `docs/superpowers/specs/` and `docs/superpowers/plans/` for `#198` on the feat branch, so both
+  files must be committed there):
+
+  ```bash
+  git fetch origin refine/issue-198-feat-loops---declarative-per-loop-stop-c
+  git checkout FETCH_HEAD -- \
+    docs/superpowers/specs/2026-08-29-loop-declarative-stop-conditions-a4-design.md \
+    docs/superpowers/plans/2026-08-29-loop-declarative-stop-conditions-a4-plan.md
+  git commit -m "docs: carry #198 spec+plan onto feat branch"
+  ```
+
 **Flag for the conformance reviewer:** Task 12 introduces a `--peek` flag on `breaker-evaluate-stop`
-that is not in the spec's literal CLI contract (R7 states the subcommand as
-`breaker-evaluate-stop --issue N --phase P --ceiling C`, no flags). The addition is justified in
+that was not in the spec's original CLI contract (R7 stated the subcommand as
+`breaker-evaluate-stop --issue N --phase P --ceiling C`, no flags); the 2026-08-29 operator review
+recorded it in spec R7 as the resolve-site form. The addition is justified in
 Task 12's own design note against `scheduler.sh`'s actual (verified) code shape — the resolve site's
 increment is structurally deferred to its `CONFLICTING` dispatch branch, unlike the other three sites
 — and preserves R7's byte-identical-parity claim, which a literal reading of R7 would otherwise break
@@ -804,12 +831,36 @@ and `max_tokens` have no factory-side equivalent to tighten against, so they app
        assert row["failure_behavior"] == "x" * 64
        assert row["loop"] == "nightly-scan"
        assert row["reason"] == "max_iterations"
+
+
+   def test_trip_audit_row_write_failure_does_not_swallow_verdict(tmp_path, monkeypatch, capsys):
+       """Operator review (2026-08-29): the audit row is written on the live scheduler.sh
+       path, where `EVAL_RESULT=$(evaluate_stop ...)` runs under `set -euo pipefail` — an
+       OSError escaping here (unwritable runs.jsonl, flock failure) would exit
+       breaker-evaluate-stop non-zero and kill the whole poll loop at the moment a
+       ticket trips. Today's inline compare has no such surface (_write_key swallows
+       OSError). The trip verdict must survive; the failure is reported on stderr."""
+       sf = tmp_path / "state.json"
+       import factory_core.run_record as run_record
+
+       def _boom(record):
+           raise OSError("read-only runs.jsonl")
+
+       monkeypatch.setattr(run_record, "append_stop_record", _boom)
+       from factory_core.breaker import set_retry_count
+       set_retry_count("42:plan", 3, sf)
+       v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+       assert v.stopped is True
+       assert v.reason == "max_retries"
+       assert "stop-condition audit row not written" in capsys.readouterr().err
    ```
 
-   Run: `python -m pytest tests/test_factory_core_breaker.py -k "runs_jsonl or non_tripped_evaluation" -v`
-   — fails (`_append_stop_audit_row` is still a no-op stub).
+   Run: `python -m pytest tests/test_factory_core_breaker.py -k "runs_jsonl or non_tripped_evaluation or audit_row_write_failure" -v`
+   — fails (`_append_stop_audit_row` is still a no-op stub; the write-failure case fails on the
+   missing stderr message).
 
-2. Green — replace the stub in `scripts/factory_core/breaker.py`:
+2. Green — replace the stub in `scripts/factory_core/breaker.py` (and add `import sys` to the
+   top-of-file imports):
 
    ```python
    def _append_stop_audit_row(verdict: StopVerdict, issue_num: int, phase: str,
@@ -822,18 +873,29 @@ and `max_tokens` have no factory-side equivalent to tighten against, so they app
            fb = (loop_entry.get("scheduling") or {}).get("failure_behavior")
            if fb:
                failure_behavior = fb[:64]
-       run_record.append_stop_record({
-           "stage": "stop_condition",
-           "verdict": "STOPPED",
-           "issue_number": issue_num,
-           "phase": phase,
-           "loop": loop_name,
-           "reason": verdict.reason,
-           "failure_behavior": failure_behavior,
-           "detail": verdict.detail,
-           "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-       })
+       try:
+           run_record.append_stop_record({
+               "stage": "stop_condition",
+               "verdict": "STOPPED",
+               "issue_number": issue_num,
+               "phase": phase,
+               "loop": loop_name,
+               "reason": verdict.reason,
+               "failure_behavior": failure_behavior,
+               "detail": verdict.detail,
+               "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           })
+       except OSError as exc:
+           # Operator review (2026-08-29): this runs on scheduler.sh's live dispatch
+           # path under `set -euo pipefail`; a propagated OSError would turn one
+           # unwritable runs.jsonl into a dead poll loop. Mirror _write_key's posture
+           # (swallow OSError) but say so loudly — the verdict itself is unaffected.
+           print(f"breaker: stop-condition audit row not written: {exc}", file=sys.stderr)
    ```
+
+   Note: `run_record` transitively imports `model_proxy` → `aiohttp` (installed in the image,
+   `Dockerfile` `pip install ... aiohttp`, and in CI); the import stays lazy so the non-trip path
+   never pays for it.
 
 3. Run: `python -m pytest tests/test_factory_core_breaker.py -v` — all green (this file's full suite,
    including Tasks 2–7's new cases).
@@ -1627,8 +1689,9 @@ dependency on any *additional* env var surviving the subprocess boundary, unlike
    script sits directly in `scripts/`, so a plain `.parent` is the equivalent climb). No external
    `PYTHONPATH` setup is needed in either the test or production path.
 
-3. **Mark the script executable** — #197's `run_verifier` fails closed (`STATUS: BLOCKED`) on a
-   declared verifier path that exists but isn't executable (its own spec, Requirement 4). Every other
+3. **Mark the script executable** — #197's `run_verifier` raises `VerifierError` on a declared
+   verifier path that exists but isn't executable (verified on `origin/feat/issue-197-...`: an
+   `os.access(X_OK)` guard; `resolve_and_run` is what turns that into `STATUS: BLOCKED`). Every other
    `scripts/*.py` in this repo is non-executable (`0644`) because none of them are *resolved and
    directly exec'd* by another component the way a declared `verification.verifier`/`stop_condition`
    path is — this one specifically needs the bit set:
@@ -1653,8 +1716,8 @@ dependency on any *additional* env var surviving the subprocess boundary, unlike
 **BLOCKED until #197 merges to `main`.** Do not start this task while `scripts/factory_core/verifier.py`
 and `scripts/factory_core/verdict.py` are absent from `main` — re-run the Pre-flight section's checks
 (`git show main:scripts/factory_core/verifier.py`) first. If present, **re-verify every function
-signature below against the merged `main` file** before writing code — #197's own spec is the source
-these signatures are copied from, but its approved spec is not itself the shipped implementation.
+signature below against the merged `main` file** before writing code — the signatures were verified
+against #197's implementation branch (`e852ecf`, see Pre-flight), not against what finally merged.
 
 **Files:** `tests/test_verifier.py` (#197-owned, extended here), `tests/test_verdict_gate_check.sh`
 (extended here, per #197 R9/#198 R6's own stated placement)
@@ -1738,10 +1801,10 @@ these signatures are copied from, but its approved spec is not itself the shippe
        and must be revised before continuing Task 17."""
        env = {"CLONE_DIR": str(tmp_path), "ISSUE_NUM": "1", "PATH": os.environ["PATH"]}
        probe = tmp_path / "probe.py"
-       # #197's own spec (Requirement 4) fails run_verifier closed — STATUS: BLOCKED —
-       # on a path that "exists but isn't executable"; a shebang + the executable bit
-       # are required here or this probe fails for the wrong reason (not-executable),
-       # not the thing it's actually meant to test (env forwarding).
+       # #197's run_verifier raises VerifierError (verified: os.access(X_OK) guard) on
+       # a path that exists but isn't executable; a shebang + the executable bit are
+       # required here or this probe fails for the wrong reason (not-executable), not
+       # the thing it's actually meant to test (env forwarding).
        probe.write_text(
            "#!/usr/bin/env python3\n"
            "import os, sys; sys.stdout.write(os.environ.get('CLONE_DIR', 'MISSING'))\n"
@@ -1764,10 +1827,10 @@ these signatures are copied from, but its approved spec is not itself the shippe
    is merged).
 
 2. Green — no new production code beyond Task 16's script; this task only wires the existing
-   predicate through #197's already-implemented seam. If `verifier.py`'s CLI lacks a `--gate-type`
-   flag at this point, use the Python API directly (as the tests above already do) rather than
-   adding one — only add `--gate-type` if a *later* consumer specifically needs the CLI form (spec's
-   own stated fallback).
+   predicate through #197's already-implemented seam. `verifier.py`'s CLI has `--loop-name` (gate
+   type `loop:<name>`) and **no `--gate-type` flag** (verified, see Pre-flight): use the Python API
+   directly (as the tests above already do) and do not add a CLI flag — only a *later* consumer
+   that specifically needs the CLI form would add `--gate-type` (spec's own stated fallback, R6).
 
 3. Append to `tests/test_verdict_gate_check.sh` (mirroring #197's existing case structure exactly,
    see `_run` helper and Case 1–2 pattern read during research). **This closes the R6 chain
@@ -1853,7 +1916,10 @@ the correct response is to point at this section and R9/R10/R11 of the spec, not
 
 - [ ] `python -m pytest tests/ -v` — full suite green (Task 15 + Task 17's additions)
 - [ ] `bash tests/test_scheduler.sh` — 0 failures, sections B/K9/K10/V/W unmodified-and-passing, new
-      section X passing
+      section X passing. **CI does not run this file** (`.github/workflows/ci.yml` runs `pytest
+      tests/` plus a fixed list of other named `.sh` files) — it must be run locally here and named in
+      the PR body as the AC3 evidence (Task 14's note)
+- [ ] `bash tests/test_run_record_hermetic.sh` — `OK` (CI runs it; Task 14 changes its regex)
 - [ ] `bash tests/test_verdict_gate_check.sh` — 0 failures (once Task 17 lands)
 - [ ] `bash -n scheduler.sh` — clean parse
 - [ ] `bash smoke_gate.sh` (informational; CI is authoritative)

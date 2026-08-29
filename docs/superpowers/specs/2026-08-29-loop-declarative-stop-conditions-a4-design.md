@@ -319,7 +319,10 @@ exactly as they are; no key in `config/config.yaml` changes.**
 **The refactor replaces only steps (4)+(5)** — the `count|*` branch's `get_retry_count`/ceiling
 compare/`increment_retry` — at all four sites with one call to a new thin `factory_core/cli.py`
 subcommand, `breaker-evaluate-stop --issue N --phase P --ceiling C` (mirroring the existing
-`breaker-get`/`breaker-incr`/`breaker-trip` family), invoked with `loop_entry=None` at every site. It
+`breaker-get`/`breaker-incr`/`breaker-trip` family), invoked with `loop_entry=None` at every site. At
+`stage_conflict_resolve` the call carries `--peek` (evaluate, never increment): that site's increment
+already lives in its `CONFLICTING` dispatch branch (l.920) and stays there untouched; a trip under
+`--peek` is still recorded and audited (operator review, 2026-08-29). It
 prints `stopped=<true|false> reason=<enum|none>`; on `stopped=true` the bash site calls the existing
 `trip_to_blocked` adapter with the reason string R13 fixes (for the parity path, the byte-identical
 `retry limit of ${MAX_RETRIES} reached` / `... for conflict resolution` text used today), so the
@@ -543,8 +546,8 @@ Files touched:
 - `scripts/factory_core/run_record.py` — one public helper, `append_stop_record(record)`, wrapping
   the existing `_append_jsonl` (no Seq post).
 - `scripts/factory_core/cli.py` — one new thin subcommand, `breaker-evaluate-stop --issue --phase
-  --ceiling`, mirroring the existing `breaker-*` family, giving `scheduler.sh` (bash) a way to invoke
-  the evaluator.
+  --ceiling [--peek]`, mirroring the existing `breaker-*` family, giving `scheduler.sh` (bash) a way to
+  invoke the evaluator.
 - `scheduler.sh` — at the four retry sites (`stage_conflict_resolve`, `stage_blocked_retry`,
   `stage_plan`, `stage_refine`) replace only the `count|*` branch's `get_retry_count`/ceiling
   compare/`increment_retry` with the new subcommand (`loop_entry=None`); steps (1)–(3) of R7 and
