@@ -82,15 +82,20 @@ _VALID_LOOP_ENTRY = """
 loops:
   - name: nightly-scan-triage
     purpose: Triage overnight scanner false positives
-    trigger: 'cron:0 6 * * *'
-    inputs: ["scanner_output.json"]
-    outputs: ["triage_report.md"]
-    artifacts: [".factory/state/triage.json"]
-    verifier: verifiers/triage_verifier.py
-    stop_condition: stop_conditions/triage_stop.py
-    failure_behavior: escalate_to_human
     side_effect_level: 2
-    handoff: handoffs/triage_handoff.py
+    discovery:
+      trigger: 'cron:0 6 * * *'
+      inputs: ["scanner_output.json"]
+    handoff:
+      outputs: ["triage_report.md"]
+      manifest: handoffs/triage_handoff.py
+    verification:
+      verifier: verifiers/triage_verifier.py
+      stop_condition: stop_conditions/triage_stop.py
+    persistence:
+      artifacts: [".factory/state/triage.json"]
+    scheduling:
+      failure_behavior: escalate_to_human
 """
 
 
@@ -99,9 +104,29 @@ def test_valid_loop_entry_parses(tmp_path, capsys):
     (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
     merged = adapter.load(str(tmp_path))
     assert len(merged["loops"]) == 1
-    assert merged["loops"][0]["name"] == "nightly-scan-triage"
-    assert merged["loops"][0]["side_effect_level"] == 2
+    entry = merged["loops"][0]
+    assert entry["name"] == "nightly-scan-triage"
+    assert entry["side_effect_level"] == 2
+    assert entry["discovery"] == {
+        "trigger": "cron:0 6 * * *", "inputs": ["scanner_output.json"]}
+    assert entry["handoff"] == {
+        "outputs": ["triage_report.md"], "manifest": "handoffs/triage_handoff.py"}
+    assert entry["verification"] == {
+        "verifier": "verifiers/triage_verifier.py",
+        "stop_condition": "stop_conditions/triage_stop.py"}
+    assert entry["persistence"] == {"artifacts": [".factory/state/triage.json"]}
+    assert entry["scheduling"] == {"failure_behavior": "escalate_to_human"}
     assert "unknown adapter key 'loops'" not in capsys.readouterr().err
+
+
+def test_loops_get_dotted_path_returns_verbatim(tmp_path):
+    """Acceptance criterion: the R1 shape is returned verbatim by adapter.get(),
+    not just adapter.load()."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    loops = adapter.get(str(tmp_path), "loops")
+    assert loops[0]["discovery"] == {
+        "trigger": "cron:0 6 * * *", "inputs": ["scanner_output.json"]}
 
 
 def test_loops_independent_of_schema_version(tmp_path):
@@ -127,9 +152,10 @@ def test_loops_not_a_list_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
-def test_loop_entry_missing_required_field_raises(tmp_path):
+def test_loop_entry_missing_required_top_field_raises(tmp_path):
     d = tmp_path / ".factory"; d.mkdir()
-    entry = _VALID_LOOP_ENTRY.replace("    purpose: Triage overnight scanner false positives\n", "")
+    entry = _VALID_LOOP_ENTRY.replace(
+        "    purpose: Triage overnight scanner false positives\n", "")
     (d / "adapter.yaml").write_text(entry)
     with pytest.raises(adapter.AdapterError, match=r"missing required field 'purpose'"):
         adapter.load(str(tmp_path))
@@ -143,24 +169,135 @@ def test_loop_entry_unknown_field_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
-@pytest.mark.parametrize("field", sorted(adapter._LOOP_STRING_FIELDS))
-def test_loop_entry_string_field_wrong_type_raises(tmp_path, field):
+_MOVE_BLOCKS = ["discovery", "handoff", "verification", "persistence", "scheduling"]
+_MOVE_BLOCK_REQUIRED_FIELDS = [
+    ("discovery", "trigger"), ("discovery", "inputs"),
+    ("handoff", "manifest"), ("handoff", "outputs"),
+    ("verification", "verifier"), ("verification", "stop_condition"),
+    ("persistence", "artifacts"),
+    ("scheduling", "failure_behavior"),
+]
+_MOVE_BLOCK_STR_FIELDS = [
+    ("discovery", "trigger"), ("handoff", "manifest"),
+    ("verification", "verifier"), ("verification", "stop_condition"),
+    ("scheduling", "failure_behavior"),
+]
+_MOVE_BLOCK_LIST_FIELDS = [
+    ("discovery", "inputs"), ("handoff", "outputs"), ("persistence", "artifacts"),
+]
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_entry_missing_required_block_raises(tmp_path, block):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
-    parsed["loops"][0][field] = 42
+    del parsed["loops"][0][block]
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a non-empty string")):
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"missing required block '{block}'")):
         adapter.load(str(tmp_path))
 
 
-@pytest.mark.parametrize("field", sorted(adapter._LOOP_LIST_FIELDS))
-def test_loop_entry_list_field_wrong_type_raises(tmp_path, field):
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_not_a_mapping_raises(tmp_path, block):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
-    parsed["loops"][0][field] = "not-a-list"
+    parsed["loops"][0][block] = "not-a-mapping"
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a list of strings")):
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"block '{block}' must be a mapping")):
         adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_null_value_raises(tmp_path, block):
+    """A block key present but with no YAML value (`discovery:` alone) parses
+    to None, which must be rejected as 'not a mapping', not silently accepted
+    as 'absent' — None is a real parsed value here, distinct from the key
+    being missing entirely."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block] = None
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"block '{block}' must be a mapping")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_unknown_field_raises(tmp_path, block):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block]["extra_typo_field"] = "oops"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': unknown field 'extra_typo_field'")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_REQUIRED_FIELDS)
+def test_loop_move_block_missing_required_field_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    del parsed["loops"][0][block][field]
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': missing required field '{field}'")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_STR_FIELDS)
+def test_loop_move_block_string_field_wrong_type_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block][field] = 42
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_LIST_FIELDS)
+def test_loop_move_block_list_field_wrong_type_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block][field] = "not-a-list"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+def test_flat_a1_shaped_entry_fails(tmp_path):
+    """An A1-shaped flat entry (pre-A1.5) fails with the first missing move
+    block — there is no dual-form fallback (spec R1)."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "loops:\n"
+        "  - name: nightly-scan-triage\n"
+        "    purpose: Triage overnight scanner false positives\n"
+        "    trigger: 'cron:0 6 * * *'\n"
+        "    inputs: []\n"
+        "    outputs: []\n"
+        "    artifacts: []\n"
+        "    verifier: verifiers/triage_verifier.py\n"
+        "    stop_condition: stop_conditions/triage_stop.py\n"
+        "    failure_behavior: escalate_to_human\n"
+        "    side_effect_level: 2\n"
+        "    handoff: handoffs/triage_handoff.py\n"
+    )
+    with pytest.raises(adapter.AdapterError, match=r"missing required block 'discovery'"):
+        adapter.load(str(tmp_path))
+
+
+def test_dark_factory_own_adapter_yaml_loads_clean_after_reshape():
+    """Spec R1 fail-open precondition: the live .factory/adapter.yaml declares no
+    loops:, so the breaking reshape must not raise on it (an AdapterError would
+    silently drop every safety override back to DEFAULTS)."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load((repo_root / ".factory" / "adapter.yaml").read_text())
+    assert "loops" not in raw
+    merged = adapter.load(str(repo_root))
+    assert merged["loops"] == []
+    assert merged["safety"]["hard_exclude_paths"] == raw["safety"]["hard_exclude_paths"]
 
 
 @pytest.mark.parametrize("bad_level", [0, 7, -1, 100])
