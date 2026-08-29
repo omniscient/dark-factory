@@ -11,7 +11,7 @@ _MAP_KEYS = {"components", "safety", "memory_routing", "deconflict", "token_opti
 
 _LOOP_ENTRY_TOP_FIELDS = ("name", "purpose", "side_effect_level")
 _LOOP_MOVE_BLOCKS = ("discovery", "handoff", "verification", "persistence", "scheduling")
-_LOOP_OPTIONAL_ENTRY_FIELDS = {"role_card", "economics", "skills"}  # grows in Task 5
+_LOOP_OPTIONAL_ENTRY_FIELDS = {"role_card", "economics", "skills", "budget_caps", "human_checkpoint"}
 _LOOP_KNOWN_ENTRY_FIELDS = (
     set(_LOOP_ENTRY_TOP_FIELDS) | set(_LOOP_MOVE_BLOCKS) | _LOOP_OPTIONAL_ENTRY_FIELDS
 )
@@ -146,6 +146,24 @@ def _validate_loop(entry, index: int) -> None:
                         bool_fields=("context_offload_required",))
     _validate_subblock(entry, index, name, "skills",
                         list_fields=("primary", "supplemental", "forbidden", "eval_cases"))
+
+    if "human_checkpoint" in entry:
+        v = entry["human_checkpoint"]
+        if not isinstance(v, str) or not v:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): field 'human_checkpoint' must be a non-empty string")
+
+    _validate_subblock(entry, index, name, "budget_caps",
+                        int_fields=("max_tokens", "max_retry_spend"),
+                        required_fields=("max_tokens",))
+
+    if sel >= 4:
+        if "budget_caps" not in entry:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): side_effect_level {sel} >= 4 requires 'budget_caps'")
+        if "human_checkpoint" not in entry:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): side_effect_level {sel} >= 4 requires 'human_checkpoint'")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
