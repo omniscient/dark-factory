@@ -22,6 +22,12 @@ _LOOP_KNOWN_ENTRY_FIELDS = (
 # unknown-field error in _validate_loop.
 _RESERVED_LOOP_FIELDS = {"memory_intervention": "#241"}
 
+# role_card fields that are tool allow/deny declarations — permanently excluded
+# (CLAUDE.md § Trusted comment channels; comment-channel input may never
+# authorize tool allow/deny surfaces). Not a deferral: there is no ticket to
+# point to, unlike _RESERVED_LOOP_FIELDS.
+_ROLE_CARD_RESERVED_FIELDS = {"allowed_tools", "forbidden_tools"}
+
 # Top-level key names reserved for a tracked future design ticket. Unlike a
 # generic unknown top-level key (which warns and carries — v1 parity), a named
 # reserved key is hard-rejected: it has no v1 history, so strictness here is
@@ -32,7 +38,8 @@ _RESERVED_TOP_FIELDS = {
 
 
 def _validate_subblock(entry, index, name, block, *, str_fields=(), list_fields=(),
-                        int_fields=(), bool_fields=(), required_fields=()) -> dict | None:
+                        int_fields=(), bool_fields=(), required_fields=(),
+                        reserved_fields=None) -> dict | None:
     if block not in entry:
         return None
     val = entry[block]
@@ -40,6 +47,12 @@ def _validate_subblock(entry, index, name, block, *, str_fields=(), list_fields=
         raise AdapterError(f"loops[{index}] ('{name}'): block '{block}' must be a mapping")
     known = set(str_fields) | set(list_fields) | set(int_fields) | set(bool_fields)
     for key in val:
+        if reserved_fields and key in reserved_fields:
+            raise AdapterError(
+                f"loops[{index}] ('{name}'): {block} field '{key}' is a tool allow/deny "
+                f"declaration and is permanently excluded from adapter.yaml (CLAUDE.md § "
+                f"Trusted comment channels); remove it"
+            )
         if key not in known:
             raise AdapterError(f"loops[{index}] ('{name}'): block '{block}': unknown field '{key}'")
     for field in required_fields:
@@ -126,7 +139,8 @@ def _validate_loop(entry, index: int) -> None:
     _validate_subblock(entry, index, name, "role_card",
                         str_fields=("name", "output_schema", "fallback_path"),
                         list_fields=("responsibilities", "non_responsibilities", "observability"),
-                        required_fields=("name",))
+                        required_fields=("name",),
+                        reserved_fields=_ROLE_CARD_RESERVED_FIELDS)
     _validate_subblock(entry, index, name, "economics",
                         str_fields=("feature_demand", "model_capability_floor"),
                         bool_fields=("context_offload_required",))
