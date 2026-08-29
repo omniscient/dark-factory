@@ -648,6 +648,25 @@ def test_loop_entry_contract_reserved_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
+@pytest.mark.parametrize("reserved_key, match", [
+    ("contract", r"reserved for a follow-up child of epic #194"),
+    ("memory_intervention", r"reserved for epic #241"),
+])
+def test_loop_entry_reserved_key_beats_missing_blocks(tmp_path, reserved_key, match):
+    """Gate 3 (#301) regression: the reserved-key scan is hoisted ahead of the
+    five-move block loop, so an entry that is BOTH incomplete and carries a
+    reserved key reports the R5 reserved message, not 'missing required block'."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    entry = parsed["loops"][0]
+    for block in ("discovery", "handoff", "verification", "persistence", "scheduling"):
+        entry.pop(block, None)
+    entry[reserved_key] = {"anything": "at all"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=match):
+        adapter.load(str(tmp_path))
+
+
 def test_mechanism_candidates_top_level_reserved_raises(tmp_path):
     d = tmp_path / ".factory"; d.mkdir()
     (d / "adapter.yaml").write_text(
