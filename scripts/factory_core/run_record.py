@@ -19,6 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from . import model_proxy
+from . import verdict as _verdict
 
 SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
 JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
@@ -302,15 +303,31 @@ def _parse_archon_cost_with_capture(
 
 
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
-    """Extract stage verdict and metadata from a verdict artifact .md file."""
+    """Extract stage verdict and metadata from a verdict artifact .md file.
+
+    Thin per-name wrapper over verdict.parse_verdict's generic STATUS/GATE_TYPE/
+    FINDINGS_COUNT/SEVERITY parse for the names whose original loop already had
+    last-STATUS-line-wins semantics (conformance/review), each keeping its own
+    extra-detail overlay (cycles/blockers/advisory) and its own pre-existing
+    loose-fallback heuristic, byte-identical to before this refactor.
+
+    validation's original loop instead `break`s on the *first* STATUS: match
+    (first-wins) -- a different precedence than the shared generic parser's
+    last-wins scan -- so it keeps its own bespoke first-wins loop rather than
+    delegating, to avoid silently changing behavior for hypothetical multi-STATUS
+    content. conflict_resolution never used the STATUS: schema at all
+    (CONFLICT_VERDICT=/**Status:** instead) and stays fully independent, exactly
+    as before. A name this function has no bespoke overlay for (e.g. a target
+    loop's own GATE_TYPE) falls through to the generic parser directly — new
+    capability, not exercised by cmd_assemble's fixed artifact_names today.
+    """
     if not content.strip():
         return None
 
     lines = content.splitlines()
-    verdict = None
-    detail: dict = {}
 
     if name == "validation":
+        verdict = None
         for line in lines:
             if line.startswith("STATUS:"):
                 verdict = line.split(":", 1)[1].strip()
@@ -319,12 +336,33 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
             verdict = (
                 "PASS" if "PASS" in content else ("FAIL" if "FAIL" in content else None)
             )
+        if verdict is None:
+            return None
+        return {"stage": name, "verdict": verdict}
 
-    elif name == "conformance":
+    if name == "conflict_resolution":
+        verdict = None
         for line in lines:
-            if line.startswith("STATUS:"):
-                verdict = line.split(":", 1)[1].strip()
-            elif line.startswith("CYCLES:"):
+            if line.startswith("CONFLICT_VERDICT="):
+                verdict = line.split("=", 1)[1].strip()
+                break
+            if "**Status:**" in line:
+                verdict = line.split("**Status:**", 1)[1].strip().strip("*").strip()
+                break
+        if verdict is None:
+            verdict = "RESOLVED" if "RESOLVED" in content else "none"
+        return {"stage": name, "verdict": verdict}
+
+    # conformance, review, and any name with no bespoke overlay share the generic
+    # parser's last-STATUS-line-wins semantics -- matching conformance/review's
+    # original no-break loops exactly.
+    parsed = _verdict.parse_verdict(content) or {}
+    verdict = parsed.get("status")
+    detail: dict = {}
+
+    if name == "conformance":
+        for line in lines:
+            if line.startswith("CYCLES:"):
                 try:
                     detail["cycles"] = int(line.split(":", 1)[1].strip())
                 except ValueError:
@@ -337,9 +375,7 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
 
     elif name == "review":
         for line in lines:
-            if line.startswith("STATUS:"):
-                verdict = line.split(":", 1)[1].strip()
-            elif line.startswith("BLOCKERS:"):
+            if line.startswith("BLOCKERS:"):
                 try:
                     detail["blockers"] = int(line.split(":", 1)[1].strip())
                 except ValueError:
@@ -354,16 +390,8 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
                 "PASS" if "PASS" in content else ("BLOCKED" if "BLOCKED" in content else None)
             )
 
-    elif name == "conflict_resolution":
-        for line in lines:
-            if line.startswith("CONFLICT_VERDICT="):
-                verdict = line.split("=", 1)[1].strip()
-                break
-            if "**Status:**" in line:
-                verdict = line.split("**Status:**", 1)[1].strip().strip("*").strip()
-                break
-        if verdict is None:
-            verdict = "RESOLVED" if "RESOLVED" in content else "none"
+    # else: no bespoke overlay for this name — verdict/detail stay exactly what the
+    # generic parser produced (the new fallback path).
 
     if verdict is None:
         return None
