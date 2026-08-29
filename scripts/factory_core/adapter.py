@@ -11,7 +11,7 @@ _MAP_KEYS = {"components", "safety", "memory_routing", "deconflict", "token_opti
 
 _LOOP_ENTRY_TOP_FIELDS = ("name", "purpose", "side_effect_level")
 _LOOP_MOVE_BLOCKS = ("discovery", "handoff", "verification", "persistence", "scheduling")
-_LOOP_OPTIONAL_ENTRY_FIELDS = set()  # grows in Tasks 3 and 5
+_LOOP_OPTIONAL_ENTRY_FIELDS = {"role_card", "economics", "skills"}  # grows in Task 5
 _LOOP_KNOWN_ENTRY_FIELDS = (
     set(_LOOP_ENTRY_TOP_FIELDS) | set(_LOOP_MOVE_BLOCKS) | _LOOP_OPTIONAL_ENTRY_FIELDS
 )
@@ -123,6 +123,15 @@ def _validate_loop(entry, index: int) -> None:
     _validate_subblock(entry, index, name, "scheduling",
                         str_fields=("failure_behavior",),
                         required_fields=("failure_behavior",))
+    _validate_subblock(entry, index, name, "role_card",
+                        str_fields=("name", "output_schema", "fallback_path"),
+                        list_fields=("responsibilities", "non_responsibilities", "observability"),
+                        required_fields=("name",))
+    _validate_subblock(entry, index, name, "economics",
+                        str_fields=("feature_demand", "model_capability_floor"),
+                        bool_fields=("context_offload_required",))
+    _validate_subblock(entry, index, name, "skills",
+                        list_fields=("primary", "supplemental", "forbidden", "eval_cases"))
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
