@@ -1,13 +1,18 @@
 # Declarative per-loop stop conditions enforced by the breaker (A4)
 
+**Revised:** 2026-08-29 (operator review)
+
 **Issue:** #198 · **Epic:** #194 (Factory/Target boundary v1) · **Depends on:** #195 (A1, shipped),
-#301 (A1.5, spec-pending-review + plan written on `refine/issue-301-...`, not yet merged)
+#301 (A1.5, spec-pending-review + plan written on `refine/issue-301-...`, not yet merged),
+#197 (A3, spec approved on `refine/issue-197-...`, not yet merged; R5/R6 build on its `verifier.py`/`verdict.py`)
 **Status:** spec-pending-review
 
 ## Overview
 
-Stop conditions today are factory-global: `breaker.py`'s single `MAX_RETRIES`
-(`config/config.yaml scheduler.max_retries`) per issue:phase, gate-`BLOCK` halts, and
+Stop conditions today are factory-global: `scheduler.sh`'s per-phase retry ceilings compared against
+`breaker.py`'s per-issue:phase counters — `MAX_RETRIES` (`config/config.yaml scheduler.max_retries`,
+default 3) for implement/resolve and env-only `REFINE_MAX_RETRIES` (default 3) for refine/plan;
+`breaker.py` itself holds no ceiling — gate-`BLOCK` halts, and
 `epic_autopilot`'s `daily_cap`/`confidence_floor`. Epic #194's A1 (#195, shipped) added a `loops:`
 block to `.factory/adapter.yaml` letting a target *declare* a loop's `verifier`/`stop_condition`/
 `failure_behavior` as opaque strings, but nothing reads or enforces them — "declared and validated
@@ -34,13 +39,15 @@ binding here:
   comment ever posted) must be shown to halt under the new mechanism. The same spike also rules that
   #198's cap-class stops (`max_iterations`/`max_tokens`/`deadline`) are "legitimately breaker-side"
   (stop owner 1, reads prior-run state) and exempt from the advisory-promotion bar that governs
-  trajectory/contract verdicts (stop owner 2, #197's territory) — see Requirement 8.
+  trajectory/contract verdicts (stop owner 2, #197's territory) — see Requirement 10.
 
-This spec was produced by a multi-round product-owner brainstorming pass (transcript in the issue
-comment) that resolved several internal tensions left open by #301 and #311 — most importantly, where
+This spec resolves several internal tensions left open by #301 and #311 — most importantly, where
 `max_iterations`/`deadline` live in the restructured schema (§Requirement 1), and how "MUST be a
 contract-satisfaction check" is satisfiable without #198 designing the full `contract:` block that
-#301 explicitly defers (§Requirement 6).
+#301 explicitly defers (§Requirement 6). The 2026-08-29 operator review re-placed the
+external-predicate class onto #197's `verifier.py` seam and the Gate-2-class evaluation point
+(#311's owner ruling, adopted here as binding), leaving `breaker.py` with cap-class stops only — see
+R5, R7, R12 and the plan-executable R13.
 
 ## Requirements
 
@@ -50,7 +57,11 @@ contract-satisfaction check" is satisfiable without #198 designing the full `con
 seconds from the loop's first recorded attempt — not an absolute timestamp) are new, additive,
 optional fields inside the existing required `scheduling` sub-block. Both validated with the same
 hand-rolled primitives #301 (R6) commits `adapter.py` to (no `jsonschema`), following #301's exact
-message convention: `loops[{i}] ('{name}'): block 'scheduling': field '{key}' must be an int >= 1`.
+message convention: `loops[{i}] ('{name}'): block 'scheduling': field '{key}' must be an int >= 1`
+(on the #301 implementation branch this is `_validate_subblock(..., int_fields=...)`, so each is a
+one-tuple-entry change). These are the only schema additions. `budget_caps` on that branch also
+carries an optional `max_retry_spend` (int `>= 1`); #198 does not read or enforce it (#234-family
+territory) and adds nothing to `budget_caps`.
 
 This resolves a tension #301 leaves open: its R1 rationale prose says "`scheduling` is reserved for
 the [Loop Engineering paper's] retry/cadence/iteration policy that #198 will populate," while its
@@ -67,8 +78,9 @@ mid-run and never a scheduler predicate. Cap-class → `scheduling`. Evidence-cl
 
 `verification.stop_condition` therefore stays exactly what A1 shipped: a plain non-empty string,
 opaque-reference-typed like `verifier` (e.g. today's `stop_conditions/triage_stop.py` example in
-`tests/test_adapter.py`). #198 **resolves** it (executes what it references) rather than widening its
-type — the same relationship #197 (A3) has to `verification.verifier`. #301's "may widen to
+`tests/test_adapter.py`). #198 **resolves** it (executes what it references, through #197's
+`verifier.py` — R5) rather than widening its type — the same relationship #197 (A3) has to
+`verification.verifier`. #301's "may widen to
 string-or-mapping" is permission, not instruction; after `max_iterations`/`deadline` move to
 `scheduling` and `max_tokens` reads `budget_caps` (R2), nothing is left that would need a mapping.
 
@@ -91,36 +103,67 @@ declared, enforcement off) that could defeat #301 R4's `side_effect_level >= 4` 
 a target-authored weakening of a safety-adjacent field, which CLAUDE.md's hard limits reserve for its
 own ticket.
 
-**Composition rule (new, #198's to state):** a declared `budget_caps.max_tokens` composes with the
-factory-global budget as `min(budget_caps.max_tokens, factory-global budget)` — a per-loop cap may
-only *tighten*, never raise, the ceiling `config/config.yaml`'s `token_optimization` block already
-enforces (that config carries its own comment: "NO env override — rollback is a git commit to main").
-A target-owned adapter file that could widen a factory budget ceiling would be exactly the kind of
-budget escalation CLAUDE.md reserves for a human-reviewed change to `config/config.yaml` itself, not
-a side effect of a target's own loop declaration.
+**Tighten-only rule (new, #198's to state; replaces any notion of composing with a factory-global
+token budget):** `budget_caps.max_tokens` is an *additional* stop. It never reads, modifies, or
+relaxes `config/config.yaml`'s `token_optimization.*` block (a per-invocation prompt-context budget
+enforced, unchanged, by `scripts/budget_enforce.py`; that block carries its own "NO env override —
+rollback is a git commit to main" comment and is not touched by this ticket). There is no
+factory-global *cumulative* token cap today, so there is nothing for a per-loop cap to compose with —
+it is compared only against the per-loop spend counter R4 defines. More generally, per #193's
+ownership boundary (levels 1–3 target-definable, 4–5 factory-owned; reproduced in #301 R4), **a
+target-declared cap may only tighten, never raise, a factory default**:
 
-Note the semantic split this implies, spelled out because the issue text elides it: `budget_caps.max_tokens`
-is a **cumulative, cross-iteration spend cap** for one declared loop (the concept `run_record.py`'s
-`_compute_harness_economics`/`retry_spend`/`failure_spend` already measures, in tokens, per run,
-correlatable across a loop's repeated runs by loop name), not the same thing as `config.yaml
-token_optimization.budgets.<scenario>` (a **per-invocation prompt-context** budget for a single agent
-call, enforced by `scripts/budget_enforce.py`). #198 enforces the former; the latter is unmodified and
-unrelated infrastructure that happens to share the word "budget."
+- The factory's own issue:phase retry ceiling (`MAX_RETRIES` / `REFINE_MAX_RETRIES`, passed to the
+  evaluator as `ceiling`, R3/R7) is evaluated **first, at every `side_effect_level`, on every
+  dispatch shape that exists today** (every dispatch is an issue:phase dispatch). A declared
+  `scheduling.max_iterations` can therefore only tighten below it in practice; the effective value
+  is `min(scheduling.max_iterations, ceiling)`.
+- For a loop entry with `side_effect_level >= 4` that rule is permanent: any future loop runtime
+  MUST keep the factory ceiling in the evaluation regardless of dispatch shape. For levels 1–3 a
+  future issue-less runtime (explicitly not designed here, R4) may honour declared values as
+  declared; that is its spec's call, not this one's.
+- `deadline_seconds` and `budget_caps.max_tokens` apply as declared (there is no factory-side
+  deadline or cumulative token cap to relax), and a declared loop can never raise any factory
+  default. Absence of every cap field means **parity**: no loop-scoped stop of any kind — R3's
+  `loop_entry=None` path and a populated entry with none of `max_iterations`/`deadline_seconds`/
+  `budget_caps` behave identically for cap purposes.
 
-### R3 — Generic, loop-entry-parameterized stop-condition evaluator in `breaker.py`
+Note the semantic split this implies, spelled out because the issue text elides it:
+`budget_caps.max_tokens` is a **cumulative, cross-iteration spend cap** for one declared loop —
+input + output tokens summed over the loop's repeated runs, accumulated in the breaker-state counter
+R4 defines — not the same thing as `config.yaml token_optimization.budgets.<scenario>` (a
+**per-invocation prompt-context** budget for a single agent call). #198 enforces the former; the
+latter is unmodified and unrelated infrastructure that happens to share the word "budget." The opt-in
+model-proxy request ledger (`run_record.py`'s `LEDGER_PATH`, `request-ledger.jsonl`, keyed by
+`run_id`, absent unless the proxy is enabled) is **not** the cap's data source — it carries no loop
+name and may not exist; `evaluate_stop_condition` never reads it.
 
-Add one new pure-ish function (state-file I/O only, no network) to `scripts/factory_core/breaker.py`:
-conceptually `evaluate_stop_condition(loop_entry: dict | None, issue_num: int, phase: str,
-clone_dir: str, state_file: Path) -> StopVerdict`, where `StopVerdict` is a small structured result
-— not a bare bool — carrying `stopped: bool`, a `reason` drawn from a **closed enum** that partitions
-cap-class from predicate-class outcomes (`max_iterations`, `deadline`, `max_tokens`,
-`predicate_satisfied`, `predicate_unsatisfied`, `predicate_error`, or `None`/not-yet-tripped), and a
-free-form `detail` dict for the audit trail. `predicate_satisfied` is the **only** successful-stop
-reason; every other tripped reason is a failure-class stop routed to the loop's declared
-`failure_behavior` (R5). This partition is what lets a future caller (the entrypoint.sh wiring
-follow-up, R11.2) apply different authority per class without re-plumbing the evaluator, per #311's
-owner ruling that trajectory/contract verdicts and breaker-side caps are different signal classes
-governed by different rules.
+### R3 — Generic, loop-entry-parameterized cap-class evaluator in `breaker.py`
+
+Add one new pure function (state-file I/O only; **no subprocess, no network**) to
+`scripts/factory_core/breaker.py`: conceptually `evaluate_stop_condition(loop_entry: dict | None,
+issue_num: int, phase: str, ceiling: int, state_file: Path, now: int | None = None) -> StopVerdict`,
+where `ceiling` is the caller's factory retry ceiling (`MAX_RETRIES` or `REFINE_MAX_RETRIES`, R7),
+`now` is injectable epoch-seconds for tests, and `StopVerdict` is a small structured result — not a
+bare bool — carrying `stopped: bool`, a `reason` drawn from a **closed, cap-class-only enum** —
+`max_retries` (the factory ceiling; the parity path's only possible reason), `max_iterations`,
+`deadline`, `max_tokens`, or `None` (not tripped) — and a free-form `detail` dict for the audit trail
+(R8). Every tripped reason is a failure-class stop routed to the loop's declared `failure_behavior`
+(R9). **There is no successful-stop reason in this evaluator**: a successful stop is a Gate-2-class
+predicate verdict (R5), produced mid-run/run-end through #197's verifier seam and never by
+`breaker.py`, per #311's owner ruling that trajectory/contract verdicts and breaker-side caps are
+different signal classes governed by different rules. The enum is deliberately cap-class only so no
+future caller can mistake a breaker outcome for evidence of completion.
+
+Comparison semantics are `>=`, evaluated **before** the dispatch that would become the next attempt:
+with `max_iterations: 3` and the per-loop attempt counter (R4) already at 3, the 4th attempt is
+refused and the loop halted (issue AC1). `deadline` trips when `now >= deadline_start +
+deadline_seconds`; `max_tokens` trips when the per-loop token counter `>= budget_caps.max_tokens`.
+Evaluation order on a populated entry: `max_retries` (factory ceiling, always) → `max_iterations` →
+`deadline` → `max_tokens`; the first tripped reason wins and is the one recorded. On no trip the
+evaluator increments the retry counter (and, for a populated entry, the per-loop attempt counter,
+anchoring `deadline_start` if absent) — the exact `get_retry_count`/compare/`increment_retry`
+sequence the four `scheduler.sh` sites perform today (R7), so the parity path is byte-identical.
 
 `loop_entry=None` means "no declared loop governs this dispatch" — the parity path. Today, **every**
 live call site in `scheduler.sh` passes `loop_entry=None`, because `.factory/adapter.yaml` on `main`
@@ -137,43 +180,73 @@ side effect of another change" reserves it for its own ticket if ever built.
 
 ### R4 — Per-loop state: reuse `breaker.py`'s existing flat-key scheme, namespaced
 
-New counters/timestamps live in the same flat `dict[str, int]` `scheduler-state.json` file, keyed by
-extending the existing `f"{issue_num}:{phase}"` convention with a loop segment — e.g.
-`f"{issue_num}:{phase}:loop:{name}:iter"` for the per-loop attempt counter and `...:deadline_start`
-for the epoch-seconds deadline anchor — mirroring the file's existing `<key>:sig` / `<key>:delivery`
-suffix convention (`record_failure_signature`, `retry_or_skip_delivery_failure`). No new state-file
+New counters/timestamps live in the same flat `dict[str, int]` `scheduler-state.json` file, namespaced
+off the existing `_make_key(issue_num, phase)` value (`str(issue_num)` for `implement`,
+`f"{issue_num}:{phase}"` for every other phase — the file's actual convention) with a loop segment,
+mirroring the file's existing `<key>:sig` / `<key>:delivery` suffix convention (`:sig` is owned by
+`record_failure_signature` in `breaker.py`; `:delivery` by `retry_or_skip_delivery_failure`, the bash
+helper at `scheduler.sh:435`). Three new suffixes, all int-valued:
+
+| Key | Meaning | Written by |
+|---|---|---|
+| `<key>:loop:<name>:iter` | per-loop attempt counter | `evaluate_stop_condition`, on each non-tripped evaluation of a populated entry |
+| `<key>:loop:<name>:deadline_start` | epoch-seconds anchor for `deadline_seconds`; set on the first evaluation that increments `:iter`, never overwritten until reset | `evaluate_stop_condition` |
+| `<key>:loop:<name>:tokens` | cumulative loop spend, input + output tokens, across the loop's runs | the run-end path, from `run_record`'s per-run `totals` (`gen_ai.usage.input_tokens` + `gen_ai.usage.output_tokens`), whenever a declared loop is dispatched — a new `breaker.add_loop_tokens(issue_num, phase, name, n)` helper; no live site calls it today (R7) |
+
+`evaluate_stop_condition` compares `:tokens` to `budget_caps.max_tokens` and never reads the
+model-proxy ledger (R2). An absent `:tokens` is read as `0` (parity — a cap with no recorded spend
+never trips); absent `:iter`/`:deadline_start` read as `0`/"not yet anchored". No new state-file
 shape, no nested objects (matches `record_failure_signature`'s own documented rationale for staying
-inside the flat-key-per-issue+phase shape). **`reset_retry` must pop these new keys alongside the
-existing `<key>`/`<key>:sig`/`<key>:delivery` triad** — the #33/#279 precedent this file's own
-docstrings warn about: a resumed-from-Blocked ticket inheriting banked state trips the breaker one
-attempt early. An issue-less business loop (not tied to any GitHub issue) is explicitly **not**
+inside the flat-key-per-issue+phase shape). **`reset_retry` must pop these three new suffixes
+alongside the existing `<key>`/`<key>:sig`/`<key>:delivery` triad** — the #33/#279 precedent this
+file's own docstrings warn about: a resumed-from-Blocked ticket inheriting banked state trips the
+breaker one attempt early. Because `trip_to_blocked` ends by calling `reset_retry(key)`, every
+cap-class trip clears the loop's counters as a side effect, exactly as today's `MAX_RETRIES` trip
+clears the retry counter. An issue-less business loop (not tied to any GitHub issue) is explicitly **not**
 designed here — nothing in this repo dispatches anything that isn't a GitHub issue today, so there is
 no lifecycle (who resets it?) to design against; a future loop-runtime ticket owns that shape.
 
-### R5 — External predicate: check-only command, exit code is the verdict, fail-closed on anything else
+### R5 — External predicate: resolved through #197's `verifier.py`, `emit_verdict` shape, Gate-2-class, never breaker-side
 
-`verification.stop_condition`'s string is resolved as an executable reference (relative to
-`clone_dir`, same treatment as `verifier`) and run via `subprocess.run` in **argv form** — never
-`shell=True`, never string-interpolated with issue/branch/comment text — under a hard timeout. Exit
-code is the verdict:
+`verification.stop_condition` is resolved and executed through #197's
+`scripts/factory_core/verifier.py` (`resolve_verifier(clone_dir, path)` → `run_verifier(resolved, env)`
+→ `normalize_verdict(exit_code, stdout, gate_type="stop_condition")`), **never by `breaker.py`**.
+`verifier.py` already owns the execution posture this class needs — argv-list invocation (never
+`shell=True`), clone-relative resolution that refuses absolute or `..`-escaping paths, a hard
+timeout, and fail-closed normalisation — so #198 adds no second subprocess runner anywhere. Its
+output is an `emit_verdict`-shape artifact (`STATUS / GATE_TYPE: stop_condition / FINDINGS_COUNT /
+SEVERITY`, #197's `verdict.py` schema); a bare exit code is accepted only via `normalize_verdict`'s
+bare-exit-code mode:
 
-| Predicate result | Evaluator outcome |
+| Predicate result | Normalised verdict |
 |---|---|
-| exit 0 | `predicate_satisfied` → successful stop |
-| nonzero exit | `predicate_unsatisfied` → not satisfied, loop continues subject to `max_iterations`/`deadline_seconds`/`budget_caps.max_tokens` |
-| missing / not executable / times out / crashes | `predicate_error` → **fail-closed**, treated as a failure-class stop, never as satisfied and never as "keep looping forever" |
+| exit 0 (or structured `STATUS: PASS`) | `PASS` → the successful stop |
+| nonzero exit (or structured `STATUS: BLOCKED`) | `BLOCKED` → not satisfied |
+| missing / not executable / times out / unparseable output | `BLOCKED` (**fail-closed**) — never satisfied, never "keep looping forever" |
 
-The fail-closed row is the mechanism's whole safety argument and directly satisfies the inherited AC
-("agent says done" is never a stop condition: the evaluator's only inputs are counters, a clock, the
-token ledger, and this exit code — never agent-authored text). It mirrors this repo's own existing
-`scripts/verdict_gate_check.sh` convention almost exactly ("a missing or unparseable verdict is a
-BLOCK... the exit code IS the gate signal — do not wrap this call in `|| true`"), cited here as
-precedent rather than reused as code, per the divergence discussion in Alternatives #1.
+This is a **Gate-2-class verdict (stop owner 2)**, exactly as #311's owner ruling places it: evaluated
+mid-run or at run end by the `verdict_gate_check.sh` pattern (a missing or unparseable verdict is a
+BLOCK), **never pre-dispatch by `scheduler.sh`, and never an input to `evaluate_stop_condition`**
+(R3). `breaker.py` learns of a predicate BLOCK only through the existing error-signature drop file
+(`error_signature.write_signature`) as `substantive:contract_violation` — a class added to
+`error_signature.classify()` by whichever ticket first wires a live predicate verdict (per #197
+Requirement 8, which reserves the class for that gate and forbids `verifier.py` from calling
+`breaker.py` or writing the drop file itself) — so `record_failure_signature`'s stuck-detection sees
+repeated contract failures through the one channel it already has, with no parallel signal. Routing
+of that BLOCK per the loop's declared `failure_behavior` happens at that same follow-up (R9, R11).
 
-A predicate can only ever **cause** a stop (satisfied or errored); it can never extend, relax, or
-override `max_iterations`, `deadline_seconds`, or `budget_caps.max_tokens` — caps stop the loop
-regardless of what the predicate returns, closing off a target-authored predicate script from
-becoming a second, unaudited path to raise its own resource ceiling.
+The inherited AC ("agent says done" is never a stop condition) is satisfied structurally: the only
+inputs on either path are counters, a clock and the token counter (cap class) or a check-only
+command's exit code / structured verdict (predicate class) — never agent-authored text.
+`scripts/verdict_gate_check.sh`'s own contract ("a missing or unparseable verdict is a BLOCK... the
+exit code IS the gate signal — do not wrap this call in `|| true`") is reused as an unmodified
+subprocess, not re-implemented.
+
+A predicate can only ever **cause** a stop (PASS or BLOCKED); it can never extend, relax, or override
+`max_iterations`, `deadline_seconds`, or `budget_caps.max_tokens` — caps stop the loop regardless of
+what the predicate returns, closing off a target-authored predicate script from becoming a second,
+unaudited path to raise its own resource ceiling. #198 ships **no live caller** for this class (R10);
+the mechanism is exercised end-to-end by R6's fixture.
 
 ### R6 — Satisfying "MUST be a contract-satisfaction check" without designing `contract:`
 
@@ -194,52 +267,116 @@ addition):
   `get_tracker().get_comments(issue_num)` (`scripts/factory_core/providers/cli.py`'s
   `tracker get-comments`, already shipped) to search for the marker, the exact durable sink and
   evidence predicate spike #311's own #300 desk walk-through names (`durable_sink` = issue comment;
-  `evidence_predicate` = marker-comment exists for this run; `required_delivery_ack: true`). This is
-  a genuinely useful first instance of the seam, not a throwaway — it directly checks the class of
-  regression #300 was.
+  `evidence_predicate` = marker-comment exists for this run; `required_delivery_ack: true`). It is a
+  check-only command in #197's registration contract (bare-exit-code mode: exit 0 = marker present,
+  exit 1 = absent), invoked through `verifier.run_verifier` + `normalize_verdict(...,
+  gate_type="stop_condition")`, and its artifact is piped through the **real**
+  `scripts/verdict_gate_check.sh` as an unmodified subprocess — mirroring #197's own integration
+  test. This is a genuinely useful first instance of the seam, not a throwaway — it directly checks
+  the class of regression #300 was.
 - **A test proving the #300 failure class produces no successful stop**: with the marker comment
-  absent (the actual pre-fix #300 state), the evaluator must never return `predicate_satisfied`; it
-  falls through to the cap-class stops and, on trip, records `predicate_unsatisfied`/`predicate_error`
-  as the reason — never inferring success from a clean process exit, which was #300's actual defect
-  ("a run reached Done because completion was inferred from node exit status").
-  A second assertion covers spike #311's own stated invariant for this exact fixture: two valid
-  trajectories both satisfy the predicate ("posted once at run end" and "posted early, updated in
-  place under the same marker") — "the predicate checks marker presence, not the path that produced
-  it" — so the fixture must not accidentally encode a single exact-ordering assumption.
+  absent (the actual pre-fix #300 state), the normalised verdict is `BLOCKED` and
+  `verdict_gate_check.sh` exits 1; a missing artifact also exits 1 — never inferring success from a
+  clean process exit, which was #300's actual defect ("a run reached Done because completion was
+  inferred from node exit status"). A second assertion covers spike #311's own stated invariant for
+  this exact fixture: two valid trajectories both yield `PASS` ("posted once at run end" and "posted
+  early, updated in place under the same marker") — "the predicate checks marker presence, not the
+  path that produced it" — so the fixture must not accidentally encode a single exact-ordering
+  assumption. A third assertion proves the cap class is independent of the predicate: with the
+  marker absent and `max_iterations` reached, `evaluate_stop_condition` trips with reason
+  `max_iterations` — never anything predicate-shaped.
 - Placement: the example predicate script lives under `scripts/` (sibling to
   `verdict_gate_check.sh`/`push_gate_check.sh`) or `tests/fixtures/` if genuinely test-only — repo
-  content, not adapter schema — wired into #198's own test suite as `stop_condition: <path>` on a
-  synthetic `loop_entry` fixture. It is explicitly **not** a claim to own completion-contract design;
-  when #301's deferred `contract:` block eventually ships, it is expected to compile down to a call
-  through this same evaluator seam rather than opening a second stop-condition path (stated here so a
-  future ticket inherits the seam instead of forking it).
+  content, not adapter schema — wired into #198's own test suite as
+  `verification.stop_condition: <path>` on a synthetic #301-shape `loop_entry` fixture. If #197's
+  `verifier.py` CLI lacks a gate-type flag at implement time, #198 uses the Python API and adds
+  `--gate-type` as a one-line additive change in its own PR; `verifier.py`'s execution semantics are
+  otherwise not modified. It is explicitly **not** a claim to own completion-contract design; when
+  #301's deferred `contract:` block eventually ships, it is expected to compile down to a call
+  through this same seam rather than opening a second stop-condition path (stated here so a future
+  ticket inherits the seam instead of forking it).
 
-### R7 — Enforcement wiring: real dispatch-path integration, not a dead branch
+### R7 — Enforcement wiring: real dispatch-path integration at all four retry sites; nothing else moves
 
-`scheduler.sh`'s existing retry-related call sites — Priority 3 `stage_blocked_retry`
-(`get_retry_count`/`MAX_RETRIES`/`increment_retry`) and the equivalent refine/plan retry checks — are
-refactored to route through the new evaluator (via a new thin `factory_core/cli.py` subcommand,
-mirroring the existing `breaker-get`/`breaker-incr`/`breaker-trip` pattern) with `loop_entry=None`,
-rather than their current ad-hoc integer comparison against `MAX_RETRIES`. This keeps the mechanism on
-the real, live dispatch path (satisfying the issue's "enforce in `breaker.py` + the dispatch path")
-instead of shipping an untested branch, while being **byte-identical** in observable behavior for
-every phase that exists today — the acceptance criterion "existing breaker behavior for factory phases
-is unchanged (`test_scheduler*.sh` green)" is exactly this parity claim, and is the primary thing
-`test_scheduler*.sh` must keep proving. `runs.jsonl` audit-trail entries (§Requirement 8) are written
-regardless of whether `loop_entry` is `None` or populated, so the plumbing itself is exercised by
-every existing dispatch even though no test asserts on new-loop-specific fields until a real
-`loops:` entry exists.
+`scheduler.sh` has **four** live retry sites, each performing the same five-step sequence: (1)
+`check_failure_signature` → `stuck=true` → `trip_to_blocked`; (2) `rollback_paused_retry` (#341:
+`environmental:session_window_pause` decrement via `breaker-set-retry`); (3)
+`retry_or_skip_delivery_failure` (#279: `<key>:delivery` shadow counter → `skip` / `trip:<reason>` /
+`count`); (4) in the `count|*` branch, `get_retry_count` `>=` ceiling → `trip_to_blocked "retry limit
+of N reached"`; (5) `increment_retry`. The sites and their ceilings:
+
+| Stage | Phase | Retry key | Ceiling | Site (`scheduler.sh`, approx.) |
+|---|---|---|---|---|
+| `stage_conflict_resolve` (Priority 1.5) | `resolve` | `<issue>:resolve` | `MAX_RETRIES` | l.883–904 (inline delivery-failure path, not the shared helper) |
+| `stage_blocked_retry` (Priority 3) | `implement` | `<issue>` | `MAX_RETRIES` | l.1039–1052 |
+| `stage_plan` (Priority 4) | `plan` | `<issue>:plan` | `REFINE_MAX_RETRIES` | l.1099–1117 |
+| `stage_refine` (Priority 5) | `refine` | `<issue>:refine` | `REFINE_MAX_RETRIES` | l.1167–1185 |
+
+`MAX_RETRIES` comes from `config/config.yaml scheduler.max_retries` (default 3; env `MAX_RETRIES`
+overrides); `REFINE_MAX_RETRIES` is env-only by design (default 3; not in `config.yaml`). **Both stay
+exactly as they are; no key in `config/config.yaml` changes.**
+
+**The refactor replaces only steps (4)+(5)** — the `count|*` branch's `get_retry_count`/ceiling
+compare/`increment_retry` — at all four sites with one call to a new thin `factory_core/cli.py`
+subcommand, `breaker-evaluate-stop --issue N --phase P --ceiling C` (mirroring the existing
+`breaker-get`/`breaker-incr`/`breaker-trip` family), invoked with `loop_entry=None` at every site. It
+prints `stopped=<true|false> reason=<enum|none>`; on `stopped=true` the bash site calls the existing
+`trip_to_blocked` adapter with the reason string R13 fixes (for the parity path, the byte-identical
+`retry limit of ${MAX_RETRIES} reached` / `... for conflict resolution` text used today), so the
+`breaker-trip` delegation the scheduler tests grep for is unchanged. Steps (1)–(3) — stuck-detection
+(`record_failure_signature`, the `substantive:` prefix rule), `rollback_paused_retry` (#341),
+`retry_or_skip_delivery_failure` (#279, `breaker-set-retry` back-fill), the resolve site's inline
+delivery path — and `trip_to_blocked`'s labels/comment/`reset_retry` are **untouched**. This keeps
+the mechanism on the real, live dispatch path (satisfying the issue's "enforce in `breaker.py` + the
+dispatch path") while being **byte-identical** in observable behavior for every phase that exists
+today — the acceptance criterion "existing breaker behavior for factory phases is unchanged
+(`test_scheduler*.sh` green)" is exactly this parity claim, and is the primary thing
+`test_scheduler*.sh` must keep proving. The single carved-out addition is R8's audit row on a trip.
+
+Because every live site passes `loop_entry=None`, no live site writes the `:tokens` counter (R4)
+today either; `add_loop_tokens` is specified, unit-tested against `run_record` `totals` fixtures, and
+becomes live only when a future loop-dispatcher passes a populated entry — the same
+"execution-inert until A2–A5" framing #301 uses for itself.
+
+Acceptance criteria for this requirement (executed by the plan):
+
+- [ ] `tests/test_scheduler.sh` sections B (`breaker-trip` delegation), B4e (#341 `breaker-set-retry`
+      decrement), K9 (P1.5 trip at `MAX_RETRIES`), K10 (early trip bypassing `MAX_RETRIES`) and every
+      existing `rollback_paused_retry`/`retry_or_skip_delivery_failure` case pass **unmodified**.
+- [ ] A new `test_scheduler.sh` case per site asserts exactly one `breaker-evaluate-stop --issue N
+      --phase P --ceiling C` call in the stub log and, at ceiling, one `breaker-trip` call carrying
+      today's exact reason text.
+- [ ] `tests/test_factory_core_breaker.py` parity table: for `loop_entry=None`, `(count, ceiling)` in
+      {(0,3), (2,3), (3,3), (4,3)} yields the same stopped/increment outcome as today's inline compare
+      (`stopped` iff `count >= ceiling`; counter incremented iff not stopped).
 
 ### R8 — `runs.jsonl` audit trail via the real writer, not the Seq-only health-event path
 
 The acceptance criterion "an audit trail in `runs.jsonl`" must go through `run_record.py`'s actual
-`cmd_record`/`_append_jsonl` path — **not** `emit_health_event`, which posts only to Seq, is
-best-effort, and swallows every exception (an unsuitable, unfalsifiable evidence source for a stop
-decision, let alone its own audit trail). `breaker.py` currently imports no `run_record` module at
-all, so this wiring is net-new: on any tripped `StopVerdict`, `breaker.py` writes one `runs.jsonl` line
-carrying the loop name (if any), the `reason` enum value, and the `detail` dict, via the existing
-`SCHEDULER_STATE_DIR`/`runs.jsonl` path both files already agree on
-(`scheduler.sh` and `run_record.py` share `SCHEDULER_STATE_DIR`).
+`_append_jsonl` path — **not** `emit_health_event`, which posts only to Seq, is best-effort, and
+swallows every exception (an unsuitable, unfalsifiable evidence source for a stop decision, let alone
+its own audit trail) — and **not** `cmd_record`, which is argparse-shaped and also posts to Seq.
+`run_record.py` gains one small public helper, `append_stop_record(record: dict) -> None`, wrapping
+`_append_jsonl` with no Seq post; `breaker.py` (which imports no `run_record` module today — this
+wiring is net-new) calls it **only on a tripped `StopVerdict`**, never on a non-tripped evaluation,
+so the parity path's dispatches write nothing new. The row shape, exact:
+
+```json
+{"stage": "stop_condition", "verdict": "STOPPED", "issue_number": 42, "phase": "implement",
+ "loop": "<name or null>", "reason": "<StopVerdict.reason value>",
+ "failure_behavior": "<declared, truncated to 64 chars, or null>", "detail": {},
+ "timestamp": "<UTC ISO-8601>"}
+```
+
+It carries **no `run_id`** (a breaker decision is not a run), so `scripts/reconcile_cost_reports.py`'s
+`_load_jsonl_stubs` skips it rather than reporting a spurious "irrecoverable" run, and its `stage` is
+not in `GATE_STAGE_NAMES`, so `_compute_outcome` ignores it. Written via the existing
+`SCHEDULER_STATE_DIR`/`runs.jsonl` path both files already agree on (`scheduler.sh` and
+`run_record.py` share `SCHEDULER_STATE_DIR`). For the parity path (`loop` null, `reason`
+`max_retries`) this is the **one** observable addition to today's behavior: a single audit row per
+`MAX_RETRIES`/`REFINE_MAX_RETRIES` trip, asserted by a `test_factory_core_breaker.py` case and
+explicitly carved out of R7's parity claim (dispatch decisions, comments and board transitions remain
+identical).
 
 ### R9 — `failure_behavior`: stays free-form and unvalidated; every value resolves to `trip_to_blocked` today
 
@@ -249,9 +386,10 @@ own — that's #301's surface, via its own reserved-key/carve-out mechanism, on 
 `.factory/adapter.yaml` declares zero `loops:` entries anywhere, so there is no production data to
 design a vocabulary from — the only value that exists anywhere in this repo is `escalate_to_human`, in
 an archived design example and two test fixtures; (c) that one example value is, operationally,
-already what `trip_to_blocked` does (Blocked + `needs-discussion` + comment). Every declared
-`failure_behavior` string is recorded **verbatim** (length-bounded, treated as untrusted adapter-
-supplied text — it flows into a GitHub comment body) in both the `trip_to_blocked` `reason` text and
+already what `trip_to_blocked` does (Blocked + `needs-discussion` + `factory-regression` labels +
+comment + `reset_retry`). Every declared
+`failure_behavior` string is recorded **verbatim, truncated to 64 characters** (treated as untrusted
+adapter-supplied text — it flows into a GitHub comment body) in both the `trip_to_blocked` `reason` text and
 the `runs.jsonl` record, so an operator can see which declared behavior *would* apply, without #198
 building a second behavior today. A named non-goal, not a silent gap: the first ticket that needs a
 second real behavior builds the dispatch table then.
@@ -269,7 +407,8 @@ composition rule in R2 means a cap bug's blast radius is "stopped too early," ne
 through" — the inverse of the risk the promotion bar manages.
 
 For the predicate class: #198 ships **no live blocking call site** for it at all (R7's parity wiring
-only touches the cap-class path; no `entrypoint.sh` Done-transition currently consults any predicate).
+only touches the cap-class path; the predicate class lives on #197's verifier seam, R5, and no
+`entrypoint.sh` Done-transition or DAG node currently consults any predicate).
 The advisory-vs-blocking distinction is therefore moot for what #198 actually ships — mirroring #190's
 own precedent for an unwired checker ("this ticket wires no caller — advisory only... no changes to
 `config/config.yaml` ship in this ticket; the mode knob is delivered as normative spec text for the
@@ -277,8 +416,10 @@ separately reviewed follow-up"). #198 does **not** build an `advisory`/`blocking
 knob with one reachable value on a governance-adjacent surface is dead config a conformance review
 would be right to flag). Instead:
 
-- The `StopVerdict` reason enum (R3) is the live mechanism that lets a future caller apply different
-  authority per class without re-plumbing — that's the actual inheritance path.
+- The class separation itself is the inheritance path: cap-class authority lives in `StopVerdict`
+  (R3, always blocking, cap-class-only enum); predicate-class authority is decided where the verdict
+  artifact is consumed (`verdict_gate_check.sh` at the Gate-2-class evaluation point, R5), so a future
+  caller applies the promotion bar there without re-plumbing `breaker.py`.
 - Normative spec text, for the follow-up ticket that wires a predicate verdict into a real
   Done-transition gate (§Requirement 11), names the exact quantified bar above as its acceptance
   criterion, not merely a cross-reference.
@@ -303,64 +444,134 @@ an explicit ruling, not a silent omission:
    ticket** (not built here), pointed at `entrypoint.sh`'s three `post_cost_report ... || true` call
    sites — the literal #300 silent-failure shape — as its motivating evidence; #198 does not remove
    the `|| true`, that is the follow-up's call once the gate itself exists.
-3. **`emit_verdict`/`verdict_gate_check.sh` shape reconciliation.** The spike recommends the external
-   predicate emit `emit_verdict` shape (STATUS/GATE_TYPE/FINDINGS_COUNT/SEVERITY, a file artifact),
-   consumed by the existing `verdict_gate_check.sh` pattern — explicitly "recommended... binding only
-   once their own specs adopt it." #198 adopts exit-code semantics instead (R5); see Alternatives #1
-   for the justification and how the two are expected to reconcile at #197's Gate-2-sibling evaluation
-   point rather than inside #198's breaker-side evaluator.
+3. **`emit_verdict`/`verdict_gate_check.sh` shape reconciliation.** **Adopted, not deferred**: R5
+   emits `emit_verdict` shape via #197's `verifier.py`/`verdict.py` and consumes it through the
+   unmodified `verdict_gate_check.sh` (the 2026-08-29 operator review reversed this spec's original
+   exit-code-inside-`breaker.py` choice; see Alternatives #1). What remains deferred is the live
+   consumer — the Done-transition gate of item 2.
 4. **`substantive:contract_violation` error-signature class.** The spike wants a contract BLOCK
    written through `error_signature.classify()` as a new signature class, for breaker stuck-detection
    (`record_failure_signature`) to see repeated contract failures without a fifth ad-hoc classifier.
-   #198's evaluator does not flow through `classify()` — its own `StopVerdict.reason` enum plus the
-   `runs.jsonl` record (R8) is its audit trail. **Declined explicitly**, not silently: a fifth
-   classifier is coupled to #197's verdict artifact and belongs with that ticket, not this one.
+   R5 binds that as the *only* channel by which a predicate BLOCK reaches `breaker.py`; the class is
+   added to `error_signature.py` by whichever ticket first wires a live predicate verdict (item 2),
+   in the same PR, per #197 Requirement 8. #198 does not add it because it ships no live predicate
+   caller. #198's cap-class stops do not flow through `classify()` at all — they trip directly via
+   `trip_to_blocked`, exactly as `MAX_RETRIES` does today, with `StopVerdict.reason` plus the R8 row
+   as their audit trail. **Deferred with a named owner**, not declined.
 
-### R12 — Security: predicate execution is target-authored-code execution, treated accordingly
+### R12 — Security: predicate execution is target-authored-code execution, delegated to `verifier.py`'s posture
 
 `stop_condition`'s resolved command is content from the target repo's own `.factory/adapter.yaml` —
 already within this factory's existing trust model (it already executes target test suites and smoke
-checks), but the evaluator must still: invoke via argv list (never `shell=True`, never string-format
-issue/branch/comment content into a command), resolve any relative path against `clone_dir` (never an
-absolute or `..`-escaping path — same posture as `run_record.py`'s existing `run_id` path-traversal
-guard), and enforce a hard timeout with `predicate_error` (fail-closed) on expiry. The declared
-`failure_behavior` string (R9) is likewise treated as untrusted adapter-supplied text, length-bounded
-before it reaches a GitHub comment body.
+checks). #198 adds **no execution path of its own**: the predicate runs only through #197's
+`verifier.py`, inheriting its posture verbatim — argv-list invocation (never `shell=True`, never
+string-formatting issue/branch/comment content into a command), clone-relative resolution that
+refuses absolute or `..`-escaping paths (the same guard `run_record.py`'s `_SAFE_RUN_ID_RE` applies to
+`run_id`), a hard timeout, and fail-closed `BLOCKED` on expiry or unparseable output. `breaker.py`
+gains no `subprocess` call in this ticket. The declared `failure_behavior` string (R9) is treated as
+untrusted adapter-supplied text, truncated to 64 characters (R13) before it reaches a GitHub comment
+body. #198 does **not read or modify** tool allow/deny lists, `role_card.allowed_tools`/
+`forbidden_tools`, any `gate_*` script, `verdict_gate_check.sh`, `deploy/**`, `config/config.yaml`,
+or `.factory/adapter.yaml` itself.
+
+### R13 — Exact defaults, trip strings, and acceptance criteria (plan-executable)
+
+Schema (validated by `adapter.py`'s existing `_validate_subblock` for `scheduling`, via `int_fields`):
+
+| Field | Type | Default when absent | Effect |
+|---|---|---|---|
+| `scheduling.max_iterations` | int `>= 1` (bool rejected) | no per-loop attempt cap | trip when `<key>:loop:<name>:iter >= min(max_iterations, ceiling)` (R2 tighten-only rule) |
+| `scheduling.deadline_seconds` | int `>= 1` (bool rejected) | no deadline | trip when `now >= deadline_start + deadline_seconds` |
+| `budget_caps.max_tokens` (#301-owned) | int `>= 1` | `budget_caps` absent → no token cap | trip when `<key>:loop:<name>:tokens >= max_tokens` |
+| `scheduling.failure_behavior` (#301-owned) | non-empty string | (required by #301) | recorded verbatim, truncated to 64 characters, in the trip comment and the R8 row |
+
+Error strings (exact): `loops[{i}] ('{name}'): block 'scheduling': field 'max_iterations' must be an
+int >= 1`, and the same for `deadline_seconds`. An adapter with `loops: []` or no `loops:` key (every
+live adapter today) loads byte-identically to #301's behavior: no new error, no new default key, and
+`adapter.load()`'s returned mapping is unchanged.
+
+`trip_to_blocked` reason strings (exact; the `reason` enum value is the machine key, the string is
+what the issue comment shows):
+
+| Reason | String passed to `trip_to_blocked` |
+|---|---|
+| `max_retries` (parity) | today's text, unchanged: `retry limit of {ceiling} reached` (`retry limit of {ceiling} reached for conflict resolution` at the resolve site) |
+| `max_iterations` | `loop '{name}' stop condition 'max_iterations' reached ({iter}/{max_iterations}); declared failure_behavior: {failure_behavior}` |
+| `deadline` | `loop '{name}' stop condition 'deadline' reached ({elapsed}s >= {deadline_seconds}s); declared failure_behavior: {failure_behavior}` |
+| `max_tokens` | `loop '{name}' stop condition 'max_tokens' reached ({tokens}/{max_tokens} tokens); declared failure_behavior: {failure_behavior}` |
+
+Every cap-class trip goes through the unchanged `trip_to_blocked` (Blocked + `needs-discussion` +
+`factory-regression` + comment + `reset_retry`).
+
+Acceptance criteria (in addition to R7's):
+
+- [ ] AC1: synthetic `loop_entry` with `scheduling.max_iterations: 3` and `ceiling=10` (so the
+      declared cap is the binding one): three evaluations return `stopped=false` and advance `:iter`
+      to 3; the 4th returns `stopped=true, reason=max_iterations`. With `ceiling=3` the 4th returns
+      `reason=max_retries` (factory ceiling evaluated first). One R8 row with the matching `reason`
+      is appended in each case.
+- [ ] `deadline_seconds: 60`, `now` injected: `stopped=false` at `deadline_start + 59`,
+      `stopped=true, reason=deadline` at `deadline_start + 60`; `:deadline_start` is set once and not
+      overwritten by later evaluations.
+- [ ] `budget_caps: {max_tokens: 1000}`: `:tokens` absent → not tripped; `add_loop_tokens(..., 1000)`
+      then evaluate → `stopped=true, reason=max_tokens`.
+- [ ] `side_effect_level: 5`, `max_iterations: 10`, `ceiling=3`: 4th evaluation → `stopped=true,
+      reason=max_retries` (the factory ceiling wins; the declared 10 never takes effect).
+- [ ] `reset_retry(key)` pops `:iter`, `:deadline_start`, `:tokens` alongside the existing triad; the
+      next evaluation starts from 0 / unanchored.
+- [ ] `evaluate_stop_condition(None, ...)` reads and writes only the existing `<key>` counter — no
+      `:loop:` key ever appears in `scheduler-state.json` on the parity path.
+- [ ] A 200-character `failure_behavior` reaches the `trip_to_blocked` comment and the R8 row
+      truncated to 64 characters.
+- [ ] R6 fixture: marker absent → `BLOCKED`, `verdict_gate_check.sh` exit 1; both valid trajectories
+      → `PASS`, exit 0; missing artifact → exit 1; cap-class trip unaffected by marker state.
+- [ ] `tests/test_adapter.py`: `max_iterations: 0`, `max_iterations: true`, `deadline_seconds: "60"`
+      → the exact error strings above; both absent → accepted; `budget_caps.max_retry_spend` still
+      accepted and ignored by the evaluator.
 
 ## Architecture / Approach
 
 Files touched:
 
-- `scripts/factory_core/adapter.py` — add `max_iterations`/`deadline_seconds` as optional int fields
-  inside the existing `scheduling` sub-block validation (additive; #301's Consumers preamble
-  pre-authorizes one-line schema additions inside an existing block, in their own ticket).
-- `scripts/factory_core/breaker.py` — new `evaluate_stop_condition(...)` / `StopVerdict`, the new
-  namespaced state-key helpers, `reset_retry` extended to pop the new keys, the argv-only/timeout
-  subprocess-execution helper for the external predicate, and the `runs.jsonl` write-through (new
-  `run_record` import).
-- `scripts/factory_core/cli.py` — one new thin subcommand mirroring the existing `breaker-*` family,
-  giving `scheduler.sh` (bash) a way to invoke the new evaluator.
-- `scheduler.sh` — refactor the Priority 3 `stage_blocked_retry` path and the refine/plan retry checks
-  to call the new subcommand with `loop_entry=None`, replacing the current ad-hoc `MAX_RETRIES`
-  integer comparison; behavior must be byte-identical (verified by `test_scheduler*.sh`).
+- `scripts/factory_core/adapter.py` — add `max_iterations`/`deadline_seconds` to the `scheduling`
+  sub-block's `int_fields` (additive; #301's Consumers preamble pre-authorizes one-line schema
+  additions inside an existing block, in their own ticket). Nothing added to `budget_caps`.
+- `scripts/factory_core/breaker.py` — new `evaluate_stop_condition(...)` / `StopVerdict`, the three
+  namespaced state-key helpers and `add_loop_tokens(...)`, `reset_retry` extended to pop the new
+  suffixes, and the `runs.jsonl` write-through on trip (new `run_record` import). **No `subprocess`
+  call and no predicate execution** — the predicate class lives in #197's `verifier.py` (R5).
+- `scripts/factory_core/run_record.py` — one public helper, `append_stop_record(record)`, wrapping
+  the existing `_append_jsonl` (no Seq post).
+- `scripts/factory_core/cli.py` — one new thin subcommand, `breaker-evaluate-stop --issue --phase
+  --ceiling`, mirroring the existing `breaker-*` family, giving `scheduler.sh` (bash) a way to invoke
+  the evaluator.
+- `scheduler.sh` — at the four retry sites (`stage_conflict_resolve`, `stage_blocked_retry`,
+  `stage_plan`, `stage_refine`) replace only the `count|*` branch's `get_retry_count`/ceiling
+  compare/`increment_retry` with the new subcommand (`loop_entry=None`); steps (1)–(3) of R7 and
+  `trip_to_blocked` untouched; behavior byte-identical (verified by `test_scheduler*.sh`).
 - One new example predicate script (`scripts/` or `tests/fixtures/`) implementing the #300
-  cost-report-marker check via `tracker get-comments`, plus its regression test.
+  cost-report-marker check via `tracker get-comments`, plus its regression test through
+  `verifier.py` and the real `verdict_gate_check.sh` (R6). If needed, a one-line additive
+  `--gate-type` flag on `verifier.py`'s CLI.
 - `tests/test_factory_core_breaker.py`, `tests/test_adapter.py` (new `scheduling` field cases),
-  `tests/test_scheduler*.sh` (parity assertions) — extended, not restructured.
-- No changes to `config/config.yaml`, `entrypoint.sh`, `epic_autopilot.py`, or `error_signature.py`
-  (R11 items are named, not built).
+  `tests/test_run_record.py` (`append_stop_record`), `tests/test_scheduler*.sh` (parity assertions
+  per R7) — extended, not restructured.
+- No changes to `config/config.yaml`, `entrypoint.sh`, `epic_autopilot.py`, `error_signature.py`,
+  `scripts/verdict_gate_check.sh`, any `gate_*` script, `deploy/**`, or `.factory/adapter.yaml` (R11
+  items are named, not built; R12).
+- Sequencing: implement waits for #301 (schema) **and** #197 (`verifier.py`/`verdict.py`) to land on
+  `main`; the plan phase re-verifies both file/function names against `main` before writing.
 
 ## Alternatives considered
 
-1. **Adopt spike #311's recommended `emit_verdict`/file-artifact shape for the external predicate**
-   (rejected — R5/R11.3). That shape assumes an artifacts directory and a check-only DAG node
-   (`verdict_gate_check.sh`'s actual consumer), which is #197's Gate-2-sibling evaluation point, not a
-   breaker-side pre-dispatch evaluator with no artifacts dir. The issue's own text ("a check-only
-   command/hook whose exit code is the verdict — same trust model as smoke-gate") is also direct,
-   already-authorized product intent for the simpler exit-code form. The recommendation is explicitly
-   "binding only once [#197/#198's] own specs adopt it" — this spec declines for #198's own mechanism
-   and expects reconciliation to happen where #197's richer verdict artifact is produced, not by
-   duplicating that shape inside `breaker.py`.
+1. **Bare exit-code semantics evaluated inside `breaker.py`'s evaluator** (this spec's original R5;
+   rejected — 2026-08-29 operator review, R5/R11.3). Would fork #197's `verifier.py` seam into a
+   second subprocess runner and reverse #311's owner ruling placing the predicate class at the
+   Gate-2-class evaluation point (`emit_verdict` shape, `verdict_gate_check.sh` pattern, never a
+   scheduler pre-dispatch predicate), leaving epic #194 with two check-only execution paths. The
+   issue's own "exit code is the verdict" intent is preserved through `normalize_verdict`'s
+   bare-exit-code mode, so nothing is lost by routing through the one seam — and `breaker.py` gets
+   smaller, not larger.
 2. **Widen `verification.stop_condition` to a mapping holding `max_iterations`/`deadline`/
    `external_predicate` together** (rejected — R1). Would cost a dual-form parser in a schema whose
    loader is deliberately hand-rolled and dependency-free (#301 R6), for no benefit once cap fields
@@ -389,14 +600,17 @@ Files touched:
 
 ## Open Questions (non-blocking)
 
-- Exact CLI subcommand name/flag shape for the new `breaker-*` evaluator entry point (implementation
-  detail; follows the existing `breaker-get`/`breaker-incr`/`breaker-trip` family's pattern).
+- Whether #197's `verifier.py` CLI grows a `--gate-type` flag in #197 itself or via #198's one-line
+  additive change (R6); the Python API (`normalize_verdict(..., gate_type=...)`) is sufficient either
+  way.
 - Whether the entrypoint.sh Done-gate follow-up ticket (R11.2) and the `epic_autopilot.should_advance`
   condition (R11.1) should be one ticket or two — left to whoever files it, once #197's verdict
   artifact shape is merged and concrete.
 - `#301` and `#197` are both still on unmerged refine branches as of this spec; the exact field paths
-  (`verification.stop_condition`, `scheduling.*`) must be re-verified against `main` at plan/implement
-  time in case either spec changes shape before merging.
+  (`verification.stop_condition`, `scheduling.*`) and #197's `verifier.py`/`verdict.py` function names
+  must be re-verified against `main` at plan/implement time in case either spec changes shape before
+  merging. The issue body's `Depends on:` lines should gain `#197` (an issue-body edit, outside this
+  spec's own file).
 
 ## Assumptions (flagged)
 
@@ -404,10 +618,11 @@ Files touched:
   `scheduling` as reserved territory for iteration/cadence/retry policy but does not itself name a
   deadline field). Chosen for consistency with `max_iterations` sitting in the same block and to keep
   the loader dependency-free (relative int, no date parsing).
-- **[ASSUMPTION]** The per-loop state key shape (`f"{issue_num}:{phase}:loop:{name}:iter"` etc.) is a
-  new convention modeled on the file's existing `<key>:sig`/`<key>:delivery` suffix pattern; #198 is
-  the first ticket to need a three-part key, and the exact separator/ordering is an implementation
-  detail free to adjust as long as `reset_retry` pops every new suffix it introduces.
+- **[ASSUMPTION]** The per-loop state key shape (`<_make_key(issue, phase)>:loop:<name>:iter`,
+  `:deadline_start`, `:tokens`) is a new convention modeled on the file's existing
+  `<key>:sig`/`<key>:delivery` suffix pattern; #198 is the first ticket to need a three-part key, and
+  the exact separator/ordering is an implementation detail free to adjust as long as `reset_retry`
+  pops every new suffix it introduces and the parity path never writes any of them.
 - **[ASSUMPTION]** The example contract-satisfaction predicate reuses `tracker get-comments` +
   substring search for the `<!-- dark-factory-cost-report -->` marker, rather than adding a new
   provider-level "find comment by marker" primitive — this mirrors `entrypoint.sh`'s own existing
@@ -416,4 +631,5 @@ Files touched:
 - **[ASSUMPTION]** "Existing breaker behavior for factory phases is unchanged" (issue AC3) is
   interpreted as an observable-behavior/parity claim (identical dispatch decisions, identical
   comments, identical board transitions), not a literal no-diff constraint on `breaker.py`'s source —
-  R7's refactor necessarily changes the code path while preserving the outcome.
+  R7's refactor necessarily changes the code path while preserving the outcome. The one carved-out
+  addition is R8's single `runs.jsonl` audit row per trip.
