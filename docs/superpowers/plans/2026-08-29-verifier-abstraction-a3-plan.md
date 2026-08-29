@@ -96,6 +96,12 @@ Not touched (Requirement 9): `scripts/verdict_gate_check.sh`, `scripts/gate_blas
 1. Write the failing test file `tests/test_verdict.py`:
 
 ```python
+import sys, pathlib
+
+# .factory/hooks/{validate,smoke-gate} run `python -m pytest tests/ -q` with no
+# PYTHONPATH=scripts — self-insert so this file collects there too, not only in CI.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+
 import pytest
 from factory_core import verdict
 
@@ -158,7 +164,7 @@ def test_documented_constants():
 
 2. Verify it fails (module doesn't exist yet):
    ```bash
-   cd /workspace/dark-factory && PYTHONPATH=scripts python -m pytest tests/test_verdict.py -x -q
+   cd "$(git rev-parse --show-toplevel)" && PYTHONPATH=scripts python -m pytest tests/test_verdict.py -x -q
    ```
    Expected: `ModuleNotFoundError: No module named 'factory_core.verdict'` (or collection error).
 
@@ -237,12 +243,12 @@ def format_verdict(gate_type: str, status: str, findings_count: int, severity: s
 
 ## Task 2: Golden corpus — behaviour-preservation invariant (Requirement 9)
 
-**Files:** `tests/fixtures/verdicts/*.md` (new, 15 files), `tests/fixtures/verdicts/*.expected.json`
-(new, 15 files), `tests/test_verdict.py` (modified — append `test_golden_corpus_byte_compat`)
+**Files:** `tests/fixtures/verdicts/*.md` (new, 17 files), `tests/fixtures/verdicts/*.expected.json`
+(new, 17 files), `tests/test_verdict.py` (modified — append `test_golden_corpus_byte_compat`)
 
 ### TDD Steps
 
-1. Create the fixture directory and all 15 `.md` files. Each captures a real writer
+1. Create the fixture directory and all 17 `.md` files. Each captures a real writer
    path's exact literal output as it exists on `main` today (before this ticket's
    refactor), per file/line references already verified in the spec's "Verified
    starting facts":
@@ -331,6 +337,18 @@ THRESHOLD: high
 ---
 
 3 blocking findings at severity >= high.
+EOF
+
+# dark-factory-code-review.md Phase 1 step 2: code_review.enabled=false writer
+cat > tests/fixtures/verdicts/review__skipped.md <<'EOF'
+STATUS: SKIPPED
+REASON: code_review.enabled=false
+EOF
+
+# dark-factory-code-review.md Phase 1 "Determine PR_NUM": no-PR fail-open writer
+cat > tests/fixtures/verdicts/review__no_pr_error.md <<'EOF'
+STATUS: ERROR
+REASON: no PR found
 EOF
 
 cat > tests/fixtures/verdicts/blast__skipped.md <<'EOF'
@@ -436,6 +454,12 @@ EOF
 cat > tests/fixtures/verdicts/review__blocked.expected.json <<'EOF'
 {"stage": "review", "verdict": "BLOCKED", "blockers": 3, "advisory": 1}
 EOF
+cat > tests/fixtures/verdicts/review__skipped.expected.json <<'EOF'
+{"stage": "review", "verdict": "SKIPPED"}
+EOF
+cat > tests/fixtures/verdicts/review__no_pr_error.expected.json <<'EOF'
+{"stage": "review", "verdict": "ERROR"}
+EOF
 cat > tests/fixtures/verdicts/blast__skipped.expected.json <<'EOF'
 {"status": "SKIPPED", "gate_type": "blast", "findings_count": 0, "severity": "none"}
 EOF
@@ -459,13 +483,17 @@ cat > tests/fixtures/verdicts/conflict_resolution__status_bold_legacy.expected.j
 EOF
 ```
 
-3. Add `import json` and `import pathlib` to the top of `tests/test_verdict.py`,
-   alongside the existing `import pytest` / `from factory_core import verdict`, and
-   add `from factory_core import run_record` there too:
+3. Add `import json` to the top of `tests/test_verdict.py` (`pathlib` is already
+   imported by Task 1's `sys.path` shim — keep the shim above the `factory_core`
+   import), and add `from factory_core import run_record` there too:
 
 ```python
 import json
-import pathlib
+import sys, pathlib
+
+# .factory/hooks/{validate,smoke-gate} run `python -m pytest tests/ -q` with no
+# PYTHONPATH=scripts — self-insert so this file collects there too, not only in CI.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
 
 import pytest
 from factory_core import run_record, verdict
@@ -488,7 +516,7 @@ def _stage_name(fixture_path: pathlib.Path) -> str:
 
 def test_golden_corpus_byte_compat():
     md_files = sorted(_FIXTURES_DIR.glob("*.md"))
-    assert len(md_files) == 15, "golden corpus fixture count changed unexpectedly"
+    assert len(md_files) == 17, "golden corpus fixture count changed unexpectedly"
     for md_path in md_files:
         expected_path = md_path.with_suffix("").with_suffix(".expected.json")
         content = md_path.read_text(encoding="utf-8")
@@ -559,11 +587,18 @@ def test_parse_artifact_conformance_keeps_last_status_line_wins():
     assert result["verdict"] == "BLOCKED"
 ```
 
-2. Run the full existing file to establish the baseline (all current tests pass,
-   the new one fails or errors since the generic fallback branch doesn't exist yet):
+2. Run the full existing file to establish the baseline:
    ```bash
-   PYTHONPATH=scripts python -m pytest tests/test_run_record.py -x -q
+   PYTHONPATH=scripts python -m pytest tests/test_run_record.py -q
    ```
+   Expected on unmodified `main`: every pre-existing test passes, and of the three
+   new tests **only** `test_parse_artifact_stage_generic_fallback_for_unseen_gate_type`
+   is red (today's function has no branch for an unknown name and returns `None`).
+   `test_parse_artifact_validation_keeps_first_status_line_wins` and
+   `test_parse_artifact_conformance_keeps_last_status_line_wins` are
+   **characterization tests**: they are green before the refactor and must stay green
+   after it. Do not "fix" them or touch the code to make them red — their job is to
+   pin the existing first-wins/last-wins precedence across the delegation.
 
 3. Refactor `_parse_artifact_stage` in `scripts/factory_core/run_record.py`. Add the
    import near the top (alongside the existing `from . import model_proxy`):
@@ -765,7 +800,12 @@ chmod +x tests/fixtures/verifiers/*.sh
 
 ```python
 import os
-import pathlib
+import sys, pathlib
+
+# .factory/hooks/{validate,smoke-gate} run `python -m pytest tests/ -q` with no
+# PYTHONPATH=scripts — self-insert so this file collects there too, not only in CI.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+
 import pytest
 
 from factory_core import verifier
@@ -806,7 +846,7 @@ def test_run_verifier_timeout_raises(tmp_path):
         verifier.run_verifier(str(_FIXTURES / "sleeper.sh"), _env(tmp_path), timeout=1)
 
 
-def test_normalize_verdict_structured_ignores_exit_code_and_renamespaces_gate_type():
+def test_normalize_verdict_structured_blocked_with_exit_0_stays_blocked_and_renamespaces_gate_type():
     stdout = "STATUS: BLOCKED\nGATE_TYPE: whatever\nFINDINGS_COUNT: 2\nSEVERITY: high\n"
     text = verifier.normalize_verdict(exit_code=0, stdout=stdout, gate_type="loop:my-loop")
     assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 2\nSEVERITY: high\n"
@@ -830,6 +870,15 @@ def test_normalize_verdict_structured_error_is_not_pass_through():
     # set, defeating AC3's "missing/failing cannot hand off" default.
     stdout = "STATUS: ERROR\nGATE_TYPE: whatever\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
     text = verifier.normalize_verdict(exit_code=0, stdout=stdout, gate_type="loop:my-loop")
+    assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 1\nSEVERITY: high\n"
+
+
+def test_normalize_verdict_structured_pass_with_nonzero_exit_blocks():
+    # Fail-closed reading (Requirement 4): a verifier that prints PASS (or SKIPPED)
+    # and then exits non-zero has failed -- the non-zero exit wins over the
+    # proceed-status, so a crash after a premature PASS cannot hand off.
+    stdout = "STATUS: PASS\nGATE_TYPE: whatever\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
+    text = verifier.normalize_verdict(exit_code=1, stdout=stdout, gate_type="loop:my-loop")
     assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 1\nSEVERITY: high\n"
 ```
 
@@ -900,6 +949,9 @@ def normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str:
     is remapped to BLOCKED/high -- ERROR is not auto-pass-through for target
     verifiers (unlike code_review.fail_open's advisory-on-error default); AC3
     requires "missing/failing cannot hand off" as the default, not an opt-in.
+    A structured PASS/SKIPPED from a process that exited non-zero is likewise
+    remapped to BLOCKED/high (fail closed): the exit code wins over a
+    proceed-status; a structured BLOCKED is honoured regardless of exit code.
     Bare-exit-code: no structured output — exit 0 synthesizes PASS, non-zero
     synthesizes BLOCKED/high, mirroring smoke-gate's exit-code-only convention.
     """
@@ -907,6 +959,10 @@ def normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str:
         parsed = _verdict.parse_verdict(stdout) or {}
         status = parsed.get("status", "ERROR")
         if status == "ERROR":
+            return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
+        if exit_code != 0 and status in ("PASS", "SKIPPED"):
+            # Fail closed: a proceed-status printed by a process that then exited
+            # non-zero is not trusted -- the exit code wins (Requirement 4).
             return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
         return _verdict.format_verdict(
             gate_type, status, parsed.get("findings_count", 0), parsed.get("severity", "none"),
@@ -920,7 +976,7 @@ def normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str:
    ```bash
    PYTHONPATH=scripts python -m pytest tests/test_verifier.py -x -q
    ```
-   Expected: `9 passed`.
+   Expected: `10 passed`.
 
 6. Commit:
    ```bash
@@ -937,15 +993,17 @@ def normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str:
 
 ### TDD Steps
 
-1. Add `import subprocess` and `import sys` to the top of `tests/test_verifier.py`,
-   alongside the existing `import os` / `import pathlib` / `import pytest` /
-   `from factory_core import verifier`. Then append the following failing tests to
+1. Add `import subprocess` to the top of `tests/test_verifier.py`, alongside the
+   existing `import os` / `import sys, pathlib` / `import pytest` /
+   `from factory_core import verifier` (`sys` is already imported by the `sys.path`
+   shim — do not import it twice). Then append the following failing tests to
    the end of `tests/test_verifier.py`:
 
 ```python
 def _loop_entry(**overrides):
     entry = {
         "name": "nightly-scan-triage",
+        "purpose": "nightly scan triage",
         "discovery": {"trigger": "cron:0 6 * * *", "inputs": ["scripts/scanner.py"]},
         "handoff": {"outputs": ["artifacts/scan-report.md"], "manifest": "artifacts/manifest.json"},
         "verification": {"verifier": "scripts/verify-scan.sh", "stop_condition": "manifest present"},
@@ -1042,7 +1100,7 @@ def test_resolve_and_run_fails_closed_for_factory_owned_level(tmp_path):
         clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="verifier.sh", side_effect_level=4,
     )
     assert "STATUS: BLOCKED" in text
-    assert "#196" in text
+    assert "factory-owned level requires #196 profile enforcement" in text
 
 
 def test_resolve_and_run_records_required_profile_level_1(tmp_path):
@@ -1276,7 +1334,7 @@ if __name__ == "__main__":
    ```bash
    PYTHONPATH=scripts python -m pytest tests/test_verifier.py -x -q
    ```
-   Expected: `26 passed` (9 from Task 4 + 17 new).
+   Expected: `27 passed` (10 from Task 4 + 17 new).
 
 5. Commit:
    ```bash
@@ -1294,7 +1352,11 @@ if __name__ == "__main__":
 `commands/dark-factory-code-review.md` (modified), `scripts/gate_lib.sh` (modified)
 
 This task is documentation deduplication only — no tool grant/restriction is
-introduced or removed, no model pin changes (Requirement 3).
+introduced or removed, no model pin changes (Requirement 3). The literal
+`claude-opus-4-8` pin stays inline at every one of the five pin sites below:
+`VERIFIER-CONTRACT.md` exists only in an image built *after* this merges, so a
+doc-only reference would leave the checker on the two blocking gates unpinned until
+the rebuild — the doc de-duplicates the *explanation*, never the pin itself.
 
 ### Steps
 
@@ -1365,10 +1427,11 @@ it is absent — a caller must always resolve and pass the loop's actual level.
 - **Output modes:**
   - *Structured* — stdout begins with a `STATUS:` line: parsed through the shared
     schema. `GATE_TYPE` is always rewritten to `loop:<loop name>` — never trusted
-    verbatim from the verifier's own stdout. A structured `STATUS: PASS` is trusted
-    even if the process exited non-zero (the exit code is only consulted in
-    bare-exit-code mode) — a verifier that prints `PASS` and then crashes is not
-    caught by its exit code; write verifiers to report their real result in stdout.
+    verbatim from the verifier's own stdout. A structured `STATUS: PASS` or
+    `STATUS: SKIPPED` is **not** trusted when the process exits non-zero — it is
+    remapped to `STATUS: BLOCKED, FINDINGS_COUNT: 1, SEVERITY: high` (fail closed),
+    so a verifier that prints `PASS` and then crashes is caught by its exit code. A
+    structured `STATUS: BLOCKED` is honoured regardless of exit code.
   - *Bare-exit-code* — no structured stdout: exit `0` synthesizes `STATUS: PASS`,
     non-zero synthesizes `STATUS: BLOCKED, FINDINGS_COUNT: 1, SEVERITY: high`. This
     mirrors `smoke-gate`'s existing bare-exit-code convention as the low-effort
@@ -1429,7 +1492,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    Replace with:
    ```
    4. Read `/opt/refinement-skills/product-owner-prompt.md` — you will pass this to subagents
-   5. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the product-owner subagent spawned in Phase 4
+   5. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the product-owner subagent spawned in Phase 4; if the file is absent (image predates it), continue — the inline pin is authoritative.
    ```
    (Renumber the original steps 5-6 that follow to 6-7.)
 
@@ -1440,7 +1503,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-      - `model` and tool access: per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (Opus 4.8 pin, Glob/Grep/Read)
+      - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (do not let it inherit the orchestrator's model)
    ```
 
 4. In `commands/dark-factory-plan.md`, find (Phase 1, step 3):
@@ -1450,7 +1513,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    Replace with:
    ```
    3. Read `/opt/refinement-skills/architect-prompt.md` — you will pass this to the review subagent
-   4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for both the architect subagent (Phase 3) and the Phase 3.5 conformance reviewer subagent
+   4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for both the architect subagent (Phase 3) and the Phase 3.5 conformance reviewer subagent; if the file is absent (image predates it), continue — the inline pin is authoritative.
    ```
    (Renumber the original steps 4-7 that follow to 5-8.)
 
@@ -1472,7 +1535,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-   - `model` and tool access: per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
+   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
    ```
 
    Find (Phase 3.5, step 5):
@@ -1481,7 +1544,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-      - `model` and tool access: per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
+      - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
    ```
 
 5. In `commands/dark-factory-conformance.md`, find (Phase 1, step 3):
@@ -1495,7 +1558,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    3. Read the conformance rubric, clone-live-first: `.claude/skills/conformance/RUBRIC.md`,
       falling back to `/opt/refinement-skills/conformance-reviewer-prompt.md` if the clone-live
       file is absent. Store the resolved text as `RUBRIC_CONTENT`.
-   4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the conformance reviewer subagent spawned in Phase 3
+   4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the conformance reviewer subagent spawned in Phase 3; if the file is absent (image predates it), continue — the inline pin is authoritative.
    ```
    (Renumber the original steps 4-10 that follow to 5-11.)
 
@@ -1505,7 +1568,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-      - `model` and tool access: per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
+      - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
    ```
 
 6. In `commands/dark-factory-code-review.md`, find (Phase 1, step 2's sibling — insert
@@ -1515,7 +1578,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-   3. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the code-reviewer subagent spawned in Phase 3
+   3. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the code-reviewer subagent spawned in Phase 3; if the file is absent (image predates it), continue — the inline pin is authoritative.
    4. Extract `BLOCK_THRESHOLD` from `code_review.block_threshold` (default: `high`).
    ```
    The live file's Phase 1 has a pre-existing numbering duplicate after the original
@@ -1536,7 +1599,7 @@ reference below uses `/opt/refinement-skills/VERIFIER-CONTRACT.md`.
    ```
    Replace with:
    ```
-      - `model` and tool access: per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
+      - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
    ```
 
 7. In `scripts/gate_lib.sh`, find the header comment:
@@ -1589,6 +1652,26 @@ def test_plan_command_references_contract_doc_at_both_pin_sites():
     assert content.count("/opt/refinement-skills/VERIFIER-CONTRACT.md") >= 3  # Phase 1 read + 2 pin sites
 
 
+# Inline pin count per command file: refine 1, plan 2 (Phase 3 + Phase 3.5),
+# conformance 1, code-review 1. VERIFIER-CONTRACT.md exists only in an image built
+# after this merges, so the inline literal is the pin that actually binds until the
+# rebuild (Requirement 3) — the doc reference must never replace it.
+_INLINE_PIN_COUNTS = {
+    "commands/dark-factory-refine.md": 1,
+    "commands/dark-factory-plan.md": 2,
+    "commands/dark-factory-conformance.md": 1,
+    "commands/dark-factory-code-review.md": 1,
+}
+
+
+def test_every_command_file_keeps_inline_model_pin():
+    for rel_path, n in _INLINE_PIN_COUNTS.items():
+        content = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        assert content.count("claude-opus-4-8") >= n, (
+            f"{rel_path} lost its inline claude-opus-4-8 pin (expected >= {n})"
+        )
+
+
 def test_gate_lib_header_references_verdict_schema_docs():
     content = (REPO_ROOT / "scripts/gate_lib.sh").read_text(encoding="utf-8")
     assert "verdict.py" in content
@@ -1601,11 +1684,11 @@ def test_verifier_contract_doc_exists_and_documents_env_contract():
         assert token in content
 ```
 
-   Run it, verify all 4 pass after the edits above:
+   Run it, verify all 5 pass after the edits above:
    ```bash
    PYTHONPATH=scripts python -m pytest tests/test_verifier_contract_doc_referenced.py -x -q
    ```
-   Expected: `4 passed`.
+   Expected: `5 passed`.
 
 9. Run the full pytest suite once to confirm no other test couples to the literal
    pin sentence text (verified in the plan's research phase: `test_epic_autopilot_config.sh`,
@@ -1747,6 +1830,7 @@ def test_adapter_load_rejects_loop_whose_verifier_is_its_own_manifest(tmp_path):
     (d / ".factory" / "adapter.yaml").write_text("""
 loops:
   - name: nightly-scan-triage
+    purpose: "nightly scan triage"
     discovery: {trigger: "cron:0 6 * * *", inputs: ["scripts/scanner.py"]}
     handoff: {outputs: ["artifacts/scan-report.md"], manifest: "artifacts/manifest.json"}
     verification: {verifier: "artifacts/manifest.json", stop_condition: "manifest present"}
@@ -1764,6 +1848,7 @@ def test_adapter_load_accepts_loop_with_independent_verifier(tmp_path):
     (d / ".factory" / "adapter.yaml").write_text("""
 loops:
   - name: nightly-scan-triage
+    purpose: "nightly scan triage"
     discovery: {trigger: "cron:0 6 * * *", inputs: ["scripts/scanner.py"]}
     handoff: {outputs: ["artifacts/scan-report.md"], manifest: "artifacts/manifest.json"}
     verification: {verifier: "scripts/verify-scan.sh", stop_condition: "manifest present"}
@@ -1814,14 +1899,17 @@ from . import verifier as _verifier
 1. Run the full suite (matching `.github/workflows/ci.yml:13-14`'s `PYTHONPATH=scripts`
    env — `tests/conftest.py` does not add `scripts/` to `sys.path` itself):
    ```bash
-   cd /workspace/dark-factory
+   cd "$(git rev-parse --show-toplevel)"
    PYTHONPATH=scripts python -m pytest tests/ -v
    ```
 2. Run the shell tests CI runs explicitly (at minimum the modified/relevant ones):
    ```bash
    bash tests/test_verdict_gate_check.sh
-   bash smoke_gate.sh || true   # sanity, not part of this ticket's file list
    ```
+   Do **not** run `smoke_gate.sh` directly here: it calls real `gh`
+   (`_smoke_list_open_red_issues`) and touches `${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}`
+   (the #348/#362/#366 class of test leak). CI's `tests/test_smoke_gate.sh` already
+   exercises it with stubs.
 3. Run the DAG checks (no `workflows/*.yaml` change expected, but confirm untouched).
    Use `origin/main` (fetched), not local `main`, so a stale local branch can't
    produce a false clean/dirty result (per `.archon/memory/codebase-patterns.md`'s
