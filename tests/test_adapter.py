@@ -82,15 +82,20 @@ _VALID_LOOP_ENTRY = """
 loops:
   - name: nightly-scan-triage
     purpose: Triage overnight scanner false positives
-    trigger: 'cron:0 6 * * *'
-    inputs: ["scanner_output.json"]
-    outputs: ["triage_report.md"]
-    artifacts: [".factory/state/triage.json"]
-    verifier: verifiers/triage_verifier.py
-    stop_condition: stop_conditions/triage_stop.py
-    failure_behavior: escalate_to_human
     side_effect_level: 2
-    handoff: handoffs/triage_handoff.py
+    discovery:
+      trigger: 'cron:0 6 * * *'
+      inputs: ["scanner_output.json"]
+    handoff:
+      outputs: ["triage_report.md"]
+      manifest: handoffs/triage_handoff.py
+    verification:
+      verifier: verifiers/triage_verifier.py
+      stop_condition: stop_conditions/triage_stop.py
+    persistence:
+      artifacts: [".factory/state/triage.json"]
+    scheduling:
+      failure_behavior: escalate_to_human
 """
 
 
@@ -99,9 +104,29 @@ def test_valid_loop_entry_parses(tmp_path, capsys):
     (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
     merged = adapter.load(str(tmp_path))
     assert len(merged["loops"]) == 1
-    assert merged["loops"][0]["name"] == "nightly-scan-triage"
-    assert merged["loops"][0]["side_effect_level"] == 2
+    entry = merged["loops"][0]
+    assert entry["name"] == "nightly-scan-triage"
+    assert entry["side_effect_level"] == 2
+    assert entry["discovery"] == {
+        "trigger": "cron:0 6 * * *", "inputs": ["scanner_output.json"]}
+    assert entry["handoff"] == {
+        "outputs": ["triage_report.md"], "manifest": "handoffs/triage_handoff.py"}
+    assert entry["verification"] == {
+        "verifier": "verifiers/triage_verifier.py",
+        "stop_condition": "stop_conditions/triage_stop.py"}
+    assert entry["persistence"] == {"artifacts": [".factory/state/triage.json"]}
+    assert entry["scheduling"] == {"failure_behavior": "escalate_to_human"}
     assert "unknown adapter key 'loops'" not in capsys.readouterr().err
+
+
+def test_loops_get_dotted_path_returns_verbatim(tmp_path):
+    """Acceptance criterion: the R1 shape is returned verbatim by adapter.get(),
+    not just adapter.load()."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    loops = adapter.get(str(tmp_path), "loops")
+    assert loops[0]["discovery"] == {
+        "trigger": "cron:0 6 * * *", "inputs": ["scanner_output.json"]}
 
 
 def test_loops_independent_of_schema_version(tmp_path):
@@ -127,9 +152,10 @@ def test_loops_not_a_list_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
-def test_loop_entry_missing_required_field_raises(tmp_path):
+def test_loop_entry_missing_required_top_field_raises(tmp_path):
     d = tmp_path / ".factory"; d.mkdir()
-    entry = _VALID_LOOP_ENTRY.replace("    purpose: Triage overnight scanner false positives\n", "")
+    entry = _VALID_LOOP_ENTRY.replace(
+        "    purpose: Triage overnight scanner false positives\n", "")
     (d / "adapter.yaml").write_text(entry)
     with pytest.raises(adapter.AdapterError, match=r"missing required field 'purpose'"):
         adapter.load(str(tmp_path))
@@ -143,24 +169,420 @@ def test_loop_entry_unknown_field_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
-@pytest.mark.parametrize("field", sorted(adapter._LOOP_STRING_FIELDS))
-def test_loop_entry_string_field_wrong_type_raises(tmp_path, field):
+_MOVE_BLOCKS = ["discovery", "handoff", "verification", "persistence", "scheduling"]
+_MOVE_BLOCK_REQUIRED_FIELDS = [
+    ("discovery", "trigger"), ("discovery", "inputs"),
+    ("handoff", "manifest"), ("handoff", "outputs"),
+    ("verification", "verifier"), ("verification", "stop_condition"),
+    ("persistence", "artifacts"),
+    ("scheduling", "failure_behavior"),
+]
+_MOVE_BLOCK_STR_FIELDS = [
+    ("discovery", "trigger"), ("handoff", "manifest"),
+    ("verification", "verifier"), ("verification", "stop_condition"),
+    ("scheduling", "failure_behavior"),
+]
+_MOVE_BLOCK_LIST_FIELDS = [
+    ("discovery", "inputs"), ("handoff", "outputs"), ("persistence", "artifacts"),
+]
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_entry_missing_required_block_raises(tmp_path, block):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
-    parsed["loops"][0][field] = 42
+    del parsed["loops"][0][block]
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a non-empty string")):
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"missing required block '{block}'")):
         adapter.load(str(tmp_path))
 
 
-@pytest.mark.parametrize("field", sorted(adapter._LOOP_LIST_FIELDS))
-def test_loop_entry_list_field_wrong_type_raises(tmp_path, field):
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_not_a_mapping_raises(tmp_path, block):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
-    parsed["loops"][0][field] = "not-a-list"
+    parsed["loops"][0][block] = "not-a-mapping"
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match=re.escape(f"field '{field}' must be a list of strings")):
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"block '{block}' must be a mapping")):
         adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_null_value_raises(tmp_path, block):
+    """A block key present but with no YAML value (`discovery:` alone) parses
+    to None, which must be rejected as 'not a mapping', not silently accepted
+    as 'absent' — None is a real parsed value here, distinct from the key
+    being missing entirely."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block] = None
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=re.escape(f"block '{block}' must be a mapping")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block", _MOVE_BLOCKS)
+def test_loop_move_block_unknown_field_raises(tmp_path, block):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block]["extra_typo_field"] = "oops"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': unknown field 'extra_typo_field'")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_REQUIRED_FIELDS)
+def test_loop_move_block_missing_required_field_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    del parsed["loops"][0][block][field]
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': missing required field '{field}'")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_STR_FIELDS)
+def test_loop_move_block_string_field_wrong_type_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block][field] = 42
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("block,field", _MOVE_BLOCK_LIST_FIELDS)
+def test_loop_move_block_list_field_wrong_type_raises(tmp_path, block, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0][block][field] = "not-a-list"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block '{block}': field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+def test_flat_a1_shaped_entry_fails(tmp_path):
+    """An A1-shaped flat entry (pre-A1.5) fails with the first missing move
+    block — there is no dual-form fallback (spec R1)."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "loops:\n"
+        "  - name: nightly-scan-triage\n"
+        "    purpose: Triage overnight scanner false positives\n"
+        "    trigger: 'cron:0 6 * * *'\n"
+        "    inputs: []\n"
+        "    outputs: []\n"
+        "    artifacts: []\n"
+        "    verifier: verifiers/triage_verifier.py\n"
+        "    stop_condition: stop_conditions/triage_stop.py\n"
+        "    failure_behavior: escalate_to_human\n"
+        "    side_effect_level: 2\n"
+        "    handoff: handoffs/triage_handoff.py\n"
+    )
+    with pytest.raises(adapter.AdapterError, match=r"missing required block 'discovery'"):
+        adapter.load(str(tmp_path))
+
+
+def test_dark_factory_own_adapter_yaml_loads_clean_after_reshape():
+    """Spec R1 fail-open precondition: the live .factory/adapter.yaml declares no
+    loops:, so the breaking reshape must not raise on it (an AdapterError would
+    silently drop every safety override back to DEFAULTS)."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load((repo_root / ".factory" / "adapter.yaml").read_text())
+    assert "loops" not in raw
+    merged = adapter.load(str(repo_root))
+    assert merged["loops"] == []
+    assert merged["safety"]["hard_exclude_paths"] == raw["safety"]["hard_exclude_paths"]
+
+
+def test_role_card_valid_parses(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {
+        "name": "Triage Agent",
+        "responsibilities": ["classify false positives"],
+        "non_responsibilities": ["patch the scanner"],
+        "output_schema": "schemas/triage_report.json",
+        "fallback_path": "manual-review:security-team",
+        "observability": ["triage.completed", "triage.escalated"],
+    }
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["role_card"]["name"] == "Triage Agent"
+
+
+def test_role_card_empty_dict_missing_name_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'role_card': missing required field 'name'"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["name", "output_schema", "fallback_path"])
+def test_role_card_string_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {"name": "Triage Agent", field: 42}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'role_card': field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["responsibilities", "non_responsibilities", "observability"])
+def test_role_card_list_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {"name": "Triage Agent", field: "not-a-list"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'role_card': field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+def test_role_card_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {"name": "Triage Agent", "extra_typo_field": "oops"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'role_card': unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+def test_economics_empty_dict_accepted(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["economics"] = {}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["economics"] == {}
+
+
+def test_economics_valid_parses(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["economics"] = {
+        "context_offload_required": True,
+        "feature_demand": "high",
+        "model_capability_floor": "sonnet",
+    }
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["economics"]["context_offload_required"] is True
+
+
+@pytest.mark.parametrize("bad_bool", [1, "yes"])
+def test_economics_context_offload_required_rejects_non_bool(tmp_path, bad_bool):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["economics"] = {"context_offload_required": bad_bool}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'economics': field 'context_offload_required' must be a bool"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["feature_demand", "model_capability_floor"])
+def test_economics_string_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["economics"] = {field: 42}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'economics': field '{field}' must be a non-empty string")):
+        adapter.load(str(tmp_path))
+
+
+def test_economics_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["economics"] = {"extra_typo_field": "oops"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'economics': unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+def test_skills_empty_dict_accepted(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["skills"] = {}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["skills"] == {}
+
+
+@pytest.mark.parametrize("field", ["primary", "supplemental", "forbidden", "eval_cases"])
+def test_skills_list_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["skills"] = {field: "not-a-list"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'skills': field '{field}' must be a list of strings")):
+        adapter.load(str(tmp_path))
+
+
+def test_skills_valid_parses(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["skills"] = {
+        "primary": ["triage-classifier"],
+        "supplemental": ["log-search"],
+        "forbidden": ["deploy"],
+        "eval_cases": ["evals/triage_case_1.yaml"],
+    }
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["skills"]["primary"] == ["triage-classifier"]
+
+
+def test_skills_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["skills"] = {"extra_typo_field": "oops"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'skills': unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["allowed_tools", "forbidden_tools"])
+def test_role_card_tool_fields_permanently_excluded(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["role_card"] = {"name": "Triage Agent", field: ["bash"]}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(
+        adapter.AdapterError,
+        match=re.escape(
+            f"role_card field '{field}' is a tool allow/deny declaration and is "
+            f"permanently excluded from adapter.yaml")):
+        adapter.load(str(tmp_path))
+
+
+def test_budget_caps_empty_dict_missing_max_tokens_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["budget_caps"] = {}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'budget_caps': missing required field 'max_tokens'"):
+        adapter.load(str(tmp_path))
+
+
+def test_budget_caps_max_tokens_bool_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": True}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'budget_caps': field 'max_tokens' must be an int >= 1"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_retry_spend"])
+def test_budget_caps_int_field_wrong_type_raises(tmp_path, field):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, field: "many"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'budget_caps': field '{field}' must be an int >= 1")):
+        adapter.load(str(tmp_path))
+
+
+def test_budget_caps_unknown_field_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, "extra_typo_field": "oops"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"block 'budget_caps': unknown field 'extra_typo_field'"):
+        adapter.load(str(tmp_path))
+
+
+def test_human_checkpoint_wrong_type_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["human_checkpoint"] = 42
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=r"field 'human_checkpoint' must be a non-empty string"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("sel", [4, 5, 6])
+def test_side_effect_level_high_without_budget_caps_raises(tmp_path, sel):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = sel
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"side_effect_level {sel} >= 4 requires 'budget_caps'")):
+        adapter.load(str(tmp_path))
+
+
+def test_side_effect_level_high_with_budget_caps_missing_human_checkpoint_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = 4
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape("side_effect_level 4 >= 4 requires 'human_checkpoint'")):
+        adapter.load(str(tmp_path))
+
+
+def test_side_effect_level_high_with_both_caps_accepted(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = 6
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, "max_retry_spend": 10000}
+    parsed["loops"][0]["human_checkpoint"] = "manual-approval:slack-#factory-ops"
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["side_effect_level"] == 6
+
+
+def test_side_effect_level_3_without_either_accepted(tmp_path):
+    """Below the R4 threshold: no budget_caps/human_checkpoint required."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = 3
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["side_effect_level"] == 3
+
+
+def test_loop_entry_all_optional_blocks_parses(tmp_path):
+    """Acceptance criterion: the R1 example entry, with every optional field
+    declared at once, parses and round-trips through adapter.get()."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = 4
+    parsed["loops"][0]["human_checkpoint"] = "manual-approval:slack-#factory-ops"
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, "max_retry_spend": 10000}
+    parsed["loops"][0]["role_card"] = {"name": "Triage Agent"}
+    parsed["loops"][0]["economics"] = {"feature_demand": "high"}
+    parsed["loops"][0]["skills"] = {"primary": ["triage-classifier"]}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    loops = adapter.get(str(tmp_path), "loops")
+    entry = loops[0]
+    assert entry["human_checkpoint"] == "manual-approval:slack-#factory-ops"
+    assert entry["budget_caps"]["max_tokens"] == 50000
+    assert entry["role_card"]["name"] == "Triage Agent"
+    assert entry["economics"]["feature_demand"] == "high"
+    assert entry["skills"]["primary"] == ["triage-classifier"]
 
 
 @pytest.mark.parametrize("bad_level", [0, 7, -1, 100])
@@ -212,6 +634,36 @@ def test_loop_entry_memory_intervention_reserved_raises(tmp_path):
     parsed["loops"][0]["memory_intervention"] = {"policy": "whatever"}
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
     with pytest.raises(adapter.AdapterError, match=r"reserved for epic #241"):
+        adapter.load(str(tmp_path))
+
+
+def test_loop_entry_contract_reserved_raises(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["contract"] = {"objective": "whatever"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(
+        adapter.AdapterError,
+        match=r"reserved for a follow-up child of epic #194"):
+        adapter.load(str(tmp_path))
+
+
+@pytest.mark.parametrize("reserved_key, match", [
+    ("contract", r"reserved for a follow-up child of epic #194"),
+    ("memory_intervention", r"reserved for epic #241"),
+])
+def test_loop_entry_reserved_key_beats_missing_blocks(tmp_path, reserved_key, match):
+    """Gate 3 (#301) regression: the reserved-key scan is hoisted ahead of the
+    five-move block loop, so an entry that is BOTH incomplete and carries a
+    reserved key reports the R5 reserved message, not 'missing required block'."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    entry = parsed["loops"][0]
+    for block in ("discovery", "handoff", "verification", "persistence", "scheduling"):
+        entry.pop(block, None)
+    entry[reserved_key] = {"anything": "at all"}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError, match=match):
         adapter.load(str(tmp_path))
 
 

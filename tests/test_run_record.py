@@ -1043,15 +1043,20 @@ def test_assemble_surfaces_loops_from_adapter(tmp_path, monkeypatch):
         "loops:\n"
         "  - name: nightly-scan-triage\n"
         "    purpose: Triage overnight scanner false positives\n"
-        "    trigger: 'cron:0 6 * * *'\n"
-        "    inputs: []\n"
-        "    outputs: []\n"
-        "    artifacts: []\n"
-        "    verifier: verifiers/triage_verifier.py\n"
-        "    stop_condition: stop_conditions/triage_stop.py\n"
-        "    failure_behavior: escalate_to_human\n"
         "    side_effect_level: 2\n"
-        "    handoff: handoffs/triage_handoff.py\n"
+        "    discovery:\n"
+        "      trigger: 'cron:0 6 * * *'\n"
+        "      inputs: []\n"
+        "    handoff:\n"
+        "      outputs: []\n"
+        "      manifest: handoffs/triage_handoff.py\n"
+        "    verification:\n"
+        "      verifier: verifiers/triage_verifier.py\n"
+        "      stop_condition: stop_conditions/triage_stop.py\n"
+        "    persistence:\n"
+        "      artifacts: []\n"
+        "    scheduling:\n"
+        "      failure_behavior: escalate_to_human\n"
     )
 
     artifacts_dir = tmp_path / "artifacts"; artifacts_dir.mkdir()
@@ -1064,13 +1069,15 @@ def test_assemble_surfaces_loops_from_adapter(tmp_path, monkeypatch):
     assert rec["loops"] == [{
         "name": "nightly-scan-triage",
         "purpose": "Triage overnight scanner false positives",
-        "trigger": "cron:0 6 * * *",
-        "inputs": [], "outputs": [], "artifacts": [],
-        "verifier": "verifiers/triage_verifier.py",
-        "stop_condition": "stop_conditions/triage_stop.py",
-        "failure_behavior": "escalate_to_human",
         "side_effect_level": 2,
-        "handoff": "handoffs/triage_handoff.py",
+        "discovery": {"trigger": "cron:0 6 * * *", "inputs": []},
+        "handoff": {"outputs": [], "manifest": "handoffs/triage_handoff.py"},
+        "verification": {
+            "verifier": "verifiers/triage_verifier.py",
+            "stop_condition": "stop_conditions/triage_stop.py",
+        },
+        "persistence": {"artifacts": []},
+        "scheduling": {"failure_behavior": "escalate_to_human"},
     }]
 
 

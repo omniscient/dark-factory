@@ -161,7 +161,7 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `schema_version` | `int` | Must be `1`. |
+| `schema_version` | `int` | Integer, inert (never gates validation). |
 | `components` | map | Maps component label (`backend`, `frontend`, …) to a list of ARCHITECTURE.md section names used for context slicing. |
 | `safety.sensitive_keywords` | `string` | Pipe-separated regex of sensitive topic keywords; matched tickets skip autopilot and go to human review. |
 | `safety.hard_exclude_paths` | `list[str]` | Path prefixes the factory will never touch; matched diff paths abort the run. |
@@ -172,6 +172,7 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 | `memory_routing` | map | Maps glob patterns to memory file paths inside the target repo. |
 | `deconflict` | map | Paths for models index (`models_init`) and migrations dir (`migrations_dir`) used by the deconflict guard. |
 | `token_optimization` | map | **Active.** Per-scenario token budget overrides (deep-merged; see `config/config.yaml` for schema). Resolution order, highest wins: adapter > clone `.claude/skills/refinement/config.yaml` (transition period) > baked `config/config.yaml` defaults — resolved per run by `factory_core.effective_config`. |
+| `loops` | `list[map]` | Declarative loop entries (Loop Engineering five-move shape: `discovery`/`handoff`/`verification`/`persistence`/`scheduling`, all required, plus optional `human_checkpoint`/`budget_caps` and optional metadata `role_card`/`economics`/`skills`); parse/validate/surface only, no runtime enforcement yet. See `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md` (#301). |
 
 All keys are optional and deep-merged over the built-in defaults.
 
