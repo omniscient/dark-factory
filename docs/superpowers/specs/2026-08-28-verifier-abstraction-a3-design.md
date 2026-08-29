@@ -1,5 +1,7 @@
 # Verifier abstraction (A3) — shared verdict contract and target-registered check-only verifiers
 
+Revised: 2026-08-29 (operator review)
+
 **Issue:** #197 · **Epic:** #194 (Factory/Target boundary v1)
 **Depends on:** #195 (A1 `loops:` schema, shipped), #301 (A1.5 five-move loop-schema
 restructuring, spec-approved 2026-08-28, not yet merged)
@@ -14,15 +16,17 @@ yet. Spec gate reviewed by the operator.
 ## Overview / Problem Statement
 
 Dark Factory today hand-wires four maker/checker instances: refine↔product-owner,
-plan↔architect, conformance↔reviewer, code-review↔reviewer. Each pairs an
-Opus-4.8-pinned checker subagent with a deterministic Python/bash adjudicator. Two of
-the four (conformance, code-review) are true blocking gates: they write a `STATUS:`
+plan↔architect, conformance↔reviewer, code-review↔reviewer. Each pairs a maker with an
+Opus-4.8-pinned checker subagent; the two blocking pairs add a deterministic
+Python/bash adjudicator (`scripts/code_review_payload.py`, `gate_lib.sh::emit_verdict`).
+Two of the four (conformance, code-review) are true blocking gates: they write a `STATUS:`
 verdict artifact via `scripts/gate_lib.sh::emit_verdict`, and a dedicated DAG node
 (`conformance-gate`, `review-gate`) reads that artifact through
 `scripts/verdict_gate_check.sh` to fail-closed-block the pipeline. The other two
-(refine, plan) are open-ended brainstorming Q&A loops with a structurally different
-escalation path (`UNCERTAIN:` → `needs-discussion` label → clean exit 0), not a
-PASS/BLOCK verdict, and nothing downstream gates on them.
+(refine, plan) escalate to `needs-discussion` and exit 0 (refine: `UNCERTAIN:`; plan:
+architect `Issues Found` after 3 cycles or Phase 3.5 `⛔` after `MAX_CYCLES`) and write
+no gated verdict artifact; plan's Phase 3.5 already uses the conformance rubric
+clone-live-first. Nothing downstream gates on either.
 
 Epic #194 (Factory/Target boundary v1) needs a shared verifier abstraction so that a
 target repo can declare its own check-only verifier against a `.factory/adapter.yaml`
@@ -35,7 +39,8 @@ across all four pairs (they are less alike than the issue's framing implies); wh
 and how "maker never validates maker" is structurally checkable against a schema that
 has no explicit maker-identity field.
 
-**Verified starting facts (re-checked against `main` `2e12b8c`, 2026-08-28):**
+**Verified starting facts (re-checked against `main` `2e12b8c`, 2026-08-28; line
+references re-verified against `main` `707533d` during the 2026-08-29 operator review):**
 
 - `scripts/gate_lib.sh::emit_verdict` writes `STATUS / GATE_TYPE / FINDINGS_COUNT /
   SEVERITY` — used today by `commands/dark-factory-conformance.md` and
@@ -53,6 +58,15 @@ has no explicit maker-identity field.
 - `scripts/verdict_gate_check.sh` already implements the fail-closed contract AC3 asks
   for: `STATUS: BLOCKED`, or a missing/unparseable verdict file, exits 1 and blocks the
   DAG node it gates; `PASS`/`SKIPPED`/`ERROR` proceed.
+- The `STATUS` tokens actually written today exceed that gate's enum, and today's parser
+  is token-agnostic: `scripts/gate_blast_radius.py:173` emits `STATUS: HUMAN_REQUIRED`
+  (blocked by `commands/dark-factory-validate.md:73`, not by `verdict_gate_check.sh`);
+  `validation.md` uses `PASS`/`FAIL` prose (`dark-factory-validate.md:229`,
+  `run_record.py:318-321`); `review.md` is written *without* `emit_verdict` on three
+  paths (`dark-factory-code-review.md:81,99,122`: `STATUS: PASS|ERROR\nBLOCKERS:
+  0\nADVISORY: 0`, no `GATE_TYPE`/`FINDINGS_COUNT`/`SEVERITY`); and
+  `_parse_artifact_stage` (`run_record.py:315-317`) copies any `STATUS:` token
+  verbatim. A closed enum would therefore break byte-compatibility (Requirements 1, 9).
 - `scripts/hooks.sh::run_hook` is the shipped precedent for "target executable/hook >
   factory default, check-only, factory owns all resulting side effects" (the pattern
   the issue's "smoke-gate precedent" bullet refers to): it resolves
@@ -89,10 +103,16 @@ has no explicit maker-identity field.
 
 ## Requirements
 
-1. **One documented verdict schema.** `STATUS ∈ {PASS, BLOCKED, SKIPPED, ERROR}`,
-   `GATE_TYPE` (free-form identifier — `conformance`, `code-review`, `blast`, or a
-   target loop's own name), `FINDINGS_COUNT` (non-negative int), `SEVERITY ∈ {none,
-   low, medium, high, critical}`. Canonicalized once, in code, as the single source of
+1. **One documented verdict schema.** `STATUS` is a free token whose *gating* values
+   are `PASS`, `SKIPPED`, `ERROR` (proceed) and `BLOCKED` (block) per
+   `verdict_gate_check.sh`; `HUMAN_REQUIRED` (blast) and `FAIL` (validation) are
+   documented legacy values that `parse_verdict` MUST return verbatim, never reject or
+   normalize. `GATE_TYPE`, `FINDINGS_COUNT`, `SEVERITY` are OPTIONAL on parse (three
+   `review.md` writers omit them today) and REQUIRED only on emit via
+   `format_verdict`/`emit_verdict`. On emit, `GATE_TYPE` is a free-form identifier
+   (`conformance`, `code-review`, `blast`, or `loop:<loop name>` for a target verifier,
+   per Requirement 4), `FINDINGS_COUNT` a non-negative int, `SEVERITY ∈ {none, low,
+   medium, high, critical}`. Canonicalized once, in code, as the single source of
    truth `scripts/gate_lib.sh::emit_verdict` and `run_record.py` already imply but never
    wrote down together.
 2. **`run_record.py::_parse_artifact_stage` refactored, not reshaped.** It becomes a
@@ -101,17 +121,22 @@ has no explicit maker-identity field.
    ticket must not alter which stages feed `_compute_outcome`'s scoring policy, per the
    issue's own "without changing their behavior." Existing `tests/test_run_record.py`
    parse/outcome tests pass unmodified (byte-compatible artifacts, byte-compatible
-   parse results).
+   parse results). `parse_verdict` never raises on unknown STATUS or missing lines;
+   missing STATUS falls through to each name's existing loose heuristic.
 3. **Checker-invocation contract documented once, referenced four times.** The
-   Opus-4.8 pin, the read-only tool grant (`Glob`, `Grep`, `Read`), and the
-   clone-live-first persona/rubric resolution pattern (already used by
-   conformance/code-review; refine/plan keep reading their baked `/opt/refinement-
+   Opus-4.8 model pin and the note that the checker needs read access (`Glob`, `Grep`,
+   `Read`) — no tool restriction is introduced or documented as existing; tool
+   allow/deny changes are out of scope — and the clone-live-first persona/rubric
+   resolution pattern (already used by conformance/code-review and by plan's Phase 3.5
+   conformance reviewer, `dark-factory-plan.md:116-117`; refine's product-owner
+   checker and plan's architect checker keep reading their baked `/opt/refinement-
    skills/` prompts as-is — no behavior change) are written once in a new reference doc
    and linked from all four `commands/*.md` files, replacing each file's own copy of
-   the same three sentences. This is documentation deduplication, not a new spawn
-   mechanism — the `Agent` tool invocation itself stays in each command's own prose,
-   since a markdown-interpreted phase command cannot delegate a tool call to shared
-   code.
+   the same pin sentence (`dark-factory-refine.md:101-102`, `dark-factory-plan.md:87`
+   and `:124`, `dark-factory-conformance.md:222`, `dark-factory-code-review.md:95`).
+   This is documentation deduplication, not a new spawn mechanism — the `Agent` tool
+   invocation itself stays in each command's own prose, since a markdown-interpreted
+   phase command cannot delegate a tool call to shared code.
 4. **A verifier resolver for target-registered verifiers**
    (`scripts/factory_core/verifier.py`), modeled on `hooks.sh::run_hook`'s
    target-over-default, check-only, factory-owns-side-effects precedent, generalized
@@ -126,16 +151,29 @@ has no explicit maker-identity field.
      **bare-exit-code** (no structured output — exit 0 synthesizes `STATUS: PASS`,
      non-zero synthesizes `STATUS: BLOCKED, FINDINGS_COUNT: 1, SEVERITY: high`),
      mirroring `smoke-gate`'s existing bare-exit-code convention as the low-effort
-     on-ramp for a target's first verifier.
+     on-ramp for a target's first verifier (exit-code semantics only; smoke-gate's
+     red→clean-halt state machinery, `smoke_gate.sh:62-121`, is not reused).
    - Writes the normalized verdict to a caller-supplied artifact path via the
      Requirement 1 schema (`emit_verdict`-equivalent, in Python).
    - Fails closed (`STATUS: BLOCKED`) if the declared path is missing, not executable,
-     times out, or the process cannot be started — never silently skips (AC3). `ERROR`
-     is reserved for "the verifier ran and reported it could not complete" (a
-     structured-mode self-report, e.g. a tooling crash inside the verifier itself) and
-     is **not** auto-pass-through for target verifiers — unlike `code_review.fail_open`,
-     there is no config knob defaulting target-verifier `ERROR` to non-blocking, because
-     AC3 requires "missing/failing cannot hand off" as the default, not an opt-in.
+     times out (`--timeout`: default 300 s, CLI-overridable, not read from
+     `config/config.yaml`), or the process cannot be started — never silently skips
+     (AC3). `ERROR` is reserved for "the verifier ran and reported it could not
+     complete" (a structured-mode self-report, e.g. a tooling crash inside the verifier
+     itself) and is **not** auto-pass-through for target verifiers — unlike
+     `code_review.fail_open`, there is no config knob defaulting target-verifier
+     `ERROR` to non-blocking, because AC3 requires "missing/failing cannot hand off" as
+     the default, not an opt-in.
+   - Target-verifier `GATE_TYPE` is always `loop:<loop name>` (namespaced by
+     `verifier.py`, not taken from verifier stdout); `verifier.py` refuses `--out`
+     basenames in `{validation.md, conformance.md, review.md, conflict_resolution.md,
+     blast.md}` (the `run_record.py` `artifact_names` set plus blast) with exit 2; a
+     target verdict can only *add* a BLOCK on its own loop's handoff and can never
+     PASS-override, replace, or be read by `conformance-gate`/`review-gate`. Per #193,
+     verifiers for loops with `side_effect_level >= 4` are factory-owned: `verifier.py`
+     records `side_effect_level` on the verdict and, until #196 ships, fails closed
+     (`BLOCKED`, finding text `factory-owned level requires #196 profile enforcement`)
+     for levels 4–5 rather than executing a target path.
 5. **Maker≠checker enforced structurally as a path-disjointness rule**, per epic #194's
    non-negotiable ("Maker never validates maker — every consequential loop gets an
    independent checker") and #301's schema (which exposes no maker-identity field
@@ -148,20 +186,26 @@ has no explicit maker-identity field.
    ```
    String/path comparison only (`os.path.normpath`, no filesystem access, no existence
    check) — consistent with #301's "opaque reference, not resolved" treatment of these
-   fields. This is the declaration-time half of maker≠checker; the load-bearing half is
-   execution isolation (Requirement 6). No cross-loop uniqueness constraint — two
-   different loops sharing one verifier script is independence-preserving, not a
-   violation.
+   fields. `handoff.manifest`/`handoff.outputs` and `persistence.artifacts` are
+   #199-owned fields (per #301's Consumers table), read as opaque strings for equality
+   only; #197 attaches no semantics to them. This is the declaration-time half of
+   maker≠checker; the load-bearing half is execution isolation (Requirement 6). No
+   cross-loop uniqueness constraint — two different loops sharing one verifier script
+   is independence-preserving, not a violation.
    Implemented as `verifier.assert_verifier_independent(entry)`, called from
    `adapter.py::load()` immediately after each existing `_validate_loop(entry, i)` call
    — an additive one-line integration hook. It does not modify `_validate_loop` itself,
-   which stays #301's owned surface. **This call site can only be added once #301 has
-   merged** its nested shape into `adapter.py`; until then `verifier.py`'s independence
-   check is developed and unit-tested against the schema #301's spec already documents
-   (fixture dicts shaped per its R1 example), and the plan/implement phases must
-   re-verify the field names against `main` on the day they start, per the
-   `.archon/memory` precedent for re-checking a dependency's shape before building
-   against it.
+   which stays #301's owned surface. A rejection surfaces as `AdapterError` from
+   `load()`, and any `AdapterError` from `load()` drops *all* adapter overrides to
+   defaults (including `hard_exclude_paths`) on the callers' fail-open path
+   (`effective_config.py:49`; `adapter.py --get` exits 1) — acceptable because no live
+   adapter declares `loops:` today, but stated here so the plan phase does not discover
+   it later. **This call site can only be added once #301 has merged** its nested shape
+   into `adapter.py`; until then `verifier.py`'s independence check is developed and
+   unit-tested against the schema #301's spec already documents (fixture dicts shaped
+   per its R1 example), and the plan/implement phases must re-verify the field names
+   against `main` on the day they start, per the `.archon/memory` precedent for
+   re-checking a dependency's shape before building against it.
 6. **The A2 permission-profile gap is recorded, not silently enforced.** #196 (A2,
    side-effect-level-to-permission-profile enforcement) has not shipped — there is no
    container/tool-permission mechanism in this repo to actually confine a verifier
@@ -201,7 +245,25 @@ has no explicit maker-identity field.
    fail-closed mechanics AC3 describes, exercised end-to-end without a live scheduler.
    No new node is added to `workflows/archon-dark-factory.yaml`; wiring a target
    verifier into a live, scheduled loop is the loop-dispatcher's job (out of scope,
-   Alternatives below).
+   Alternatives below). Owner ruling (#311) adopted: a verifier verdict is a
+   Gate-2-class BLOCK (stop owner 2) — `verifier.py` never calls `breaker.py`, never
+   writes the error-signature drop file, and is never evaluated pre-dispatch by
+   `scheduler.sh`. The `substantive:contract_violation` class is reserved for the
+   deferred `contract.md` gate (Open Questions) and is not added by this ticket; if the
+   plan phase pulls `contract.md` in, it must add that class to `error_signature.py`
+   in the same PR.
+9. **Behaviour-preservation invariant.** For every artifact shape a factory writer
+   produces today, `_parse_artifact_stage(name, content)` returns a dict equal to
+   main's result, and `verdict_gate_check.sh` is not modified. Proven by a golden
+   corpus `tests/fixtures/verdicts/` (one file per writer path: conformance
+   PASS-with-VERDICT/CYCLES and BLOCKED-critical; review empty-diff PASS, FAIL_OPEN
+   ERROR, zero-findings PASS, emit_verdict PASS+THRESHOLD, BLOCKED; blast
+   SKIPPED/PASS/HUMAN_REQUIRED; validation prose PASS/FAIL; conflict_resolution
+   `CONFLICT_VERDICT=`/`**Status:**`) with expected JSON captured from main *before*
+   the refactor commit; `tests/test_verdict.py::test_golden_corpus_byte_compat` diffs
+   them. `verdict_gate_check.sh`, `gate_blast_radius.py`, `budget_gate.sh`,
+   `push_gate_check.sh`, `oos_excise.sh`, `config/config.yaml`, `workflows/*.yaml` are
+   not in this ticket's file list.
 
 ---
 
@@ -224,8 +286,9 @@ has no explicit maker-identity field.
 > verdict for #197.
 
 > **Q:** Given refine/plan are structurally different from conformance/code-review (no
-> verdict artifact, no gate node, an `UNCERTAIN:`-based escalation instead of PASS/
-> BLOCK), should "refactor the four existing pairs onto the abstraction" (a) extract
+> verdict artifact, no gate node, a `needs-discussion` escalation — `UNCERTAIN:` for
+> refine, architect `Issues Found`/Phase 3.5 `⛔` for plan — instead of PASS/BLOCK),
+> should "refactor the four existing pairs onto the abstraction" (a) extract
 > only the common invocation mechanic across all four while verdict-emission stays
 > conformance/code-review-only, (b) also make refine/plan emit a formal verdict artifact
 > for future-proofing even though nothing consumes it yet, or (c) something else?
@@ -274,21 +337,26 @@ has no explicit maker-identity field.
   etc. — only when structured lines are absent, exactly mirroring each existing
   `elif name == ...` branch's own fallback so behavior is preserved); `format_verdict(
   gate_type, status, findings_count, severity) -> str` (Python-side sibling of
-  `gate_lib.sh::emit_verdict`, for verifiers not written in bash); the enum
-  constants from Requirement 1 as the module's documented single source of truth.
+  `gate_lib.sh::emit_verdict`, for verifiers not written in bash); the gating/legacy
+  `STATUS` values and `SEVERITY` enum from Requirement 1 as the module's documented
+  single source of truth (documentation constants — `parse_verdict` never validates
+  `STATUS` against them, Requirement 2).
 - **`scripts/factory_core/verifier.py`** — `resolve_verifier(clone_dir, verifier_path)`,
   `run_verifier(resolved_path, env) -> (exit_code, stdout)`, `normalize_verdict(exit_code,
   stdout, gate_type) -> str` (structured vs. bare-exit-code dispatch, Requirement 4),
   `assert_verifier_independent(loop_entry)` (Requirement 5), and a small CLI (`python3
-  -m factory_core.verifier --clone-dir . --loop-name X --verifier-path Y run
-  --out artifacts/verifier.md`) so a future dispatcher (or a human, or a test) has one
-  documented entry point.
+  -m factory_core.verifier --clone-dir . --loop-name X --verifier-path Y
+  [--timeout 300] run --out artifacts/verifier.md`; `--out` basenames colliding with
+  a ticket-lifecycle artifact name are refused with exit 2, Requirement 4) so a future
+  dispatcher (or a human, or a test) has one documented entry point.
 - **`refinement-skills/VERIFIER-CONTRACT.md`** — Requirement 3's shared doc: the
-  checker-invocation contract (Opus-4.8 pin, read-only tool grant, clone-live-first
-  resolution), the verdict schema (re-stated from `verdict.py`'s docstring for a
-  non-Python-reading audience — command authors), and the target-verifier registration
-  contract (env vars, structured vs. bare-exit-code modes, fail-closed defaults,
-  the maker≠checker rule). Linked from `refinement-skills/SKILL.md` and each of the
+  checker-invocation contract (the Opus-4.8 model pin and the note that the checker
+  needs read access (`Glob`, `Grep`, `Read`); no tool restriction is introduced or
+  documented as existing — tool allow/deny changes are out of scope; plus
+  clone-live-first resolution), the verdict schema (re-stated from `verdict.py`'s
+  docstring for a non-Python-reading audience — command authors), and the
+  target-verifier registration contract (env vars, structured vs. bare-exit-code
+  modes, fail-closed defaults, the maker≠checker rule). Linked from `refinement-skills/SKILL.md` and each of the
   four `commands/*.md` files.
 
 ### Modified files
@@ -306,35 +374,52 @@ has no explicit maker-identity field.
 - **`scripts/gate_lib.sh`** — top-of-file comment updated to point at `verdict.py` as
   the canonical schema reference. `emit_verdict` itself is unchanged (it already matches
   the documented schema).
-- **`commands/dark-factory-refine.md`, `dark-factory-plan.md`,
-  `dark-factory-conformance.md`, `dark-factory-code-review.md`** — each command's
-  "always pin this subagent to Opus 4.8 ... needs Glob, Grep, and Read tools" sentence
-  is replaced with a one-line reference to `refinement-skills/VERIFIER-CONTRACT.md`'s
-  checker-invocation section. No change to which tools are granted or which model is
-  pinned — pure de-duplication.
+- **`commands/dark-factory-refine.md` (pin at l.101, read-access note at l.102),
+  `dark-factory-plan.md` (both pin sites: architect l.87 and Phase 3.5 conformance
+  reviewer l.124), `dark-factory-conformance.md` (l.222),
+  `dark-factory-code-review.md` (l.95)** — each command's "always pin this subagent to
+  Opus 4.8 ..." sentence is replaced with a one-line reference to
+  `refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation section. No change to
+  which model is pinned; no tool restriction is introduced or removed (only
+  `refine.md:102` mentions tools today, as a need, not a grant) — pure
+  de-duplication.
+
+### Explicitly not in this ticket's file list
+
+`scripts/verdict_gate_check.sh`, `scripts/gate_blast_radius.py`,
+`scripts/budget_gate.sh`, `scripts/push_gate_check.sh`, `scripts/oos_excise.sh`,
+`config/config.yaml`, `workflows/*.yaml` (Requirement 9). `verdict_gate_check.sh` is
+exercised by the integration test as an unmodified subprocess, never edited.
 
 ### Tests
 
 - `tests/test_verdict.py` (new) — schema round-trip for every `GATE_TYPE` the four
   existing gates use plus one invented target-loop `GATE_TYPE`, structured and
-  loose-fallback parsing, unknown/malformed `STATUS:` handling.
+  loose-fallback parsing, unknown/malformed `STATUS:` handling (returned verbatim,
+  never raised); `test_golden_corpus_byte_compat` diffs `_parse_artifact_stage` over
+  every file in `tests/fixtures/verdicts/` against the expected JSON captured from
+  main before the refactor commit (Requirement 9).
 - `tests/test_verifier.py` (new) — `resolve_verifier`/`run_verifier` against real
   executable fixture scripts under `tests/fixtures/verifiers/` (structured-PASS,
   structured-BLOCKED, bare-exit-0, bare-exit-1, missing path, non-executable path,
   timeout); `assert_verifier_independent` positive/negative cases for all three
   disjointness members (`handoff.manifest`, one of `handoff.outputs`, one of
   `persistence.artifacts`); env-contract assertions (`CLONE_DIR`/`ARTIFACTS_DIR`/
-  `ISSUE_NUM` or `LOOP_NAME`/`FACTORY_REPO_SLUG` all present in the child process).
+  `ISSUE_NUM` or `LOOP_NAME`/`FACTORY_REPO_SLUG` all present in the child process);
+  `GATE_TYPE` namespacing to `loop:<loop name>` regardless of verifier stdout; refused
+  `--out` basenames → exit 2; `side_effect_level >= 4` → fail-closed `BLOCKED` without
+  executing the target path (Requirement 4); `--timeout` default 300 s and CLI override.
 - `tests/test_run_record.py` — existing parse/outcome tests unchanged and green
   (byte-compatibility); one additive test proving `_parse_artifact_stage` round-trips a
   `GATE_TYPE` it has never seen through the generic path.
 - `tests/test_adapter.py` — additive `assert_verifier_independent` cases written against
   #301's approved shape, added once #301 merges (coordinated, not concurrent, per the
   `Depends on:` edge).
-- New integration test (`tests/test_verifier_gate_integration.sh` or appended to
-  `tests/test_verdict_gate_check.sh`) — pipes a `verifier.py`-written artifact through
-  the real `verdict_gate_check.sh` subprocess: PASS → exit 0, BLOCKED → exit 1, missing
-  artifact → exit 1 (Requirement 8c, the concrete AC3 proof).
+- New integration test, appended to `tests/test_verdict_gate_check.sh` (already in CI,
+  `.github/workflows/ci.yml:28` — CI enumerates shell tests explicitly at
+  `ci.yml:15-29`); no new shell test file is created. Pipes a `verifier.py`-written
+  artifact through the real `verdict_gate_check.sh` subprocess: PASS → exit 0,
+  BLOCKED → exit 1, missing artifact → exit 1 (Requirement 8c, the concrete AC3 proof).
 
 ### Consumers (informational — none of these are this ticket's deliverable)
 
@@ -352,7 +437,7 @@ has no explicit maker-identity field.
 
 | # | Source | Criterion | Disposition |
 |---|---|---|---|
-| 1 | Issue | All four existing gates run on the shared abstraction; tests green | Satisfied as restated (Requirement 7): invocation-contract sharing for all four, verdict-schema sharing for the verdict-emitting producers, byte-compatible artifacts |
+| 1 | Issue | All four existing gates run on the shared abstraction; tests green | Satisfied as restated (Requirement 7): invocation-contract sharing for all four, verdict-schema sharing for the verdict-emitting producers, byte-compatible artifacts and parse results (Requirement 9 golden corpus) |
 | 2 | Issue | A target loop can declare a verifier and its verdict is parsed, recorded, gates handoff | Satisfied via `verifier.py` + `verdict.py` + the integration test (Requirement 8); no live dispatcher, per Q&A |
 | 3 | Issue | Missing/failing verifier cannot hand off (fail closed) | Satisfied: `verifier.py` fails closed on missing/non-executable/timeout/undetermined-profile (Requirements 4, 6); proven against the real `verdict_gate_check.sh` (Requirement 8c) |
 | i | #311 inherited | Verifier consumes only observable events/artifacts, never agent self-report | Satisfied by construction: `verifier.py` reads only the resolved script's stdout/exit code and the adapter-declared paths — never a maker's session/reasoning |
@@ -371,7 +456,8 @@ has no explicit maker-identity field.
 2. **Make refine/plan emit a formal PASS/BLOCK verdict artifact** for schema uniformity.
    Rejected per Q&A: changes behavior, risks silently entering `_compute_outcome`'s
    scoring the moment someone extends `artifact_names`, and misrepresents
-   `UNCERTAIN:`'s real semantics (human escalation, not a gate verdict).
+   `UNCERTAIN:`'s (refine) and the architect/Phase 3.5 escalations' (plan) real
+   semantics (human escalation, not a gate verdict).
 3. **Add a `maker:` field to #301's loop schema** so maker≠checker could be a direct
    equality check instead of a path-disjointness rule. Rejected per Q&A: #301's spec is
    already approved and explicitly assigns "maker≠checker rule enforced [in #197], not
