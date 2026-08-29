@@ -12,6 +12,9 @@
 #                     write/update bench/baseline.md
 #   --issues LIST     Comma-separated issue numbers to run (default: all tasks)
 #   --dry-run         Print plan without running archon
+#   --variant-id ID   Tag this invocation's run-records/aggregate-run rows with a variant_id
+#                     (df#240) so bench/compare_variants.py can join two arms without a
+#                     run_id-prefix collision. Omit for a plain (non-comparison) bench run.
 #
 # Environment:
 #   BENCH_TOKEN_BUDGET  Soft budget in USD (default: 5.00) — warns on breach
@@ -20,6 +23,7 @@
 #
 # Output:
 #   Per-run JSON: bench/results/YYYY-MM-DD-HH-run.json
+#   Per-invocation run-record: bench/results/<run_id>-run-record.json (harness_economics)
 #   Summary table: stdout
 
 set -euo pipefail
@@ -36,6 +40,7 @@ K=""
 BASELINE=false
 DRY_RUN=false
 ISSUE_FILTER=""
+VARIANT_ID=""
 
 # ---- Argument parsing ----
 while [[ $# -gt 0 ]]; do
@@ -46,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --baseline) BASELINE=true; shift ;;
     --issues)   ISSUE_FILTER="$2"; shift 2 ;;
     --dry-run)  DRY_RUN=true; shift ;;
+    --variant-id) VARIANT_ID="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -136,22 +142,6 @@ check_budget() {
   fi
 }
 
-get_last_run_cost_cents() {
-  # Try archon workflow cost --last --json first; fall back to 0
-  local cost_json
-  cost_json=$(archon workflow cost --last --json 2>/dev/null || echo '{}')
-  python3 -c "
-import json, sys
-try:
-    d = json.loads('$cost_json')
-    # cost field may be float USD or dict; try common shapes
-    cost = d.get('total_cost', d.get('cost', 0))
-    print(int(float(cost) * 100))
-except Exception:
-    print(0)
-"
-}
-
 # ---- Main run loop ----
 RUN_TS=$(date -u +%Y-%m-%dT%H-%M)
 RESULTS_FILE="$RESULTS_DIR/${RUN_TS}-run.json"
@@ -206,6 +196,15 @@ for t in tasks:
     }
 
     # Invoke archon with BENCH_MODE
+    RUN_TS_NOW=$(date -u +%Y%m%dT%H%M%S)
+    RUN_ID="${VARIANT_ID:+${VARIANT_ID}-}${RUN_TS_NOW}-issue${ISSUE}-r${RUN_IDX}"
+    export RUN_ID
+    RUN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    export RUN_STARTED_AT
+    ARTIFACTS_DIR="/tmp/artifacts/bench-${RUN_ID}"
+    export ARTIFACTS_DIR
+    mkdir -p "$ARTIFACTS_DIR"
+
     RUN_START=$(date +%s)
     ARCHON_RC=0
     BENCH_MODE="$BENCH_MODE" archon workflow run archon-dark-factory "Fix issue #${ISSUE}" 2>&1 | \
@@ -213,8 +212,50 @@ for t in tasks:
     RUN_END=$(date +%s)
     DURATION=$(( RUN_END - RUN_START ))
 
-    COST_CENTS=$(get_last_run_cost_cents)
-    check_budget "$COST_CENTS"
+    # --- Capture archon cost data and assemble a run-record (non-fatal) ---
+    ARCHON_COST_JSON=$(mktemp)
+    ARCHON_COST_STDERR=$(mktemp)
+    set +e
+    archon workflow cost --last --json --quiet > "$ARCHON_COST_JSON" 2>"$ARCHON_COST_STDERR"
+    ARCHON_COST_RC=$?
+    set -e
+
+    RUN_RECORD_FILE="$RESULTS_DIR/${RUN_ID}-run-record.json"
+    RUN_STATUS="failed"; [ "$ARCHON_RC" -eq 0 ] && RUN_STATUS="completed"
+    python3 "$REPO_ROOT/scripts/factory_core/cli.py" run-record assemble \
+      --run-id "$RUN_ID" \
+      --issue "$ISSUE" \
+      --intent implement \
+      --started-at "$RUN_STARTED_AT" \
+      --artifacts-dir "$ARTIFACTS_DIR" \
+      --archon-cost-json "$ARCHON_COST_JSON" \
+      --archon-cost-exit-code "$ARCHON_COST_RC" \
+      --archon-cost-stderr-file "$ARCHON_COST_STDERR" \
+      --out-file "$RUN_RECORD_FILE" \
+      --status "$RUN_STATUS" \
+      --clone-dir "$REPO_ROOT" || true
+    rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR"
+
+    # cost_per_task is null when archon's cost capture failed — surface that as
+    # cost_unavailable, never silently coerce to 0 (df#240; the bug this replaces).
+    read -r COST_UNAVAILABLE COST_CENTS < <(python3 -c "
+import json
+try:
+    d = json.load(open('$RUN_RECORD_FILE'))
+    c = d.get('harness_economics', {}).get('cost_per_task')
+except Exception:
+    c = None
+if c is None:
+    print('true 0')
+else:
+    print(f'false {int(round(c * 100))}')
+" 2>/dev/null || echo "true 0")
+
+    if [ "$COST_UNAVAILABLE" = "true" ]; then
+      log "    WARNING: cost unavailable for run $RUN_ID (archon cost capture failed) — not counted toward budget"
+    else
+      check_budget "$COST_CENTS"
+    fi
 
     # Find and checkout the result branch
     RESULT_BRANCH=$(git -C "$REPO_ROOT" branch --list "feat/issue-${ISSUE}-*" | head -1 | xargs 2>/dev/null || true)
@@ -238,13 +279,18 @@ for t in tasks:
     # Collect run result
     RUN_RESULT=$(python3 -c "
 import json
+cost_unavailable = '$COST_UNAVAILABLE' == 'true'
+cost_cents = None if cost_unavailable else $COST_CENTS
 print(json.dumps({
     'run': $RUN_IDX,
     'passed': bool($PASSED),
     'archon_exit': $ARCHON_RC,
     'duration_secs': $DURATION,
-    'cost_cents': $COST_CENTS,
+    'cost_cents': cost_cents,
+    'cost_unavailable': cost_unavailable,
     'result_branch': '${RESULT_BRANCH:-}',
+    'run_id': '$RUN_ID',
+    'variant_id': '$VARIANT_ID',
 }))
 ")
     TASK_RUNS_JSON=$(python3 -c "
