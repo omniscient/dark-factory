@@ -17,9 +17,13 @@ sees a shell variable if it was `export`-ed.
 
 Both tests' first `SCHEDULER_STATE_DIR=$(mktemp -d ...)` assignment (line 65 in each file) is a plain,
 non-exported shell variable. Every function called before the file's later `export SCHEDULER_STATE_DIR`
-line (session-window: line 152; error-signature: line 123) therefore leaks its `run-record`/
-`error-signature-write` subprocess calls straight to the real `/var/lib/dark-factory` — the scheduler
-state volume mounted into every factory run container. Confirmed live in this very refine container:
+line (session-window: line 152; error-signature: line 123) therefore leaks its `run-record record`
+subprocess calls straight to the real `/var/lib/dark-factory` — the scheduler state volume mounted
+into every factory run container. (The `error-signature-write` and `session-window-*` CLI calls are
+already isolated: `entrypoint.sh:246/295/387` pass `--state-dir "${SCHEDULER_STATE_DIR:-…}"`
+explicitly, which is why the error-signature test's `.sig` assertions pass on main. Only
+`run-record record|assemble` — `entrypoint.sh:298/495/512/890`, no `--state-dir` flag, argv passed
+through `cli.py` as REMAINDER — resolves the directory from the environment in `run_record.py:23`.) Confirmed live in this very refine container:
 `/var/lib/dark-factory/runs.jsonl` and `current-run.json` are real, actively-written production files
 (verified during Phase 3 context assembly), not a mock or CI fixture.
 
@@ -35,9 +39,14 @@ placed *before* the `source` line — it is just never applied to the other two 
 Investigation during refinement surfaced a third contributing gap: `tests/test_run_record_hermetic.sh`
 (added for a near-identical prior incident, df#300) is a CI-wired static guard that scans every
 `tests/test_*.sh` file and fails it if it invokes `run-record record|assemble` / `error-signature-write`
-without first setting `SCHEDULER_STATE_DIR`. Its check (`grep -q 'SCHEDULER_STATE_DIR' "$f"`) only tests
-whether the string appears *anywhere* in the file — both offending tests do mention it (just not
-exported at first use), so the guard has been passing them green the entire time. This is precisely
+without first setting `SCHEDULER_STATE_DIR`. Two holes: (a) its candidate filter
+(`tests/test_run_record_hermetic.sh:24-26`) only inspects files that literally contain
+`run-record (record|assemble)|error-signature-write` — the session-window test contains neither
+string (it reaches `run-record record` only through the sourced `_handle_session_window_pause` /
+`on_failure` functions), so the primary offender is *skipped*, not passed; the error-signature test
+is a candidate only because of a comment on its line 4. (b) For candidates, the check
+(`grep -q 'SCHEDULER_STATE_DIR' "$f"`) only tests whether the string appears *anywhere* in the
+file — mention-without-export passes green. This is precisely
 the hole #362 fell through, and leaving it as-is would let the same class of bug recur in any future
 test. Separately, `tests/test_entrypoint_error_signature.sh` is not wired into
 `.github/workflows/ci.yml` at all — it has only ever been run ad hoc by implement agents inside live
@@ -75,8 +84,8 @@ All changes are confined to `tests/` and `.github/workflows/ci.yml` — no produ
    `SCHEDULER_STATE_DIR=$(mktemp -d ...)` into an exported assignment. Bash's export attribute is
    sticky across later plain reassignments (`VAR=newvalue` without `export`), so a single fix at the
    first assignment in each file automatically covers every later reassignment in that file
-   (session-window: lines 92/105/129/137/151/... ; error-signature: lines 79/96/106/122/...) — no
-   need to touch each block individually.
+   (session-window: lines 129/137/151/230/268/307/349/394/428 — lines 92/105 are `rm -f` uses, not
+   reassignments; error-signature: lines 79/96/106/122) — no need to touch each block individually.
 
 2. **Set and export `CURRENT_RUN_DIR` to a fresh `mktemp -d` scratch directory before the `source`
    line** in both files (`tests/test_entrypoint_session_window.sh:33`,
@@ -88,29 +97,51 @@ All changes are confined to `tests/` and `.github/workflows/ci.yml` — no produ
 
 3. **Add a lightweight isolation assertion in both tests**, addressing the issue's literal ask
    ("assert `/var/lib/dark-factory/runs.jsonl` is untouched") without depending on that path's
-   existence: before the test body runs, if `/var/lib/dark-factory/runs.jsonl` and
-   `/var/lib/dark-factory/current-run.json` exist, snapshot their mtime (and `runs.jsonl`'s line
-   count); after the test body finishes, assert both are unchanged. Skip the assertion entirely when
-   the path doesn't exist (bare CI runners / developer machines never have it, matching the existing
+   existence: if `/var/lib/dark-factory/runs.jsonl` exists, count — before and after the test
+   body — the lines whose `run_id` matches this test's own `RUN_ID` values (`test-run-*`; see
+   session-window lines 48/157/236/274/313) and assert the delta is 0; if
+   `/var/lib/dark-factory/current-run.json` exists, assert after the body that its `run_id` is not
+   the `RUN_ID` `entrypoint.sh:95` generated in this process. Do **not** snapshot mtimes or absolute
+   line counts: the state volume is shared with the host scheduler and any concurrent container, so
+   those change under the test, and the 91 pre-existing `test-run-1` rows make an absolute check
+   impossible until the operator cleanup (Requirement 6). Skip the assertion entirely when the path
+   doesn't exist (bare CI runners / developer machines never have it, matching the existing
    `tests/test_entrypoint_current_run.sh` comment about that path being "unwritable on CI runners").
-   This is deliberately a belt-and-suspenders check on top of full scratch-dir isolation (items 1-2),
-   not the primary correctness mechanism — asserting the real path never changes is fragile in a live
-   factory container where the path is genuinely in concurrent production use, but a same-run
-   before/after diff is safe since only one phase agent runs per container.
+   This is a belt-and-suspenders check on top of full scratch-dir isolation (items 1-2), not the
+   primary correctness mechanism.
 
-4. **Tighten `tests/test_run_record_hermetic.sh`'s check** from "does the file mention
-   `SCHEDULER_STATE_DIR` anywhere" to "is the *first* line in the file matching `SCHEDULER_STATE_DIR`
-   an `export`". Concretely: for each candidate test file, find the first line matching
-   `SCHEDULER_STATE_DIR` and require it to also match `export`, instead of the current
-   file-wide `grep -q`. Verify the tightened guard fails against the pre-fix versions of both target
-   test files and passes once items 1-2 land (red-then-green), so the guard is proven to actually
-   catch this failure mode rather than just changed.
+4. **Tighten `tests/test_run_record_hermetic.sh`** in three ways:
+   (a) **Widen the candidate set** at `tests/test_run_record_hermetic.sh:24-26`: inspect any
+   `tests/test_*.sh` that matches `ENTRYPOINT_SOURCE_ONLY=1` (sourcing `entrypoint.sh` exposes
+   `run-record record` at `entrypoint.sh:298/495`) in addition to files that literally mention
+   `run-record (record|assemble)|error-signature-write` — otherwise the session-window test is never
+   inspected at all.
+   (b) **First real mention must be exported**: for each candidate, find the first *non-comment* line
+   matching `SCHEDULER_STATE_DIR` (`grep -nE '^[^#]*SCHEDULER_STATE_DIR'`) and require either
+   `export SCHEDULER_STATE_DIR=` on that line **or** a bare `export SCHEDULER_STATE_DIR` on the
+   immediately following line. The two-line form is the repo's established pattern
+   (`tests/test_entrypoint_current_run.sh:32-33`, and the CI-wired
+   `tests/test_entrypoint_cost_report_regression.sh:47-48`), so a same-line-only rule would false-fail
+   a green test.
+   (c) **`CURRENT_RUN_DIR` guard**: for every file matching `ENTRYPOINT_SOURCE_ONLY=1`, require an
+   exported `CURRENT_RUN_DIR` assignment on a line number lower than the `source .*entrypoint.sh`
+   line — the `current-run.json` clobber happens at source time (`entrypoint.sh:117-121`), so an
+   export after the source line is too late.
+   Verify red-then-green: the tightened guard must fail against the pre-fix versions of both target
+   test files, pass once items 1-2 land, and keep `tests/test_entrypoint_cost_report_regression.sh`
+   and `tests/test_entrypoint_current_run.sh` green throughout.
 
 5. **Wire `tests/test_entrypoint_error_signature.sh` into `.github/workflows/ci.yml`**, sequenced
    near `test_entrypoint_session_window.sh` (which is already wired). This is the same class of gap
    as items above: a test capable of writing to real factory state that only ever ran by hand inside
    a live container is exactly the condition that produced this incident, and CI-wiring it makes the
-   whole fix self-verifying.
+   whole fix self-verifying. In the same `ci.yml` job, prove the property directly: run
+   `sudo install -d -m 777 /var/lib/dark-factory` before the two entrypoint tests (with
+   `SCHEDULER_STATE_DIR` and `CURRENT_RUN_DIR` unset in the job env) and afterwards assert
+   `test ! -e /var/lib/dark-factory/runs.jsonl && test ! -e /var/lib/dark-factory/current-run.json`.
+   Without this, item 3's assertion is always skipped on CI (the path never exists there) and the
+   "nothing lands in the production path" property would only ever be checked inside live factory
+   containers.
 
 ## Alternatives Considered
 
@@ -135,11 +166,12 @@ All changes are confined to `tests/` and `.github/workflows/ci.yml` — no produ
 
 ## Open Questions (non-blocking)
 
-- `tests/test_run_record_hermetic.sh`'s tightened check (first-mention-must-be-exported) still has a
-  pre-existing blind spot shared with the current guard: a file whose first `SCHEDULER_STATE_DIR`
-  mention is a comment (not a real assignment) would still false-pass. No current or planned test
-  does this, and hardening the guard's parsing further is not warranted for an S-sized ticket — noted
-  here so a future edit to the guard doesn't have to rediscover this limitation.
+- Item 4(b) skips comment lines, so a file whose first `SCHEDULER_STATE_DIR` mention is a comment is
+  handled (it would otherwise false-*fail*, not false-pass). The remaining limitation is that the
+  guard is a line-pattern heuristic, not a bash parser — an assignment split across lines with a
+  backslash continuation, or one inside a function that runs before the first top-level export,
+  would not be modelled. No current test does this; noted so a future edit to the guard doesn't have
+  to rediscover it.
 
 ## Assumptions
 
