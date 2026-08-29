@@ -1,0 +1,21 @@
+{
+  "run_id": "budget-enforce-off-20260829T000000-issue224-r1",
+  "issue_number": 224,
+  "intent": "implement",
+  "started_at": "2026-08-29T00:00:00Z",
+  "completed_at": "2026-08-29T00:05:00Z",
+  "status": "completed",
+  "harness_economics": {
+    "policy_version": "1.0",
+    "cost_per_task": 0.40,
+    "tokens_per_task": 42000,
+    "wall_clock_seconds": 300,
+    "outcome": {"state": "produced_ungated", "score": 1.0, "evidence": {"status": "completed", "gate_stages": [], "penalties": [], "ungated": true}},
+    "factory_cpm": 23.8,
+    "retry_spend": {"tokens": null, "request_count": null},
+    "failure_spend": {"tokens": 0, "basis": "retry_only"},
+    "ledger_available": false,
+    "ledger_rows_correlated": 0,
+    "ledger_mechanics": null
+  }
+}
