@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+{
+  echo "CLONE_DIR=$CLONE_DIR"
+  echo "ARTIFACTS_DIR=$ARTIFACTS_DIR"
+  echo "ISSUE_NUM=$ISSUE_NUM"
+  echo "LOOP_NAME=$LOOP_NAME"
+  echo "FACTORY_REPO_SLUG=$FACTORY_REPO_SLUG"
+} > "$ENV_DUMP_PATH"
+printf 'STATUS: PASS\nGATE_TYPE: x\nFINDINGS_COUNT: 0\nSEVERITY: none\n'
+exit 0
