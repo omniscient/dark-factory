@@ -606,3 +606,20 @@ def test_format_trip_reason_failure_behavior_truncated_to_64_chars():
     result = format_trip_reason(v, entry)
     assert result.endswith("declared failure_behavior: " + "x" * 64)
     assert "x" * 65 not in result
+
+
+# `pytest` is already imported at module scope (Task 3, step 0's hermeticity fixture)
+# — reuse it, don't add a second import/alias.
+@pytest.mark.parametrize("count,ceiling", [(0, 3), (2, 3), (3, 3), (4, 3)])
+def test_evaluate_stop_condition_parity_table(tmp_path, count, ceiling):
+    """For loop_entry=None, matches today's inline
+    get_retry_count/compare/increment_retry exactly: stopped iff count >= ceiling;
+    counter incremented iff not stopped."""
+    sf = tmp_path / "state.json"
+    from factory_core.breaker import set_retry_count
+    set_retry_count("99:plan", count, sf)
+    v = evaluate_stop_condition(None, 99, "plan", ceiling=ceiling, state_file=sf)
+    expect_stopped = count >= ceiling
+    assert v.stopped == expect_stopped
+    expect_count = count if expect_stopped else count + 1
+    assert get_retry_count("99:plan", sf) == expect_count
