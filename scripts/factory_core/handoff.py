@@ -10,6 +10,8 @@ import re
 
 import yaml
 
+from . import verifier as _verifier
+
 
 class HandoffError(Exception):
     """Raised on any R2-R5 rejection. `code` is a closed reason-code token recorded
@@ -201,6 +203,36 @@ def validate_manifest(manifest: dict) -> None:
         if not isinstance(path, str) or not path:
             raise HandoffError("schema_invalid", "field 'verifier_verdict.path' must be a non-empty string")
         _check_unsafe_string(path, "verifier_verdict.path")
+
+
+def cross_check(manifest: dict, loops) -> dict:
+    """R3: producing_loop must resolve to a loops[].name in the adapter; the manifest's
+    declared side_effect_level must equal that loop's declared level; that level must be
+    below verifier._FACTORY_OWNED_MIN_LEVEL (Trust model -- factory-owned until #196
+    ships profile enforcement; reuses the same named constant verifier.py's own
+    resolve_and_run draws this line with, rather than a second literal 4 that could
+    drift out of sync with it). Returns the matched loop entry."""
+    match = next((l for l in (loops or []) if l.get("name") == manifest["producing_loop"]), None)
+    if match is None:
+        raise HandoffError(
+            "unknown_producing_loop",
+            f"producing_loop '{manifest['producing_loop']}' matches no loops[].name in "
+            f".factory/adapter.yaml",
+        )
+    declared = match.get("side_effect_level")
+    if declared != manifest["side_effect_level"]:
+        raise HandoffError(
+            "side_effect_level_mismatch",
+            f"manifest declares side_effect_level {manifest['side_effect_level']}, loop "
+            f"'{match['name']}' declares {declared}",
+        )
+    if declared >= _verifier._FACTORY_OWNED_MIN_LEVEL:
+        raise HandoffError(
+            "producing_loop_factory_owned",
+            f"loop '{match['name']}' declares side_effect_level {declared} >= "
+            f"{_verifier._FACTORY_OWNED_MIN_LEVEL} (factory-owned)",
+        )
+    return match
 
 
 if __name__ == "__main__":

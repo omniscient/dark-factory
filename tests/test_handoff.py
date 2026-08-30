@@ -319,3 +319,54 @@ def test_validate_manifest_rejects_verifier_verdict_path_with_backtick():
 
 def test_validate_manifest_accepts_minimal_valid_manifest_now():
     handoff.validate_manifest(_valid_manifest())  # no raise -- full R2 pass now wired up
+
+
+def _loop_entry(**overrides):
+    """Mirrors tests/test_verifier.py::_loop_entry -- the minimal valid A1.5 loop shape."""
+    entry = {
+        "name": "nightly-scan-triage",
+        "purpose": "nightly scan triage",
+        "discovery": {"trigger": "cron:0 6 * * *", "inputs": ["scripts/scanner.py"]},
+        "handoff": {"outputs": ["artifacts/scan-report.md"], "manifest": "artifacts/manifest.yaml"},
+        "verification": {"verifier": "scripts/verify-scan.sh", "stop_condition": "manifest present"},
+        "persistence": {"artifacts": ["artifacts/scan-history.jsonl"]},
+        "scheduling": {"failure_behavior": "retry-once"},
+        "side_effect_level": 2,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_cross_check_returns_matched_loop_entry():
+    loops = [_loop_entry()]
+    matched = handoff.cross_check(_valid_manifest(), loops)
+    assert matched["name"] == "nightly-scan-triage"
+
+
+def test_cross_check_rejects_unknown_producing_loop():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.cross_check(_valid_manifest(producing_loop="ghost-loop"), [_loop_entry()])
+    assert exc.value.code == "unknown_producing_loop"
+
+
+def test_cross_check_rejects_when_no_loops_declared():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.cross_check(_valid_manifest(), None)
+    assert exc.value.code == "unknown_producing_loop"
+
+
+def test_cross_check_rejects_side_effect_level_mismatch():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.cross_check(
+            _valid_manifest(side_effect_level=3), [_loop_entry(side_effect_level=2)]
+        )
+    assert exc.value.code == "side_effect_level_mismatch"
+    assert "3" in exc.value.message and "2" in exc.value.message
+
+
+def test_cross_check_rejects_factory_owned_level():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.cross_check(
+            _valid_manifest(side_effect_level=4), [_loop_entry(side_effect_level=4)]
+        )
+    assert exc.value.code == "producing_loop_factory_owned"
