@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,17 @@ def set_retry_count(key: str, value: int, state_file: Path = _DEFAULT_STATE) -> 
     counter (#279) reaches its ceiling, so trip_to_blocked's "attempted N time(s)"
     report reflects the true dispatch count."""
     _write_key(key, value, state_file)
+
+
+def add_loop_tokens(issue_num: int, phase: str, name: str, n: int,
+                     state_file: Path = _DEFAULT_STATE) -> int:
+    """Adds n to the per-loop cumulative token counter. No live caller today (R7) —
+    becomes live only when a future loop-dispatcher passes a populated loop_entry
+    and reports run_record totals through this helper."""
+    key = _loop_state_key(_make_key(issue_num, phase), name, "tokens")
+    new = get_retry_count(key, state_file) + n
+    _write_key(key, new, state_file)
+    return new
 
 
 def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
@@ -135,11 +147,47 @@ def evaluate_stop_condition(
 
 
 def _evaluate_loop_caps(loop_entry, key, ceiling, state_file, now):
+    name = loop_entry["name"]
+    scheduling = loop_entry.get("scheduling") or {}
+    budget_caps = loop_entry.get("budget_caps") or {}
+    max_iterations = scheduling.get("max_iterations")
+    deadline_seconds = scheduling.get("deadline_seconds")
+    max_tokens = budget_caps.get("max_tokens")
+
+    if max_iterations is not None:
+        cur_iter = get_retry_count(_loop_state_key(key, name, "iter"), state_file)
+        effective = min(max_iterations, ceiling)
+        if cur_iter >= effective:
+            return "max_iterations", {
+                "iter": cur_iter, "max_iterations": max_iterations,
+                "effective_ceiling": effective,
+            }
+
+    if deadline_seconds is not None:
+        deadline_start = get_retry_count(_loop_state_key(key, name, "deadline_start"), state_file)
+        if deadline_start:
+            now_ts = now if now is not None else int(time.time())
+            elapsed = now_ts - deadline_start
+            if elapsed >= deadline_seconds:
+                return "deadline", {"elapsed": elapsed, "deadline_seconds": deadline_seconds}
+
+    if max_tokens is not None:
+        cur_tokens = get_retry_count(_loop_state_key(key, name, "tokens"), state_file)
+        if cur_tokens >= max_tokens:
+            return "max_tokens", {"tokens": cur_tokens, "max_tokens": max_tokens}
+
     return None, {}
 
 
 def _advance_loop_counters(loop_entry, key, state_file, now):
-    pass
+    name = loop_entry["name"]
+    iter_key = _loop_state_key(key, name, "iter")
+    deadline_key = _loop_state_key(key, name, "deadline_start")
+    new_iter = get_retry_count(iter_key, state_file) + 1
+    _write_key(iter_key, new_iter, state_file)
+    if get_retry_count(deadline_key, state_file) == 0:
+        now_ts = now if now is not None else int(time.time())
+        _write_key(deadline_key, now_ts, state_file)
 
 
 def _append_stop_audit_row(verdict: StopVerdict, issue_num: int, phase: str,

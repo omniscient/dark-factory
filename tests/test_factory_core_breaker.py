@@ -335,3 +335,125 @@ def test_evaluate_stop_condition_parity_never_writes_loop_key(tmp_path):
     evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
     data = json.loads(sf.read_text())
     assert not any(":loop:" in k for k in data)
+
+
+def _loop(name="nightly-scan", **scheduling_extra):
+    entry = {
+        "name": name,
+        "purpose": "test loop",
+        "side_effect_level": 2,
+        "discovery": {"trigger": "cron:0 6 * * *", "inputs": []},
+        "handoff": {"manifest": "h.py", "outputs": []},
+        "verification": {"verifier": "v.py", "stop_condition": "s.py"},
+        "persistence": {"artifacts": []},
+        "scheduling": {"failure_behavior": "escalate_to_human", **scheduling_extra},
+    }
+    return entry
+
+
+def test_max_iterations_trips_after_n_evaluations(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=3)
+    for _ in range(3):
+        v = evaluate_stop_condition(entry, 7, "implement", ceiling=10, state_file=sf)
+        assert v.stopped is False
+    v = evaluate_stop_condition(entry, 7, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_iterations"
+    assert v.detail["iter"] == 3
+    assert v.detail["max_iterations"] == 3
+
+
+def test_max_iterations_tighten_only_factory_ceiling_wins(tmp_path):
+    """side_effect_level 5, max_iterations=10, ceiling=3: the 4th evaluation trips
+    on the factory ceiling, not the declared 10 (R2)."""
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=10)
+    entry["side_effect_level"] = 5
+    for _ in range(3):
+        evaluate_stop_condition(entry, 7, "implement", ceiling=3, state_file=sf)
+    v = evaluate_stop_condition(entry, 7, "implement", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+
+
+def test_deadline_trips_at_exact_boundary(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(deadline_seconds=60)
+    v0 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1000)
+    assert v0.stopped is False
+    v1 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1059)
+    assert v1.stopped is False
+    v2 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1060)
+    assert v2.stopped is True
+    assert v2.reason == "deadline"
+    assert v2.detail["elapsed"] == 60
+
+
+def test_deadline_start_anchored_once(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(deadline_seconds=60)
+    evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1000)
+    evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1010)
+    # _make_key(8, "implement") is the bare "8" (implement's special case, breaker.py's
+    # existing convention) — the loop-scoped key is "8:loop:<name>:...", NOT
+    # "8:implement:loop:...". Matches Task 2's own _loop_state_key test.
+    assert get_retry_count("8:loop:nightly-scan:deadline_start", sf) == 1000
+
+
+def test_max_tokens_absent_never_trips(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop()  # no max_tokens anywhere — budget_caps absent entirely
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False
+
+
+def test_max_tokens_trips_after_add_loop_tokens(tmp_path):
+    from factory_core.breaker import add_loop_tokens
+    sf = tmp_path / "state.json"
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    add_loop_tokens(9, "implement", "nightly-scan", 1000, sf)
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_tokens"
+    assert v.detail == {"tokens": 1000, "max_tokens": 1000}
+
+
+def test_populated_entry_no_caps_declared_behaves_as_parity(tmp_path):
+    """Absence of every cap field means parity (R2): a populated entry with no
+    max_iterations/deadline_seconds/budget_caps never trips on cap grounds."""
+    sf = tmp_path / "state.json"
+    entry = _loop()
+    for _ in range(5):
+        v = evaluate_stop_condition(entry, 10, "implement", ceiling=10, state_file=sf)
+        assert v.stopped is False
+
+
+def test_add_loop_tokens_from_run_record_totals_shape(tmp_path):
+    """R7: add_loop_tokens is 'unit-tested against run_record totals fixtures' —
+    pin the intended data source (input + output tokens summed), not a bare int."""
+    from factory_core.breaker import add_loop_tokens
+    sf = tmp_path / "state.json"
+    totals = {"gen_ai.usage.input_tokens": 600, "gen_ai.usage.output_tokens": 400}
+    n = totals["gen_ai.usage.input_tokens"] + totals["gen_ai.usage.output_tokens"]
+    assert add_loop_tokens(9, "implement", "nightly-scan", n, sf) == 1000
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True and v.reason == "max_tokens"
+
+
+def test_cap_class_trip_independent_of_predicate_state(tmp_path):
+    """R6's third fixture assertion, proven here directly against breaker.py — it
+    needs nothing from #197's verifier.py, so it does not wait on Task 17: with
+    max_iterations reached, evaluate_stop_condition trips with reason
+    max_iterations regardless of any predicate/verification field's content."""
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=1)
+    entry["verification"]["stop_condition"] = "scripts/cost_report_marker_check.py"
+    v = evaluate_stop_condition(entry, 300, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False
+    v2 = evaluate_stop_condition(entry, 300, "implement", ceiling=10, state_file=sf)
+    assert v2.stopped is True
+    assert v2.reason == "max_iterations"
