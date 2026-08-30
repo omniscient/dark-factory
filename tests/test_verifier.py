@@ -417,6 +417,9 @@ def test_resolve_and_run_origin_line_on_success(tmp_path):
         clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="verifier.sh", side_effect_level=1,
     )
     assert "ORIGIN: target-loop:my-loop" in text
+    # ORIGIN is the last line even after the profile suffix on the normal path
+    assert text.rstrip("
+").splitlines()[-1] == "ORIGIN: target-loop:my-loop"
 
 
 def test_resolve_and_run_origin_line_when_side_effect_level_undetermined(tmp_path):

@@ -101,5 +101,5 @@ it is absent — a caller must always resolve and pass the loop's actual level.
   fail-closed returns) — `loop_name` is always available on entry, so the line's value never
   depends on which branch returns. `run_record.py record --origin target-loop:<name>` writes
   the matching `origin` field on a `runs.jsonl` audit row (default `factory` for every
-  existing caller). This is the field the A5 intake path (`#199`) reads to attribute a row to
-  the target loop that produced a handoff manifest.
+  existing caller). This is the field the A5 intake path (`#199`) will read to attribute a row
+  to the target loop that produced a handoff manifest.
