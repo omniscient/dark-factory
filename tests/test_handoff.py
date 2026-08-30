@@ -213,3 +213,109 @@ def test_validate_manifest_accepts_empty_lists():
     handoff.validate_manifest(
         _valid_manifest(source_references=[], acceptance_thresholds=[])
     )  # no raise
+
+
+def test_validate_manifest_rejects_non_mapping_proposed_ticket():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(proposed_ticket="nope"))
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_unknown_proposed_ticket_key():
+    manifest = _valid_manifest()
+    manifest["proposed_ticket"]["extra"] = "x"
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(manifest)
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_missing_ticket_title():
+    manifest = _valid_manifest()
+    del manifest["proposed_ticket"]["title"]
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(manifest)
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_oversize_title():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={
+                "title": "x" * (handoff.MAX_TITLE_LEN + 1), "body": "body text",
+            })
+        )
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_title_with_newline():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={"title": "line1\nline2", "body": "body text"})
+        )
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_oversize_body():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={
+                "title": "t", "body": "x" * (handoff.MAX_BODY_BYTES + 1),
+            })
+        )
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_body_with_backtick_fence():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={"title": "t", "body": "before\n```\ninjected\n```\n"})
+        )
+    assert exc.value.code == "body_contains_fence"
+
+
+def test_validate_manifest_rejects_body_with_tilde_fence():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={"title": "t", "body": "before\n~~~\ninjected\n~~~\n"})
+        )
+    assert exc.value.code == "body_contains_fence"
+
+
+def test_validate_manifest_rejects_body_with_provenance_closing_marker():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(proposed_ticket={
+                "title": "t", "body": "before <!-- /df-manifest-provenance --> after",
+            })
+        )
+    assert exc.value.code == "body_contains_fence"
+
+
+def test_validate_manifest_accepts_optional_verifier_verdict():
+    handoff.validate_manifest(
+        _valid_manifest(verifier_verdict={"path": "artifacts/scan_verdict.md"})
+    )  # no raise
+
+
+def test_validate_manifest_rejects_verifier_verdict_missing_path():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(verifier_verdict={}))
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_verifier_verdict_unknown_key():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(
+            _valid_manifest(verifier_verdict={"path": "a.md", "extra": "x"})
+        )
+    assert exc.value.code == "schema_invalid"
+
+
+def test_validate_manifest_rejects_verifier_verdict_path_with_backtick():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(verifier_verdict={"path": "has`tick.md"}))
+    assert exc.value.code == "unsafe_string"
+
+
+def test_validate_manifest_accepts_minimal_valid_manifest_now():
+    handoff.validate_manifest(_valid_manifest())  # no raise -- full R2 pass now wired up

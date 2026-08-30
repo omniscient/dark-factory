@@ -146,6 +146,62 @@ def validate_manifest(manifest: dict) -> None:
                 )
             _check_unsafe_string(item, field)
 
+    ticket = manifest["proposed_ticket"]
+    if not isinstance(ticket, dict):
+        raise HandoffError("schema_invalid", "field 'proposed_ticket' must be a mapping")
+    for key in ticket:
+        if key not in ("title", "body"):
+            raise HandoffError("schema_invalid", f"unknown field 'proposed_ticket.{key}'")
+    for field in ("title", "body"):
+        if field not in ticket:
+            raise HandoffError("schema_invalid", f"missing required field 'proposed_ticket.{field}'")
+
+    title = ticket["title"]
+    if not isinstance(title, str) or not title or len(title) > MAX_TITLE_LEN:
+        raise HandoffError(
+            "schema_invalid",
+            f"field 'proposed_ticket.title' must be a non-empty string of at most "
+            f"{MAX_TITLE_LEN} chars",
+        )
+    if any(ord(c) < 32 for c in title):
+        raise HandoffError(
+            "schema_invalid",
+            "field 'proposed_ticket.title' must not contain control characters or newlines",
+        )
+
+    body = ticket["body"]
+    if not isinstance(body, str) or not body or len(body.encode("utf-8")) > MAX_BODY_BYTES:
+        raise HandoffError(
+            "schema_invalid",
+            f"field 'proposed_ticket.body' must be a non-empty string of at most "
+            f"{MAX_BODY_BYTES} bytes",
+        )
+    for line in body.splitlines():
+        if re.match(r"^\s*(```|~~~)", line):
+            raise HandoffError(
+                "body_contains_fence",
+                "field 'proposed_ticket.body' must not contain a fenced-code-block line",
+            )
+    if "<!-- /df-manifest-provenance -->" in body:
+        raise HandoffError(
+            "body_contains_fence",
+            "field 'proposed_ticket.body' must not contain the provenance closing marker",
+        )
+
+    if "verifier_verdict" in manifest:
+        vv = manifest["verifier_verdict"]
+        if not isinstance(vv, dict):
+            raise HandoffError("schema_invalid", "field 'verifier_verdict' must be a mapping")
+        for key in vv:
+            if key != "path":
+                raise HandoffError("schema_invalid", f"unknown field 'verifier_verdict.{key}'")
+        if "path" not in vv:
+            raise HandoffError("schema_invalid", "missing required field 'verifier_verdict.path'")
+        path = vv["path"]
+        if not isinstance(path, str) or not path:
+            raise HandoffError("schema_invalid", "field 'verifier_verdict.path' must be a non-empty string")
+        _check_unsafe_string(path, "verifier_verdict.path")
+
 
 if __name__ == "__main__":
     pass
