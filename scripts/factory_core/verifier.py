@@ -154,21 +154,27 @@ def resolve_and_run(
     side_effect_level in the factory-owned range (Requirement 6) — never silently
     skips (AC3). Records SIDE_EFFECT_LEVEL on every verdict where a level was
     resolved, so a future #196 enforcement layer has something to check against
-    (Requirement 6a); an undetermined level has no level to record. This is the
-    primitive a future dispatcher, the CLI below, or a test calls per declared loop.
+    (Requirement 6a); an undetermined level has no level to record. Also records
+    ORIGIN: target-loop:<loop_name> on every verdict returned, on all four return
+    points (#199/R7, split out as #378) -- loop_name is always available on entry, so
+    this line's value never depends on which branch returns. This is the primitive a
+    future dispatcher, the CLI below, or a test calls per declared loop.
     """
     gate_type = f"loop:{loop_name}"
+    origin_line = f"ORIGIN: target-loop:{loop_name}\n"
 
     if side_effect_level is None:
         return (
             _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
             + "REQUIRED_PROFILE: undetermined\nREASON: side_effect_level not resolved\n"
+            + origin_line
         )
     if side_effect_level >= _FACTORY_OWNED_MIN_LEVEL:
         return (
             _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
             + f"REQUIRED_PROFILE: factory-owned\nSIDE_EFFECT_LEVEL: {side_effect_level}\n"
             + "REASON: factory-owned level requires #196 profile enforcement\n"
+            + origin_line
         )
 
     env = dict(os.environ)
@@ -184,9 +190,9 @@ def resolve_and_run(
         resolved = resolve_verifier(clone_dir, verifier_path)
         exit_code, stdout = run_verifier(resolved, env, timeout=timeout)
     except VerifierError:
-        return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high") + profile_suffix
+        return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high") + profile_suffix + origin_line
 
-    return normalize_verdict(exit_code, stdout, gate_type) + profile_suffix
+    return normalize_verdict(exit_code, stdout, gate_type) + profile_suffix + origin_line
 
 
 def main() -> None:

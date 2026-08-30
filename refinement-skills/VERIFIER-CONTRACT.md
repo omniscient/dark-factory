@@ -96,3 +96,10 @@ it is absent — a caller must always resolve and pass the loop's actual level.
   sandbox or restrict the verifier process — that enforcement is `#196`'s chartered
   scope. Loops with `side_effect_level >= 4` are factory-owned and fail closed
   rather than executing a target path, until `#196` ships.
+- **Origin attribution.** `verifier.py` records `ORIGIN: target-loop:<loop_name>` on every
+  verdict `resolve_and_run` returns, on all four return points (including both early
+  fail-closed returns) — `loop_name` is always available on entry, so the line's value never
+  depends on which branch returns. `run_record.py record --origin target-loop:<name>` writes
+  the matching `origin` field on a `runs.jsonl` audit row (default `factory` for every
+  existing caller). This is the field the A5 intake path (`#199`) reads to attribute a row to
+  the target loop that produced a handoff manifest.

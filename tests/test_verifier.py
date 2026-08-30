@@ -405,3 +405,45 @@ def test_cost_report_marker_predicate_passes_when_present_updated_in_place(tmp_p
     exit_code, stdout = run_verifier(resolved, env)
     verdict = normalize_verdict(exit_code, stdout, gate_type="stop_condition")
     assert "STATUS: PASS" in verdict
+
+
+# --- #378 (split from #199/R7): ORIGIN attribution line -------------------------------
+
+def test_resolve_and_run_origin_line_on_success(tmp_path):
+    verifier_script = tmp_path / "verifier.sh"
+    verifier_script.write_text((_FIXTURES / "structured_pass.sh").read_text())
+    verifier_script.chmod(0o755)
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="verifier.sh", side_effect_level=1,
+    )
+    assert "ORIGIN: target-loop:my-loop" in text
+
+
+def test_resolve_and_run_origin_line_when_side_effect_level_undetermined(tmp_path):
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="anything.sh", side_effect_level=None,
+    )
+    assert "ORIGIN: target-loop:my-loop" in text
+
+
+def test_resolve_and_run_origin_line_when_factory_owned(tmp_path):
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="anything.sh", side_effect_level=5,
+    )
+    assert "ORIGIN: target-loop:my-loop" in text
+
+
+def test_resolve_and_run_origin_line_on_fail_closed_missing_verifier(tmp_path):
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="does-not-exist.sh", side_effect_level=1,
+    )
+    assert "ORIGIN: target-loop:my-loop" in text
+    assert "STATUS: BLOCKED" in text
+
+
+def test_resolve_and_run_origin_line_is_last_and_single(tmp_path):
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop", verifier_path="anything.sh", side_effect_level=None,
+    )
+    assert text.count("ORIGIN:") == 1
+    assert text.rstrip("\n").splitlines()[-1] == "ORIGIN: target-loop:my-loop"

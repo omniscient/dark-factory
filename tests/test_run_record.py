@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1233,3 +1234,52 @@ def test_append_stop_record_writes_jsonl_no_seq(tmp_path, monkeypatch):
     assert len(lines) == 1
     assert json.loads(lines[0]) == {"stage": "stop_condition", "verdict": "STOPPED"}
     assert posted == []
+
+
+# --- #378 (split from #199/R6): origin on runs.jsonl rows -----------------------------
+
+def test_record_defaults_origin_to_factory(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    rr.cmd_record(_RecordArgs())  # _RecordArgs has no 'origin' attribute
+
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["origin"] == "factory"
+
+
+def test_record_passes_through_explicit_origin(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    class _OriginArgs(_RecordArgs):
+        origin = "target-loop:nightly-scan-triage"
+
+    rr.cmd_record(_OriginArgs())
+
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["origin"] == "target-loop:nightly-scan-triage"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl import in the subprocess")
+def test_cli_record_accepts_origin_flag(tmp_path):
+    import subprocess
+    jsonl = tmp_path / "runs.jsonl"
+    # Hermetic: the subprocess resolves SCHEDULER_STATE_DIR from the env (#362), and the
+    # unreachable SEQ_URL mirrors test_post_seq_is_nonfatal's pattern.
+    env = {
+        **os.environ, "SCHEDULER_STATE_DIR": str(tmp_path),
+        "SEQ_URL": "http://unreachable-host-99999:5341",
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "factory_core.run_record", "record",
+         "--run-id", "r1", "--issue", "1", "--intent", "intake", "--stage", "manifest_intake",
+         "--verdict", "ACCEPTED", "--origin", "target-loop:x"],
+        cwd=str(Path(__file__).parent.parent / "scripts"),
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["origin"] == "target-loop:x"
