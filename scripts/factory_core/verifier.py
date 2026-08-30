@@ -25,9 +25,18 @@ def resolve_verifier(clone_dir: str, verifier_path: str) -> str:
 
     Unlike hooks.sh::run_hook, a target verifier has no built-in factory default to
     fall back to — a missing/non-executable result is a fail-closed condition
-    (Requirement 4), not a no-op.
+    (Requirement 4), not a no-op. The declared path must be relative, and its
+    realpath must stay inside realpath(clone_dir) — an absolute path or a `..`/
+    symlink escape raises VerifierError (fail closed), never resolves outside the
+    clone the target repo owns.
     """
-    return os.path.join(clone_dir, verifier_path)
+    if os.path.isabs(verifier_path):
+        raise VerifierError(f"verifier path must be relative to CLONE_DIR, got absolute: {verifier_path}")
+    root = os.path.realpath(clone_dir)
+    resolved = os.path.realpath(os.path.join(root, verifier_path))
+    if os.path.commonpath([root, resolved]) != root:
+        raise VerifierError(f"verifier path escapes CLONE_DIR: {verifier_path}")
+    return resolved
 
 
 def run_verifier(resolved_path: str, env: dict, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> "tuple[int, str]":
@@ -65,11 +74,14 @@ def normalize_verdict(exit_code: int, stdout: str, gate_type: str) -> str:
     Bare-exit-code: no structured output — exit 0 synthesizes PASS, non-zero
     synthesizes BLOCKED/high, mirroring smoke-gate's exit-code-only convention.
     """
-    if stdout.lstrip().startswith("STATUS:"):
-        parsed = _verdict.parse_verdict(stdout) or {}
-        status = parsed.get("status", "ERROR")
+    parsed = _verdict.parse_verdict(stdout) if stdout.lstrip().startswith("STATUS:") else None
+    if parsed is not None:
+        status = parsed["status"]
         if status == "ERROR":
-            return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
+            return (
+                _verdict.format_verdict(gate_type, "BLOCKED", 1, "high")
+                + "REASON: verifier self-reported ERROR\n"
+            )
         if exit_code != 0 and status in ("PASS", "SKIPPED"):
             # Fail closed: a proceed-status printed by a process that then exited
             # non-zero is not trusted -- the exit code wins (Requirement 4).
@@ -94,14 +106,20 @@ _RESERVED_OUT_BASENAMES = {
 _FACTORY_OWNED_MIN_LEVEL = 4
 
 
+def _canon(path: str) -> str:
+    """normpath + realpath for equality comparison; a non-existent path canonicalizes
+    as a plain string, so declaration-time checks need nothing on disk."""
+    return os.path.realpath(os.path.normpath(path))
+
+
 def assert_verifier_independent(loop_entry: dict) -> None:
     """Path-disjointness rule (Requirement 5): a loop's verifier must not be the
     loop's own handoff producer or a file it writes.
 
     owned = {handoff.manifest} ∪ set(handoff.outputs) ∪ set(persistence.artifacts)
-    String/path comparison only (os.path.normpath) — no filesystem access, no
-    existence check, consistent with #301's opaque-reference treatment of these
-    fields. This is the declaration-time half of maker≠checker; the load-bearing
+    Canonical-path comparison (normpath + realpath, so a symlink-aliased declaration
+    cannot dodge the rule) — no existence check, consistent with #301's
+    opaque-reference treatment of these fields. This is the declaration-time half of maker≠checker; the load-bearing
     half is that the verifier always runs as a separate check-only process whose
     verdict the factory parses and acts on (#189's clean-room-grader principle).
     """
@@ -111,12 +129,12 @@ def assert_verifier_independent(loop_entry: dict) -> None:
     owned = set()
     manifest = handoff.get("manifest")
     if manifest:
-        owned.add(os.path.normpath(manifest))
+        owned.add(_canon(manifest))
     for p in handoff.get("outputs") or []:
-        owned.add(os.path.normpath(p))
+        owned.add(_canon(p))
     for p in persistence.get("artifacts") or []:
-        owned.add(os.path.normpath(p))
-    if verifier_path and os.path.normpath(verifier_path) in owned:
+        owned.add(_canon(p))
+    if verifier_path and _canon(verifier_path) in owned:
         name = loop_entry.get("name", "?")
         raise VerifierError(
             f"loop '{name}': verifier '{verifier_path}' must not be a path the loop "
@@ -131,8 +149,8 @@ def resolve_and_run(
 ) -> str:
     """End-to-end: resolve, run, normalize, record required_profile + side_effect_level.
 
-    Fails closed (STATUS: BLOCKED) on every non-PASS-able condition: missing/
-    non-executable path, timeout, undetermined side_effect_level, or a
+    Fails closed (STATUS: BLOCKED) on every non-PASS-able condition: absolute or
+    clone-escaping path, missing/non-executable path, timeout, undetermined side_effect_level, or a
     side_effect_level in the factory-owned range (Requirement 6) — never silently
     skips (AC3). Records SIDE_EFFECT_LEVEL on every verdict where a level was
     resolved, so a future #196 enforcement layer has something to check against
@@ -153,7 +171,6 @@ def resolve_and_run(
             + "REASON: factory-owned level requires #196 profile enforcement\n"
         )
 
-    resolved = resolve_verifier(clone_dir, verifier_path)
     env = dict(os.environ)
     env.update({
         "CLONE_DIR": clone_dir,
@@ -164,6 +181,7 @@ def resolve_and_run(
     })
     profile_suffix = f"REQUIRED_PROFILE: level-1\nSIDE_EFFECT_LEVEL: {side_effect_level}\n"
     try:
+        resolved = resolve_verifier(clone_dir, verifier_path)
         exit_code, stdout = run_verifier(resolved, env, timeout=timeout)
     except VerifierError:
         return _verdict.format_verdict(gate_type, "BLOCKED", 1, "high") + profile_suffix

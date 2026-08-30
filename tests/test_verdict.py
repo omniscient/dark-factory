@@ -50,6 +50,16 @@ def test_format_verdict_matches_gate_lib_emit_verdict_shape():
     assert text == "STATUS: PASS\nGATE_TYPE: code-review\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
 
 
+def test_format_verdict_clamps_unknown_severity_to_none():
+    text = verdict.format_verdict("loop:x", "BLOCKED", 1, "bogus")
+    assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:x\nFINDINGS_COUNT: 1\nSEVERITY: none\n"
+
+
+def test_format_verdict_clamps_negative_findings_count_to_zero():
+    text = verdict.format_verdict("loop:x", "PASS", -3, "none")
+    assert text == "STATUS: PASS\nGATE_TYPE: loop:x\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
+
+
 def test_format_then_parse_roundtrips_an_invented_gate_type():
     text = verdict.format_verdict("loop:nightly-scan-triage", "BLOCKED", 1, "high")
     assert verdict.parse_verdict(text) == {

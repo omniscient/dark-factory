@@ -27,10 +27,7 @@ read directly.
   skills/{product-owner,architect}-prompt.md` copies as-is, unchanged by this
   ticket. This contract doc itself (`VERIFIER-CONTRACT.md`) is always read at its
   fixed baked path, `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all four
-  commands — it is not itself subject to clone-live-first resolution. A structured
-  `PASS` from a target verifier's stdout is trusted regardless of the process's exit
-  code — only `PASS`/`SKIPPED` are remapped to `BLOCKED` on a non-zero exit
-  (Requirement 4's fail-closed rule below).
+  commands — it is not itself subject to clone-live-first resolution.
 
 ## Verdict schema
 
@@ -47,7 +44,8 @@ returned verbatim, never rejected or normalized. `GATE_TYPE`/`FINDINGS_COUNT`/
 
 A target repo declares a check-only verifier via a loop entry's
 `verification.verifier` field (an opaque path, resolved relative to the clone root
-by `scripts/factory_core/verifier.py::resolve_verifier`). Invocation:
+by `scripts/factory_core/verifier.py::resolve_verifier`; an absolute path, or a path
+whose realpath lands outside the clone root, is rejected and fails closed). Invocation:
 
 ```bash
 python3 -m factory_core.verifier \
@@ -78,7 +76,10 @@ it is absent — a caller must always resolve and pass the loop's actual level.
   (`--timeout`, default 300s), or a process that cannot be started all produce
   `STATUS: BLOCKED` — never a silent skip. `ERROR` is reserved for "the verifier ran
   and self-reported it could not complete" and is **not** auto-pass-through for
-  target verifiers (unlike `code_review.fail_open`'s advisory-on-error default).
+  target verifiers (unlike `code_review.fail_open`'s advisory-on-error default): it
+  is emitted as `STATUS: BLOCKED` with `REASON: verifier self-reported ERROR`. On
+  emit, a `SEVERITY` outside `{none, low, medium, high, critical}` is clamped to
+  `none` and a negative `FINDINGS_COUNT` to `0`.
 - **Reserved output names:** `verifier.py`'s `--out` refuses the basenames
   `validation.md`, `conformance.md`, `review.md`, `conflict_resolution.md`,
   `blast.md` — a target verdict can only *add* a `BLOCK` on its own loop's handoff

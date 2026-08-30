@@ -45,7 +45,19 @@ def parse_verdict(content: str) -> "dict | None":
 
 
 def format_verdict(gate_type: str, status: str, findings_count: int, severity: str) -> str:
-    """Python-side sibling of gate_lib.sh::emit_verdict — byte-identical shape."""
+    """Python-side sibling of gate_lib.sh::emit_verdict — byte-identical shape.
+
+    Emit-side validation (Requirement 1: GATE_TYPE/FINDINGS_COUNT/SEVERITY are
+    required and well-formed on emit): a severity outside SEVERITY_LEVELS is clamped
+    to "none" and a negative findings_count to 0, rather than raising -- a verdict
+    writer must never crash on a malformed value it is relaying (e.g. a target
+    verifier printing `SEVERITY: bogus`); STATUS alone carries the gating decision,
+    so clamping the advisory fields cannot turn a block into a pass.
+    """
+    if severity not in SEVERITY_LEVELS:
+        severity = "none"
+    if findings_count < 0:
+        findings_count = 0
     return (
         f"STATUS: {status}\n"
         f"GATE_TYPE: {gate_type}\n"

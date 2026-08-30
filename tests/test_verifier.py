@@ -23,6 +23,24 @@ def test_resolve_verifier_joins_clone_dir():
     assert resolved == "/clone/scripts/my-verifier.sh"
 
 
+def test_resolve_verifier_rejects_absolute_path(tmp_path):
+    with pytest.raises(verifier.VerifierError, match="absolute"):
+        verifier.resolve_verifier(str(tmp_path), str(_FIXTURES / "structured_pass.sh"))
+
+
+def test_resolve_verifier_rejects_parent_escape(tmp_path):
+    with pytest.raises(verifier.VerifierError, match="escapes"):
+        verifier.resolve_verifier(str(tmp_path), "../outside.sh")
+
+
+def test_resolve_verifier_in_tree_path_resolves(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    target = tmp_path / "scripts" / "verify.sh"
+    target.write_text("#!/usr/bin/env bash\nexit 0\n")
+    resolved = verifier.resolve_verifier(str(tmp_path), "./scripts/../scripts/verify.sh")
+    assert resolved == os.path.realpath(str(target))
+
+
 def test_run_verifier_structured_pass(tmp_path):
     exit_code, stdout = verifier.run_verifier(str(_FIXTURES / "structured_pass.sh"), _env(tmp_path))
     assert exit_code == 0
@@ -70,7 +88,23 @@ def test_normalize_verdict_structured_error_is_not_pass_through():
     # set, defeating AC3's "missing/failing cannot hand off" default.
     stdout = "STATUS: ERROR\nGATE_TYPE: whatever\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
     text = verifier.normalize_verdict(exit_code=0, stdout=stdout, gate_type="loop:my-loop")
-    assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 1\nSEVERITY: high\n"
+    assert text == (
+        "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 1\nSEVERITY: high\n"
+        "REASON: verifier self-reported ERROR\n"
+    )
+
+
+def test_normalize_verdict_structured_error_keeps_reason_line():
+    stdout = "STATUS: ERROR\nGATE_TYPE: whatever\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
+    text = verifier.normalize_verdict(exit_code=0, stdout=stdout, gate_type="loop:my-loop")
+    assert text.startswith("STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\n")
+    assert "REASON: verifier self-reported ERROR\n" in text
+
+
+def test_normalize_verdict_clamps_bogus_severity_from_structured_stdout():
+    stdout = "STATUS: BLOCKED\nGATE_TYPE: whatever\nFINDINGS_COUNT: -2\nSEVERITY: bogus\n"
+    text = verifier.normalize_verdict(exit_code=0, stdout=stdout, gate_type="loop:my-loop")
+    assert text == "STATUS: BLOCKED\nGATE_TYPE: loop:my-loop\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
 
 
 def test_normalize_verdict_structured_pass_with_nonzero_exit_blocks():
@@ -165,6 +199,29 @@ def test_resolve_and_run_fails_closed_on_missing_verifier(tmp_path):
     )
     assert "STATUS: BLOCKED" in text
     assert "GATE_TYPE: loop:my-loop" in text
+
+
+def test_resolve_and_run_fails_closed_on_escaping_verifier_path(tmp_path):
+    outside = tmp_path.parent / "escaped-verifier.sh"
+    outside.write_text((_FIXTURES / "structured_pass.sh").read_text())
+    outside.chmod(0o755)
+    try:
+        text = verifier.resolve_and_run(
+            clone_dir=str(tmp_path), loop_name="my-loop",
+            verifier_path="../escaped-verifier.sh", side_effect_level=1,
+        )
+    finally:
+        outside.unlink()
+    assert text.startswith("STATUS: BLOCKED\n")
+    assert "GATE_TYPE: loop:my-loop" in text
+
+
+def test_resolve_and_run_fails_closed_on_absolute_verifier_path(tmp_path):
+    text = verifier.resolve_and_run(
+        clone_dir=str(tmp_path), loop_name="my-loop",
+        verifier_path=str(_FIXTURES / "structured_pass.sh"), side_effect_level=1,
+    )
+    assert text.startswith("STATUS: BLOCKED\n")
 
 
 def test_resolve_and_run_fails_closed_when_side_effect_level_undetermined(tmp_path):
