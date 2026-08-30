@@ -507,14 +507,47 @@ check_pr_mergeable() {
 # and stays outside the provider abstraction, codehost/base.py). Runs over git's
 # smart-HTTP transport, not the GitHub REST/GraphQL API, so it costs no quota (#366) —
 # call this BEFORE get_pr_for_issue so the common recovery path never touches the
-# rate-limited API at all. Never echo $url — it embeds GH_TOKEN.
+# rate-limited API at all. Never echo $url — it embeds GH_TOKEN. It is also kept out of
+# `git`'s argv: an argv element is world-readable via /proc/<pid>/cmdline to any UID in
+# the container, a strictly wider exposure than the env var GH_TOKEN already lives in.
+# Instead, git's own `url.<credentialed>.insteadOf=<bare>` rewrite is supplied via
+# GIT_CONFIG_KEY_0/VALUE_0 (env-only, git >= 2.31) so the argv git actually sees is the
+# bare https://github.com/<slug>.git — git rewrites it back to the credentialed form
+# in-process before dialing out, so auth still works for private repos too (#371).
 # Bounded and prompt-free: a smart-HTTP stall must not hang the poll loop, and a 401
 # must fail closed (empty) instead of blocking on a credential prompt.
+#
+# Return contract: echoes the matched ref, or "" for BOTH a genuine "no branch" and any
+# probe error (remote-url unavailable, git ls-remote transport failure, or the 30s
+# timeout expiring) — per spec requirement 5, an error must fail closed to empty exactly
+# like an absent branch, never default to Continue. A `branch_probe_error` line to stderr
+# gives an operator the diagnostic `2>/dev/null` on the old implementation discarded,
+# without changing the dispatch decision.
 branch_exists_for_issue() {
-  local url
+  local url bare_url out rc
   url=$(python3 "$FACTORY_PROVIDERS_CLI" codehost remote-url 2>/dev/null) || true
-  [ -n "$url" ] || { echo ""; return; }
-  GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --heads "$url" "refs/heads/feat/issue-${1}-*" 2>/dev/null | head -1 | awk '{print $2}' || true
+  if [ -z "$url" ]; then
+    echo "[$(date -u +%FT%TZ)] branch_probe_error issue=#${1} reason=remote_url_unavailable" >&2
+    echo ""
+    return 0
+  fi
+  case "$url" in
+    *://*@*) bare_url="${url%%://*}://${url#*@}" ;;
+    *) bare_url="$url" ;;
+  esac
+  # `&& rc=0 || rc=$?` (not a bare `out=$(...)` line) so a failing/timed-out git under
+  # `set -e` doesn't abort the whole scheduler process — the failure must be captured and
+  # handled here, not propagated as a crash.
+  out=$(GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.${url}.insteadOf" GIT_CONFIG_VALUE_0="$bare_url" \
+    timeout 30 git ls-remote --heads "$bare_url" "refs/heads/feat/issue-${1}-*" 2>/dev/null) && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[$(date -u +%FT%TZ)] branch_probe_error issue=#${1} reason=git_ls_remote_exit_${rc}" >&2
+    echo ""
+    return 0
+  fi
+  printf '%s\n' "$out" | head -1 | awk '{print $2}'
+  return 0
 }
 
 # --- PR lookup: open PR number for an issue's feature branch ("" if none) ---

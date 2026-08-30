@@ -1941,7 +1941,10 @@ echo "--- Y: branch_exists_for_issue — git ls-remote probe ---"
 # via the subprocess PATH-shim (SHIM_LOG), not STUB_LOG — `timeout` execs a real `git`
 # binary, not a bash function, so only a re-entrant PATH shim script (not an exported
 # bash function) is visible to it. The URL embeds a fake token to prove requirement 6
-# (never leaked) without touching a real credential.
+# (never leaked, from stdout/stderr AND from argv — argv lands in the world-readable
+# /proc/<pid>/cmdline, so the credentialed URL must never appear in $* either, only the
+# bare https://github.com/<slug>.git; the credential travels via GIT_CONFIG_KEY_0/VALUE_0
+# env vars instead, #371) without touching a real credential.
 # Section N (its --id-routing python3 override, and the N20 variant it leaves behind) permanently overrides the `python3` stub with its own
 # --id-routing case and never restores the generic PROVIDERS_CLI_OUTPUT-echoing form —
 # reset_python3_stub() only clears the variable, not the function body. Redefine the
@@ -1964,8 +1967,10 @@ export -f git
 > "$STUB_LOG"
 Y1_OUT=$(branch_exists_for_issue 371)
 assert_eq "Y1: helper echoes the matched ref" "refs/heads/feat/issue-371-x" "$Y1_OUT"
-assert_eq "Y1b: git invoked with the expected ls-remote argv (via SHIM_LOG, not STUB_LOG)" \
-  "1" "$(grep -c '^git ls-remote --heads https://x-access-token:ghs_zzfaketoken371@github.com/omniscient/dark-factory.git refs/heads/feat/issue-371-\*$' "$SHIM_LOG" || echo 0)"
+assert_eq "Y1b: git invoked with the bare (credential-free) ls-remote argv (via SHIM_LOG, not STUB_LOG)" \
+  "1" "$(grep -c '^git ls-remote --heads https://github.com/omniscient/dark-factory.git refs/heads/feat/issue-371-\*$' "$SHIM_LOG" || echo 0)"
+assert_eq "Y1c: the fake token never appears in the logged argv (argv is world-readable via /proc/<pid>/cmdline)" \
+  "0" "$(grep -c 'ghs_zzfaketoken371' "$SHIM_LOG" || true)"
 
 # Y2: git ls-remote exits non-zero (transport error) -> helper echoes empty, no crash
 git() { echo "git $*" >> "$STUB_LOG"; return 128; }
