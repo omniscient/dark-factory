@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import sys
 
@@ -435,3 +436,167 @@ def test_render_body_rejects_when_over_size_cap(monkeypatch):
     with pytest.raises(handoff.HandoffError) as exc:
         handoff.render_body(_valid_manifest(), "v.md")
     assert exc.value.code == "body_too_large"
+
+
+from factory_core import run_record as _run_record
+from factory_core import verifier as _verifier
+
+_FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "verifiers"
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_run_record(tmp_path, monkeypatch):
+    """Every test in this file exercises intake(), and from Task 8 onward intake()
+    unconditionally calls run_record.cmd_record (R6) on both the accept and reject
+    path. Autouse + per-test tmp_path keeps every test in this file off the real
+    SCHEDULER_STATE_DIR and off the network (R6's Hermetic-test statement), without
+    each test needing its own monkeypatch boilerplate. A test that needs to inspect
+    the written jsonl content overrides JSONL_PATH again with its own path (Task 8) —
+    monkeypatch stacking makes that safe."""
+    monkeypatch.setattr(_run_record, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+    # #362 rule: every test that can write a ledger row pins SCHEDULER_STATE_DIR (attr and
+    # env) to tmp_path, so neither this process nor any child can reach /var/lib/dark-factory.
+    monkeypatch.setattr(_run_record, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path))
+
+
+def _write_manifest_file(clone_dir, manifest, name="manifest.yaml"):
+    import yaml as _yaml
+    path = pathlib.Path(clone_dir) / name
+    path.write_text(_yaml.safe_dump(manifest), encoding="utf-8")
+    return name
+
+
+def _stub_create_issue(issue_id="4242"):
+    calls = []
+
+    def _create(title, body, labels):
+        calls.append({"title": title, "body": body, "labels": labels})
+        return issue_id
+
+    _create.calls = calls
+    return _create
+
+
+def test_intake_accepts_and_creates_issue(tmp_path):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest = _valid_manifest()
+    manifest_name = _write_manifest_file(clone_dir, manifest)
+
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    create_issue = _stub_create_issue()
+
+    result = handoff.intake(
+        str(clone_dir), manifest_name, artifacts_dir=str(artifacts_dir),
+        create_issue=create_issue,
+        run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+        adapter_loops=[loop],
+    )
+
+    assert result.accepted is True
+    assert result.issue_id == "4242"
+    assert len(create_issue.calls) == 1
+    call = create_issue.calls[0]
+    assert call["title"] == "[intake] Triage: 3 new findings in payments module"
+    assert call["labels"] == "needs-triage,manifest-intake"
+    assert "df-manifest-provenance" in call["body"]
+    assert (artifacts_dir / "loop-nightly-scan-triage.md").exists()
+    assert "STATUS: PASS" in (artifacts_dir / "loop-nightly-scan-triage.md").read_text()
+
+
+def test_intake_rejects_verifier_undeclared(tmp_path):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"stop_condition": "n/a"})  # no 'verifier' key
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(), adapter_loops=[loop],
+        )
+    assert exc.value.code == "verifier_undeclared"
+
+
+def test_intake_rejects_verdict_not_passing(tmp_path):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_blocked.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(),
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "verdict_not_passing"
+    assert "BLOCKED" in exc.value.message
+
+
+def test_intake_rejects_issue_create_failed_on_empty_return(tmp_path):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(issue_id=""),
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "issue_create_failed"
+
+
+def test_intake_manifest_label_env_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", "custom-intake")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    handoff.intake(
+        str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+        create_issue=create_issue,
+        run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+        adapter_loops=[loop],
+    )
+    assert create_issue.calls[0]["labels"] == "needs-triage,custom-intake"
+
+
+def test_default_create_issue_argv_and_fail_closed(monkeypatch, tmp_path):
+    calls = []
+
+    class _R:
+        def __init__(self, rc, out):
+            self.returncode, self.stdout = rc, out
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return _R(0, "123\n") if len(calls) == 1 else _R(1, "stray text")
+
+    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
+    assert handoff._default_create_issue("t", "b", "needs-triage,manifest-intake") == "123"
+    argv = calls[0]
+    assert argv[0] == sys.executable and argv[1].endswith(os.path.join("providers", "cli.py"))
+    assert argv[2:4] == ["tracker", "create"]
+    assert "--title" in argv and "--body-file" in argv
+    assert argv[argv.index("--labels") + 1] == "needs-triage,manifest-intake"
+    assert handoff._default_create_issue("t", "b", "x") == ""  # rc != 0 -> fail closed

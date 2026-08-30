@@ -8,9 +8,16 @@ docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md.
 import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
+from collections import namedtuple
 
 import yaml
 
+from . import adapter as _adapter
+from . import identity as _identity
+from . import verdict as _verdict
 from . import verifier as _verifier
 
 
@@ -31,6 +38,17 @@ MAX_BODY_BYTES = 32 * 1024
 MAX_LIST_ITEMS = 50
 MAX_LIST_ITEM_LEN = 512
 MAX_RENDERED_BODY_LEN = 60_000
+
+# Admission set for the verdict *intake itself produces* by running the loop's A3
+# verifier (R4). Deliberately not verdict.GATING_PASS_STATUSES ({PASS, SKIPPED, ERROR}):
+# intake is terminal and one-way (mints new backlog work with no downstream gate behind
+# it), so SKIPPED ("verification did not happen") must not admit -- that would reopen
+# the "maker never validates maker" gap this ticket exists to close.
+HANDOFF_ACCEPT_STATUSES = {"PASS"}
+
+FACTORY_MANIFEST_LABEL = os.environ.get("FACTORY_MANIFEST_LABEL", "manifest-intake")
+
+IntakeResult = namedtuple("IntakeResult", ["accepted", "issue_id", "artifact_id"])
 
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -277,6 +295,83 @@ def render_body(manifest: dict, verdict_path: str) -> str:
             "body_too_large", f"rendered body is {len(body)} chars, exceeds {MAX_RENDERED_BODY_LEN}"
         )
     return body
+
+
+def _default_create_issue(title: str, body: str, labels: str) -> str:
+    """Default create_issue callable: shells out to providers/cli.py's `tracker create`
+    subcommand, mirroring smoke_gate.sh's existing subprocess invocation of the same CLI."""
+    cli_path = os.path.join(os.path.dirname(__file__), "providers", "cli.py")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
+        fh.write(body)
+        body_path = fh.name
+    try:
+        result = subprocess.run(
+            [sys.executable, cli_path, "tracker", "create",
+             "--title", title, "--body-file", body_path, "--labels", labels],
+            capture_output=True, text=True,
+        )
+    finally:
+        os.unlink(body_path)
+    if result.returncode != 0:
+        return ""  # fail closed even if stdout carries stray text
+    return (result.stdout or "").strip()
+
+
+def intake(
+    clone_dir: str, manifest_path: str, *, artifacts_dir: str,
+    create_issue=None, run_verifier=None, adapter_loops=None,
+) -> IntakeResult:
+    """R2 -> R3 -> R4 -> R5 orchestration (R6 audit trail wired in Task 8).
+
+    create_issue: (title, body, labels) -> issue_id str; defaults to the real tracker CLI.
+    run_verifier: kwargs -> verdict text str; defaults to verifier.resolve_and_run.
+    adapter_loops: injectable override for adapter.get(clone_dir, "loops") (test seam);
+    None means "look it up for real."
+    """
+    create_issue = create_issue or _default_create_issue
+    run_verifier = run_verifier or _verifier.resolve_and_run
+
+    manifest = read_manifest(clone_dir, manifest_path)
+    validate_manifest(manifest)
+
+    loops = adapter_loops if adapter_loops is not None else _adapter.get(clone_dir, "loops")
+    loop_entry = cross_check(manifest, loops)
+    producing_loop = manifest["producing_loop"]
+
+    verifier_path = (loop_entry.get("verification") or {}).get("verifier")
+    if not verifier_path:
+        raise HandoffError(
+            "verifier_undeclared", f"loop '{producing_loop}' declares no verification.verifier"
+        )
+
+    verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}.md")
+    verdict_text = run_verifier(
+        clone_dir=clone_dir, loop_name=producing_loop, verifier_path=verifier_path,
+        side_effect_level=loop_entry["side_effect_level"], issue_num="",
+        factory_repo_slug=_identity.SLUG,
+    )
+    os.makedirs(os.path.dirname(verdict_out) or ".", exist_ok=True)
+    with open(verdict_out, "w", encoding="utf-8") as fh:
+        fh.write(verdict_text)
+
+    parsed = _verdict.parse_verdict(verdict_text) or {}
+    status = parsed.get("status")
+    if status not in HANDOFF_ACCEPT_STATUSES:
+        reason = f"observed STATUS: {status}"
+        for line in verdict_text.splitlines():
+            if line.startswith("REASON:"):
+                reason += f"; {line}"
+                break
+        raise HandoffError("verdict_not_passing", reason)
+
+    body = render_body(manifest, verdict_out)
+    title = f"[intake] {manifest['proposed_ticket']['title']}"
+    labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
+    issue_id = create_issue(title, body, labels)
+    if not issue_id:
+        raise HandoffError("issue_create_failed", "tracker create_item returned an empty result")
+
+    return IntakeResult(accepted=True, issue_id=issue_id, artifact_id=manifest["artifact_id"])
 
 
 if __name__ == "__main__":
