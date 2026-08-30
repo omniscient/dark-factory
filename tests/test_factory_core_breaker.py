@@ -556,3 +556,53 @@ def test_trip_audit_row_write_failure_does_not_swallow_verdict(tmp_path, monkeyp
     assert v.stopped is True
     assert v.reason == "max_retries"
     assert "stop-condition audit row not written" in capsys.readouterr().err
+
+
+from factory_core.breaker import format_trip_reason
+
+
+def test_format_trip_reason_max_retries():
+    v = StopVerdict(True, "max_retries", {"count": 3, "ceiling": 3})
+    assert format_trip_reason(v, None) == "retry limit of 3 reached"
+
+
+def test_format_trip_reason_max_iterations():
+    entry = _loop(max_iterations=3)
+    v = StopVerdict(True, "max_iterations", {"iter": 3, "max_iterations": 3, "effective_ceiling": 3})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'max_iterations' reached (3/3); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_deadline():
+    entry = _loop(deadline_seconds=60)
+    v = StopVerdict(True, "deadline", {"elapsed": 61, "deadline_seconds": 60})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'deadline' reached (61s >= 60s); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_max_tokens():
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    v = StopVerdict(True, "max_tokens", {"tokens": 1000, "max_tokens": 1000})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'max_tokens' reached (1000/1000 tokens); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_failure_behavior_truncated_to_64_chars():
+    """R13 AC: 'A 200-character failure_behavior reaches the trip_to_blocked
+    comment ... truncated to 64 characters.' This is the trip_to_blocked-comment
+    half of that AC (format_trip_reason's output is what a future caller passes to
+    trip_to_blocked's `reason` argument); the runs.jsonl-row half is
+    test_trip_row_failure_behavior_truncated_to_64_chars in Task 7."""
+    entry = _loop(max_iterations=3)
+    entry["scheduling"]["failure_behavior"] = "x" * 200
+    v = StopVerdict(True, "max_iterations", {"iter": 3, "max_iterations": 3, "effective_ceiling": 3})
+    result = format_trip_reason(v, entry)
+    assert result.endswith("declared failure_behavior: " + "x" * 64)
+    assert "x" * 65 not in result

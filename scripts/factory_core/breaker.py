@@ -113,6 +113,29 @@ def _loop_state_key(key: str, name: str, suffix: str) -> str:
     return f"{key}:loop:{name}:{suffix}"
 
 
+def format_trip_reason(verdict: StopVerdict, loop_entry: Optional[dict]) -> str:
+    """The exact R13 trip-reason strings passed to trip_to_blocked. No live caller
+    constructs the three loop-scoped variants today (R7's live sites only ever see
+    reason="max_retries", which scheduler.sh already renders byte-identically
+    inline) — this is the tested, ready-to-call implementation for the loop-scoped
+    reasons, for whichever future loop-dispatcher wires a populated loop_entry."""
+    d = verdict.detail
+    if verdict.reason == "max_retries":
+        return f"retry limit of {d['ceiling']} reached"
+    name = loop_entry["name"]
+    fb = (loop_entry.get("scheduling") or {}).get("failure_behavior", "")[:64]
+    if verdict.reason == "max_iterations":
+        return (f"loop '{name}' stop condition 'max_iterations' reached "
+                 f"({d['iter']}/{d['max_iterations']}); declared failure_behavior: {fb}")
+    if verdict.reason == "deadline":
+        return (f"loop '{name}' stop condition 'deadline' reached "
+                 f"({d['elapsed']}s >= {d['deadline_seconds']}s); declared failure_behavior: {fb}")
+    if verdict.reason == "max_tokens":
+        return (f"loop '{name}' stop condition 'max_tokens' reached "
+                 f"({d['tokens']}/{d['max_tokens']} tokens); declared failure_behavior: {fb}")
+    raise ValueError(f"format_trip_reason: unknown reason {verdict.reason!r}")
+
+
 def evaluate_stop_condition(
     loop_entry: Optional[dict],
     issue_num: int,
