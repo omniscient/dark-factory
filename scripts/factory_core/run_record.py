@@ -68,6 +68,13 @@ def _append_jsonl(record: dict) -> None:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def append_stop_record(record: dict) -> None:
+    """Public wrapper for a breaker stop-condition audit row (#198 R8) — writes to
+    runs.jsonl only, no Seq post (unlike cmd_record/_post_seq, which are for actual
+    run verdicts, not breaker decisions)."""
+    _append_jsonl(record)
+
+
 def _post_seq(record: dict) -> None:
     payload = {
         "Events": [
