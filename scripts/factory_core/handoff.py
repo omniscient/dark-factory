@@ -24,8 +24,11 @@ from . import verifier as _verifier
 
 
 class HandoffError(Exception):
-    """Raised on any R2-R5 rejection. `code` is a closed reason-code token recorded
-    verbatim in runs.jsonl's detail.reject_reason (R6); `message` is human-readable."""
+    """Raised on any R2-R5 rejection, or on `internal_error` (an orchestration-level
+    failure -- e.g. an unwritable ARTIFACTS_DIR mount -- that is not itself a manifest
+    rejection but must still produce an auditable runs.jsonl row, R6). `code` is a
+    closed reason-code token recorded verbatim in runs.jsonl's detail.reject_reason
+    (R6); `message` is human-readable."""
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -40,6 +43,7 @@ MAX_BODY_BYTES = 32 * 1024
 MAX_LIST_ITEMS = 50
 MAX_LIST_ITEM_LEN = 512
 MAX_RENDERED_BODY_LEN = 60_000
+MAX_DETAIL_REASON_LEN = 500
 
 # Admission set for the verdict *intake itself produces* by running the loop's A3
 # verifier (R4). Deliberately not verdict.GATING_PASS_STATUSES ({PASS, SKIPPED, ERROR}):
@@ -299,9 +303,15 @@ def render_body(manifest: dict, verdict_path: str) -> str:
     return body
 
 
-def _default_create_issue(title: str, body: str, labels: str) -> str:
+def _default_create_issue(
+    title: str, body: str, labels: str, *, timeout: int = _verifier.DEFAULT_TIMEOUT_SECONDS,
+) -> str:
     """Default create_issue callable: shells out to providers/cli.py's `tracker create`
-    subcommand, mirroring smoke_gate.sh's existing subprocess invocation of the same CLI."""
+    subcommand, mirroring smoke_gate.sh's existing subprocess invocation of the same CLI.
+
+    Bounded by `timeout` (default: the same DEFAULT_TIMEOUT_SECONDS verifier.run_verifier
+    uses) so a hung `gh` on a stalled network cannot block intake indefinitely; a timeout
+    fails closed the same way a non-zero exit does (empty string -> issue_create_failed)."""
     cli_path = os.path.join(os.path.dirname(__file__), "providers", "cli.py")
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
         fh.write(body)
@@ -310,8 +320,10 @@ def _default_create_issue(title: str, body: str, labels: str) -> str:
         result = subprocess.run(
             [sys.executable, cli_path, "tracker", "create",
              "--title", title, "--body-file", body_path, "--labels", labels],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        return ""  # fail closed: same empty-result contract a non-zero exit already uses
     finally:
         os.unlink(body_path)
     if result.returncode != 0:
@@ -337,6 +349,7 @@ def intake(
 
     artifact_id = "unknown"
     producing_loop = None
+    verdict_out = None
     try:
         manifest = read_manifest(clone_dir, manifest_path)
         if isinstance(manifest.get("artifact_id"), str) and manifest["artifact_id"]:
@@ -368,7 +381,11 @@ def intake(
                 "verifier_undeclared", f"loop '{producing_loop}' declares no verification.verifier"
             )
 
-        verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}.md")
+        # artifact_id (not just producing_loop) is in the filename so a second manifest
+        # handed off from the same producing loop into the same ARTIFACTS_DIR cannot
+        # overwrite the first verdict file out from under an issue that already cites it
+        # (both fields are charset-validated to ^[A-Za-z0-9._-]+$ by validate_manifest, R2).
+        verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}-{artifact_id}.md")
         verdict_text = run_verifier(
             clone_dir=clone_dir, loop_name=producing_loop, verifier_path=verifier_path,
             side_effect_level=loop_entry["side_effect_level"], issue_num="",
@@ -390,16 +407,46 @@ def intake(
 
         body = render_body(manifest, verdict_out)
         title = f"[intake] {manifest['proposed_ticket']['title']}"
+        # FACTORY_MANIFEST_LABEL is env-supplied (operator/deploy config, not manifest
+        # input), but it is interpolated straight into a comma-joined label string that
+        # providers/cli.py::_tracker_create splits on "," -- an override containing a
+        # comma (e.g. "manifest-intake,ready-for-agent") would silently smuggle in an
+        # extra label and could opt a target-loop-authored issue into ready-for-agent,
+        # which docs/triage-labels.md requires never be applied together with
+        # manifest-intake. Reject before building the label string.
+        if not FACTORY_MANIFEST_LABEL or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL):
+            raise ValueError(
+                f"FACTORY_MANIFEST_LABEL override must be a single label with no comma "
+                f"or whitespace, got: {FACTORY_MANIFEST_LABEL!r}"
+            )
         labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
         issue_id = create_issue(title, body, labels)
         if not issue_id:
-            raise HandoffError("issue_create_failed", "tracker create_item returned an empty result")
+            raise HandoffError(
+                "issue_create_failed",
+                f"tracker create_item returned an empty/falsy result (raw={issue_id!r}); "
+                f"if the underlying tracker actually created an issue despite this, it is "
+                f"now an orphan '{FACTORY_MANIFEST_LABEL}' issue with no artifact_id "
+                f"back-reference, and rerunning this manifest may create a duplicate",
+            )
     except HandoffError as exc:
         _record_intake(
             manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
             issue=0, verdict="REJECTED", reject_reason=exc.code, created_issue="",
+            verdict_path=verdict_out or "", reason=exc.message,
         )
         raise
+    except Exception as exc:
+        # Anything other than HandoffError here (os.makedirs/open() raising OSError on
+        # e.g. a read-only ARTIFACTS_DIR mount, or a config error like the label check
+        # above) must still close the same audit gap the AdapterError branch above
+        # closes: a runs.jsonl row, not an uncaught traceback and no trace at all.
+        _record_intake(
+            manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
+            issue=0, verdict="REJECTED", reject_reason="internal_error", created_issue="",
+            verdict_path=verdict_out or "", reason=str(exc),
+        )
+        raise HandoffError("internal_error", f"unexpected error during intake: {exc}") from exc
 
     # GitHubTracker.create_item returns a numeric string, but the Tracker ABC's ids
     # are opaque everywhere (docs/adapter-authoring-guide.md) -- e.g. JiraTracker
@@ -417,13 +464,20 @@ def intake(
 
 def _record_intake(
     *, manifest_path: str, artifact_id: str, producing_loop, issue: int, verdict: str,
-    reject_reason: str, created_issue,
+    reject_reason: str, created_issue, verdict_path: str = "", reason: str = "",
 ) -> None:
     """R6: writes intake's own accept/reject decision as a runs.jsonl row -- the entire
     audit trail for a rejected manifest, which otherwise creates no GitHub issue and
     would leave no trace anywhere. Calls run_record.cmd_record in-process (an
     argparse.Namespace, not a subprocess) so tests can monkeypatch JSONL_PATH/_post_seq
-    exactly as tests/test_run_record.py already does."""
+    exactly as tests/test_run_record.py already does.
+
+    verdict_path/reason are best-effort extras (empty string when not applicable/not yet
+    known, e.g. a reject that fired before the verifier ran): verdict_path points an
+    auditor at the verdict file that explains a `verdict_not_passing` row instead of
+    leaving them only the loop name to go find it themselves; reason carries the
+    HandoffError's human-readable message (truncated) so a code like
+    `verdict_not_passing` isn't the auditor's only clue."""
     run_id = os.environ.get("RUN_ID") or f"intake-{artifact_id}"
     origin = f"target-loop:{producing_loop}" if producing_loop else "factory"
     ns = argparse.Namespace(
@@ -432,6 +486,7 @@ def _record_intake(
         detail=[
             f"manifest_path={manifest_path}", f"artifact_id={artifact_id}",
             f"created_issue={created_issue}", f"reject_reason={reject_reason}",
+            f"verdict_path={verdict_path}", f"reason={reason[:MAX_DETAIL_REASON_LEN]}",
         ],
         origin=origin,
     )

@@ -507,8 +507,11 @@ def test_intake_accepts_and_creates_issue(tmp_path):
     assert call["title"] == "[intake] Triage: 3 new findings in payments module"
     assert call["labels"] == "needs-triage,manifest-intake"
     assert "df-manifest-provenance" in call["body"]
-    assert (artifacts_dir / "loop-nightly-scan-triage.md").exists()
-    assert "STATUS: PASS" in (artifacts_dir / "loop-nightly-scan-triage.md").read_text()
+    # Filename includes artifact_id (not just producing_loop) so a second manifest from
+    # the same loop can't silently overwrite this verdict file (advisory finding fix).
+    verdict_path = artifacts_dir / "loop-nightly-scan-triage-scan-2026-08-30-001.md"
+    assert verdict_path.exists()
+    assert "STATUS: PASS" in verdict_path.read_text()
 
 
 def test_intake_rejects_verifier_undeclared(tmp_path):
