@@ -418,8 +418,7 @@ def test_resolve_and_run_origin_line_on_success(tmp_path):
     )
     assert "ORIGIN: target-loop:my-loop" in text
     # ORIGIN is the last line even after the profile suffix on the normal path
-    assert text.rstrip("
-").splitlines()[-1] == "ORIGIN: target-loop:my-loop"
+    assert text.rstrip("\n").splitlines()[-1] == "ORIGIN: target-loop:my-loop"
 
 
 def test_resolve_and_run_origin_line_when_side_effect_level_undetermined(tmp_path):
