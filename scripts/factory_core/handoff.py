@@ -6,6 +6,7 @@ file the manifest merely references (maker never validates maker). See
 docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md.
 """
 import os
+import re
 
 import yaml
 
@@ -27,6 +28,15 @@ MAX_BODY_BYTES = 32 * 1024
 MAX_LIST_ITEMS = 50
 MAX_LIST_ITEM_LEN = 512
 MAX_RENDERED_BODY_LEN = 60_000
+
+_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_REQUIRED_TOP = (
+    "schema_version", "artifact_id", "producing_loop", "side_effect_level",
+    "source_references", "acceptance_thresholds", "proposed_ticket",
+)
+_OPTIONAL_TOP = ("verifier_verdict",)
+_KNOWN_TOP = set(_REQUIRED_TOP) | set(_OPTIONAL_TOP)
 
 
 def _resolve_manifest_path(clone_dir: str, manifest_path: str) -> str:
@@ -67,6 +77,56 @@ def read_manifest(clone_dir: str, manifest_path: str) -> dict:
     if not isinstance(data, dict):
         raise HandoffError("schema_invalid", "manifest top level must be a mapping")
     return data
+
+
+def _check_unsafe_string(value: str, field: str) -> None:
+    """R2/R5: a string rendered outside a fenced block must not carry a backtick
+    (breaks out of an inline code span) or a newline (breaks out of a single-line
+    provenance bullet). Defined here (not in a later task) because artifact_id and
+    producing_loop -- both validated in this task -- are on the spec's R2 unsafe_string
+    field list alongside the list-item/verifier_verdict.path fields later tasks add."""
+    if "`" in value or "\n" in value:
+        raise HandoffError("unsafe_string", f"field '{field}' must not contain a backtick or newline")
+
+
+def validate_manifest(manifest: dict) -> None:
+    """R2: full shape/type/limit validation of an already-parsed manifest dict.
+    Raises HandoffError(code, message) on the first violation found; code is drawn
+    from the closed reason-code list in the spec's R2 table."""
+    for key in manifest:
+        if key not in _KNOWN_TOP:
+            raise HandoffError("schema_invalid", f"unknown field '{key}'")
+    for field in _REQUIRED_TOP:
+        if field not in manifest:
+            raise HandoffError("schema_invalid", f"missing required field '{field}'")
+
+    sv = manifest["schema_version"]
+    if isinstance(sv, bool) or sv != 1:
+        raise HandoffError("schema_invalid", "field 'schema_version' must be the int 1")
+
+    for field in ("artifact_id", "producing_loop"):
+        v = manifest[field]
+        if not isinstance(v, str) or not v or len(v) > MAX_ID_LEN:
+            raise HandoffError(
+                "schema_invalid",
+                f"field '{field}' must be a non-empty string of at most {MAX_ID_LEN} chars",
+            )
+        # Checked before the charset regex so a backtick/newline is reported as
+        # unsafe_string (the spec's R2 table lists artifact_id/producing_loop among
+        # the unsafe_string fields), not the generic schema_invalid the regex below
+        # would otherwise raise for the same input -- "more specific codes take
+        # precedence" per the spec's schema_invalid definition.
+        _check_unsafe_string(v, field)
+        if not _ID_RE.match(v):
+            raise HandoffError(
+                "schema_invalid", f"field '{field}' must match ^[A-Za-z0-9._-]+$"
+            )
+
+    sel = manifest["side_effect_level"]
+    if isinstance(sel, bool) or not isinstance(sel, int) or not (1 <= sel <= 6):
+        raise HandoffError(
+            "schema_invalid", "field 'side_effect_level' must be an int between 1 and 6"
+        )
 
 
 if __name__ == "__main__":
