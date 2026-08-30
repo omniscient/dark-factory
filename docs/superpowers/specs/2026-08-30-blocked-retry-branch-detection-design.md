@@ -52,17 +52,18 @@ finished branch (the interim recipe used for #341/#342/#301).
   git-adjacent method here is `remote_url()`." `remote_url()` (implemented in
   `github.py:20-22`) returns a token-embedded HTTPS clone URL and is exposed via
   `python3 $FACTORY_PROVIDERS_CLI codehost remote-url`.
-- `scheduler.sh` already makes raw `gh api graphql` calls directly in places (e.g.
-  `fetch_board_items`, `scheduler.sh:539`) — so calling `git` directly from `scheduler.sh`
-  for a plain-git question is consistent with existing file conventions, not a new
-  pattern.
+- `scheduler.sh` currently has zero `git` invocations — this helper is the first. That is
+  acceptable because `git` is installed in the image (`Dockerfile:9`) and `git ls-remote
+  <url>` needs no checkout; the precedent `scheduler.sh` does set (raw `gh api graphql`
+  calls in `fetch_board_items`, `scheduler.sh:539`) is for calling tools directly rather
+  than through a wrapper, which is the same shape.
 - `stage_rescue_blocked` (Priority 0.6, `scheduler.sh:832-849`) already promotes a
   Blocked ticket straight to "In review" when its PR is green+mergeable, and already
   guards `stage_blocked_retry` against double-handling via the `RESCUED` skip
   (`scheduler.sh:1040`). This ticket's failure mode has no PR at retry time, so
   `stage_rescue_blocked` is a structural no-op for it — the item always falls through to
   `stage_blocked_retry` today.
-- `merge_change` passes `--delete-branch` by default (`github.py:83-90`), so a merged
+- `merge_change` passes `--delete-branch` by default (`github.py:83-91`), so a merged
   ticket does not leave a `feat/issue-N-*` branch on `origin`. A surviving branch for a
   Blocked issue genuinely means unfinished (or unshipped-but-done) work, not stale debris.
 - `tests/test_scheduler.sh` supports `SCHEDULER_SOURCE_ONLY=1 source "$SCHED"` to define
@@ -84,13 +85,23 @@ finished branch (the interim recipe used for #341/#342/#301).
 4. The branch probe must not consume GitHub REST/GraphQL quota (the #366 exhaustion that
    caused this bug in the first place).
 5. Failure of either check (branch probe error, PR lookup error) must fail closed to an
-   empty result — matching `get_pr_for_issue`'s existing `2>/dev/null || true` contract —
-   never crash the poll loop and never mistakenly default to `Continue` on an error.
+   empty result **within a bounded time** — matching `get_pr_for_issue`'s existing
+   `2>/dev/null || true` contract, plus `GIT_TERMINAL_PROMPT=0` and `timeout 30` on the
+   probe so a transport stall or a credential prompt can neither hang the poll loop nor
+   default to `Continue`.
 6. No credential leakage: the token-embedded remote URL must never be echoed to stdout,
    logs, or a run report.
 7. No changes to `stage_rescue_blocked`, the rescue/`RESCUED` ordering, or any
    gate/breaker/budget logic — this is a dispatch-path-only change (per the issue's own
-   scope fence and CLAUDE.md's "gate changes get their own reviewed ticket").
+   scope fence and CLAUDE.md's "gate changes get their own reviewed ticket"). Retry
+   accounting is unchanged by construction: the Continue/Fix decision stays *after*
+   `check_failure_signature` → `rollback_paused_retry` → `retry_or_skip_delivery_failure`
+   → `evaluate_stop` (`scheduler.sh:1046-1070`); `evaluate_stop` increments the counter
+   before dispatch regardless of which command is chosen, and `stage_blocked_retry` never
+   calls `reset_retry` (only review-triage `:974` and the end gate `:352` do), so a
+   Continue consumes exactly one retry, as a Fix does — no infinite retries, no double
+   count. The `evaluate_stop wired 4x` / `rollback_paused_retry wired 4x` drift locks
+   (`tests/test_scheduler.sh:1815`, `:1926`) are unaffected.
 8. `setup-branch` (`workflows/archon-dark-factory.yaml`) needs no change: its existing
    `continue`-intent path (`git fetch origin "$BRANCH" && git checkout "$BRANCH" || git
    checkout -b "$BRANCH"`) already does the right thing once `stage_blocked_retry`
@@ -199,7 +210,9 @@ branch_exists_for_issue() {
   local url
   url=$(python3 "$FACTORY_PROVIDERS_CLI" codehost remote-url 2>/dev/null) || true
   [ -n "$url" ] || { echo ""; return; }
-  git ls-remote --heads "$url" "refs/heads/feat/issue-${1}-*" 2>/dev/null | head -1 | awk '{print $2}' || true
+  # Bounded and prompt-free: a smart-HTTP stall must not hang the poll loop, and a 401 must
+  # fail closed (empty) instead of blocking on a credential prompt.
+  GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --heads "$url" "refs/heads/feat/issue-${1}-*" 2>/dev/null | head -1 | awk '{print $2}' || true
 }
 ```
 
@@ -227,6 +240,24 @@ fi
 No changes to `workflows/archon-dark-factory.yaml` (`setup-branch`'s existing `continue`
 path already reuses the branch correctly) or to `stage_rescue_blocked`.
 
+**Decision matrix for a Blocked ticket** (what the scheduler does after this change):
+
+| Remote `feat/issue-N-*` branch | PR | Outcome |
+|---|---|---|
+| absent | absent | `Fix issue #N` (fresh branch from main) — unchanged |
+| present | absent | **`Continue issue #N`** — NEW; this is the #371 case (pushed, PR creation failed) |
+| present | open, not green/mergeable | `Continue issue #N` — unchanged behaviour, now reached via the branch check first |
+| present | open, green + mergeable | `stage_rescue_blocked` (Priority 0.6) promotes to In review and the item is `RESCUED`-skipped here — unchanged (note `rescue.py:84` also marks a draft PR ready) |
+
+**End to end for the PR-less Continue** (the new row), verified against the DAG on main:
+`fetch-issue` guards its PR lookups on `[ -n "$PR_NUM" ]`, so a missing PR is not an error;
+`digest-comments` yields "No specific feedback found." and `acknowledge-continue` posts the
+matching (cosmetic) acknowledgement; the implement command's continue path
+(`commands/dark-factory-implement.md:55-77`) reviews `git log main..HEAD` on the reused branch
+and must make no changes when the work is complete; `push-and-pr`'s `codehost find-change
+--branch … --exact` returns empty and therefore creates the PR — which is exactly the step
+that failed originally.
+
 ### Testing
 
 In `tests/test_scheduler.sh`, extend the existing `dispatch_stage stage_blocked_retry`
@@ -239,6 +270,20 @@ asserts the dispatched command via `$STUB_LOG`, covering:
 3. Neither exists → `Fix`.
 4. Branch probe stub returns empty (simulating a `git ls-remote` error or absent
    `remote-url`) but PR exists → still `Continue` via the fallback, not a crash.
+
+Cases 1–4 stub `branch_exists_for_issue`, so they do not exercise the helper. Add
+**helper-level cases against the real `branch_exists_for_issue`**: export a `git()` bash stub
+and add `git` to the PATH-shim loop (`for _stub_cmd in gh docker` at
+`tests/test_scheduler.sh:52`, the PR #366 pattern) so the probe is intercepted whether it is
+called from bash or from a child process; the stub logs its argv to `$STUB_LOG` and
+(i) prints `<sha>\trefs/heads/feat/issue-371-x` → the helper echoes the ref and the logged
+argv contains `ls-remote --heads <url> refs/heads/feat/issue-371-*`; (ii) `return 128` → the
+helper echoes empty; (iii) `PROVIDERS_CLI_OUTPUT=""` (empty `remote-url`) → empty and `git`
+is never called. Caveat for the implementer: the single `python3` stub returns
+`PROVIDERS_CLI_OUTPUT` for *every* providers-CLI call (`tests/test_scheduler.sh:30-36`), so
+`get_pr_for_issue` must be function-stubbed in these cases or it would also return the URL.
+Finally assert that the captured stdout of `dispatch_stage stage_blocked_retry` never
+contains the stub URL string (Requirement 6 — the token-embedded URL must not leak).
 
 Update section V's `_run_blocked_retry_body` comment (`tests/test_scheduler.sh:~1590`) to
 state it covers retry-accounting only, not the Continue/Fix decision, so its unmodified
@@ -281,8 +326,9 @@ state it covers retry-accounting only, not the Continue/Fix decision, so its unm
 - `GH_TOKEN` (used by `codehost remote-url`) is always available to `scheduler.sh` at the
   point `stage_blocked_retry` runs — consistent with `get_pr_for_issue`'s existing use of
   the same provider CLI without an env-presence check of its own.
-- The `feat/issue-${ISSUE}-*` glob passed to `git ls-remote` is sufficient to disambiguate
-  issue numbers that are prefixes of one another (e.g. `feat/issue-37-*` vs.
-  `feat/issue-371-*`) — carried over unchanged from `get_pr_for_issue`'s existing
-  `"feat/issue-${1}-"` prefix convention (`scheduler.sh:513`), not a new assumption
-  introduced by this fix.
+- The `refs/heads/feat/issue-${ISSUE}-*` glob passed to `git ls-remote` disambiguates issue
+  numbers that are prefixes of one another: `feat/issue-37-*` cannot match
+  `feat/issue-371-…` because the literal `-` after `37` must follow immediately. The probe
+  is therefore *stricter* than `get_pr_for_issue`'s fallback, whose `--search
+  head:feat/issue-37-` (`github.py:32`) keeps GitHub's older fuzzy matching; only that
+  fallback path retains the fuzziness, and it is unchanged by this fix.
