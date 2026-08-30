@@ -1083,10 +1083,13 @@ stage_blocked_retry() {
         fi
         ;;
     esac
-    # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
-    # continue run that failed mid-way) must be CONTINUED to reuse the existing branch.
-    # Dispatching "Fix" would start a fresh branch that collides with the PR on push.
-    if [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
+    # Branch-aware: a blocked item whose feat branch already exists on origin (pushed but
+    # PR creation failed, e.g. #366's GraphQL exhaustion — or a PR already exists, e.g. red
+    # CI gated above) must be CONTINUED to reuse the existing branch. Dispatching "Fix"
+    # would start a fresh branch from main that collides with the pushed branch on push
+    # (#371). Branch probe first: no API quota cost, and a strict superset of the PR check
+    # (a PR can't exist without its source branch).
+    if [ -n "$(branch_exists_for_issue "$ISSUE")" ] || [ -n "$(get_pr_for_issue "$ISSUE")" ]; then
       if dispatch "Continue issue #${ISSUE}"; then
         DISPATCHED="Continue issue #${ISSUE}"
       fi

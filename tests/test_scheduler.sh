@@ -1595,6 +1595,11 @@ dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
 get_pr_for_issue() { echo ""; }
 export -f dispatch get_pr_for_issue
 
+# Hand-copied shadow of the pre-#371 retry-accounting path only (signature/pause/
+# delivery-failure/ceiling handling) — it predates the dispatch_stage seam and still
+# ends on the unmodified get_pr_for_issue-only tail below. It does NOT cover the
+# Continue/Fix dispatch decision: that is exercised against the real function via
+# `dispatch_stage stage_blocked_retry` in section Z.
 _run_blocked_retry_body() {
   local issue="$1"
   SIG_RESULT=$(check_failure_signature "$issue" "implement")
@@ -1984,6 +1989,97 @@ reset_python3_stub
 git() { echo "git $*" >> "$STUB_LOG"; return 0; }
 export -f git
 > "$STUB_LOG"
+
+# Y4: end-to-end via dispatch_stage stage_blocked_retry, exercising the REAL
+# (still-unstubbed) branch_exists_for_issue against a fake token-bearing URL — proves
+# requirement 6 (URL never leaked) at the actual dispatch call site, not just in the
+# helper's own return value. get_pr_for_issue is never reached here (OR short-circuits
+# once the branch probe is non-empty), so it needs no stub post-fix; pre-fix it is reached and hits section X's `get_pr_for_issue() { echo ""; }` restore, which is what makes Y4 red before Task 2 step 3.
+PROVIDERS_CLI_OUTPUT="https://x-access-token:ghs_zzfaketoken371@github.com/omniscient/dark-factory.git"
+git() { printf 'deadbeefcafefeed\trefs/heads/feat/issue-304-x\n'; return 0; }
+export -f git
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; RESCUED=""
+BLOCKED='[{"content":{"number":304},"labels":[],"status":"Blocked"}]'
+DISPATCHED=""
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+Y4_STDOUT=$(dispatch_stage stage_blocked_retry 2>&1)
+assert_eq "Y4: real branch probe drives Continue end-to-end through dispatch_stage" \
+  "1" "$(grep -c 'dispatch Continue issue #304' "$STUB_LOG" || echo 0)"
+assert_eq "Y4b: dispatch_stage's own stdout/stderr never contains the token-embedded URL" \
+  "0" "$(echo "$Y4_STDOUT" | grep -c 'ghs_zzfaketoken371' || true)"
+assert_eq "Y4c: the dispatch log line itself never contains the token-embedded URL" \
+  "0" "$(grep -c 'ghs_zzfaketoken371' "$STUB_LOG" || true)"
+
+reset_python3_stub
+git() { echo "git $*" >> "$STUB_LOG"; return 0; }
+export -f git
+> "$STUB_LOG"
+
+# ==========================================
+# Z: stage_blocked_retry — branch-aware dispatch decision (#371)
+# ==========================================
+echo ""
+echo "--- Z: stage_blocked_retry — dispatch Continue when the feat branch already exists ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; RESCUED=""
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+is_issue_running() { return 1; }
+export -f dispatch is_issue_running
+
+# Z1: branch exists, no PR -> Continue (the #371 case: pushed, PR creation failed)
+branch_exists_for_issue() { echo "deadbeef"; }
+get_pr_for_issue() { echo ""; }
+export -f branch_exists_for_issue get_pr_for_issue
+BLOCKED='[{"content":{"number":300},"labels":[],"status":"Blocked"}]'
+DISPATCHED=""
+dispatch_stage stage_blocked_retry > /dev/null
+assert_eq "Z1: branch exists, no PR -> Continue" \
+  "1" "$(grep -c 'dispatch Continue issue #300' "$STUB_LOG" || echo 0)"
+assert_eq "Z1b: no Fix dispatched" "0" "$(grep -c 'dispatch Fix issue #300' "$STUB_LOG" || true)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# Z2: no branch, PR exists -> Continue (existing behavior preserved)
+branch_exists_for_issue() { echo ""; }
+get_pr_for_issue() { echo "501"; }
+export -f branch_exists_for_issue get_pr_for_issue
+BLOCKED='[{"content":{"number":301},"labels":[],"status":"Blocked"}]'
+DISPATCHED=""
+dispatch_stage stage_blocked_retry > /dev/null
+assert_eq "Z2: no branch, PR exists -> Continue" \
+  "1" "$(grep -c 'dispatch Continue issue #301' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# Z3: neither branch nor PR -> Fix (unchanged behavior)
+branch_exists_for_issue() { echo ""; }
+get_pr_for_issue() { echo ""; }
+export -f branch_exists_for_issue get_pr_for_issue
+BLOCKED='[{"content":{"number":302},"labels":[],"status":"Blocked"}]'
+DISPATCHED=""
+dispatch_stage stage_blocked_retry > /dev/null
+assert_eq "Z3: neither branch nor PR -> Fix" \
+  "1" "$(grep -c 'dispatch Fix issue #302' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# Z4: branch probe comes back empty (simulating a git-ls-remote error or absent
+# `remote-url`), PR exists -> still Continue via the get_pr_for_issue fallback, not a
+# crash and not a false Fix.
+branch_exists_for_issue() { echo ""; }
+get_pr_for_issue() { echo "502"; }
+export -f branch_exists_for_issue get_pr_for_issue
+BLOCKED='[{"content":{"number":303},"labels":[],"status":"Blocked"}]'
+DISPATCHED=""
+dispatch_stage stage_blocked_retry > /dev/null
+assert_eq "Z4: branch probe empty, PR exists -> Continue via fallback" \
+  "1" "$(grep -c 'dispatch Continue issue #303' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# Restore stubs to section defaults
+get_pr_for_issue() { echo ""; }
+export -f get_pr_for_issue
 
 # ==========================================
 # Cleanup
