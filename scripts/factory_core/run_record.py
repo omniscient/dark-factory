@@ -137,6 +137,10 @@ def cmd_record(args) -> None:
         "intent": args.intent,
         "stage": args.stage,
         "verdict": args.verdict,
+        # Who produced this row: "factory" (default, every existing caller) or
+        # "target-loop:<name>" for rows written on behalf of a target loop (#199/#378).
+        # getattr so callers that build a bare Namespace without the flag keep working.
+        "origin": getattr(args, "origin", None) or "factory",
         "gen_ai.system": "dark-factory",
         "gen_ai.operation.name": f"stage.{args.stage}",
         "gen_ai.usage.input_tokens": args.tokens_in,
@@ -822,6 +826,8 @@ def main() -> None:
     r.add_argument("--intent", required=True)
     r.add_argument("--stage", required=True)
     r.add_argument("--verdict", required=True)
+    r.add_argument("--origin", default="factory",
+                   help='row producer: "factory" (default) or "target-loop:<loop_name>"')
     r.add_argument("--tokens-in", type=int, default=None)
     r.add_argument("--tokens-out", type=int, default=None)
     r.add_argument("--cost-usd", type=float, default=None)

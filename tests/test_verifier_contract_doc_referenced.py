@@ -51,5 +51,6 @@ def test_gate_lib_header_references_verdict_schema_docs():
 
 def test_verifier_contract_doc_exists_and_documents_env_contract():
     content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
-    for token in ("CLONE_DIR", "ARTIFACTS_DIR", "ISSUE_NUM", "FACTORY_REPO_SLUG", "LOOP_NAME"):
+    for token in ("CLONE_DIR", "ARTIFACTS_DIR", "ISSUE_NUM", "FACTORY_REPO_SLUG", "LOOP_NAME",
+                  "ORIGIN:", "target-loop:"):
         assert token in content
