@@ -311,6 +311,36 @@ def test_parse_artifact_missing_returns_none():
     assert rr._parse_artifact_stage("validation", "") is None
 
 
+def test_parse_artifact_stage_generic_fallback_for_unseen_gate_type():
+    # A name run_record.py has no bespoke overlay for (e.g. a future target-loop
+    # GATE_TYPE) still round-trips through the shared generic parser — proving the
+    # refactor's delegation, not just the four hardcoded names, actually works.
+    content = "STATUS: BLOCKED\nGATE_TYPE: loop:nightly-scan-triage\nFINDINGS_COUNT: 1\nSEVERITY: high\n"
+    result = rr._parse_artifact_stage("loop:nightly-scan-triage", content)
+    assert result["stage"] == "loop:nightly-scan-triage"
+    assert result["verdict"] == "BLOCKED"
+
+
+def test_parse_artifact_validation_keeps_first_status_line_wins():
+    # validation's original loop does `break` on the first STATUS: match (first-wins);
+    # conformance/review deliberately have no break (last-wins). The shared
+    # verdict.parse_verdict is last-wins throughout, so validation must NOT be routed
+    # through it for STATUS extraction -- this pins that the refactor preserves
+    # validation's distinct precedence rather than silently changing it.
+    content = "STATUS: PASS\nsome prose\nSTATUS: FAIL\n"
+    result = rr._parse_artifact_stage("validation", content)
+    assert result["verdict"] == "PASS"
+
+
+def test_parse_artifact_conformance_keeps_last_status_line_wins():
+    # conformance's original loop has no break -- last STATUS: line wins. Pin this
+    # explicitly so the shared parser's last-wins semantics are the *intended* match
+    # for conformance/review, not an accidental side effect of delegation.
+    content = "STATUS: PASS\nSTATUS: BLOCKED\nCYCLES: 1\n"
+    result = rr._parse_artifact_stage("conformance", content)
+    assert result["verdict"] == "BLOCKED"
+
+
 # ---------------------------------------------------------------------------
 # _compute_outcome
 # ---------------------------------------------------------------------------

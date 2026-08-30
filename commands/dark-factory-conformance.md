@@ -37,13 +37,14 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 3. Read the conformance rubric, clone-live-first: `.claude/skills/conformance/RUBRIC.md`,
    falling back to `/opt/refinement-skills/conformance-reviewer-prompt.md` if the clone-live
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
-4. Read `$ARTIFACTS_DIR/implementation.md` for what was implemented (may be missing if validate wrote nothing — continue anyway)
-5. Extract `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
-6. Extract `BLOCK_ON_MATERIAL` from `conformance.block_on_material` (default: true)
-7. Extract `SCOPE_ENFORCEMENT` from `conformance.scope_enforcement` (default: true)
-8. Extract `EXCISE_OOS` from `conformance.excise_out_of_scope` (default: true)
-9. Extract `BACKLOG_LABEL` from `conformance.backlog_label` (default: `scope-spillover`)
-10. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
+4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the conformance reviewer subagent spawned in Phase 3; if the file is absent (image predates it), continue — the inline pin is authoritative.
+5. Read `$ARTIFACTS_DIR/implementation.md` for what was implemented (may be missing if validate wrote nothing — continue anyway)
+6. Extract `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
+7. Extract `BLOCK_ON_MATERIAL` from `conformance.block_on_material` (default: true)
+8. Extract `SCOPE_ENFORCEMENT` from `conformance.scope_enforcement` (default: true)
+9. Extract `EXCISE_OOS` from `conformance.excise_out_of_scope` (default: true)
+10. Extract `BACKLOG_LABEL` from `conformance.backlog_label` (default: `scope-spillover`)
+11. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
 
 ## Phase 2: LOCATE SPEC
 
@@ -219,7 +220,7 @@ fi
 
 4. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: code vs spec"
-   - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (applies to every reconcile re-spawn in Phase 3.5 too; do not let it inherit the orchestrator's model)
+   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
    - `prompt`: `RUBRIC_CONTENT` (resolved in Phase 1 step 3) with:
      - `$ARTIFACT_KIND` replaced with `IMPLEMENTATION`
      - `$SPEC_CONTENT` replaced with the spec file contents (or issue body if `NO_SPEC=true`)

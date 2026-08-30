@@ -37,16 +37,17 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
    `## claude_md` section in place of reading `CLAUDE.md` directly, and its `## spec` section in
    place of the spec-file discovery glob below. For any section that is empty or absent from the
    pack, fall back to the existing behavior: read `CLAUDE.md` directly, and discover/read the spec
-   via steps 4-5. No DAG node currently produces `context-pack.md` for the `plan` scenario, so this
+   via steps 5-6. No DAG node currently produces `context-pack.md` for the `plan` scenario, so this
    branch currently always takes the fallback — the same forward-compatible, currently-fallback-only
    plumbing as `dark-factory-refine.md`.
 2. Read `$ARTIFACTS_DIR/issue.json`; this is the authoritative issue context artifact.
 3. Read `/opt/refinement-skills/architect-prompt.md` — you will pass this to the review subagent
-4. Find the spec file (fallback branch of step 1): look in `docs/superpowers/specs/` for a file
+4. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for both the architect subagent (Phase 3) and the Phase 3.5 conformance reviewer subagent; if the file is absent (image predates it), continue — the inline pin is authoritative.
+5. Find the spec file (fallback branch of step 1): look in `docs/superpowers/specs/` for a file
    matching this issue's topic, or check the issue comments for a "Refinement Pipeline — Spec
    Generated" report that names the spec path
-5. Read the spec file (fallback branch of step 1, if `## spec` was absent or empty from the pack)
-6. Compute the affected file set and load memory context:
+6. Read the spec file (fallback branch of step 1, if `## spec` was absent or empty from the pack)
+7. Compute the affected file set and load memory context:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
@@ -55,7 +56,7 @@ INTENT=$(jq -r '.intent' "$ARTIFACTS_DIR/issue.json")
 MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh" plan)  # TARGET-PATH
 ```
 
-7. Include `$MEMORY_CONTEXT` in the context for this phase. If empty, proceed without memory context.
+8. Include `$MEMORY_CONTEXT` in the context for this phase. If empty, proceed without memory context.
    If a memory entry marks an approach as AVOID, do not plan steps that use that approach.
 
    Bake relevant memory lessons directly into the plan task steps — do not leave them as a
@@ -84,7 +85,7 @@ Prepend `$MEMORY_CONTEXT` to the architect prompt as a "## Memory: Accumulated P
 
 Spawn an architect subagent using the Agent tool:
 - `description`: "Architect review: validate plan against spec"
-- `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (applies to every re-spawn in the review cycle below too; do not let it inherit the orchestrator's model)
+- `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
 - `prompt`: Content of `architect-prompt.md` with `$SPEC_CONTENT` and `$PLAN_CONTENT` replaced with the actual file contents, and with `$MEMORY_CONTEXT` prepended as shown:
 
   ```
@@ -121,7 +122,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 4. Build the artifact content: the plan document text is `$PLAN_CONTENT`
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
-   - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8 (applies to every reconcile re-spawn too; do not let it inherit the orchestrator's model)
+   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
    - `prompt`: `RUBRIC_CONTENT` (resolved in step 1) with:
      - `$ARTIFACT_KIND` replaced with `PLAN`
      - `$SPEC_CONTENT` replaced with the spec file contents

@@ -132,4 +132,41 @@ bash "$GATE" "$CASE10" "not-a-number" "Conformance (Gate 2)" >/dev/null 2>&1 || 
 [ "$RC" = "1" ] || { echo "FAIL case10 expected exit 1 on non-numeric issue number, got $RC"; exit 1; }
 [ ! -s "$STUB_LOG" ] || { echo "FAIL case10 expected no tracker calls for a non-numeric issue number, got:"; cat "$STUB_LOG"; exit 1; }
 
+# --- Case 11: verifier.py PASS artifact proceeds through the real gate ------
+CASE11_DIR=$(mktemp -d)
+VERIFIER11="${CASE11_DIR}/verifier.sh"
+cat > "$VERIFIER11" <<'SCRIPT'
+#!/usr/bin/env bash
+exit 0
+SCRIPT
+chmod +x "$VERIFIER11"
+CASE11_OUT="${WORK}/case11-loop-verdict.md"
+PYTHONPATH="${REPO_ROOT}/scripts" python3 -m factory_core.verifier \
+  --clone-dir "$CASE11_DIR" --loop-name "integration-loop" \
+  --verifier-path "verifier.sh" --side-effect-level 1 \
+  run --out "$CASE11_OUT"
+NEEDS_DISCUSSION_LABEL="false"
+RC=$(_run "$CASE11_OUT" "271" "loop:integration-loop")
+[ "$RC" = "0" ] || { echo "FAIL case11 expected exit 0 (verifier PASS), got $RC"; cat "${WORK}/stderr.log"; exit 1; }
+rm -rf "$CASE11_DIR"
+
+# --- Case 12: verifier.py BLOCKED artifact (missing verifier path) blocks ----
+CASE12_DIR=$(mktemp -d)
+CASE12_OUT="${WORK}/case12-loop-verdict.md"
+PYTHONPATH="${REPO_ROOT}/scripts" python3 -m factory_core.verifier \
+  --clone-dir "$CASE12_DIR" --loop-name "integration-loop" \
+  --verifier-path "does-not-exist.sh" --side-effect-level 1 \
+  run --out "$CASE12_OUT"
+NEEDS_DISCUSSION_LABEL="false"
+RC=$(_run "$CASE12_OUT" "271" "loop:integration-loop")
+[ "$RC" = "1" ] || { echo "FAIL case12 expected exit 1 (verifier BLOCKED), got $RC"; cat "${WORK}/stderr.log"; exit 1; }
+rm -rf "$CASE12_DIR"
+
+# --- Case 13: missing verifier-written artifact — true silent miss, blocks --
+CASE13_OUT="${WORK}/case13-does-not-exist.md"
+NEEDS_DISCUSSION_LABEL="false"
+RC=$(_run "$CASE13_OUT" "271" "loop:integration-loop")
+[ "$RC" = "1" ] || { echo "FAIL case13 expected exit 1 (missing artifact), got $RC"; cat "${WORK}/stderr.log"; exit 1; }
+grep -q "tracker comment" "$STUB_LOG" || { echo "FAIL case13: missing loop verdict must post a failure comment"; cat "$STUB_LOG"; exit 1; }
+
 echo PASS

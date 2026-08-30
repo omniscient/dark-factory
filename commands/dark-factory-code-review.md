@@ -34,17 +34,18 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 2. If `code_review.enabled` is `false`:
    - Write `$ARTIFACTS_DIR/review.md` with content: `STATUS: SKIPPED\nREASON: code_review.enabled=false`
    - Exit cleanly (`exit 0`) — `status-in-review` and `report` proceed.
-3. Extract `BLOCK_THRESHOLD` from `code_review.block_threshold` (default: `high`).
-4. Extract `FAIL_OPEN` from `code_review.fail_open` (default: `true`).
-5. Extract `MAX_FINDINGS` from `code_review.max_findings` (default: `50`).
-6. Extract `SEVERITY_ORDER_CSV` from `code_review.severity_order` in config.yaml:
+3. Read `/opt/refinement-skills/VERIFIER-CONTRACT.md` — the checker-invocation contract for the code-reviewer subagent spawned in Phase 3; if the file is absent (image predates it), continue — the inline pin is authoritative.
+4. Extract `BLOCK_THRESHOLD` from `code_review.block_threshold` (default: `high`).
+5. Extract `FAIL_OPEN` from `code_review.fail_open` (default: `true`).
+6. Extract `MAX_FINDINGS` from `code_review.max_findings` (default: `50`).
+7. Extract `SEVERITY_ORDER_CSV` from `code_review.severity_order` in config.yaml:
    ```bash
    CONFIG_YAML=$(git rev-parse --show-toplevel)/.claude/skills/refinement/config.yaml
    SEVERITY_ORDER_CSV=$(yq '.code_review.severity_order | join(",")' "$CONFIG_YAML" 2>/dev/null || true)
    SEVERITY_ORDER_CSV="${SEVERITY_ORDER_CSV:-low,medium,high,critical}"
    ```
-6. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
-7. Determine `PR_NUM`:
+8. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
+9. Determine `PR_NUM`:
    ```bash
    BRANCH=$(git branch --show-current)
    PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" --json number --jq '.[0].number // empty')
@@ -92,7 +93,7 @@ rm -f "$RANK_IN"
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 3. Spawn a code-reviewer subagent using the Agent tool:
    - `description`: "Code review: diff vs correctness/security"
-   - `model`: `claude-opus-4-8` — **always** pin this subagent to Opus 4.8; do not let it inherit the orchestrator's model.
+   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
    - `prompt`: `RUBRIC_CONTENT` (resolved in step 2) with `$ISSUE_CONTEXT` replaced by the issue context from step 1 and `$DIFF_CONTENT` replaced by the contents of `$ARTIFACTS_DIR/review_diff.txt`.
 4. Save the subagent's full output to `$ARTIFACTS_DIR/review_findings.md`.
    - If the subagent errored, timed out, or returned empty/unparseable output:
