@@ -93,6 +93,60 @@ def _loop_state_key(key: str, name: str, suffix: str) -> str:
     return f"{key}:loop:{name}:{suffix}"
 
 
+def evaluate_stop_condition(
+    loop_entry: Optional[dict],
+    issue_num: int,
+    phase: str,
+    ceiling: int,
+    state_file: Path = _DEFAULT_STATE,
+    now: Optional[int] = None,
+    peek: bool = False,
+) -> StopVerdict:
+    """Cap-class-only stop evaluator (state-file I/O only — no subprocess, no
+    network; the external-predicate class lives on #197's verifier.py seam, never
+    here). `loop_entry=None` is the parity path every live scheduler.sh site uses
+    today: identical to the inline get_retry_count/compare/increment_retry sequence
+    it replaces, with one addition — a runs.jsonl audit row on trip (R8).
+    `peek=True` evaluates without advancing any counter (used only by the
+    conflict-resolve site, whose own increment is deferred to its dispatch branch —
+    see Task 12's note); a trip is still recorded and audited under peek.
+    """
+    key = _make_key(issue_num, phase)
+    count = get_retry_count(key, state_file)
+
+    reason: Optional[str] = None
+    detail: dict = {}
+    if count >= ceiling:
+        reason, detail = "max_retries", {"count": count, "ceiling": ceiling}
+
+    if reason is None and loop_entry is not None:
+        reason, detail = _evaluate_loop_caps(loop_entry, key, ceiling, state_file, now)
+
+    if reason is not None:
+        verdict = StopVerdict(True, reason, detail)
+        _append_stop_audit_row(verdict, issue_num, phase, loop_entry)
+        return verdict
+
+    if not peek:
+        increment_retry(key, state_file)
+        if loop_entry is not None:
+            _advance_loop_counters(loop_entry, key, state_file, now)
+    return StopVerdict(False)
+
+
+def _evaluate_loop_caps(loop_entry, key, ceiling, state_file, now):
+    return None, {}
+
+
+def _advance_loop_counters(loop_entry, key, state_file, now):
+    pass
+
+
+def _append_stop_audit_row(verdict: StopVerdict, issue_num: int, phase: str,
+                            loop_entry: Optional[dict]) -> None:
+    pass  # wired for real in Task 7
+
+
 def _read_state(state_file: Path) -> dict:
     if not state_file.exists():
         return {}

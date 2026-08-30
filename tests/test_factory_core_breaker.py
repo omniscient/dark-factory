@@ -4,11 +4,25 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from factory_core import run_record
 from factory_core.breaker import (
     get_retry_count, increment_retry, reset_retry, set_retry_count, trip_to_blocked,
 )
 from factory_core.breaker import StopVerdict, _loop_state_key
+from factory_core.breaker import evaluate_stop_condition
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_runs_jsonl(tmp_path, monkeypatch):
+    """Never let a tripped StopVerdict's audit row (#198 R8) write to the real
+    /var/lib/dark-factory/runs.jsonl (df#300 precedent — mirrors
+    tests/test_run_record.py's own hermeticity fixture). _append_jsonl reads the
+    JSONL_PATH module global directly, not a re-derived SCHEDULER_STATE_DIR, so it
+    must be patched directly rather than via SCHEDULER_STATE_DIR."""
+    monkeypatch.setattr(run_record, "JSONL_PATH", tmp_path / "runs.jsonl")
 
 
 def test_get_retry_count_missing_file(tmp_path):
@@ -280,3 +294,44 @@ def test_reset_retry_clears_delivery_shadow_counter(tmp_path):
     reset_retry("9:refine", sf)
 
     assert get_retry_count("9:refine:delivery", sf) == 0
+
+
+def test_evaluate_stop_condition_parity_not_tripped_increments(tmp_path):
+    sf = tmp_path / "state.json"
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v == StopVerdict(False)
+    assert get_retry_count("42:plan", sf) == 1
+
+
+def test_evaluate_stop_condition_parity_trips_at_ceiling(tmp_path):
+    sf = tmp_path / "state.json"
+    for _ in range(3):
+        evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+    # tripped: counter is NOT incremented past the ceiling
+    assert get_retry_count("42:plan", sf) == 3
+
+
+def test_evaluate_stop_condition_peek_does_not_increment(tmp_path):
+    sf = tmp_path / "state.json"
+    v = evaluate_stop_condition(None, 42, "resolve", ceiling=3, state_file=sf, peek=True)
+    assert v == StopVerdict(False)
+    assert get_retry_count("42:resolve", sf) == 0
+
+
+def test_evaluate_stop_condition_peek_still_trips_at_ceiling(tmp_path):
+    sf = tmp_path / "state.json"
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:resolve", 3, sf)
+    v = evaluate_stop_condition(None, 42, "resolve", ceiling=3, state_file=sf, peek=True)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+
+
+def test_evaluate_stop_condition_parity_never_writes_loop_key(tmp_path):
+    sf = tmp_path / "state.json"
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    data = json.loads(sf.read_text())
+    assert not any(":loop:" in k for k in data)
