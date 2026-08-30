@@ -30,7 +30,22 @@ export -f docker
 claude() { echo "stub"; return 0; }
 export -f claude
 
+# #362: entrypoint.sh's current-run.json write happens unconditionally at source
+# time (entrypoint.sh:117-121), before the ENTRYPOINT_SOURCE_ONLY guard returns --
+# export a scratch CURRENT_RUN_DIR before sourcing so this test can never clobber
+# the real /var/lib/dark-factory/current-run.json (mirrors
+# tests/test_entrypoint_current_run.sh:32-33).
+CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-sw-rundir-XXXXXX)
+export CURRENT_RUN_DIR
+
+# #362 isolation snapshot: capture the real ledger's state before sourcing so the
+# end-of-file assertions can prove this test never wrote to it, without depending
+# on absolute counts (the shared production path already carries unrelated rows).
+BEFORE_TESTRUN_COUNT=0
+[ -f /var/lib/dark-factory/runs.jsonl ] && BEFORE_TESTRUN_COUNT=$(grep -c '"run_id": "test-run-' /var/lib/dark-factory/runs.jsonl 2>/dev/null)
+
 ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
+SOURCE_TIME_RUN_ID="$RUN_ID"
 
 trap - ERR
 set +e; set +u; set +o pipefail
@@ -63,6 +78,7 @@ assert_true() {
 
 echo "--- A: matched (structured rate_limit_event line, real pino shape, status=rejected) ---"
 SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-sw-statedir-XXXXXX)
+export SCHEDULER_STATE_DIR
 NOW=$(date -u +%s)
 RESET_EPOCH=$((NOW+600))
 TMP_OUT=$(mktemp /tmp/ep-sw-out-XXXXXX)
@@ -461,6 +477,19 @@ assert_true "failure comment claims the (true) successful board move" \
   "grep -q 'Issue has been moved to \*\*Blocked\*\*\.' '${COMMENT_LOG_DIR}/dffactoryfailure.md'"
 
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$COMMENT_LOG_DIR"
+
+echo ""
+echo "--- I: isolation -- the real /var/lib/dark-factory ledger was never touched (#362) ---"
+if [ -f /var/lib/dark-factory/runs.jsonl ]; then
+  AFTER_TESTRUN_COUNT=$(grep -c '"run_id": "test-run-' /var/lib/dark-factory/runs.jsonl 2>/dev/null)
+  assert_eq "runs.jsonl test-run-* row count unchanged" "$BEFORE_TESTRUN_COUNT" "$AFTER_TESTRUN_COUNT"
+fi
+if [ -f /var/lib/dark-factory/current-run.json ]; then
+  AFTER_CURRENT_RUN_ID=$(python3 -c "import json; print(json.load(open('/var/lib/dark-factory/current-run.json')).get('run_id',''))" 2>/dev/null || echo "")
+  assert_true "current-run.json was not overwritten with this run's source-time run_id" \
+    "[ '$AFTER_CURRENT_RUN_ID' != '$SOURCE_TIME_RUN_ID' ]"
+fi
+rm -rf "$CURRENT_RUN_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"

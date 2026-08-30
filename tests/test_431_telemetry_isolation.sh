@@ -30,6 +30,9 @@ claude() { echo "Stub post-mortem text for test."; return 0; }
 export -f claude
 
 # ── Source entrypoint (guard prevents clone + main execution) ─────────────
+CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-cr-rundir-XXXXXX)
+export CURRENT_RUN_DIR
+
 ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
 
 # Reset strict error handling from entrypoint — test context manages its own flow
@@ -108,7 +111,7 @@ rm -f "$GIT_LOG"
 # dir, but would now delete the checkout's parent). Matches
 # test_entrypoint_cost_report_regression.sh:118, which never includes
 # CLONE_DIR in its cleanup for the identical reason.
-rm -rf "$ARTIFACTS_DIR"
+rm -rf "$ARTIFACTS_DIR" "$CURRENT_RUN_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"
