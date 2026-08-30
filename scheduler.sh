@@ -502,6 +502,21 @@ check_pr_mergeable() {
   echo "${result:-UNKNOWN}"
 }
 
+# --- Branch lookup: does a feat/issue-<N>-* branch exist on origin? ---
+# Plain-git probe (CodeHost contract principle 3: branch/ref existence is host-agnostic
+# and stays outside the provider abstraction, codehost/base.py). Runs over git's
+# smart-HTTP transport, not the GitHub REST/GraphQL API, so it costs no quota (#366) —
+# call this BEFORE get_pr_for_issue so the common recovery path never touches the
+# rate-limited API at all. Never echo $url — it embeds GH_TOKEN.
+# Bounded and prompt-free: a smart-HTTP stall must not hang the poll loop, and a 401
+# must fail closed (empty) instead of blocking on a credential prompt.
+branch_exists_for_issue() {
+  local url
+  url=$(python3 "$FACTORY_PROVIDERS_CLI" codehost remote-url 2>/dev/null) || true
+  [ -n "$url" ] || { echo ""; return; }
+  GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --heads "$url" "refs/heads/feat/issue-${1}-*" 2>/dev/null | head -1 | awk '{print $2}' || true
+}
+
 # --- PR lookup: open PR number for an issue's feature branch ("" if none) ---
 # Matches the branch convention used throughout the workflow: feat/issue-<N>-<slug>.
 # `--repo` is REQUIRED: the scheduler runs at /workspace (not a git checkout — the repo

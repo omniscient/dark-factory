@@ -16,6 +16,7 @@ export FACTORY_CORE_CLI="$SCRIPT_DIR/../scripts/factory_core/cli.py"
 STUB_LOG=$(mktemp /tmp/sched-test-stubs-XXXXXX.log)
 gh()               { echo "gh $*"               >> "$STUB_LOG"; return 0; }
 docker()           { echo "docker $*"           >> "$STUB_LOG"; return 0; }
+git()              { echo "git $*"              >> "$STUB_LOG"; return 0; }
 set_board_status() { echo "set_board_status $*" >> "$STUB_LOG"; return 0; }
 # Default python3 stub (#249): calls into the new providers CLI are logged and never
 # let through for real — that CLI shells out to a real `gh` binary directly (bash
@@ -35,7 +36,7 @@ python3() {
   esac
 }
 reset_python3_stub() { PROVIDERS_CLI_OUTPUT=""; }
-export -f gh docker set_board_status python3
+export -f gh docker git set_board_status python3
 
 # ---- Subprocess-visible stubs ----
 # The exported bash functions above are invisible to non-bash children: the python3 stub
@@ -50,7 +51,7 @@ export -f gh docker set_board_status python3
 # sections below assert on are unchanged; the function runs with STUB_LOG=/dev/null.
 STUB_BIN=$(mktemp -d /tmp/sched-test-bin-XXXXXX)
 SHIM_LOG="$STUB_BIN/calls.log"; : > "$SHIM_LOG"; export SHIM_LOG
-for _stub_cmd in gh docker; do
+for _stub_cmd in gh docker git; do
   printf '#!/usr/bin/env bash
 echo "%s $*" >> "$SHIM_LOG"
 STUB_LOG=/dev/null %s "$@"
@@ -1924,6 +1925,65 @@ export -f get_pr_for_issue check_pr_mergeable dispatch
 # post-refactor bodies, and the R7 parity claim rests entirely on those copies
 # staying in sync with the real call sites.
 assert_eq "evaluate_stop wired 4x in scheduler.sh" "4" "$(grep -c 'evaluate_stop "\$ISSUE"' "$SCHED")"
+
+# ==========================================
+# Y: branch_exists_for_issue — helper-level git ls-remote probe (#371)
+# ==========================================
+echo ""
+echo "--- Y: branch_exists_for_issue — git ls-remote probe ---"
+
+# Y1: git prints a matching ref -> helper echoes the ref; the logged argv is captured
+# via the subprocess PATH-shim (SHIM_LOG), not STUB_LOG — `timeout` execs a real `git`
+# binary, not a bash function, so only a re-entrant PATH shim script (not an exported
+# bash function) is visible to it. The URL embeds a fake token to prove requirement 6
+# (never leaked) without touching a real credential.
+# Section N (its --id-routing python3 override, and the N20 variant it leaves behind) permanently overrides the `python3` stub with its own
+# --id-routing case and never restores the generic PROVIDERS_CLI_OUTPUT-echoing form —
+# reset_python3_stub() only clears the variable, not the function body. Redefine the
+# generic stub here so PROVIDERS_CLI_OUTPUT is honored again for this section.
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+export -f python3
+PROVIDERS_CLI_OUTPUT="https://x-access-token:ghs_zzfaketoken371@github.com/omniscient/dark-factory.git"
+git() {
+  echo "git $*" >> "$STUB_LOG"
+  printf 'deadbeefcafefeed\trefs/heads/feat/issue-371-x\n'
+  return 0
+}
+export -f git
+> "$STUB_LOG"
+Y1_OUT=$(branch_exists_for_issue 371)
+assert_eq "Y1: helper echoes the matched ref" "refs/heads/feat/issue-371-x" "$Y1_OUT"
+assert_eq "Y1b: git invoked with the expected ls-remote argv (via SHIM_LOG, not STUB_LOG)" \
+  "1" "$(grep -c '^git ls-remote --heads https://x-access-token:ghs_zzfaketoken371@github.com/omniscient/dark-factory.git refs/heads/feat/issue-371-\*$' "$SHIM_LOG" || echo 0)"
+
+# Y2: git ls-remote exits non-zero (transport error) -> helper echoes empty, no crash
+git() { echo "git $*" >> "$STUB_LOG"; return 128; }
+export -f git
+Y2_OUT=$(branch_exists_for_issue 371)
+assert_eq "Y2: git ls-remote failure -> empty" "" "$Y2_OUT"
+
+# Y3: codehost remote-url itself returns empty (e.g. GH_TOKEN missing) -> empty, and git
+# is never invoked at all (checked via a SHIM_LOG line-count delta, since SHIM_LOG is a
+# suite-wide accumulating log with no reset hook).
+PROVIDERS_CLI_OUTPUT=""
+git() { echo "git $*" >> "$STUB_LOG"; return 0; }
+export -f git
+Y3_SHIM_BEFORE=$(wc -l < "$SHIM_LOG")
+Y3_OUT=$(branch_exists_for_issue 371)
+Y3_SHIM_AFTER=$(wc -l < "$SHIM_LOG")
+assert_eq "Y3: empty remote-url -> empty" "" "$Y3_OUT"
+assert_eq "Y3b: git never called when remote-url is empty" "$Y3_SHIM_BEFORE" "$Y3_SHIM_AFTER"
+
+reset_python3_stub
+git() { echo "git $*" >> "$STUB_LOG"; return 0; }
+export -f git
+> "$STUB_LOG"
 
 # ==========================================
 # Cleanup
