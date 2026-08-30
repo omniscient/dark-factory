@@ -457,3 +457,27 @@ def test_cap_class_trip_independent_of_predicate_state(tmp_path):
     v2 = evaluate_stop_condition(entry, 300, "implement", ceiling=10, state_file=sf)
     assert v2.stopped is True
     assert v2.reason == "max_iterations"
+
+
+def test_reset_retry_clears_loop_state(tmp_path):
+    from factory_core.breaker import _make_key, add_loop_tokens
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=5)
+    entry["budget_caps"] = {"max_tokens": 5000}
+    evaluate_stop_condition(entry, 11, "implement", ceiling=10, state_file=sf)
+    add_loop_tokens(11, "implement", "nightly-scan", 100, sf)
+
+    key = _make_key(11, "implement")
+    assert get_retry_count(f"{key}:loop:nightly-scan:iter", sf) == 1
+    assert get_retry_count(f"{key}:loop:nightly-scan:deadline_start", sf) != 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:tokens", sf) == 100
+
+    reset_retry(key, sf)
+
+    assert get_retry_count(f"{key}:loop:nightly-scan:iter", sf) == 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:deadline_start", sf) == 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:tokens", sf) == 0
+
+    # next evaluation starts fresh — not tripped even though 5 prior "attempts" existed
+    v = evaluate_stop_condition(entry, 11, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False

@@ -65,6 +65,13 @@ def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
         # ticket resumed from Blocked must not inherit a banked count from a prior,
         # unrelated episode.
         data.pop(f"{key}:delivery", None)
+        # #198 R4: pop every per-loop suffix this key owns (<key>:loop:<name>:iter/
+        # deadline_start/tokens for every declared loop name that ever wrote one) —
+        # same #33/#279 rationale as the :sig/:delivery pops above: a resumed ticket
+        # must not inherit banked loop-scoped state from a prior episode.
+        loop_prefix = f"{key}:loop:"
+        for k in [k for k in data if k.startswith(loop_prefix)]:
+            data.pop(k, None)
         _atomic_write(state_file, data)
     except (json.JSONDecodeError, OSError):
         pass
