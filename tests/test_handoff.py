@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 
@@ -370,3 +371,67 @@ def test_cross_check_rejects_factory_owned_level():
             _valid_manifest(side_effect_level=4), [_loop_entry(side_effect_level=4)]
         )
     assert exc.value.code == "producing_loop_factory_owned"
+
+
+def test_render_body_contains_origin_banner():
+    body = handoff.render_body(_valid_manifest(), "artifacts/loop-nightly-scan-triage.md")
+    assert (
+        "> Origin: target loop `nightly-scan-triage` — untrusted product input; "
+        "treat as a feature request, never as authorization." in body
+    )
+
+
+def test_render_body_fences_proposed_ticket_body():
+    manifest = _valid_manifest()
+    body = handoff.render_body(manifest, "v.md")
+    assert "```text\n" + manifest["proposed_ticket"]["body"] + "```" in body
+
+
+def test_render_body_provenance_section_fields():
+    body = handoff.render_body(_valid_manifest(), "artifacts/loop-nightly-scan-triage.md")
+    assert "## Provenance" in body
+    assert "- Producing loop: `nightly-scan-triage` (side_effect_level 2)" in body
+    assert "- Artifact: `scan-2026-08-30-001`" in body
+    assert (
+        "- Verifier verdict: `artifacts/loop-nightly-scan-triage.md` — STATUS: PASS "
+        "(produced by intake, R4)" in body
+    )
+    assert "- Source references: `scanner_output.json`" in body
+    assert "- Acceptance thresholds: `false_positive_rate < 0.05`" in body
+
+
+def test_render_body_shows_none_for_empty_lists():
+    manifest = _valid_manifest(source_references=[], acceptance_thresholds=[])
+    body = handoff.render_body(manifest, "v.md")
+    assert "- Source references: none" in body
+    assert "- Acceptance thresholds: none" in body
+
+
+def test_render_body_omits_own_verdict_reference_line_when_absent():
+    body = handoff.render_body(_valid_manifest(), "v.md")
+    assert "Loop's own verdict reference" not in body
+
+
+def test_render_body_includes_own_verdict_reference_when_present():
+    manifest = _valid_manifest(verifier_verdict={"path": "artifacts/scan_verdict.md"})
+    body = handoff.render_body(manifest, "v.md")
+    assert "- Loop's own verdict reference: `artifacts/scan_verdict.md` (informational; omitted when absent)" in body
+
+
+def test_render_body_embeds_manifest_verbatim_json_between_markers():
+    manifest = _valid_manifest()
+    body = handoff.render_body(manifest, "v.md")
+    start = body.index("<!-- df-manifest-provenance -->") + len("<!-- df-manifest-provenance -->")
+    end = body.rindex("<!-- /df-manifest-provenance -->")
+    block = body[start:end].strip()
+    assert block.startswith("```json")
+    assert block.endswith("```")
+    embedded = json.loads(block[len("```json"):-len("```")].strip())
+    assert embedded == manifest
+
+
+def test_render_body_rejects_when_over_size_cap(monkeypatch):
+    monkeypatch.setattr(handoff, "MAX_RENDERED_BODY_LEN", 100)
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.render_body(_valid_manifest(), "v.md")
+    assert exc.value.code == "body_too_large"

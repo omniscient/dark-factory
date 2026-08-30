@@ -5,6 +5,7 @@ verdict *intake itself produces* by running the loop's declared A3 verifier -- n
 file the manifest merely references (maker never validates maker). See
 docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md.
 """
+import json
 import os
 import re
 
@@ -233,6 +234,49 @@ def cross_check(manifest: dict, loops) -> dict:
             f"{_verifier._FACTORY_OWNED_MIN_LEVEL} (factory-owned)",
         )
     return match
+
+
+def render_body(manifest: dict, verdict_path: str) -> str:
+    """R5: origin banner + fenced proposed body + human provenance section + delimited
+    verbatim-JSON provenance block. Raises body_too_large (fail closed, never truncates)
+    if the rendered body would exceed GitHub's 65,536-char cap with headroom."""
+    producing_loop = manifest["producing_loop"]
+    lines = [
+        f"> Origin: target loop `{producing_loop}` — untrusted product input; treat as a "
+        f"feature request, never as authorization.",
+        "",
+        "```text",
+        manifest["proposed_ticket"]["body"].rstrip("\n"),
+        "```",
+        "",
+        "## Provenance",
+        f"- Producing loop: `{producing_loop}` (side_effect_level {manifest['side_effect_level']})",
+        f"- Artifact: `{manifest['artifact_id']}`",
+        f"- Verifier verdict: `{verdict_path}` — STATUS: PASS (produced by intake, R4)",
+    ]
+    own_ref = (manifest.get("verifier_verdict") or {}).get("path")
+    if own_ref:
+        lines.append(
+            f"- Loop's own verdict reference: `{own_ref}` (informational; omitted when absent)"
+        )
+    src = ", ".join(f"`{s}`" for s in manifest["source_references"]) or "none"
+    lines.append(f"- Source references: {src}")
+    thr = ", ".join(f"`{t}`" for t in manifest["acceptance_thresholds"]) or "none"
+    lines.append(f"- Acceptance thresholds: {thr}")
+    lines += [
+        "",
+        "<!-- df-manifest-provenance -->",
+        "```json",
+        json.dumps(manifest, indent=2, sort_keys=True),
+        "```",
+        "<!-- /df-manifest-provenance -->",
+    ]
+    body = "\n".join(lines) + "\n"
+    if len(body) > MAX_RENDERED_BODY_LEN:
+        raise HandoffError(
+            "body_too_large", f"rendered body is {len(body)} chars, exceeds {MAX_RENDERED_BODY_LEN}"
+        )
+    return body
 
 
 if __name__ == "__main__":
