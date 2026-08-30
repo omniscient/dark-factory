@@ -1,6 +1,10 @@
 import json
 import os
 import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +39,17 @@ def set_retry_count(key: str, value: int, state_file: Path = _DEFAULT_STATE) -> 
     _write_key(key, value, state_file)
 
 
+def add_loop_tokens(issue_num: int, phase: str, name: str, n: int,
+                     state_file: Path = _DEFAULT_STATE) -> int:
+    """Adds n to the per-loop cumulative token counter. No live caller today (R7) —
+    becomes live only when a future loop-dispatcher passes a populated loop_entry
+    and reports run_record totals through this helper."""
+    key = _loop_state_key(_make_key(issue_num, phase), name, "tokens")
+    new = get_retry_count(key, state_file) + n
+    _write_key(key, new, state_file)
+    return new
+
+
 def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
     if not state_file.exists():
         return
@@ -51,6 +66,13 @@ def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
         # ticket resumed from Blocked must not inherit a banked count from a prior,
         # unrelated episode.
         data.pop(f"{key}:delivery", None)
+        # #198 R4: pop every per-loop suffix this key owns (<key>:loop:<name>:iter/
+        # deadline_start/tokens for every declared loop name that ever wrote one) —
+        # same #33/#279 rationale as the :sig/:delivery pops above: a resumed ticket
+        # must not inherit banked loop-scoped state from a prior episode.
+        loop_prefix = f"{key}:loop:"
+        for k in [k for k in data if k.startswith(loop_prefix)]:
+            data.pop(k, None)
         _atomic_write(state_file, data)
     except (json.JSONDecodeError, OSError):
         pass
@@ -74,6 +96,159 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def _make_key(issue_num: int, phase: str) -> str:
     return str(issue_num) if phase == "implement" else f"{issue_num}:{phase}"
+
+
+@dataclass
+class StopVerdict:
+    """Result of evaluate_stop_condition. `reason` is one of the closed cap-class
+    enum {"max_retries", "max_iterations", "deadline", "max_tokens"} or None (not
+    tripped) — never a value implying a *successful* stop; that verdict class lives
+    on #197's verifier seam, never here (spec R3)."""
+    stopped: bool
+    reason: "str | None" = None
+    detail: dict = field(default_factory=dict)
+
+
+def _loop_state_key(key: str, name: str, suffix: str) -> str:
+    return f"{key}:loop:{name}:{suffix}"
+
+
+def format_trip_reason(verdict: StopVerdict, loop_entry: Optional[dict]) -> str:
+    """The exact R13 trip-reason strings passed to trip_to_blocked. No live caller
+    constructs the three loop-scoped variants today (R7's live sites only ever see
+    reason="max_retries", which scheduler.sh already renders byte-identically
+    inline) — this is the tested, ready-to-call implementation for the loop-scoped
+    reasons, for whichever future loop-dispatcher wires a populated loop_entry."""
+    d = verdict.detail
+    if verdict.reason == "max_retries":
+        return f"retry limit of {d['ceiling']} reached"
+    name = loop_entry["name"]
+    fb = (loop_entry.get("scheduling") or {}).get("failure_behavior", "")[:64]
+    if verdict.reason == "max_iterations":
+        return (f"loop '{name}' stop condition 'max_iterations' reached "
+                 f"({d['iter']}/{d['max_iterations']}); declared failure_behavior: {fb}")
+    if verdict.reason == "deadline":
+        return (f"loop '{name}' stop condition 'deadline' reached "
+                 f"({d['elapsed']}s >= {d['deadline_seconds']}s); declared failure_behavior: {fb}")
+    if verdict.reason == "max_tokens":
+        return (f"loop '{name}' stop condition 'max_tokens' reached "
+                 f"({d['tokens']}/{d['max_tokens']} tokens); declared failure_behavior: {fb}")
+    raise ValueError(f"format_trip_reason: unknown reason {verdict.reason!r}")
+
+
+def evaluate_stop_condition(
+    loop_entry: Optional[dict],
+    issue_num: int,
+    phase: str,
+    ceiling: int,
+    state_file: Path = _DEFAULT_STATE,
+    now: Optional[int] = None,
+    peek: bool = False,
+) -> StopVerdict:
+    """Cap-class-only stop evaluator (state-file I/O only — no subprocess, no
+    network; the external-predicate class lives on #197's verifier.py seam, never
+    here). `loop_entry=None` is the parity path every live scheduler.sh site uses
+    today: identical to the inline get_retry_count/compare/increment_retry sequence
+    it replaces, with one addition — a runs.jsonl audit row on trip (R8).
+    `peek=True` evaluates without advancing any counter (used only by the
+    conflict-resolve site, whose own increment is deferred to its dispatch branch —
+    see Task 12's note); a trip is still recorded and audited under peek.
+    """
+    key = _make_key(issue_num, phase)
+    count = get_retry_count(key, state_file)
+
+    reason: Optional[str] = None
+    detail: dict = {}
+    if count >= ceiling:
+        reason, detail = "max_retries", {"count": count, "ceiling": ceiling}
+
+    if reason is None and loop_entry is not None:
+        reason, detail = _evaluate_loop_caps(loop_entry, key, ceiling, state_file, now)
+
+    if reason is not None:
+        verdict = StopVerdict(True, reason, detail)
+        _append_stop_audit_row(verdict, issue_num, phase, loop_entry)
+        return verdict
+
+    if not peek:
+        increment_retry(key, state_file)
+        if loop_entry is not None:
+            _advance_loop_counters(loop_entry, key, state_file, now)
+    return StopVerdict(False)
+
+
+def _evaluate_loop_caps(loop_entry, key, ceiling, state_file, now):
+    name = loop_entry["name"]
+    scheduling = loop_entry.get("scheduling") or {}
+    budget_caps = loop_entry.get("budget_caps") or {}
+    max_iterations = scheduling.get("max_iterations")
+    deadline_seconds = scheduling.get("deadline_seconds")
+    max_tokens = budget_caps.get("max_tokens")
+
+    if max_iterations is not None:
+        cur_iter = get_retry_count(_loop_state_key(key, name, "iter"), state_file)
+        effective = min(max_iterations, ceiling)
+        if cur_iter >= effective:
+            return "max_iterations", {
+                "iter": cur_iter, "max_iterations": max_iterations,
+                "effective_ceiling": effective,
+            }
+
+    if deadline_seconds is not None:
+        deadline_start = get_retry_count(_loop_state_key(key, name, "deadline_start"), state_file)
+        if deadline_start:
+            now_ts = now if now is not None else int(time.time())
+            elapsed = now_ts - deadline_start
+            if elapsed >= deadline_seconds:
+                return "deadline", {"elapsed": elapsed, "deadline_seconds": deadline_seconds}
+
+    if max_tokens is not None:
+        cur_tokens = get_retry_count(_loop_state_key(key, name, "tokens"), state_file)
+        if cur_tokens >= max_tokens:
+            return "max_tokens", {"tokens": cur_tokens, "max_tokens": max_tokens}
+
+    return None, {}
+
+
+def _advance_loop_counters(loop_entry, key, state_file, now):
+    name = loop_entry["name"]
+    iter_key = _loop_state_key(key, name, "iter")
+    deadline_key = _loop_state_key(key, name, "deadline_start")
+    new_iter = get_retry_count(iter_key, state_file) + 1
+    _write_key(iter_key, new_iter, state_file)
+    if get_retry_count(deadline_key, state_file) == 0:
+        now_ts = now if now is not None else int(time.time())
+        _write_key(deadline_key, now_ts, state_file)
+
+
+def _append_stop_audit_row(verdict: StopVerdict, issue_num: int, phase: str,
+                            loop_entry: Optional[dict]) -> None:
+    from . import run_record
+    failure_behavior = None
+    loop_name = None
+    if loop_entry is not None:
+        loop_name = loop_entry.get("name")
+        fb = (loop_entry.get("scheduling") or {}).get("failure_behavior")
+        if fb:
+            failure_behavior = fb[:64]
+    try:
+        run_record.append_stop_record({
+            "stage": "stop_condition",
+            "verdict": "STOPPED",
+            "issue_number": issue_num,
+            "phase": phase,
+            "loop": loop_name,
+            "reason": verdict.reason,
+            "failure_behavior": failure_behavior,
+            "detail": verdict.detail,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    except OSError as exc:
+        # Operator review (2026-08-29): this runs on scheduler.sh's live dispatch
+        # path under `set -euo pipefail`; a propagated OSError would turn one
+        # unwritable runs.jsonl into a dead poll loop. Mirror _write_key's posture
+        # (swallow OSError) but say so loudly — the verdict itself is unaffected.
+        print(f"breaker: stop-condition audit row not written: {exc}", file=sys.stderr)
 
 
 def _read_state(state_file: Path) -> dict:

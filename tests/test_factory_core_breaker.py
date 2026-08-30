@@ -4,14 +4,40 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from factory_core import run_record
 from factory_core.breaker import (
     get_retry_count, increment_retry, reset_retry, set_retry_count, trip_to_blocked,
 )
+from factory_core.breaker import StopVerdict, _loop_state_key
+from factory_core.breaker import evaluate_stop_condition
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_runs_jsonl(tmp_path, monkeypatch):
+    """Never let a tripped StopVerdict's audit row (#198 R8) write to the real
+    /var/lib/dark-factory/runs.jsonl (df#300 precedent — mirrors
+    tests/test_run_record.py's own hermeticity fixture). _append_jsonl reads the
+    JSONL_PATH module global directly, not a re-derived SCHEDULER_STATE_DIR, so it
+    must be patched directly rather than via SCHEDULER_STATE_DIR."""
+    monkeypatch.setattr(run_record, "JSONL_PATH", tmp_path / "runs.jsonl")
 
 
 def test_get_retry_count_missing_file(tmp_path):
     assert get_retry_count("42:refine", tmp_path / "state.json") == 0
+
+
+def test_stop_verdict_defaults():
+    v = StopVerdict(stopped=False)
+    assert v.reason is None
+    assert v.detail == {}
+
+
+def test_loop_state_key_shape():
+    assert _loop_state_key("42:plan", "nightly-scan", "iter") == "42:plan:loop:nightly-scan:iter"
+    assert _loop_state_key("42", "nightly-scan", "tokens") == "42:loop:nightly-scan:tokens"
 
 
 def test_increment_creates_key(tmp_path):
@@ -268,3 +294,332 @@ def test_reset_retry_clears_delivery_shadow_counter(tmp_path):
     reset_retry("9:refine", sf)
 
     assert get_retry_count("9:refine:delivery", sf) == 0
+
+
+def test_evaluate_stop_condition_parity_not_tripped_increments(tmp_path):
+    sf = tmp_path / "state.json"
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v == StopVerdict(False)
+    assert get_retry_count("42:plan", sf) == 1
+
+
+def test_evaluate_stop_condition_parity_trips_at_ceiling(tmp_path):
+    sf = tmp_path / "state.json"
+    for _ in range(3):
+        evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+    # tripped: counter is NOT incremented past the ceiling
+    assert get_retry_count("42:plan", sf) == 3
+
+
+def test_evaluate_stop_condition_peek_does_not_increment(tmp_path):
+    sf = tmp_path / "state.json"
+    v = evaluate_stop_condition(None, 42, "resolve", ceiling=3, state_file=sf, peek=True)
+    assert v == StopVerdict(False)
+    assert get_retry_count("42:resolve", sf) == 0
+
+
+def test_evaluate_stop_condition_peek_still_trips_at_ceiling(tmp_path):
+    sf = tmp_path / "state.json"
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:resolve", 3, sf)
+    v = evaluate_stop_condition(None, 42, "resolve", ceiling=3, state_file=sf, peek=True)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+
+
+def test_evaluate_stop_condition_parity_never_writes_loop_key(tmp_path):
+    sf = tmp_path / "state.json"
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    data = json.loads(sf.read_text())
+    assert not any(":loop:" in k for k in data)
+
+
+def _loop(name="nightly-scan", **scheduling_extra):
+    entry = {
+        "name": name,
+        "purpose": "test loop",
+        "side_effect_level": 2,
+        "discovery": {"trigger": "cron:0 6 * * *", "inputs": []},
+        "handoff": {"manifest": "h.py", "outputs": []},
+        "verification": {"verifier": "v.py", "stop_condition": "s.py"},
+        "persistence": {"artifacts": []},
+        "scheduling": {"failure_behavior": "escalate_to_human", **scheduling_extra},
+    }
+    return entry
+
+
+def test_max_iterations_trips_after_n_evaluations(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=3)
+    for _ in range(3):
+        v = evaluate_stop_condition(entry, 7, "implement", ceiling=10, state_file=sf)
+        assert v.stopped is False
+    v = evaluate_stop_condition(entry, 7, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_iterations"
+    assert v.detail["iter"] == 3
+    assert v.detail["max_iterations"] == 3
+
+
+def test_max_iterations_tighten_only_factory_ceiling_wins(tmp_path):
+    """side_effect_level 5, max_iterations=10, ceiling=3: the 4th evaluation trips
+    on the factory ceiling, not the declared 10 (R2)."""
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=10)
+    entry["side_effect_level"] = 5
+    for _ in range(3):
+        evaluate_stop_condition(entry, 7, "implement", ceiling=3, state_file=sf)
+    v = evaluate_stop_condition(entry, 7, "implement", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+
+
+def test_deadline_trips_at_exact_boundary(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(deadline_seconds=60)
+    v0 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1000)
+    assert v0.stopped is False
+    v1 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1059)
+    assert v1.stopped is False
+    v2 = evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1060)
+    assert v2.stopped is True
+    assert v2.reason == "deadline"
+    assert v2.detail["elapsed"] == 60
+
+
+def test_deadline_start_anchored_once(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop(deadline_seconds=60)
+    evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1000)
+    evaluate_stop_condition(entry, 8, "implement", ceiling=10, state_file=sf, now=1010)
+    # _make_key(8, "implement") is the bare "8" (implement's special case, breaker.py's
+    # existing convention) — the loop-scoped key is "8:loop:<name>:...", NOT
+    # "8:implement:loop:...". Matches Task 2's own _loop_state_key test.
+    assert get_retry_count("8:loop:nightly-scan:deadline_start", sf) == 1000
+
+
+def test_max_tokens_absent_never_trips(tmp_path):
+    sf = tmp_path / "state.json"
+    entry = _loop()  # no max_tokens anywhere — budget_caps absent entirely
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False
+
+
+def test_max_tokens_trips_after_add_loop_tokens(tmp_path):
+    from factory_core.breaker import add_loop_tokens
+    sf = tmp_path / "state.json"
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    add_loop_tokens(9, "implement", "nightly-scan", 1000, sf)
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_tokens"
+    assert v.detail == {"tokens": 1000, "max_tokens": 1000}
+
+
+def test_populated_entry_no_caps_declared_behaves_as_parity(tmp_path):
+    """Absence of every cap field means parity (R2): a populated entry with no
+    max_iterations/deadline_seconds/budget_caps never trips on cap grounds."""
+    sf = tmp_path / "state.json"
+    entry = _loop()
+    for _ in range(5):
+        v = evaluate_stop_condition(entry, 10, "implement", ceiling=10, state_file=sf)
+        assert v.stopped is False
+
+
+def test_add_loop_tokens_from_run_record_totals_shape(tmp_path):
+    """R7: add_loop_tokens is 'unit-tested against run_record totals fixtures' —
+    pin the intended data source (input + output tokens summed), not a bare int."""
+    from factory_core.breaker import add_loop_tokens
+    sf = tmp_path / "state.json"
+    totals = {"gen_ai.usage.input_tokens": 600, "gen_ai.usage.output_tokens": 400}
+    n = totals["gen_ai.usage.input_tokens"] + totals["gen_ai.usage.output_tokens"]
+    assert add_loop_tokens(9, "implement", "nightly-scan", n, sf) == 1000
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    v = evaluate_stop_condition(entry, 9, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is True and v.reason == "max_tokens"
+
+
+def test_cap_class_trip_independent_of_predicate_state(tmp_path):
+    """R6's third fixture assertion, proven here directly against breaker.py — it
+    needs nothing from #197's verifier.py, so it does not wait on Task 17: with
+    max_iterations reached, evaluate_stop_condition trips with reason
+    max_iterations regardless of any predicate/verification field's content."""
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=1)
+    entry["verification"]["stop_condition"] = "scripts/cost_report_marker_check.py"
+    v = evaluate_stop_condition(entry, 300, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False
+    v2 = evaluate_stop_condition(entry, 300, "implement", ceiling=10, state_file=sf)
+    assert v2.stopped is True
+    assert v2.reason == "max_iterations"
+
+
+def test_reset_retry_clears_loop_state(tmp_path):
+    from factory_core.breaker import _make_key, add_loop_tokens
+    sf = tmp_path / "state.json"
+    entry = _loop(max_iterations=5)
+    entry["budget_caps"] = {"max_tokens": 5000}
+    evaluate_stop_condition(entry, 11, "implement", ceiling=10, state_file=sf)
+    add_loop_tokens(11, "implement", "nightly-scan", 100, sf)
+
+    key = _make_key(11, "implement")
+    assert get_retry_count(f"{key}:loop:nightly-scan:iter", sf) == 1
+    assert get_retry_count(f"{key}:loop:nightly-scan:deadline_start", sf) != 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:tokens", sf) == 100
+
+    reset_retry(key, sf)
+
+    assert get_retry_count(f"{key}:loop:nightly-scan:iter", sf) == 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:deadline_start", sf) == 0
+    assert get_retry_count(f"{key}:loop:nightly-scan:tokens", sf) == 0
+
+    # next evaluation starts fresh — not tripped even though 5 prior "attempts" existed
+    v = evaluate_stop_condition(entry, 11, "implement", ceiling=10, state_file=sf)
+    assert v.stopped is False
+
+
+def test_trip_appends_runs_jsonl_row_parity_path(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:plan", 3, sf)
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    rows = [json.loads(l) for l in jsonl.read_text().strip().splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["stage"] == "stop_condition"
+    assert row["verdict"] == "STOPPED"
+    assert row["issue_number"] == 42
+    assert row["phase"] == "plan"
+    assert row["loop"] is None
+    # R8: no run_id — a breaker decision is not a run. Load-bearing for
+    # reconcile_cost_reports.py's _load_jsonl_stubs, which skips any row without one
+    # (confirmed: scripts/reconcile_cost_reports.py:65-68) rather than reporting a
+    # spurious "irrecoverable" run.
+    assert "run_id" not in row
+    assert row["reason"] == "max_retries"
+    assert row["failure_behavior"] is None
+    assert "timestamp" in row
+
+
+def test_non_tripped_evaluation_writes_no_row(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert not jsonl.exists() or jsonl.read_text() == ""
+
+
+def test_trip_row_failure_behavior_truncated_to_64_chars(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    entry = _loop(max_iterations=1)
+    entry["scheduling"]["failure_behavior"] = "x" * 200
+    # First evaluation: :iter is 0, effective=min(1,10)=1, 0 >= 1 is False — not
+    # tripped yet (matches the ">=  evaluated before the dispatch" semantics Task 4
+    # already exercises). The second evaluation trips.
+    evaluate_stop_condition(entry, 43, "implement", ceiling=10, state_file=sf)
+    evaluate_stop_condition(entry, 43, "implement", ceiling=10, state_file=sf)
+    row = json.loads(jsonl.read_text().strip().splitlines()[0])
+    assert row["failure_behavior"] == "x" * 64
+    assert row["loop"] == "nightly-scan"
+    assert row["reason"] == "max_iterations"
+
+
+def test_trip_audit_row_write_failure_does_not_swallow_verdict(tmp_path, monkeypatch, capsys):
+    """Operator review (2026-08-29): the audit row is written on the live scheduler.sh
+    path, where `EVAL_RESULT=$(evaluate_stop ...)` runs under `set -euo pipefail` — an
+    OSError escaping here (unwritable runs.jsonl, flock failure) would exit
+    breaker-evaluate-stop non-zero and kill the whole poll loop at the moment a
+    ticket trips. Today's inline compare has no such surface (_write_key swallows
+    OSError). The trip verdict must survive; the failure is reported on stderr."""
+    sf = tmp_path / "state.json"
+    import factory_core.run_record as run_record
+
+    def _boom(record):
+        raise OSError("read-only runs.jsonl")
+
+    monkeypatch.setattr(run_record, "append_stop_record", _boom)
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:plan", 3, sf)
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+    assert "stop-condition audit row not written" in capsys.readouterr().err
+
+
+from factory_core.breaker import format_trip_reason
+
+
+def test_format_trip_reason_max_retries():
+    v = StopVerdict(True, "max_retries", {"count": 3, "ceiling": 3})
+    assert format_trip_reason(v, None) == "retry limit of 3 reached"
+
+
+def test_format_trip_reason_max_iterations():
+    entry = _loop(max_iterations=3)
+    v = StopVerdict(True, "max_iterations", {"iter": 3, "max_iterations": 3, "effective_ceiling": 3})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'max_iterations' reached (3/3); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_deadline():
+    entry = _loop(deadline_seconds=60)
+    v = StopVerdict(True, "deadline", {"elapsed": 61, "deadline_seconds": 60})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'deadline' reached (61s >= 60s); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_max_tokens():
+    entry = _loop()
+    entry["budget_caps"] = {"max_tokens": 1000}
+    v = StopVerdict(True, "max_tokens", {"tokens": 1000, "max_tokens": 1000})
+    assert format_trip_reason(v, entry) == (
+        "loop 'nightly-scan' stop condition 'max_tokens' reached (1000/1000 tokens); "
+        "declared failure_behavior: escalate_to_human"
+    )
+
+
+def test_format_trip_reason_failure_behavior_truncated_to_64_chars():
+    """R13 AC: 'A 200-character failure_behavior reaches the trip_to_blocked
+    comment ... truncated to 64 characters.' This is the trip_to_blocked-comment
+    half of that AC (format_trip_reason's output is what a future caller passes to
+    trip_to_blocked's `reason` argument); the runs.jsonl-row half is
+    test_trip_row_failure_behavior_truncated_to_64_chars in Task 7."""
+    entry = _loop(max_iterations=3)
+    entry["scheduling"]["failure_behavior"] = "x" * 200
+    v = StopVerdict(True, "max_iterations", {"iter": 3, "max_iterations": 3, "effective_ceiling": 3})
+    result = format_trip_reason(v, entry)
+    assert result.endswith("declared failure_behavior: " + "x" * 64)
+    assert "x" * 65 not in result
+
+
+# `pytest` is already imported at module scope (Task 3, step 0's hermeticity fixture)
+# — reuse it, don't add a second import/alias.
+@pytest.mark.parametrize("count,ceiling", [(0, 3), (2, 3), (3, 3), (4, 3)])
+def test_evaluate_stop_condition_parity_table(tmp_path, count, ceiling):
+    """For loop_entry=None, matches today's inline
+    get_retry_count/compare/increment_retry exactly: stopped iff count >= ceiling;
+    counter incremented iff not stopped."""
+    sf = tmp_path / "state.json"
+    from factory_core.breaker import set_retry_count
+    set_retry_count("99:plan", count, sf)
+    v = evaluate_stop_condition(None, 99, "plan", ceiling=ceiling, state_file=sf)
+    expect_stopped = count >= ceiling
+    assert v.stopped == expect_stopped
+    expect_count = count if expect_stopped else count + 1
+    assert get_retry_count("99:plan", sf) == expect_count

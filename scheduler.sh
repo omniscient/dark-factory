@@ -155,6 +155,20 @@ reset_retry() {
   STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-reset --key "$1"
 }
 
+# --- Cap-class stop-condition evaluator (thin adapter — logic lives in factory_core/breaker.py) ---
+# Usage: evaluate_stop <issue_num> <phase> <ceiling> [--peek] — echoes
+# "stopped=true|false reason=<enum|none>". loop_entry is always None at every live
+# site today (#198 R7) — no call site here declares a populated loop.
+# SCHEDULER_STATE_DIR is forwarded explicitly, matching check_failure_signature's
+# existing precedent (l.395) — scheduler.sh assigns it without `export` (l.10), so a
+# runs.jsonl-writing call path (R8) must pass it through by hand or the audit row
+# lands under the default /var/lib/dark-factory instead of the configured state dir.
+evaluate_stop() {
+  local issue_num="$1" phase="$2" ceiling="$3" peek_flag="${4:-}"
+  STATE_FILE="$STATE_FILE" SCHEDULER_STATE_DIR="$SCHEDULER_STATE_DIR" python3 "$FACTORY_CORE_CLI" \
+    breaker-evaluate-stop --issue "$issue_num" --phase "$phase" --ceiling "$ceiling" $peek_flag
+}
+
 # --- Duplicate dispatch prevention ---
 is_issue_running() {
   local issue_num="$1"
@@ -899,8 +913,8 @@ stage_conflict_resolve() {
       fi
       RESOLVE_DELIVERY_SKIP=1
     else
-      RETRIES=$(get_retry_count "${ISSUE}:resolve")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      EVAL_RESULT=$(evaluate_stop "$ISSUE" "resolve" "$MAX_RETRIES" --peek)
+      if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
         trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
         continue
       fi
@@ -1047,12 +1061,11 @@ stage_blocked_retry() {
         continue
         ;;
       count|*)
-        RETRIES=$(get_retry_count "$ISSUE")
-        if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+        EVAL_RESULT=$(evaluate_stop "$ISSUE" "implement" "$MAX_RETRIES")
+        if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
           trip_to_blocked "$ISSUE" "implement" "retry limit of ${MAX_RETRIES} reached"
           continue
         fi
-        increment_retry "$ISSUE"
         ;;
     esac
     # Branch-aware: a blocked item that already has a PR (e.g. red CI gated above, or a
@@ -1112,12 +1125,11 @@ stage_plan() {
         continue
         ;;
       count|*)
-        RETRIES=$(get_retry_count "${ISSUE}:plan")
-        if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        EVAL_RESULT=$(evaluate_stop "$ISSUE" "plan" "$REFINE_MAX_RETRIES")
+        if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
           trip_to_blocked "$ISSUE" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
           continue
         fi
-        increment_retry "${ISSUE}:plan"
         ;;
     esac
 
@@ -1180,12 +1192,11 @@ stage_refine() {
         continue
         ;;
       count|*)
-        RETRIES=$(get_retry_count "${ISSUE}:refine")
-        if [ "$RETRIES" -ge "$REFINE_MAX_RETRIES" ]; then
+        EVAL_RESULT=$(evaluate_stop "$ISSUE" "refine" "$REFINE_MAX_RETRIES")
+        if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
           trip_to_blocked "$ISSUE" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
           continue
         fi
-        increment_retry "${ISSUE}:refine"
         ;;
     esac
 

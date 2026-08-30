@@ -28,7 +28,7 @@ _calls_trigger_fn() {
 
 _is_state_dir_candidate() {
   local f="$1"
-  grep -qE 'run-record (record|assemble)|error-signature-write' "$f" && return 0
+  grep -qE 'run-record (record|assemble)|error-signature-write|breaker-evaluate-stop' "$f" && return 0
   grep -q 'ENTRYPOINT_SOURCE_ONLY=1' "$f" && _calls_trigger_fn "$f" && return 0
   return 1
 }

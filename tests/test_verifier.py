@@ -321,3 +321,87 @@ def test_cli_timeout_override(tmp_path):
     )
     assert result.returncode == 0  # CLI itself succeeds; the timeout is recorded as BLOCKED
     assert "STATUS: BLOCKED" in (tmp_path / "out.md").read_text()
+
+
+import json
+from pathlib import Path
+from factory_core.verifier import resolve_verifier, run_verifier, normalize_verdict
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def test_run_verifier_forwards_clone_dir_to_child_env(tmp_path):
+    """Probes the actual #197 behavior this task's whole test-seam design depends
+    on, rather than assuming it. If this fails, run_verifier only forwards a fixed
+    whitelist that excludes a caller-supplied CLONE_DIR override — in which case
+    every _fixture_env-based test above needs a different seam (e.g. writing the
+    fixture file into the *real*, resolved CLONE_DIR that resolve_verifier used,
+    rather than a caller-chosen override path), and this plan's design note is wrong
+    and must be revised before continuing Task 17."""
+    env = {"CLONE_DIR": str(tmp_path), "ISSUE_NUM": "1", "PATH": os.environ["PATH"]}
+    probe = tmp_path / "probe.py"
+    # #197's run_verifier raises VerifierError (verified: os.access(X_OK) guard) on
+    # a path that exists but isn't executable; a shebang + the executable bit are
+    # required here or this probe fails for the wrong reason (not-executable), not
+    # the thing it's actually meant to test (env forwarding).
+    probe.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys; sys.stdout.write(os.environ.get('CLONE_DIR', 'MISSING'))\n"
+    )
+    probe.chmod(0o755)
+    exit_code, stdout = run_verifier(str(probe), env)
+    assert str(tmp_path) in stdout
+
+
+def _fixture_env(tmp_path, issue_num, comments):
+    """Reuses Task 16's explicit-env-var JSON fixture seam (not a PYTHONPATH/module
+    swap), so it survives the real subprocess boundary here. Deliberately not a
+    CLONE_DIR-relative filename: CLONE_DIR is the agent-writable working clone in
+    production. #197's resolve_and_run() forwards the factory process environment
+    (dict(os.environ) + CLONE_DIR/ARTIFACTS_DIR/ISSUE_NUM/FACTORY_REPO_SLUG/
+    LOOP_NAME overlays) and run_verifier() passes the env it is given verbatim
+    (test_run_verifier_forwards_clone_dir_to_child_env), so
+    COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH is honoured only when set in the
+    factory process env, which is trusted; it is not reachable from agent-writable
+    clone files."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    fixture = tmp_path / ".cost_report_marker_check_test_fixture.json"
+    fixture.write_text(json.dumps({"comments": comments}))
+    return {
+        "ISSUE_NUM": str(issue_num),
+        "CLONE_DIR": str(clone_dir),
+        "COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH": str(fixture),
+        "PATH": os.environ["PATH"],
+    }
+
+
+def test_cost_report_marker_predicate_blocked_when_absent(tmp_path):
+    env = _fixture_env(tmp_path, 300, [{"body": "unrelated comment"}])
+    resolved = resolve_verifier(str(REPO_ROOT), "scripts/cost_report_marker_check.py")
+    exit_code, stdout = run_verifier(resolved, env)
+    verdict = normalize_verdict(exit_code, stdout, gate_type="stop_condition")
+    assert "STATUS: BLOCKED" in verdict
+
+
+def test_cost_report_marker_predicate_passes_when_present_end_of_run(tmp_path):
+    comments = [{"body": "unrelated"}, {"body": "## Cost Report\n<!-- dark-factory-cost-report -->"}]
+    env = _fixture_env(tmp_path, 300, comments)
+    resolved = resolve_verifier(str(REPO_ROOT), "scripts/cost_report_marker_check.py")
+    exit_code, stdout = run_verifier(resolved, env)
+    verdict = normalize_verdict(exit_code, stdout, gate_type="stop_condition")
+    assert "STATUS: PASS" in verdict
+
+
+def test_cost_report_marker_predicate_passes_when_present_updated_in_place(tmp_path):
+    """#311's own invariant: 'posted early, updated in place under the same marker'
+    must PASS identically to 'posted once at run end' — the predicate checks marker
+    presence, not the path that produced it. Deliberately a single comment (not the
+    two-comments-marker-last shape of the prior case) so this is a structurally
+    different fixture, not the same list twice."""
+    comments = [{"body": "## Cost Report\n<!-- dark-factory-cost-report -->\n(updated)"}]
+    env = _fixture_env(tmp_path, 300, comments)
+    resolved = resolve_verifier(str(REPO_ROOT), "scripts/cost_report_marker_check.py")
+    exit_code, stdout = run_verifier(resolved, env)
+    verdict = normalize_verdict(exit_code, stdout, gate_type="stop_condition")
+    assert "STATUS: PASS" in verdict

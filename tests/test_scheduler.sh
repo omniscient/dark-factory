@@ -1806,6 +1806,126 @@ assert_eq "W7: counter clamped at 0, not negative, after the new dispatch's own 
 > "$STUB_LOG"
 
 # ==========================================
+# X: breaker-evaluate-stop wiring at all four retry sites (#198 R7)
+# ==========================================
+echo ""
+echo "--- X: breaker-evaluate-stop wiring ---"
+
+# X1: stage_blocked_retry (implement) — one evaluate_stop call, trips at ceiling
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+get_pr_for_issue() { echo ""; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f get_pr_for_issue dispatch
+
+_run_blocked_retry_ceiling_step() {
+  local issue="$1"
+  EVAL_RESULT=$(evaluate_stop "$issue" "implement" "$MAX_RETRIES")
+  if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
+    trip_to_blocked "$issue" "implement" "retry limit of ${MAX_RETRIES} reached"
+    return
+  fi
+  dispatch "Fix issue #${issue}" > /dev/null
+}
+
+for i in $(seq 1 "$MAX_RETRIES"); do _run_blocked_retry_ceiling_step 200; done
+assert_eq "X1a: three evaluate_stop calls (implement)" \
+  "3" "$(grep -c 'breaker-evaluate-stop --issue 200 --phase implement --ceiling 3' "$STUB_LOG" || echo 0)"
+assert_eq "X1b: three dispatches, no trip yet" \
+  "3" "$(grep -c 'dispatch Fix issue #200' "$STUB_LOG" || echo 0)"
+> "$STUB_LOG"
+_run_blocked_retry_ceiling_step 200
+assert_eq "X1c: 4th call trips via breaker-trip with exact reason text" \
+  "1" "$(grep -c 'breaker-trip --issue 200 --phase implement --reason retry limit of 3 reached' "$STUB_LOG" || echo 0)"
+assert_eq "X1d: no dispatch on trip" "0" "$(grep -c 'dispatch Fix' "$STUB_LOG")"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# X2: stage_plan — one evaluate_stop call, trips at REFINE_MAX_RETRIES
+_run_plan_ceiling_step() {
+  local issue="$1"
+  EVAL_RESULT=$(evaluate_stop "$issue" "plan" "$REFINE_MAX_RETRIES")
+  if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
+    trip_to_blocked "$issue" "plan" "retry limit of ${REFINE_MAX_RETRIES} reached"
+    return
+  fi
+  dispatch "Plan issue #${issue}" > /dev/null
+}
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do _run_plan_ceiling_step 201; done
+assert_eq "X2a: three evaluate_stop calls (plan)"   "3" "$(grep -c 'breaker-evaluate-stop --issue 201 --phase plan --ceiling 3' "$STUB_LOG" || echo 0)"
+> "$STUB_LOG"
+_run_plan_ceiling_step 201
+assert_eq "X2b: exactly one evaluate_stop call on the tripping step (plan)"   "1" "$(grep -c 'breaker-evaluate-stop --issue 201 --phase plan --ceiling 3' "$STUB_LOG" || echo 0)"
+assert_eq "X2: stage_plan trips via breaker-trip with exact reason text" \
+  "1" "$(grep -c 'breaker-trip --issue 201 --phase plan --reason retry limit of 3 reached' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# X3: stage_refine — one evaluate_stop call, trips at REFINE_MAX_RETRIES
+_run_refine_ceiling_step() {
+  local issue="$1"
+  EVAL_RESULT=$(evaluate_stop "$issue" "refine" "$REFINE_MAX_RETRIES")
+  if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
+    trip_to_blocked "$issue" "refine" "retry limit of ${REFINE_MAX_RETRIES} reached"
+    return
+  fi
+  dispatch "Refine issue #${issue}" > /dev/null
+}
+for i in $(seq 1 "$REFINE_MAX_RETRIES"); do _run_refine_ceiling_step 202; done
+assert_eq "X3a: three evaluate_stop calls (refine)"   "3" "$(grep -c 'breaker-evaluate-stop --issue 202 --phase refine --ceiling 3' "$STUB_LOG" || echo 0)"
+> "$STUB_LOG"
+_run_refine_ceiling_step 202
+assert_eq "X3b: exactly one evaluate_stop call on the tripping step (refine)"   "1" "$(grep -c 'breaker-evaluate-stop --issue 202 --phase refine --ceiling 3' "$STUB_LOG" || echo 0)"
+assert_eq "X3: stage_refine trips via breaker-trip with exact reason text" \
+  "1" "$(grep -c 'breaker-trip --issue 202 --phase refine --reason retry limit of 3 reached' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# X4: stage_conflict_resolve — peek mode: evaluate_stop called with --peek, no increment
+# until the (untouched) CONFLICTING-branch increment_retry fires.
+check_pr_mergeable() { echo "CONFLICTING"; }
+get_pr_for_issue() { echo "500"; }
+export -f check_pr_mergeable get_pr_for_issue
+
+_run_resolve_ceiling_step() {
+  local issue="$1"
+  EVAL_RESULT=$(evaluate_stop "$issue" "resolve" "$MAX_RETRIES" --peek)
+  if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
+    trip_to_blocked "$issue" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
+    return
+  fi
+  PR_NUM=$(get_pr_for_issue "$issue")
+  MERGEABLE=$(check_pr_mergeable "$PR_NUM")
+  if [ "$MERGEABLE" = "CONFLICTING" ]; then
+    increment_retry "${issue}:resolve" || true
+    dispatch "Deconflict issue #${issue}" > /dev/null
+  fi
+}
+for i in $(seq 1 "$MAX_RETRIES"); do _run_resolve_ceiling_step 203; done
+assert_eq "X4a: three --peek evaluate_stop calls (resolve)" \
+  "3" "$(grep -c 'breaker-evaluate-stop --issue 203 --phase resolve --ceiling 3 --peek' "$STUB_LOG" || echo 0)"
+assert_eq "X4b: normal counter incremented by the unchanged CONFLICTING-branch call, not by peek" \
+  "3" "$(get_retry_count "203:resolve")"
+> "$STUB_LOG"
+_run_resolve_ceiling_step 203
+assert_eq "X4c: 4th call trips via breaker-trip with exact resolve reason text" \
+  "1" "$(grep -c 'breaker-trip --issue 203 --phase resolve --reason retry limit of 3 reached for conflict resolution' "$STUB_LOG" || echo 0)"
+
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+# Restore stubs to section defaults
+get_pr_for_issue() { echo ""; }
+check_pr_mergeable() { echo "UNKNOWN"; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+export -f get_pr_for_issue check_pr_mergeable dispatch
+
+# Static drift lock, mirroring the existing #341 precedent at l.1815
+# (rollback_paused_retry wired 4x) — nothing else currently detects divergence
+# between Task 11/12's real scheduler.sh edits and this section's hand-copied
+# post-refactor bodies, and the R7 parity claim rests entirely on those copies
+# staying in sync with the real call sites.
+assert_eq "evaluate_stop wired 4x in scheduler.sh" "4" "$(grep -c 'evaluate_stop "\$ISSUE"' "$SCHED")"
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"

@@ -74,6 +74,21 @@ def _breaker_set_retry(args):
     set_retry_count(args.key, args.value, state_file)
 
 
+def _breaker_evaluate_stop(args):
+    from factory_core.breaker import evaluate_stop_condition
+    state_file = Path(os.environ.get("STATE_FILE",
+                                     "/var/lib/dark-factory/scheduler-state.json"))
+    verdict = evaluate_stop_condition(
+        loop_entry=None,
+        issue_num=args.issue,
+        phase=args.phase,
+        ceiling=args.ceiling,
+        state_file=state_file,
+        peek=args.peek,
+    )
+    print(f"stopped={'true' if verdict.stopped else 'false'} reason={verdict.reason or 'none'}")
+
+
 def _run_record(args):
     sys.argv = ["run_record"] + args.run_record_args
     from factory_core import run_record
@@ -279,6 +294,13 @@ def main():
     bsr.add_argument("--key", required=True)
     bsr.add_argument("--value", type=int, required=True)
     bsr.set_defaults(func=_breaker_set_retry)
+
+    bes = sub.add_parser("breaker-evaluate-stop")
+    bes.add_argument("--issue", type=int, required=True)
+    bes.add_argument("--phase", required=True)
+    bes.add_argument("--ceiling", type=int, required=True)
+    bes.add_argument("--peek", action="store_true")
+    bes.set_defaults(func=_breaker_evaluate_stop)
 
     rr = sub.add_parser("run-record")
     rr.add_argument("run_record_args", nargs=argparse.REMAINDER)

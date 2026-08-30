@@ -511,6 +511,48 @@ def test_budget_caps_unknown_field_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
+def test_scheduling_max_iterations_valid_parses(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["scheduling"]["max_iterations"] = 3
+    parsed["loops"][0]["scheduling"]["deadline_seconds"] = 3600
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["scheduling"]["max_iterations"] == 3
+    assert merged["loops"][0]["scheduling"]["deadline_seconds"] == 3600
+
+
+def test_scheduling_max_iterations_and_deadline_absent_accepted(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
+    merged = adapter.load(str(tmp_path))
+    assert "max_iterations" not in merged["loops"][0]["scheduling"]
+    assert "deadline_seconds" not in merged["loops"][0]["scheduling"]
+
+
+@pytest.mark.parametrize("field", ["max_iterations", "deadline_seconds"])
+@pytest.mark.parametrize("bad_value", [0, True, "60"])
+def test_scheduling_int_field_rejects_bad_values(tmp_path, field, bad_value):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["scheduling"][field] = bad_value
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(adapter.AdapterError,
+                        match=re.escape(f"block 'scheduling': field '{field}' must be an int >= 1")):
+        adapter.load(str(tmp_path))
+
+
+def test_scheduling_budget_caps_max_retry_spend_still_accepted_and_ignored(tmp_path):
+    """#301's budget_caps.max_retry_spend is #234-family territory; #198 must not
+    reject it even though it never reads it."""
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, "max_retry_spend": 10000}
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    merged = adapter.load(str(tmp_path))
+    assert merged["loops"][0]["budget_caps"]["max_retry_spend"] == 10000
+
+
 def test_human_checkpoint_wrong_type_raises(tmp_path):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)

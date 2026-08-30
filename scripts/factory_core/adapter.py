@@ -163,6 +163,7 @@ def _validate_loop(entry, index: int) -> None:
                         list_fields=("artifacts",), required_fields=("artifacts",))
     _validate_subblock(entry, index, name, "scheduling",
                         str_fields=("failure_behavior",),
+                        int_fields=("max_iterations", "deadline_seconds"),
                         required_fields=("failure_behavior",))
     _validate_subblock(entry, index, name, "role_card",
                         str_fields=("name", "output_schema", "fallback_path"),

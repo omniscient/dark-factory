@@ -1219,3 +1219,17 @@ def test_emit_health_event_swallows_post_exceptions(monkeypatch):
     rr.emit_health_event("factory.cost_report.missing", issue=1, run_id="r", detail={})  # no raise
 
     rr.cmd_health_event(_HealthEventArgs())  # must not raise
+
+
+def test_append_stop_record_writes_jsonl_no_seq(tmp_path, monkeypatch):
+    # Module is imported as `rr` in this file (l.8: `from factory_core import
+    # run_record as rr`) — every existing test uses that alias, not `run_record`.
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    posted = []
+    monkeypatch.setattr(rr, "_post_seq_raw", lambda payload: posted.append(payload))
+    rr.append_stop_record({"stage": "stop_condition", "verdict": "STOPPED"})
+    lines = jsonl.read_text().strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"stage": "stop_condition", "verdict": "STOPPED"}
+    assert posted == []
