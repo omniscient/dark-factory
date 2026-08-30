@@ -67,3 +67,19 @@ def test_guide_cites_design_doc_sections():
     assert "provider-abstraction-design.md" in text
     for section in ("§5.1", "§5.2", "§6.1", "§6.3", "§7"):
         assert section in text, f"missing design-doc citation: {section}"
+
+
+def test_guide_documents_handoff_manifest_a5_section():
+    text = _text()
+    assert "## Handoff manifest (A5)" in text
+    for token in (
+        "schema_version", "artifact_id", "producing_loop", "side_effect_level",
+        "source_references", "acceptance_thresholds", "proposed_ticket",
+        "scripts/factory_core/handoff.py",
+        "unknown_producing_loop", "side_effect_level_mismatch",
+        "producing_loop_factory_owned", "verifier_undeclared", "verdict_not_passing",
+        "schema_invalid", "unsafe_string", "body_contains_fence", "body_too_large",
+        "issue_create_failed",
+    ):
+        assert token in text, f"missing A5 token: {token}"
+    assert "never executed" in text or "never runs it" in text
