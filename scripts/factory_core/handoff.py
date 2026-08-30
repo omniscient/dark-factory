@@ -128,6 +128,24 @@ def validate_manifest(manifest: dict) -> None:
             "schema_invalid", "field 'side_effect_level' must be an int between 1 and 6"
         )
 
+    for field in ("source_references", "acceptance_thresholds"):
+        items = manifest[field]
+        if (
+            not isinstance(items, list)
+            or len(items) > MAX_LIST_ITEMS
+            or not all(isinstance(x, str) for x in items)
+        ):
+            raise HandoffError(
+                "schema_invalid",
+                f"field '{field}' must be a list of at most {MAX_LIST_ITEMS} strings",
+            )
+        for item in items:
+            if len(item) > MAX_LIST_ITEM_LEN:
+                raise HandoffError(
+                    "schema_invalid", f"field '{field}' item exceeds {MAX_LIST_ITEM_LEN} chars"
+                )
+            _check_unsafe_string(item, field)
+
 
 if __name__ == "__main__":
     pass

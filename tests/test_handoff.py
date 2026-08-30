@@ -165,3 +165,51 @@ def test_validate_manifest_rejects_out_of_range_side_effect_level(level):
     with pytest.raises(handoff.HandoffError) as exc:
         handoff.validate_manifest(_valid_manifest(side_effect_level=level))
     assert exc.value.code == "schema_invalid"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_non_list_field(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: "not-a-list"}))
+    assert exc.value.code == "schema_invalid"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_non_string_list_item(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: [123]}))
+    assert exc.value.code == "schema_invalid"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_too_many_list_items(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: ["x"] * (handoff.MAX_LIST_ITEMS + 1)}))
+    assert exc.value.code == "schema_invalid"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_oversize_list_item(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: ["x" * (handoff.MAX_LIST_ITEM_LEN + 1)]}))
+    assert exc.value.code == "schema_invalid"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_backtick_in_list_item(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: ["has`backtick"]}))
+    assert exc.value.code == "unsafe_string"
+
+
+@pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
+def test_validate_manifest_rejects_newline_in_list_item(field):
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(**{field: ["has\nnewline"]}))
+    assert exc.value.code == "unsafe_string"
+
+
+def test_validate_manifest_accepts_empty_lists():
+    handoff.validate_manifest(
+        _valid_manifest(source_references=[], acceptance_thresholds=[])
+    )  # no raise
