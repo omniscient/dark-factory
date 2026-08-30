@@ -21,13 +21,15 @@ import sys
 from pathlib import Path
 
 COST_MARKER = "<!-- dark-factory-cost-report -->"
-# Test-only seam, gated by an env var name #197's run_verifier() never forwards to
-# a real production invocation (its forwarded set is CLONE_DIR/ARTIFACTS_DIR/
-# ISSUE_NUM/FACTORY_REPO_SLUG/LOOP_NAME, verified in test_verifier.py). Deliberately
-# NOT a CLONE_DIR-relative filename: CLONE_DIR is the agent-writable working clone,
-# so sniffing a fixed filename there would let any code that can write into the
-# clone fake marker evidence -- the exact #300 shape this predicate exists to catch.
-# The fixture path travels in the env var itself, so it needs no fixed location.
+# Test-only env-var seam. #197's resolve_and_run() forwards the factory process
+# environment to the predicate (dict(os.environ) plus the CLONE_DIR/ARTIFACTS_DIR/
+# ISSUE_NUM/FACTORY_REPO_SLUG/LOOP_NAME overlays), so this variable is honoured
+# only if it is set in the factory process env -- which is trusted. What the seam
+# is deliberately NOT is a CLONE_DIR-relative filename: CLONE_DIR is the
+# agent-writable working clone, so sniffing a fixed filename there would let any
+# code that can write into the clone fake marker evidence -- the exact #300 shape
+# this predicate exists to catch. The fixture path travels in the env var itself,
+# so it is not reachable from agent-writable clone files.
 _TEST_FIXTURE_ENV = "COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH"
 
 

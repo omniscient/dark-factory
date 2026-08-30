@@ -357,10 +357,13 @@ def _fixture_env(tmp_path, issue_num, comments):
     """Reuses Task 16's explicit-env-var JSON fixture seam (not a PYTHONPATH/module
     swap), so it survives the real subprocess boundary here. Deliberately not a
     CLONE_DIR-relative filename: CLONE_DIR is the agent-writable working clone in
-    production, and COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH is never part of
-    run_verifier's forwarded env there (proven by
-    test_run_verifier_forwards_clone_dir_to_child_env's sibling whitelist, which
-    this var is not on), so this seam has no production-reachable path."""
+    production. #197's resolve_and_run() forwards the factory process environment
+    (dict(os.environ) + CLONE_DIR/ARTIFACTS_DIR/ISSUE_NUM/FACTORY_REPO_SLUG/
+    LOOP_NAME overlays) and run_verifier() passes the env it is given verbatim
+    (test_run_verifier_forwards_clone_dir_to_child_env), so
+    COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH is honoured only when set in the
+    factory process env, which is trusted; it is not reachable from agent-writable
+    clone files."""
     clone_dir = tmp_path / "clone"
     clone_dir.mkdir()
     fixture = tmp_path / ".cost_report_marker_check_test_fixture.json"

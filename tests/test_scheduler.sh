@@ -1851,8 +1851,10 @@ _run_plan_ceiling_step() {
   dispatch "Plan issue #${issue}" > /dev/null
 }
 for i in $(seq 1 "$REFINE_MAX_RETRIES"); do _run_plan_ceiling_step 201; done
+assert_eq "X2a: three evaluate_stop calls (plan)"   "3" "$(grep -c 'breaker-evaluate-stop --issue 201 --phase plan --ceiling 3' "$STUB_LOG" || echo 0)"
 > "$STUB_LOG"
 _run_plan_ceiling_step 201
+assert_eq "X2b: exactly one evaluate_stop call on the tripping step (plan)"   "1" "$(grep -c 'breaker-evaluate-stop --issue 201 --phase plan --ceiling 3' "$STUB_LOG" || echo 0)"
 assert_eq "X2: stage_plan trips via breaker-trip with exact reason text" \
   "1" "$(grep -c 'breaker-trip --issue 201 --phase plan --reason retry limit of 3 reached' "$STUB_LOG" || echo 0)"
 
@@ -1869,8 +1871,10 @@ _run_refine_ceiling_step() {
   dispatch "Refine issue #${issue}" > /dev/null
 }
 for i in $(seq 1 "$REFINE_MAX_RETRIES"); do _run_refine_ceiling_step 202; done
+assert_eq "X3a: three evaluate_stop calls (refine)"   "3" "$(grep -c 'breaker-evaluate-stop --issue 202 --phase refine --ceiling 3' "$STUB_LOG" || echo 0)"
 > "$STUB_LOG"
 _run_refine_ceiling_step 202
+assert_eq "X3b: exactly one evaluate_stop call on the tripping step (refine)"   "1" "$(grep -c 'breaker-evaluate-stop --issue 202 --phase refine --ceiling 3' "$STUB_LOG" || echo 0)"
 assert_eq "X3: stage_refine trips via breaker-trip with exact reason text" \
   "1" "$(grep -c 'breaker-trip --issue 202 --phase refine --reason retry limit of 3 reached' "$STUB_LOG" || echo 0)"
 
