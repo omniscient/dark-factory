@@ -8,10 +8,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core.breaker import (
     get_retry_count, increment_retry, reset_retry, set_retry_count, trip_to_blocked,
 )
+from factory_core.breaker import StopVerdict, _loop_state_key
 
 
 def test_get_retry_count_missing_file(tmp_path):
     assert get_retry_count("42:refine", tmp_path / "state.json") == 0
+
+
+def test_stop_verdict_defaults():
+    v = StopVerdict(stopped=False)
+    assert v.reason is None
+    assert v.detail == {}
+
+
+def test_loop_state_key_shape():
+    assert _loop_state_key("42:plan", "nightly-scan", "iter") == "42:plan:loop:nightly-scan:iter"
+    assert _loop_state_key("42", "nightly-scan", "tokens") == "42:loop:nightly-scan:tokens"
 
 
 def test_increment_creates_key(tmp_path):

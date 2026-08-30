@@ -1,6 +1,8 @@
 import json
 import os
 import subprocess
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -74,6 +76,21 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 def _make_key(issue_num: int, phase: str) -> str:
     return str(issue_num) if phase == "implement" else f"{issue_num}:{phase}"
+
+
+@dataclass
+class StopVerdict:
+    """Result of evaluate_stop_condition. `reason` is one of the closed cap-class
+    enum {"max_retries", "max_iterations", "deadline", "max_tokens"} or None (not
+    tripped) — never a value implying a *successful* stop; that verdict class lives
+    on #197's verifier seam, never here (spec R3)."""
+    stopped: bool
+    reason: "str | None" = None
+    detail: dict = field(default_factory=dict)
+
+
+def _loop_state_key(key: str, name: str, suffix: str) -> str:
+    return f"{key}:loop:{name}:{suffix}"
 
 
 def _read_state(state_file: Path) -> dict:
