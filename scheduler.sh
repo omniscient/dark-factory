@@ -913,8 +913,8 @@ stage_conflict_resolve() {
       fi
       RESOLVE_DELIVERY_SKIP=1
     else
-      RETRIES=$(get_retry_count "${ISSUE}:resolve")
-      if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+      EVAL_RESULT=$(evaluate_stop "$ISSUE" "resolve" "$MAX_RETRIES" --peek)
+      if echo "$EVAL_RESULT" | grep -q "stopped=true"; then
         trip_to_blocked "$ISSUE" "resolve" "retry limit of ${MAX_RETRIES} reached for conflict resolution"
         continue
       fi
