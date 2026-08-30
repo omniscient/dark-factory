@@ -171,14 +171,17 @@ grep -q "tracker comment" "$STUB_LOG" || { echo "FAIL case13: missing loop verdi
 
 # --- Case (#198 R6): cost-report-marker predicate, REAL verifier output piped through REAL gate --
 _cost_report_verify() {
-  # $1=clone_dir (with the fixture file already written) $2=out_file $3=issue_num
+  # $1=fixture json path (already written) $2=out_file $3=issue_num
   # sys.path gets scripts/ itself, not the repo root, so `factory_core` resolves
   # (factory_core lives at scripts/factory_core — same arithmetic as the predicate
   # script's own get_tracker() in Task 16). ISSUE_NUM must be set explicitly: the
   # predicate's main() fails closed (exit 1 / BLOCKED) whenever it's absent or
   # non-numeric, so omitting it here would make the "real-PASS" case fail for the
   # wrong reason and make the "real-BLOCKED" case pass for the wrong reason.
-  CLONE_DIR="$1" ISSUE_NUM="$3" "$_REAL_PY3" - <<PYEOF > "$2"
+  # COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH (not a CLONE_DIR-relative filename —
+  # CLONE_DIR is the agent-writable working clone in production, so the fixture seam
+  # never keys off anything found there) points the predicate at the fixture json.
+  COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH="$1" ISSUE_NUM="$3" "$_REAL_PY3" - <<PYEOF > "$2"
 import sys
 sys.path.insert(0, "${REPO_ROOT}/scripts")
 from factory_core.verifier import resolve_verifier, run_verifier, normalize_verdict
@@ -189,19 +192,17 @@ sys.stdout.write(normalize_verdict(exit_code, stdout, gate_type="stop_condition"
 PYEOF
 }
 
-COST_REPORT_CLONE_ABSENT="${WORK}/cost_report_clone_absent"; mkdir -p "$COST_REPORT_CLONE_ABSENT"
-echo '{"comments": [{"body": "unrelated"}]}' \
-  > "${COST_REPORT_CLONE_ABSENT}/.cost_report_marker_check_test_fixture.json"
-_cost_report_verify "$COST_REPORT_CLONE_ABSENT" "${WORK}/cost_report_blocked_real.md" "300"
+COST_REPORT_FIXTURE_ABSENT="${WORK}/cost_report_fixture_absent.json"
+echo '{"comments": [{"body": "unrelated"}]}' > "$COST_REPORT_FIXTURE_ABSENT"
+_cost_report_verify "$COST_REPORT_FIXTURE_ABSENT" "${WORK}/cost_report_blocked_real.md" "300"
 NEEDS_DISCUSSION_LABEL="true"
 RC=$(_run "${WORK}/cost_report_blocked_real.md" "300" "Stop condition (cost-report-marker)")
 [ "$RC" = "1" ] || { echo "FAIL cost-report-marker real-BLOCKED case: $RC"; cat "${WORK}/cost_report_blocked_real.md"; exit 1; }
 NEEDS_DISCUSSION_LABEL="false"
 
-COST_REPORT_CLONE_PRESENT="${WORK}/cost_report_clone_present"; mkdir -p "$COST_REPORT_CLONE_PRESENT"
-echo '{"comments": [{"body": "<!-- dark-factory-cost-report -->"}]}' \
-  > "${COST_REPORT_CLONE_PRESENT}/.cost_report_marker_check_test_fixture.json"
-_cost_report_verify "$COST_REPORT_CLONE_PRESENT" "${WORK}/cost_report_pass_real.md" "300"
+COST_REPORT_FIXTURE_PRESENT="${WORK}/cost_report_fixture_present.json"
+echo '{"comments": [{"body": "<!-- dark-factory-cost-report -->"}]}' > "$COST_REPORT_FIXTURE_PRESENT"
+_cost_report_verify "$COST_REPORT_FIXTURE_PRESENT" "${WORK}/cost_report_pass_real.md" "300"
 RC=$(_run "${WORK}/cost_report_pass_real.md" "300" "Stop condition (cost-report-marker)")
 [ "$RC" = "0" ] || { echo "FAIL cost-report-marker real-PASS case: $RC"; cat "${WORK}/cost_report_pass_real.md"; exit 1; }
 

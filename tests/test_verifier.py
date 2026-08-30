@@ -354,16 +354,23 @@ def test_run_verifier_forwards_clone_dir_to_child_env(tmp_path):
 
 
 def _fixture_env(tmp_path, issue_num, comments):
-    """Reuses Task 16's CLONE_DIR-relative JSON fixture seam (not a PYTHONPATH/module
-    swap) — the whole point of that design (see Task 16's test-seam note) is that it
-    needs nothing beyond CLONE_DIR, one of the four vars #197's own spec commits
-    run_verifier to always forward, so it survives the real subprocess boundary here
-    without any dependency on unverified extra-env-var forwarding behavior."""
+    """Reuses Task 16's explicit-env-var JSON fixture seam (not a PYTHONPATH/module
+    swap), so it survives the real subprocess boundary here. Deliberately not a
+    CLONE_DIR-relative filename: CLONE_DIR is the agent-writable working clone in
+    production, and COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH is never part of
+    run_verifier's forwarded env there (proven by
+    test_run_verifier_forwards_clone_dir_to_child_env's sibling whitelist, which
+    this var is not on), so this seam has no production-reachable path."""
     clone_dir = tmp_path / "clone"
     clone_dir.mkdir()
-    fixture = clone_dir / ".cost_report_marker_check_test_fixture.json"
+    fixture = tmp_path / ".cost_report_marker_check_test_fixture.json"
     fixture.write_text(json.dumps({"comments": comments}))
-    return {"ISSUE_NUM": str(issue_num), "CLONE_DIR": str(clone_dir), "PATH": os.environ["PATH"]}
+    return {
+        "ISSUE_NUM": str(issue_num),
+        "CLONE_DIR": str(clone_dir),
+        "COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH": str(fixture),
+        "PATH": os.environ["PATH"],
+    }
 
 
 def test_cost_report_marker_predicate_blocked_when_absent(tmp_path):

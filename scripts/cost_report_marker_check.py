@@ -21,7 +21,14 @@ import sys
 from pathlib import Path
 
 COST_MARKER = "<!-- dark-factory-cost-report -->"
-_TEST_FIXTURE_NAME = ".cost_report_marker_check_test_fixture.json"
+# Test-only seam, gated by an env var name #197's run_verifier() never forwards to
+# a real production invocation (its forwarded set is CLONE_DIR/ARTIFACTS_DIR/
+# ISSUE_NUM/FACTORY_REPO_SLUG/LOOP_NAME, verified in test_verifier.py). Deliberately
+# NOT a CLONE_DIR-relative filename: CLONE_DIR is the agent-writable working clone,
+# so sniffing a fixed filename there would let any code that can write into the
+# clone fake marker evidence -- the exact #300 shape this predicate exists to catch.
+# The fixture path travels in the env var itself, so it needs no fixed location.
+_TEST_FIXTURE_ENV = "COST_REPORT_MARKER_CHECK_TEST_FIXTURE_PATH"
 
 
 def get_tracker():
@@ -32,16 +39,9 @@ def get_tracker():
 
 
 def _load_comments(issue_num: int) -> list:
-    # Test-only seam: a CLONE_DIR-relative fixture file, never present in production
-    # (CLONE_DIR is always a real clone there). CLONE_DIR is one of the four core
-    # env vars #197 commits run_verifier to always forward, unlike an ad hoc extra
-    # var, so this seam has no dependency on unverified subprocess env-forwarding
-    # behavior (see #198 plan Task 16/17's own design note).
-    clone_dir = os.environ.get("CLONE_DIR", "")
-    if clone_dir:
-        fixture = Path(clone_dir) / _TEST_FIXTURE_NAME
-        if fixture.is_file():
-            return json.loads(fixture.read_text()).get("comments", [])
+    fixture_path = os.environ.get(_TEST_FIXTURE_ENV, "")
+    if fixture_path:
+        return json.loads(Path(fixture_path).read_text()).get("comments", [])
     return get_tracker().get_comments(str(issue_num))
 
 
