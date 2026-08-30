@@ -19,7 +19,14 @@ jobs:
       - run: bash tests/test_model_proxy_compose.sh
       - run: bash tests/test_model_proxy_smoke.sh
       - run: bash tests/test_entrypoint_current_run.sh
+      - run: sudo install -d -m 777 /var/lib/dark-factory
       - run: bash tests/test_entrypoint_session_window.sh
+      - run: bash tests/test_entrypoint_error_signature.sh
+      - name: Assert neither entrypoint test touched /var/lib/dark-factory
+        run: test -z "$(ls -A /var/lib/dark-factory)"
+      - name: Remove the /var/lib/dark-factory scratch dir
+        if: always()
+        run: sudo rm -rf /var/lib/dark-factory
       - run: bash tests/test_cost_report_endpoint.sh
       - run: bash tests/test_cost_report_harness_economics.sh
       - run: bash tests/test_run_record_hermetic.sh
