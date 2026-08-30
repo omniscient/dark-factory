@@ -481,3 +481,78 @@ def test_reset_retry_clears_loop_state(tmp_path):
     # next evaluation starts fresh — not tripped even though 5 prior "attempts" existed
     v = evaluate_stop_condition(entry, 11, "implement", ceiling=10, state_file=sf)
     assert v.stopped is False
+
+
+def test_trip_appends_runs_jsonl_row_parity_path(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:plan", 3, sf)
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    rows = [json.loads(l) for l in jsonl.read_text().strip().splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["stage"] == "stop_condition"
+    assert row["verdict"] == "STOPPED"
+    assert row["issue_number"] == 42
+    assert row["phase"] == "plan"
+    assert row["loop"] is None
+    # R8: no run_id — a breaker decision is not a run. Load-bearing for
+    # reconcile_cost_reports.py's _load_jsonl_stubs, which skips any row without one
+    # (confirmed: scripts/reconcile_cost_reports.py:65-68) rather than reporting a
+    # spurious "irrecoverable" run.
+    assert "run_id" not in row
+    assert row["reason"] == "max_retries"
+    assert row["failure_behavior"] is None
+    assert "timestamp" in row
+
+
+def test_non_tripped_evaluation_writes_no_row(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert not jsonl.exists() or jsonl.read_text() == ""
+
+
+def test_trip_row_failure_behavior_truncated_to_64_chars(tmp_path, monkeypatch):
+    sf = tmp_path / "state.json"
+    jsonl = tmp_path / "runs.jsonl"
+    import factory_core.run_record as run_record
+    monkeypatch.setattr(run_record, "JSONL_PATH", jsonl)
+    entry = _loop(max_iterations=1)
+    entry["scheduling"]["failure_behavior"] = "x" * 200
+    # First evaluation: :iter is 0, effective=min(1,10)=1, 0 >= 1 is False — not
+    # tripped yet (matches the ">=  evaluated before the dispatch" semantics Task 4
+    # already exercises). The second evaluation trips.
+    evaluate_stop_condition(entry, 43, "implement", ceiling=10, state_file=sf)
+    evaluate_stop_condition(entry, 43, "implement", ceiling=10, state_file=sf)
+    row = json.loads(jsonl.read_text().strip().splitlines()[0])
+    assert row["failure_behavior"] == "x" * 64
+    assert row["loop"] == "nightly-scan"
+    assert row["reason"] == "max_iterations"
+
+
+def test_trip_audit_row_write_failure_does_not_swallow_verdict(tmp_path, monkeypatch, capsys):
+    """Operator review (2026-08-29): the audit row is written on the live scheduler.sh
+    path, where `EVAL_RESULT=$(evaluate_stop ...)` runs under `set -euo pipefail` — an
+    OSError escaping here (unwritable runs.jsonl, flock failure) would exit
+    breaker-evaluate-stop non-zero and kill the whole poll loop at the moment a
+    ticket trips. Today's inline compare has no such surface (_write_key swallows
+    OSError). The trip verdict must survive; the failure is reported on stderr."""
+    sf = tmp_path / "state.json"
+    import factory_core.run_record as run_record
+
+    def _boom(record):
+        raise OSError("read-only runs.jsonl")
+
+    monkeypatch.setattr(run_record, "append_stop_record", _boom)
+    from factory_core.breaker import set_retry_count
+    set_retry_count("42:plan", 3, sf)
+    v = evaluate_stop_condition(None, 42, "plan", ceiling=3, state_file=sf)
+    assert v.stopped is True
+    assert v.reason == "max_retries"
+    assert "stop-condition audit row not written" in capsys.readouterr().err

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -199,7 +200,32 @@ def _advance_loop_counters(loop_entry, key, state_file, now):
 
 def _append_stop_audit_row(verdict: StopVerdict, issue_num: int, phase: str,
                             loop_entry: Optional[dict]) -> None:
-    pass  # wired for real in Task 7
+    from . import run_record
+    failure_behavior = None
+    loop_name = None
+    if loop_entry is not None:
+        loop_name = loop_entry.get("name")
+        fb = (loop_entry.get("scheduling") or {}).get("failure_behavior")
+        if fb:
+            failure_behavior = fb[:64]
+    try:
+        run_record.append_stop_record({
+            "stage": "stop_condition",
+            "verdict": "STOPPED",
+            "issue_number": issue_num,
+            "phase": phase,
+            "loop": loop_name,
+            "reason": verdict.reason,
+            "failure_behavior": failure_behavior,
+            "detail": verdict.detail,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    except OSError as exc:
+        # Operator review (2026-08-29): this runs on scheduler.sh's live dispatch
+        # path under `set -euo pipefail`; a propagated OSError would turn one
+        # unwritable runs.jsonl into a dead poll loop. Mirror _write_key's posture
+        # (swallow OSError) but say so loudly — the verdict itself is unaffected.
+        print(f"breaker: stop-condition audit row not written: {exc}", file=sys.stderr)
 
 
 def _read_state(state_file: Path) -> dict:
