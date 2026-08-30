@@ -36,6 +36,9 @@ export -f claude
 archon() { echo "{}"; return 0; }
 export -f archon
 
+CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-cr-rundir-XXXXXX)
+export CURRENT_RUN_DIR
+
 ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
 
 trap - ERR
@@ -115,7 +118,7 @@ else
 fi
 
 rm -f "$STDERR_FILE"
-rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR"
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR" "$CURRENT_RUN_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"

@@ -9,6 +9,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# entrypoint.sh hardcodes /opt/dark-factory/scripts/* for identity and the providers
+# CLI, which only exists in the factory image. Point both at the repo checkout so this
+# test runs on a bare CI runner (mirrors tests/test_entrypoint_session_window.sh).
+_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export IDENTITY_SH="${IDENTITY_SH:-$_REPO_DIR/scripts/identity.sh}"
+export FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-$_REPO_DIR/scripts/factory_core/providers/cli.py}"
+
 export GH_TOKEN="stub-token"
 export CLAUDE_CODE_OAUTH_TOKEN="stub-token"
 
@@ -32,7 +39,16 @@ export -f docker
 claude() { echo "stub"; return 0; }
 export -f claude
 
+# #362: see tests/test_entrypoint_session_window.sh for why CURRENT_RUN_DIR must be
+# exported before sourcing.
+CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-es-rundir-XXXXXX)
+export CURRENT_RUN_DIR
+
+BEFORE_TESTRUN_COUNT=0
+[ -f /var/lib/dark-factory/runs.jsonl ] && BEFORE_TESTRUN_COUNT=$(grep -c '"run_id": "test-run-' /var/lib/dark-factory/runs.jsonl 2>/dev/null)
+
 ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
+SOURCE_TIME_RUN_ID="$RUN_ID"
 
 trap - ERR
 set +e; set +u; set +o pipefail
@@ -63,6 +79,7 @@ INTENT=continue; assert_eq "continue -> implement" "implement" "$(_failure_phase
 echo ""
 echo "--- B: delivery_failure classification (no commits, no artifact, fast) ---"
 SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-es-statedir-XXXXXX)
+export SCHEDULER_STATE_DIR
 ARTIFACTS_DIR=$(mktemp -d /tmp/ep-es-artifacts-XXXXXX)
 RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 STUB_COMMIT_COUNT=0
@@ -159,6 +176,19 @@ assert_true "on_failure() threads real TMP_OUT text -> environmental:rate_limit"
 unset -f python3
 rm -f "$TMP_OUT"
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR"
+
+echo ""
+echo "--- G: isolation -- the real /var/lib/dark-factory ledger was never touched (#362) ---"
+if [ -f /var/lib/dark-factory/runs.jsonl ]; then
+  AFTER_TESTRUN_COUNT=$(grep -c '"run_id": "test-run-' /var/lib/dark-factory/runs.jsonl 2>/dev/null)
+  assert_eq "runs.jsonl test-run-* row count unchanged" "$BEFORE_TESTRUN_COUNT" "$AFTER_TESTRUN_COUNT"
+fi
+if [ -f /var/lib/dark-factory/current-run.json ]; then
+  AFTER_CURRENT_RUN_ID=$(python3 -c "import json; print(json.load(open('/var/lib/dark-factory/current-run.json')).get('run_id',''))" 2>/dev/null || echo "")
+  assert_true "current-run.json was not overwritten with this run's source-time run_id" \
+    "[ '$AFTER_CURRENT_RUN_ID' != '$SOURCE_TIME_RUN_ID' ]"
+fi
+rm -rf "$CURRENT_RUN_DIR"
 
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"
