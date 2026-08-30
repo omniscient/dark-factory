@@ -750,3 +750,81 @@ def test_intake_records_reject_row_for_malformed_adapter_yaml(tmp_path, monkeypa
     rec = _json.loads(jsonl.read_text().strip())
     assert rec["verdict"] == "REJECTED"
     assert rec["detail"]["reject_reason"] == "unknown_producing_loop"
+
+
+def test_cli_validate_ok(tmp_path, capsys):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    handoff.main([
+        "--clone-dir", str(clone_dir), "validate", "--manifest-path", manifest_name,
+    ])
+    assert "manifest OK" in capsys.readouterr().out
+
+
+def test_cli_validate_invalid_exits_nonzero(tmp_path, capsys):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest = _valid_manifest()
+    del manifest["artifact_id"]
+    manifest_name = _write_manifest_file(clone_dir, manifest)
+    with pytest.raises(SystemExit) as exc:
+        handoff.main([
+            "--clone-dir", str(clone_dir), "validate", "--manifest-path", manifest_name,
+        ])
+    assert exc.value.code == 1
+    assert "schema_invalid" in capsys.readouterr().err
+
+
+def test_cli_intake_end_to_end_with_real_adapter_yaml(tmp_path, monkeypatch, capsys):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    (clone_dir / ".factory").mkdir(parents=True)
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    import yaml as _yaml
+    adapter_doc = {"schema_version": 2, "loops": [_loop_entry(
+        verification={"verifier": "verify.sh", "stop_condition": "n/a"},
+    )]}
+    (clone_dir / ".factory" / "adapter.yaml").write_text(_yaml.safe_dump(adapter_doc))
+
+    artifacts_dir = tmp_path / "artifacts"
+    calls = []
+    monkeypatch.setattr(
+        handoff, "_default_create_issue",
+        lambda title, body, labels: (calls.append((title, body, labels)), "5150")[1],
+    )
+
+    handoff.main([
+        "--clone-dir", str(clone_dir), "intake",
+        "--manifest-path", manifest_name, "--artifacts-dir", str(artifacts_dir),
+    ])
+    assert "intake OK" in capsys.readouterr().out
+    assert len(calls) == 1
+
+
+def test_cli_intake_rejects_and_exits_nonzero(tmp_path, monkeypatch, capsys):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    (clone_dir / ".factory").mkdir(parents=True)
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest(producing_loop="ghost-loop"))
+
+    import yaml as _yaml
+    adapter_doc = {"schema_version": 2, "loops": [_loop_entry()]}
+    (clone_dir / ".factory" / "adapter.yaml").write_text(_yaml.safe_dump(adapter_doc))
+
+    with pytest.raises(SystemExit) as exc:
+        handoff.main([
+            "--clone-dir", str(clone_dir), "intake",
+            "--manifest-path", manifest_name, "--artifacts-dir", str(tmp_path / "artifacts"),
+        ])
+    assert exc.value.code == 1
+    assert "unknown_producing_loop" in capsys.readouterr().err

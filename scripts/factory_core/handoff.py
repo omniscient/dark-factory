@@ -438,5 +438,35 @@ def _record_intake(
     _run_record.cmd_record(ns)
 
 
+def main(argv=None) -> None:
+    p = argparse.ArgumentParser(description="Validate and intake an artifact handoff manifest (A5)")
+    p.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    v = sub.add_parser("validate")
+    v.add_argument("--manifest-path", required=True)
+
+    i = sub.add_parser("intake")
+    i.add_argument("--manifest-path", required=True)
+    i.add_argument("--artifacts-dir", default=os.environ.get("ARTIFACTS_DIR", "."))
+
+    args = p.parse_args(argv)
+    if args.cmd == "validate":
+        try:
+            manifest = read_manifest(args.clone_dir, args.manifest_path)
+            validate_manifest(manifest)
+            print("manifest OK")
+        except HandoffError as exc:
+            print(f"manifest INVALID [{exc.code}]: {exc.message}", file=sys.stderr)
+            sys.exit(1)
+    elif args.cmd == "intake":
+        try:
+            result = intake(args.clone_dir, args.manifest_path, artifacts_dir=args.artifacts_dir)
+            print(f"intake OK: issue {result.issue_id}")
+        except HandoffError as exc:
+            print(f"intake REJECTED [{exc.code}]: {exc.message}", file=sys.stderr)
+            sys.exit(1)
+
+
 if __name__ == "__main__":
-    pass
+    main()
