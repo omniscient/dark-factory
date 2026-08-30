@@ -134,7 +134,7 @@ budget file, `config/config.yaml`.
    # binary, not a bash function, so only a re-entrant PATH shim script (not an exported
    # bash function) is visible to it. The URL embeds a fake token to prove requirement 6
    # (never leaked) without touching a real credential.
-   # Section N (l.915/l.1083) permanently overrides the `python3` stub with its own
+   # Section N (its --id-routing python3 override, and the N20 variant it leaves behind) permanently overrides the `python3` stub with its own
    # --id-routing case and never restores the generic PROVIDERS_CLI_OUTPUT-echoing form —
    # reset_python3_stub() only clears the variable, not the function body. Redefine the
    # generic stub here so PROVIDERS_CLI_OUTPUT is honored again for this section.
@@ -241,7 +241,7 @@ budget file, `config/config.yaml`.
    # (still-unstubbed) branch_exists_for_issue against a fake token-bearing URL — proves
    # requirement 6 (URL never leaked) at the actual dispatch call site, not just in the
    # helper's own return value. get_pr_for_issue is never reached here (OR short-circuits
-   # once the branch probe is non-empty), so it needs no stub for this case.
+   # once the branch probe is non-empty), so it needs no stub post-fix; pre-fix it is reached and hits section X's `get_pr_for_issue() { echo ""; }` restore, which is what makes Y4 red before Task 2 step 3.
    PROVIDERS_CLI_OUTPUT="https://x-access-token:ghs_zzfaketoken371@github.com/omniscient/dark-factory.git"
    git() { printf 'deadbeefcafefeed\trefs/heads/feat/issue-304-x\n'; return 0; }
    export -f git
