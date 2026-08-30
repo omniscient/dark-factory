@@ -600,3 +600,153 @@ def test_default_create_issue_argv_and_fail_closed(monkeypatch, tmp_path):
     assert "--title" in argv and "--body-file" in argv
     assert argv[argv.index("--labels") + 1] == "needs-triage,manifest-intake"
     assert handoff._default_create_issue("t", "b", "x") == ""  # rc != 0 -> fail closed
+
+
+def test_intake_records_runs_jsonl_row_on_accept(tmp_path, monkeypatch):
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    handoff.intake(
+        str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+        create_issue=_stub_create_issue(issue_id="99"),
+        run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+        adapter_loops=[loop],
+    )
+
+    lines = jsonl.read_text().strip().splitlines()
+    assert len(lines) == 1
+    rec = _json.loads(lines[0])
+    assert rec["intent"] == "intake"
+    assert rec["stage"] == "manifest_intake"
+    assert rec["verdict"] == "ACCEPTED"
+    assert rec["issue_number"] == 99
+    assert rec["origin"] == "target-loop:nightly-scan-triage"
+    assert rec["detail"]["artifact_id"] == "scan-2026-08-30-001"
+    assert rec["detail"]["created_issue"] == 99
+    assert rec["detail"]["reject_reason"] == ""
+
+
+def test_intake_records_runs_jsonl_row_on_reject(tmp_path, monkeypatch):
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest(producing_loop="ghost-loop"))
+
+    with pytest.raises(handoff.HandoffError):
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(), adapter_loops=[_loop_entry()],
+        )
+
+    lines = jsonl.read_text().strip().splitlines()
+    assert len(lines) == 1
+    rec = _json.loads(lines[0])
+    assert rec["verdict"] == "REJECTED"
+    assert rec["issue_number"] == 0
+    assert rec["origin"] == "target-loop:ghost-loop"
+    assert rec["detail"]["reject_reason"] == "unknown_producing_loop"
+    assert rec["detail"]["created_issue"] == ""
+
+
+def test_intake_records_origin_factory_when_producing_loop_unreadable(tmp_path, monkeypatch):
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    bad_manifest = _valid_manifest()
+    del bad_manifest["producing_loop"]  # R2 schema_invalid fires before producing_loop is read
+    manifest_name = _write_manifest_file(clone_dir, bad_manifest)
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(), adapter_loops=[_loop_entry()],
+        )
+    assert exc.value.code == "schema_invalid"
+
+    rec = _json.loads(jsonl.read_text().strip())
+    assert rec["origin"] == "factory"
+    assert rec["detail"]["artifact_id"] == "scan-2026-08-30-001"  # read before producing_loop
+
+
+def test_intake_run_id_defaults_to_intake_artifact_id(tmp_path, monkeypatch):
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+    monkeypatch.delenv("RUN_ID", raising=False)
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest(producing_loop="ghost-loop"))
+
+    with pytest.raises(handoff.HandoffError):
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(), adapter_loops=[_loop_entry()],
+        )
+    rec = _json.loads(jsonl.read_text().strip())
+    assert rec["run_id"] == "intake-scan-2026-08-30-001"
+
+
+def test_intake_run_id_uses_env_when_set(tmp_path, monkeypatch):
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+    monkeypatch.setenv("RUN_ID", "abc-999")
+
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest(producing_loop="ghost-loop"))
+
+    with pytest.raises(handoff.HandoffError):
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(), adapter_loops=[_loop_entry()],
+        )
+    rec = _json.loads(jsonl.read_text().strip())
+    assert rec["run_id"] == "abc-999"
+
+
+def test_intake_records_reject_row_for_malformed_adapter_yaml(tmp_path, monkeypatch):
+    """Reachable purely from target-controlled input: the target authors its own
+    .factory/adapter.yaml. adapter.get() raises AdapterError (not HandoffError) on a
+    malformed file -- this must still produce a runs.jsonl reject row (R6/AC2), not
+    an uncaught traceback that leaves no audit trail."""
+    import json as _json
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(_run_record, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(_run_record, "_post_seq", lambda r: None)
+
+    clone_dir = tmp_path / "clone"
+    (clone_dir / ".factory").mkdir(parents=True)
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    (clone_dir / ".factory" / "adapter.yaml").write_text("key: [unclosed")  # unparseable
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=_stub_create_issue(),  # adapter_loops NOT passed -- exercises the real _adapter.get() path
+        )
+    assert exc.value.code == "unknown_producing_loop"
+
+    rec = _json.loads(jsonl.read_text().strip())
+    assert rec["verdict"] == "REJECTED"
+    assert rec["detail"]["reject_reason"] == "unknown_producing_loop"

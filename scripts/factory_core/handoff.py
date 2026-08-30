@@ -5,6 +5,7 @@ verdict *intake itself produces* by running the loop's declared A3 verifier -- n
 file the manifest merely references (maker never validates maker). See
 docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md.
 """
+import argparse
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import yaml
 
 from . import adapter as _adapter
 from . import identity as _identity
+from . import run_record as _run_record
 from . import verdict as _verdict
 from . import verifier as _verifier
 
@@ -321,7 +323,9 @@ def intake(
     clone_dir: str, manifest_path: str, *, artifacts_dir: str,
     create_issue=None, run_verifier=None, adapter_loops=None,
 ) -> IntakeResult:
-    """R2 -> R3 -> R4 -> R5 orchestration (R6 audit trail wired in Task 8).
+    """R2 -> R3 -> R4 -> R5 -> R6 orchestration. Every failure is recorded to runs.jsonl
+    (R6) via run_record.cmd_record, called in-process (not a subprocess), then re-raised
+    as HandoffError. On success, one ACCEPTED row is recorded after the issue is created.
 
     create_issue: (title, body, labels) -> issue_id str; defaults to the real tracker CLI.
     run_verifier: kwargs -> verdict text str; defaults to verifier.resolve_and_run.
@@ -331,47 +335,107 @@ def intake(
     create_issue = create_issue or _default_create_issue
     run_verifier = run_verifier or _verifier.resolve_and_run
 
-    manifest = read_manifest(clone_dir, manifest_path)
-    validate_manifest(manifest)
+    artifact_id = "unknown"
+    producing_loop = None
+    try:
+        manifest = read_manifest(clone_dir, manifest_path)
+        if isinstance(manifest.get("artifact_id"), str) and manifest["artifact_id"]:
+            artifact_id = manifest["artifact_id"]
+        validate_manifest(manifest)
+        artifact_id = manifest["artifact_id"]
+        producing_loop = manifest["producing_loop"]
 
-    loops = adapter_loops if adapter_loops is not None else _adapter.get(clone_dir, "loops")
-    loop_entry = cross_check(manifest, loops)
-    producing_loop = manifest["producing_loop"]
+        if adapter_loops is not None:
+            loops = adapter_loops
+        else:
+            try:
+                loops = _adapter.get(clone_dir, "loops")
+            except _adapter.AdapterError as exc:
+                # adapter.get() raises AdapterError (not HandoffError) on a malformed
+                # target .factory/adapter.yaml -- unparseable YAML, a bad loop entry,
+                # etc. This is target-controlled input reachable from an intake call,
+                # and it must still produce a runs.jsonl row (R6/AC2), not an uncaught
+                # traceback. The producing loop cannot be confirmed either way, which
+                # is exactly what unknown_producing_loop means.
+                raise HandoffError(
+                    "unknown_producing_loop", f"adapter.yaml could not be loaded: {exc}"
+                ) from exc
+        loop_entry = cross_check(manifest, loops)
 
-    verifier_path = (loop_entry.get("verification") or {}).get("verifier")
-    if not verifier_path:
-        raise HandoffError(
-            "verifier_undeclared", f"loop '{producing_loop}' declares no verification.verifier"
+        verifier_path = (loop_entry.get("verification") or {}).get("verifier")
+        if not verifier_path:
+            raise HandoffError(
+                "verifier_undeclared", f"loop '{producing_loop}' declares no verification.verifier"
+            )
+
+        verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}.md")
+        verdict_text = run_verifier(
+            clone_dir=clone_dir, loop_name=producing_loop, verifier_path=verifier_path,
+            side_effect_level=loop_entry["side_effect_level"], issue_num="",
+            factory_repo_slug=_identity.SLUG,
         )
+        os.makedirs(os.path.dirname(verdict_out) or ".", exist_ok=True)
+        with open(verdict_out, "w", encoding="utf-8") as fh:
+            fh.write(verdict_text)
 
-    verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}.md")
-    verdict_text = run_verifier(
-        clone_dir=clone_dir, loop_name=producing_loop, verifier_path=verifier_path,
-        side_effect_level=loop_entry["side_effect_level"], issue_num="",
-        factory_repo_slug=_identity.SLUG,
+        parsed = _verdict.parse_verdict(verdict_text) or {}
+        status = parsed.get("status")
+        if status not in HANDOFF_ACCEPT_STATUSES:
+            reason = f"observed STATUS: {status}"
+            for line in verdict_text.splitlines():
+                if line.startswith("REASON:"):
+                    reason += f"; {line}"
+                    break
+            raise HandoffError("verdict_not_passing", reason)
+
+        body = render_body(manifest, verdict_out)
+        title = f"[intake] {manifest['proposed_ticket']['title']}"
+        labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
+        issue_id = create_issue(title, body, labels)
+        if not issue_id:
+            raise HandoffError("issue_create_failed", "tracker create_item returned an empty result")
+    except HandoffError as exc:
+        _record_intake(
+            manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
+            issue=0, verdict="REJECTED", reject_reason=exc.code, created_issue="",
+        )
+        raise
+
+    # GitHubTracker.create_item returns a numeric string, but the Tracker ABC's ids
+    # are opaque everywhere (docs/adapter-authoring-guide.md) -- e.g. JiraTracker
+    # returns "PROJ-123". run_record.py's --issue is an existing int-typed field
+    # (unrelated to this ticket), so a non-digit id is recorded as issue=0 with the
+    # real id preserved verbatim in detail.created_issue, rather than crashing after
+    # the issue has already been created.
+    issue_num = int(issue_id) if str(issue_id).isdigit() else 0
+    _record_intake(
+        manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
+        issue=issue_num, verdict="ACCEPTED", reject_reason="", created_issue=issue_id,
     )
-    os.makedirs(os.path.dirname(verdict_out) or ".", exist_ok=True)
-    with open(verdict_out, "w", encoding="utf-8") as fh:
-        fh.write(verdict_text)
+    return IntakeResult(accepted=True, issue_id=issue_id, artifact_id=artifact_id)
 
-    parsed = _verdict.parse_verdict(verdict_text) or {}
-    status = parsed.get("status")
-    if status not in HANDOFF_ACCEPT_STATUSES:
-        reason = f"observed STATUS: {status}"
-        for line in verdict_text.splitlines():
-            if line.startswith("REASON:"):
-                reason += f"; {line}"
-                break
-        raise HandoffError("verdict_not_passing", reason)
 
-    body = render_body(manifest, verdict_out)
-    title = f"[intake] {manifest['proposed_ticket']['title']}"
-    labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
-    issue_id = create_issue(title, body, labels)
-    if not issue_id:
-        raise HandoffError("issue_create_failed", "tracker create_item returned an empty result")
-
-    return IntakeResult(accepted=True, issue_id=issue_id, artifact_id=manifest["artifact_id"])
+def _record_intake(
+    *, manifest_path: str, artifact_id: str, producing_loop, issue: int, verdict: str,
+    reject_reason: str, created_issue,
+) -> None:
+    """R6: writes intake's own accept/reject decision as a runs.jsonl row -- the entire
+    audit trail for a rejected manifest, which otherwise creates no GitHub issue and
+    would leave no trace anywhere. Calls run_record.cmd_record in-process (an
+    argparse.Namespace, not a subprocess) so tests can monkeypatch JSONL_PATH/_post_seq
+    exactly as tests/test_run_record.py already does."""
+    run_id = os.environ.get("RUN_ID") or f"intake-{artifact_id}"
+    origin = f"target-loop:{producing_loop}" if producing_loop else "factory"
+    ns = argparse.Namespace(
+        run_id=run_id, issue=issue, intent="intake", stage="manifest_intake", verdict=verdict,
+        tokens_in=None, tokens_out=None, cost_usd=None, duration_ms=None,
+        detail=[
+            f"manifest_path={manifest_path}", f"artifact_id={artifact_id}",
+            f"created_issue={created_issue}", f"reject_reason={reject_reason}",
+        ],
+        origin=origin,
+    )
+    _run_record.cmd_record(ns)
 
 
 if __name__ == "__main__":
