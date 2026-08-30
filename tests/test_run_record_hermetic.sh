@@ -23,7 +23,7 @@ for f in "$SCRIPT_DIR"/test_*.sh; do
   # (ENTRYPOINT_SOURCE_ONLY=1) or invoking cli.py directly — needs the override.
   grep -qE 'ENTRYPOINT_SOURCE_ONLY=1|cli\.py' "$f" || continue
 
-  if grep -qE 'run-record (record|assemble)|error-signature-write' "$f"; then
+  if grep -qE 'run-record (record|assemble)|error-signature-write|breaker-evaluate-stop' "$f"; then
     if grep -q 'SCHEDULER_STATE_DIR' "$f"; then
       echo "  PASS: $base sets SCHEDULER_STATE_DIR before invoking run-record/error-signature-write"
     else
