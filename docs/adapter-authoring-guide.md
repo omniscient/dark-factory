@@ -263,6 +263,7 @@ issue via the existing `tracker create` primitive, labeled exactly `needs-triage
 | `verdict_not_passing` | Intake-produced verdict `STATUS` != `PASS` |
 | `body_too_large` | Rendered issue body would exceed 60,000 chars |
 | `issue_create_failed` | `create_issue` returned an empty/falsy result |
+| `internal_error` | Any failure that is not itself an R2-R5 manifest rejection (e.g. an unwritable `--artifacts-dir`, a malformed `FACTORY_MANIFEST_LABEL` override) — still produces a `runs.jsonl` row (R6), fail-closed |
 
 ### Trust boundary
 
