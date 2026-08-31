@@ -207,3 +207,69 @@ this, plus the two real pure-mapping methods above, is the executable proof the 
 criterion asks for. A full, live-validated GitLab implementation (real HTTP calls, tested
 against a live GitLab instance) is explicitly out of scope for this guide's ticket and is filed
 as a separate follow-up only if requested.
+
+## Handoff manifest (A5)
+
+A loop entry's `handoff.manifest` field (A1.5) points at a flat YAML file the target loop's own
+tooling already wrote. Unlike `verification.verifier`, the manifest is **never executed** —
+`scripts/factory_core/handoff.py` reads and validates it, never runs it. (The A1.5 spec's
+`handoffs/triage_handoff.py`-shaped example predates this decision and is a stale illustration
+in the archived spec; this section is the current, authoritative shape.)
+
+### Schema
+
+```yaml
+schema_version: 1
+artifact_id: scan-2026-08-30-001            # non-empty string, opaque, ^[A-Za-z0-9._-]+$, <=128 chars
+producing_loop: nightly-scan-triage         # must match a loops[].name in .factory/adapter.yaml
+side_effect_level: 2                        # int 1-6; must equal that loop's declared side_effect_level
+verifier_verdict:                           # OPTIONAL, informational only -- never gated on
+  path: artifacts/scan_verdict.md
+source_references:                          # list of strings, <=50 items, <=512 chars each
+  - scanner_output.json
+acceptance_thresholds:                      # list of strings, same limits
+  - "false_positive_rate < 0.05"
+proposed_ticket:
+  title: "Triage: 3 new findings in payments module"   # <=200 chars, no newlines/control chars
+  body: |                                                # <=32 KiB, no fence lines, no provenance marker
+    ## Findings
+    ...
+```
+
+Unknown top-level keys (and unknown keys inside `verifier_verdict`/`proposed_ticket`) are a hard
+rejection. The manifest file itself is capped at 256 KiB, checked before YAML parsing.
+
+### Intake path
+
+`scripts/factory_core/handoff.py intake` runs: R2 (schema validation) -> R3 (cross-check
+`producing_loop`/`side_effect_level` against the adapter's `loops:` entries) -> R4 (runs the
+loop's declared A3 verifier itself via `verifier.resolve_and_run` and gates on `STATUS: PASS`
+only -- never trusts a verdict file the manifest merely references) -> R5 (creates a GitHub
+issue via the existing `tracker create` primitive, labeled exactly `needs-triage,manifest-intake`
+-- never `ready-for-agent`) -> R6 (records an accept/reject row to `runs.jsonl` via
+`run_record.cmd_record`, in-process, for every manifest processed).
+
+### Reason codes
+
+| Code | Meaning |
+|---|---|
+| `schema_invalid` | Shape/type/required/unknown-key/file-size violation |
+| `unsafe_string` | A string rendered outside a fence contains a backtick or newline |
+| `body_contains_fence` | `proposed_ticket.body` contains a fence line or the provenance closing marker |
+| `unknown_producing_loop` | `producing_loop` matches no `loops[].name` in the adapter |
+| `side_effect_level_mismatch` | Manifest's declared level != the loop's declared level |
+| `producing_loop_factory_owned` | Loop's declared level >= 4 (factory-owned until #196) |
+| `verifier_undeclared` | Loop entry has no `verification.verifier` to run |
+| `verdict_not_passing` | Intake-produced verdict `STATUS` != `PASS` |
+| `body_too_large` | Rendered issue body would exceed 60,000 chars |
+| `issue_create_failed` | `create_issue` returned an empty/falsy result |
+
+### Trust boundary
+
+Only `handoff.py intake`, running with the factory's own tracker credentials, ever calls
+`tracker create`. A manifest may set no labels beyond the fixed pair, no assignee/milestone/
+project, and no dependency edges — the proposed ticket body is always rendered inside a fenced
+code block (`scheduler.sh::_scan_body_for_deps` skips fenced code when scanning for
+`Depends on:`), and every string rendered outside that fence is checked for backtick/newline
+injection (`unsafe_string`). See
+`docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md` for the full design.

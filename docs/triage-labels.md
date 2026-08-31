@@ -41,3 +41,4 @@ implies entry and straight-through flow).
 | `spec-pending-review` | Spec posted, waiting for human board-move or `SPEC_GRACE_MINUTES` auto-advance |
 | `plan-pending-review` | Plan posted, waiting for human board-move or `PLAN_GRACE_MINUTES` auto-advance |
 | `direct-to-pr` | **Opt-in**: ticket is admitted to the pipeline _and_ runs straight-through. Spec and plan checkpoints become async (grace-windowed); PR approval is the single end gate. Combine with `SPEC_GRACE_MINUTES=0` / `PLAN_GRACE_MINUTES=0` for pure auto-flow. |
+| `manifest-intake` | Applied by `handoff.py intake` (A5) alongside `needs-triage` on every GitHub issue created from a target-loop artifact handoff manifest. Env-overridable via `FACTORY_MANIFEST_LABEL`. Never applied together with `ready-for-agent` — a manifest-created issue always starts at triage. |
