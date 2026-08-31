@@ -6,6 +6,7 @@ file the manifest merely references (maker never validates maker). See
 docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -260,6 +261,18 @@ def cross_check(manifest: dict, loops) -> dict:
     return match
 
 
+def _verdict_filename(producing_loop: str, artifact_id: str) -> str:
+    """Deterministic, collision-free verdict filename. `_ID_RE` permits "-" inside both
+    producing_loop and artifact_id, so a fixed separator alone can't distinguish
+    ("a-b", "c") from ("a", "b-c") -- the `\\0` byte (excluded by _ID_RE from both
+    fields) makes the hash input injective. Hashing the *rendered* stem
+    (producing_loop + "-" + artifact_id) would just reproduce the same ambiguity this
+    exists to close."""
+    digest = hashlib.sha256(f"{producing_loop}\0{artifact_id}".encode("utf-8")).hexdigest()[:16]
+    stem = f"loop-{producing_loop}-{artifact_id}"[:200]
+    return f"{stem}-{digest}.md"
+
+
 def render_body(manifest: dict, verdict_path: str) -> str:
     """R5: origin banner + fenced proposed body + human provenance section + delimited
     verbatim-JSON provenance block. Raises body_too_large (fail closed, never truncates)
@@ -383,9 +396,10 @@ def intake(
 
         # artifact_id (not just producing_loop) is in the filename so a second manifest
         # handed off from the same producing loop into the same ARTIFACTS_DIR cannot
-        # overwrite the first verdict file out from under an issue that already cites it
+        # overwrite the first verdict file out from under an issue that already cites it;
+        # _verdict_filename's hash suffix closes the remaining charset-collision case
         # (both fields are charset-validated to ^[A-Za-z0-9._-]+$ by validate_manifest, R2).
-        verdict_out = os.path.join(artifacts_dir, f"loop-{producing_loop}-{artifact_id}.md")
+        verdict_out = os.path.join(artifacts_dir, _verdict_filename(producing_loop, artifact_id))
         verdict_text = run_verifier(
             clone_dir=clone_dir, loop_name=producing_loop, verifier_path=verifier_path,
             side_effect_level=loop_entry["side_effect_level"], issue_num="",

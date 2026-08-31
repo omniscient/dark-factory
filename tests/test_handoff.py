@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import re
 import sys
 
 # .factory/hooks/{validate,smoke-gate} run `python -m pytest tests/ -q` with no
@@ -374,6 +375,20 @@ def test_cross_check_rejects_factory_owned_level():
     assert exc.value.code == "producing_loop_factory_owned"
 
 
+def test_verdict_filename_closes_charset_collision():
+    # _ID_RE (^[A-Za-z0-9._-]+$) permits "-" inside either field, so a fixed separator
+    # alone can't distinguish these two pairs -- the hash suffix must.
+    a = handoff._verdict_filename("a-b", "c")
+    b = handoff._verdict_filename("a", "b-c")
+    assert a != b
+
+
+def test_verdict_filename_is_deterministic():
+    first = handoff._verdict_filename("nightly-scan-triage", "scan-2026-08-30-001")
+    second = handoff._verdict_filename("nightly-scan-triage", "scan-2026-08-30-001")
+    assert first == second
+
+
 def test_render_body_contains_origin_banner():
     body = handoff.render_body(_valid_manifest(), "artifacts/loop-nightly-scan-triage.md")
     assert (
@@ -509,8 +524,12 @@ def test_intake_accepts_and_creates_issue(tmp_path):
     assert "df-manifest-provenance" in call["body"]
     # Filename includes artifact_id (not just producing_loop) so a second manifest from
     # the same loop can't silently overwrite this verdict file (advisory finding fix).
-    verdict_path = artifacts_dir / "loop-nightly-scan-triage-scan-2026-08-30-001.md"
-    assert verdict_path.exists()
+    matches = list(artifacts_dir.glob("loop-nightly-scan-triage-scan-2026-08-30-001-*.md"))
+    assert len(matches) == 1
+    verdict_path = matches[0]
+    assert re.fullmatch(
+        r"loop-nightly-scan-triage-scan-2026-08-30-001-[0-9a-f]{16}\.md", verdict_path.name
+    )
     assert "STATUS: PASS" in verdict_path.read_text()
 
 
