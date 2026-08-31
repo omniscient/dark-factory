@@ -455,6 +455,8 @@ def intake(
                 f"back-reference, and rerunning this manifest may create a duplicate",
             )
     except HandoffError as exc:
+        # If _record_intake itself raises (e.g. an unwritable ledger), that new exception
+        # replaces this one -- fail-closed but rowless; acceptable, not a bug.
         _record_intake(
             manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
             issue=0, verdict="REJECTED", reject_reason=exc.code, created_issue="",
@@ -466,6 +468,8 @@ def intake(
         # e.g. a read-only ARTIFACTS_DIR mount, or a config error like the label check
         # above) must still close the same audit gap the AdapterError branch above
         # closes: a runs.jsonl row, not an uncaught traceback and no trace at all.
+        # If _record_intake itself raises (e.g. an unwritable ledger), that new exception
+        # replaces this one -- fail-closed but rowless; acceptable, not a bug.
         _record_intake(
             manifest_path=manifest_path, artifact_id=artifact_id, producing_loop=producing_loop,
             issue=0, verdict="REJECTED", reject_reason="internal_error", created_issue="",
