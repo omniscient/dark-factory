@@ -474,6 +474,12 @@ def _hermetic_run_record(tmp_path, monkeypatch):
     # env) to tmp_path, so neither this process nor any child can reach /var/lib/dark-factory.
     monkeypatch.setattr(_run_record, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
     monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path))
+    # Only the four DIRECT_TO_PR_LABEL-specific tests below set this env var themselves;
+    # every other test in this file must not inherit an ambient value from the developer
+    # or CI environment, since an ambient value that happens to be a substring of
+    # "manifest-intake" would fail unrelated accept-path tests with a confusing
+    # internal_error.
+    monkeypatch.delenv("DIRECT_TO_PR_LABEL", raising=False)
 
 
 def _write_manifest_file(clone_dir, manifest, name="manifest.yaml"):

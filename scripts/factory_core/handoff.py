@@ -382,20 +382,36 @@ def intake(
         # failure contract #381 established -- only artifact_id/producing_loop now read
         # their pre-read_manifest defaults for this rejection path (see spec Assumptions).
         label_folded = FACTORY_MANIFEST_LABEL.lower()
+        # DIRECT_TO_PR_LABEL is read verbatim from env and matched as a *plain substring*
+        # here, whereas scheduler_lib.sh's has_direct_to_pr_label matches it as a `grep
+        # -qi` *regex*. A DIRECT_TO_PR_LABEL value containing regex metacharacters (e.g.
+        # "dtp|ship-it") could therefore match more broadly under the scheduler's own
+        # matcher than under this guard's plain-substring check. Accepted as out of scope
+        # for this XS ticket -- the scheduler's matchers are a non-goal here (see spec) --
+        # an operator-set env value is trusted config, not manifest-controlled input.
         direct_to_pr_folded = os.environ.get("DIRECT_TO_PR_LABEL", "").strip().lower()
         deny_substrings = ["ready-for-agent", "-pending-review", "direct-to-pr"]
         if direct_to_pr_folded:
             deny_substrings.append(direct_to_pr_folded)
-        if (
-            not FACTORY_MANIFEST_LABEL
-            or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL)
-            or any(needle in label_folded for needle in deny_substrings)
-        ):
+        matched_needle = next(
+            (needle for needle in deny_substrings if needle in label_folded), None
+        )
+        if not FACTORY_MANIFEST_LABEL or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL) or matched_needle:
+            reason = (
+                f"matched gate/escalation shape {matched_needle!r}"
+                if matched_needle
+                else "must be a single label with no comma or whitespace"
+            )
+            env_note = (
+                f" (from DIRECT_TO_PR_LABEL={direct_to_pr_folded!r})"
+                if matched_needle and matched_needle == direct_to_pr_folded
+                else ""
+            )
             raise ValueError(
                 f"FACTORY_MANIFEST_LABEL override must be a single label with no comma or "
                 f"whitespace, and must not contain a gate/escalation label shape "
-                f"(ready-for-agent, *-pending-review, or direct-to-pr), got: "
-                f"{FACTORY_MANIFEST_LABEL!r}"
+                f"(ready-for-agent, *-pending-review, or direct-to-pr): {reason}{env_note}, "
+                f"got: {FACTORY_MANIFEST_LABEL!r}"
             )
 
         manifest = read_manifest(clone_dir, manifest_path)
