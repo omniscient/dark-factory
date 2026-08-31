@@ -428,10 +428,21 @@ def intake(
         # extra label and could opt a target-loop-authored issue into ready-for-agent,
         # which docs/triage-labels.md requires never be applied together with
         # manifest-intake. Reject before building the label string.
-        if not FACTORY_MANIFEST_LABEL or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL):
+        # Also reject the override being SET to a gate label itself (ready-for-agent, or
+        # any *-pending-review shape, case-folded -- scheduler.sh matches gate labels with
+        # grep -qi at scheduler.sh:1144/1209) so a misconfigured override can't smuggle a
+        # manifest-intake issue into an existing gate state.
+        _manifest_label = FACTORY_MANIFEST_LABEL.lower()
+        if (
+            not FACTORY_MANIFEST_LABEL
+            or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL)
+            or _manifest_label == "ready-for-agent"
+            or _manifest_label.endswith("-pending-review")
+        ):
             raise ValueError(
                 f"FACTORY_MANIFEST_LABEL override must be a single label with no comma "
-                f"or whitespace, got: {FACTORY_MANIFEST_LABEL!r}"
+                f"or whitespace, and must not be a gate label (ready-for-agent or "
+                f"*-pending-review), got: {FACTORY_MANIFEST_LABEL!r}"
             )
         labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
         issue_id = create_issue(title, body, labels)

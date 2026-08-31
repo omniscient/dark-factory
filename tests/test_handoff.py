@@ -603,6 +603,107 @@ def test_intake_manifest_label_env_override(tmp_path, monkeypatch):
     assert create_issue.calls[0]["labels"] == "needs-triage,custom-intake"
 
 
+@pytest.mark.parametrize("label", [
+    "ready-for-agent",
+    "READY-FOR-AGENT",
+    "spec-pending-review",
+    "plan-pending-review",
+    "triage-pending-review",  # same *-pending-review shape, not one of today's two literals
+])
+def test_intake_rejects_gate_shaped_manifest_label_override(tmp_path, monkeypatch, label):
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", label)
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=create_issue,
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "internal_error"
+    assert create_issue.calls == []
+
+
+@pytest.mark.parametrize("label", ["needs,extra", "has space", ""])
+def test_intake_rejects_malformed_manifest_label_override_as_internal_error(tmp_path, monkeypatch, label):
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", label)
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=create_issue,
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "internal_error"
+    assert create_issue.calls == []
+
+    # R6: a malformed override must still produce an auditable runs.jsonl row, not just
+    # a raised exception -- the autouse _hermetic_run_record fixture already points
+    # JSONL_PATH at tmp_path / "runs.jsonl", mirroring test_intake_records_runs_jsonl_row_on_reject.
+    lines = (tmp_path / "runs.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["verdict"] == "REJECTED"
+    assert rec["detail"]["reject_reason"] == "internal_error"
+    assert rec["detail"]["created_issue"] == ""
+
+
+def test_intake_records_internal_error_for_unwritable_artifacts_dir(tmp_path):
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+
+    # A file (not a directory) sitting at the artifacts-dir path makes
+    # os.makedirs(..., exist_ok=True) raise FileExistsError (an OSError) -- the same
+    # failure shape as a genuinely unwritable/read-only ARTIFACTS_DIR mount.
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.write_text("not a directory")
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(artifacts_dir),
+            create_issue=_stub_create_issue(),
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "internal_error"
+
+    # R6, same as above: the OSError arm must still write a runs.jsonl row. This file
+    # lives under tmp_path directly (not under the unwritable artifacts_dir), so the
+    # write is unaffected by the failure being tested.
+    lines = (tmp_path / "runs.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["verdict"] == "REJECTED"
+    assert rec["detail"]["reject_reason"] == "internal_error"
+
+
+def test_default_create_issue_timeout_expired_fails_closed(monkeypatch):
+    def fake_run(argv, **kw):
+        raise handoff.subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout", 300))
+
+    monkeypatch.setattr(handoff.subprocess, "run", fake_run)
+    assert handoff._default_create_issue("t", "b", "needs-triage,manifest-intake") == ""
+
+
 def test_default_create_issue_argv_and_fail_closed(monkeypatch, tmp_path):
     calls = []
 
