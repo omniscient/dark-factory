@@ -364,6 +364,40 @@ def intake(
     producing_loop = None
     verdict_out = None
     try:
+        # FACTORY_MANIFEST_LABEL / DIRECT_TO_PR_LABEL validation depends only on process
+        # env, never on manifest content -- run it first so a misconfigured override
+        # fails before paying a verifier subprocess or writing an orphan verdict file
+        # (Gate-3 finding 3, #384). It is interpolated straight into a comma-joined label
+        # string that providers/cli.py::_tracker_create splits on "," -- an override
+        # containing a comma or whitespace would silently smuggle in an extra label.
+        # Containment (not exact/suffix) matching mirrors scheduler_lib.sh's own
+        # unanchored `grep -qi` label matchers (has_opt_in_refine_label,
+        # has_direct_to_pr_label, the inline *-pending-review greps), so this guard is at
+        # least as strict as the dispatch predicates it defends against (Gate-3 finding
+        # 1). direct-to-pr is denied in addition to ready-for-agent/*-pending-review
+        # because it is a strictly wider escalation: grace-timer auto-advance past
+        # spec/plan review *and* end-gate auto-merge (Gate-3 finding 2). This must stay
+        # inside this try so the ValueError is caught by the generic `except Exception`
+        # arm below and still produces a runs.jsonl row (R6) + HandoffError, the same
+        # failure contract #381 established -- only artifact_id/producing_loop now read
+        # their pre-read_manifest defaults for this rejection path (see spec Assumptions).
+        label_folded = FACTORY_MANIFEST_LABEL.lower()
+        direct_to_pr_folded = os.environ.get("DIRECT_TO_PR_LABEL", "").strip().lower()
+        deny_substrings = ["ready-for-agent", "-pending-review", "direct-to-pr"]
+        if direct_to_pr_folded:
+            deny_substrings.append(direct_to_pr_folded)
+        if (
+            not FACTORY_MANIFEST_LABEL
+            or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL)
+            or any(needle in label_folded for needle in deny_substrings)
+        ):
+            raise ValueError(
+                f"FACTORY_MANIFEST_LABEL override must be a single label with no comma or "
+                f"whitespace, and must not contain a gate/escalation label shape "
+                f"(ready-for-agent, *-pending-review, or direct-to-pr), got: "
+                f"{FACTORY_MANIFEST_LABEL!r}"
+            )
+
         manifest = read_manifest(clone_dir, manifest_path)
         if isinstance(manifest.get("artifact_id"), str) and manifest["artifact_id"]:
             artifact_id = manifest["artifact_id"]
@@ -421,29 +455,6 @@ def intake(
 
         body = render_body(manifest, verdict_out)
         title = f"[intake] {manifest['proposed_ticket']['title']}"
-        # FACTORY_MANIFEST_LABEL is env-supplied (operator/deploy config, not manifest
-        # input), but it is interpolated straight into a comma-joined label string that
-        # providers/cli.py::_tracker_create splits on "," -- an override containing a
-        # comma (e.g. "manifest-intake,ready-for-agent") would silently smuggle in an
-        # extra label and could opt a target-loop-authored issue into ready-for-agent,
-        # which docs/triage-labels.md requires never be applied together with
-        # manifest-intake. Reject before building the label string.
-        # Also reject the override being SET to a gate label itself (ready-for-agent, or
-        # any *-pending-review shape, lower-cased -- scheduler.sh matches gate labels with
-        # grep -qi at scheduler.sh:1144/1209) so a misconfigured override can't smuggle a
-        # manifest-intake issue into an existing gate state.
-        label_folded = FACTORY_MANIFEST_LABEL.lower()
-        if (
-            not FACTORY_MANIFEST_LABEL
-            or re.search(r"[,\s]", FACTORY_MANIFEST_LABEL)
-            or label_folded == "ready-for-agent"
-            or label_folded.endswith("-pending-review")
-        ):
-            raise ValueError(
-                f"FACTORY_MANIFEST_LABEL override must be a single label with no comma "
-                f"or whitespace, and must not be a gate label (ready-for-agent or "
-                f"*-pending-review), got: {FACTORY_MANIFEST_LABEL!r}"
-            )
         labels = f"needs-triage,{FACTORY_MANIFEST_LABEL}"
         issue_id = create_issue(title, body, labels)
         if not issue_id:

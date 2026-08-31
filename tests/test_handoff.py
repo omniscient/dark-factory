@@ -609,6 +609,11 @@ def test_intake_manifest_label_env_override(tmp_path, monkeypatch):
     "spec-pending-review",
     "plan-pending-review",
     "triage-pending-review",  # same *-pending-review shape, not one of today's two literals
+    "manifest-intake-ready-for-agent",  # substring containment, not exact match (Gate-3 finding 1)
+    "xx-pending-review-yy",  # containment anywhere in the string, not just a suffix (finding 1)
+    "direct-to-pr",  # Gate-3 finding 2
+    "DIRECT-TO-PR",
+    "manifest-intake-direct-to-pr",  # substring containment of direct-to-pr
 ])
 def test_intake_rejects_gate_shaped_manifest_label_override(tmp_path, monkeypatch, label):
     monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", label)
@@ -629,6 +634,98 @@ def test_intake_rejects_gate_shaped_manifest_label_override(tmp_path, monkeypatc
         )
     assert exc.value.code == "internal_error"
     assert create_issue.calls == []
+
+
+def test_intake_rejects_manifest_label_matching_renamed_direct_to_pr_env(tmp_path, monkeypatch):
+    """Gate-3 finding 2: an operator-renamed DIRECT_TO_PR_LABEL must also be denied,
+    not just the canonical literal."""
+    monkeypatch.setenv("DIRECT_TO_PR_LABEL", "ship-it")
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", "ship-it")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=create_issue,
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "internal_error"
+    assert create_issue.calls == []
+
+
+def test_intake_still_denies_canonical_direct_to_pr_after_env_rename(tmp_path, monkeypatch):
+    """A DIRECT_TO_PR_LABEL rename must not un-deny the canonical literal 'direct-to-pr'."""
+    monkeypatch.setenv("DIRECT_TO_PR_LABEL", "ship-it")
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", "direct-to-pr")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+            create_issue=create_issue,
+            run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+            adapter_loops=[loop],
+        )
+    assert exc.value.code == "internal_error"
+    assert create_issue.calls == []
+
+
+def test_intake_blank_direct_to_pr_label_env_does_not_reject_default_override(tmp_path, monkeypatch):
+    """An empty/whitespace-only DIRECT_TO_PR_LABEL must not contribute an empty-string
+    needle that vacuously matches (and rejects) every override, including the default
+    'manifest-intake'."""
+    monkeypatch.setenv("DIRECT_TO_PR_LABEL", "   ")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    result = handoff.intake(
+        str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+        create_issue=create_issue,
+        run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+        adapter_loops=[loop],
+    )
+    assert result.accepted is True
+    assert create_issue.calls[0]["labels"] == "needs-triage,manifest-intake"
+
+
+def test_intake_nonmatching_direct_to_pr_label_env_does_not_reject_default_override(tmp_path, monkeypatch):
+    """Symmetric to the blank-env case above: a DIRECT_TO_PR_LABEL that is set but does
+    not appear in the override must not over-match and reject a normal override either."""
+    monkeypatch.setenv("DIRECT_TO_PR_LABEL", "ship-it")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    manifest_name = _write_manifest_file(clone_dir, _valid_manifest())
+    loop = _loop_entry(verification={"verifier": "verify.sh", "stop_condition": "n/a"})
+    (clone_dir / "verify.sh").write_text((_FIXTURES / "handoff_pass.sh").read_text())
+    (clone_dir / "verify.sh").chmod(0o755)
+    create_issue = _stub_create_issue()
+
+    result = handoff.intake(
+        str(clone_dir), manifest_name, artifacts_dir=str(tmp_path / "artifacts"),
+        create_issue=create_issue,
+        run_verifier=lambda **kw: _verifier.resolve_and_run(**kw),
+        adapter_loops=[loop],
+    )
+    assert result.accepted is True
+    assert create_issue.calls[0]["labels"] == "needs-triage,manifest-intake"
 
 
 @pytest.mark.parametrize("label", ["needs,extra", "has space", ""])
@@ -661,6 +758,31 @@ def test_intake_rejects_malformed_manifest_label_override_as_internal_error(tmp_
     assert rec["verdict"] == "REJECTED"
     assert rec["detail"]["reject_reason"] == "internal_error"
     assert rec["detail"]["created_issue"] == ""
+
+
+def test_intake_validates_manifest_label_before_reading_manifest(tmp_path, monkeypatch):
+    """Gate-3 finding 3: the override check must run before read_manifest(), so a
+    misconfigured override is caught without paying manifest/verifier work. Proven by
+    pointing manifest_path at a file that doesn't exist: if validation ran after
+    read_manifest (the old order), the missing-file check (schema_invalid) would fire
+    first instead of the label check (internal_error)."""
+    monkeypatch.setattr(handoff, "FACTORY_MANIFEST_LABEL", "ready-for-agent")
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+
+    artifacts_dir = tmp_path / "artifacts"
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.intake(
+            str(clone_dir), "does-not-exist.yaml", artifacts_dir=str(artifacts_dir),
+            create_issue=_stub_create_issue(),
+        )
+    assert exc.value.code == "internal_error"
+    assert "ready-for-agent" in exc.value.message
+    assert "pending-review" in exc.value.message
+    assert "direct-to-pr" in exc.value.message
+    # Gate-3 finding 3's actual harm: no verdict file orphaned on the artifacts mount,
+    # because the rejection fires before run_verifier() ever writes one.
+    assert not artifacts_dir.exists()
 
 
 def test_intake_records_internal_error_for_unwritable_artifacts_dir(tmp_path):
