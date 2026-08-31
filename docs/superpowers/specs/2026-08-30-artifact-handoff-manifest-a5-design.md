@@ -152,6 +152,7 @@ more specific codes below take precedence where they apply.
 | `verdict_not_passing` | Intake-produced verdict `STATUS` ≠ `PASS`; message echoes the observed status and any `REASON:` line (R4) |
 | `body_too_large` | Rendered body would exceed 60,000 chars (R5) |
 | `issue_create_failed` | `create_issue` returned empty/falsy (R5) |
+| `internal_error` | Any failure that is not itself an R2-R5 manifest rejection (e.g. an unwritable `--artifacts-dir`, a malformed `FACTORY_MANIFEST_LABEL` override) — still produces a `runs.jsonl` row (R6), fail-closed |
 
 ### R3 — Cross-validate `producing_loop` and `side_effect_level` against the adapter
 
@@ -186,8 +187,10 @@ and gates on the fresh verdict text it gets back. This keeps R1 intact (the *man
 executed; the verifier is the one execution surface A3 already accepted and hedged —
 clone-relative path safety, missing/non-executable/timeout → `BLOCKED`, `ERROR` → `BLOCKED`,
 exit-code-wins-over-status, level ≥ 4 → `BLOCKED`). The verdict is written to
-`$ARTIFACTS_DIR/loop-<producing_loop>.md` (factory-owned, outside the clone; never one of
-`verifier._RESERVED_OUT_BASENAMES`), and *that* path — not the manifest's `verifier_verdict.path`
+`$ARTIFACTS_DIR/<filename>` where `<filename>` is `_verdict_filename(producing_loop,
+artifact_id)` — `loop-<producing_loop>-<artifact_id>-<16-hex-char-sha256-digest>.md`
+(factory-owned, outside the clone; never one of `verifier._RESERVED_OUT_BASENAMES`), and
+*that* path — not the manifest's `verifier_verdict.path`
 — is the one recorded in the Provenance section (R5). `verifier_verdict.path`, when present, is
 carried into the provenance JSON verbatim as the loop's own informational reference and is
 otherwise ignored. If the loop entry declares no `verification.verifier`, intake rejects with
@@ -266,7 +269,7 @@ machine-readable block, not a third hand-rolled `KEY: value` format (that format
 ## Provenance
 - Producing loop: `<producing_loop>` (side_effect_level <n>)
 - Artifact: `<artifact_id>`
-- Verifier verdict: `$ARTIFACTS_DIR/loop-<producing_loop>.md` — STATUS: PASS (produced by intake, R4)
+- Verifier verdict: `$ARTIFACTS_DIR/<_verdict_filename(producing_loop, artifact_id)>` — STATUS: PASS (produced by intake, R4)
 - Loop's own verdict reference: `<verifier_verdict.path>` (informational; omitted when absent)
 - Source references: `<ref-1>`, `<ref-2>`, … (each in its own inline code span; "none" when empty)
 - Acceptance thresholds: `<t-1>`, `<t-2>`, … (each in its own inline code span; "none" when empty)

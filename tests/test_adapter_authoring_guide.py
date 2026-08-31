@@ -79,7 +79,7 @@ def test_guide_documents_handoff_manifest_a5_section():
         "unknown_producing_loop", "side_effect_level_mismatch",
         "producing_loop_factory_owned", "verifier_undeclared", "verdict_not_passing",
         "schema_invalid", "unsafe_string", "body_contains_fence", "body_too_large",
-        "issue_create_failed",
+        "issue_create_failed", "internal_error",
     ):
         assert token in text, f"missing A5 token: {token}"
     assert "never executed" in text or "never runs it" in text
