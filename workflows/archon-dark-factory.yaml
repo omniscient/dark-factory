@@ -434,8 +434,17 @@ nodes:
 
       if [ -n "$SPEC_FILE" ]; then
         git push -u origin "$BRANCH"
-        python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review
-        echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+        if python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review; then
+          echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+        else
+          echo "WARNING: spec-pending-review failed to apply for #$ISSUE — spec pushed to $BRANCH but gate label missing; check board state manually"
+          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
+      "## Refinement Pipeline — Gate Label Missing
+
+      The spec was pushed to \`$BRANCH\` but the \`spec-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
+
+      **Remediation:** \`gh issue edit $ISSUE --add-label spec-pending-review --repo $FACTORY_REPO_SLUG\`" || true
+        fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \
@@ -465,7 +474,12 @@ nodes:
       fi
     depends_on: [refine]
     when: "$parse-intent.output.intent == 'refine'"
-    timeout: 30000
+    # 60s (not the usual 30s): the gate-label-failure else-branch runs an extra
+    # marker + tracker-comment upsert (get-comments + create/update gh calls) on top
+    # of the push+label, and it fires exactly when the GitHub API is slowest/retrying
+    # (rate exhaustion) — a 30s node timeout is not catchable by `|| true` and would
+    # mark an otherwise-successful push as failed (#358 review).
+    timeout: 60000
 
   # Push plan branch (no longer auto-advances to Ready — plan-pending-review gate).
   # Applying the plan-pending-review label is the gate: the scheduler's plan_advance_check
@@ -483,8 +497,17 @@ nodes:
 
       if [ -n "$PLAN_FILE" ]; then
         git push -u origin "$BRANCH"
-        python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review
-        echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+        if python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review; then
+          echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+        else
+          echo "WARNING: plan-pending-review failed to apply for #$ISSUE — plan pushed to $BRANCH but gate label missing; check board state manually"
+          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
+      "## Refinement Pipeline — Gate Label Missing
+
+      The plan was pushed to \`$BRANCH\` but the \`plan-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
+
+      **Remediation:** \`gh issue edit $ISSUE --add-label plan-pending-review --repo $FACTORY_REPO_SLUG\`" || true
+        fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \
@@ -514,7 +537,9 @@ nodes:
       fi
     depends_on: [plan]
     when: "$parse-intent.output.intent == 'plan'"
-    timeout: 30000
+    # 60s — see refine-push's timeout comment above; same gate-label-failure
+    # else-branch shape, same rate-exhaustion timing risk.
+    timeout: 60000
 
   # Startup codeindex regeneration — runs before implement so the MCP tools serve a fresh index
   - id: update-codeindex

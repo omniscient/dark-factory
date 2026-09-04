@@ -311,3 +311,65 @@ def test_tracker_set_status_catches_runtime_error_and_exits_1(monkeypatch, capsy
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "ERROR: jira: POST /issue/42/transitions failed (500): boom" in err
+
+
+def test_tracker_label_exits_0_on_success(monkeypatch):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeTracker:
+        def add_label(self, id, name):
+            return True
+        def remove_label(self, id, name):
+            return True
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["cli.py", "tracker", "label", "--id", "42", "--add", "plan-pending-review"],
+    )
+    cli_mod.main()  # must not raise / must not SystemExit
+
+
+def test_tracker_label_prints_error_and_exits_1_on_any_failure(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    calls = []
+
+    class _FakeTracker:
+        def add_label(self, id, name):
+            calls.append(("add", name))
+            return name != "spec-pending-review"
+        def remove_label(self, id, name):
+            calls.append(("remove", name))
+            return True
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["cli.py", "tracker", "label", "--id", "42",
+         "--add", "spec-pending-review", "--remove", "needs-discussion"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    # both operations were attempted despite the first failing
+    assert calls == [("add", "spec-pending-review"), ("remove", "needs-discussion")]
+    err = capsys.readouterr().err
+    assert "ERROR:" in err
+    assert "42" in err
+
+
+def test_tracker_label_catches_runtime_error_and_exits_1(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeTracker:
+        def add_label(self, id, name):
+            raise RuntimeError("jira: PUT /issue/42 failed (500): boom")
+    monkeypatch.setattr(cli_mod, "get_tracker", lambda: _FakeTracker())
+    monkeypatch.setattr(
+        sys, "argv",
+        ["cli.py", "tracker", "label", "--id", "42", "--add", "plan-pending-review"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "ERROR: jira: PUT /issue/42 failed (500): boom" in err

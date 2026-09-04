@@ -113,21 +113,49 @@ def test_set_status_item_edit_failure_returns_false(monkeypatch):
 def test_add_label_matches_breaker_trip_to_blocked(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
-    GitHubTracker().add_label("42", "needs-discussion")
+    result = GitHubTracker().add_label("42", "needs-discussion")
     assert calls[0] == [
         "gh", "issue", "edit", "42", "--repo", identity.SLUG,
         "--add-label", "needs-discussion",
     ]
+    assert result is True
 
 
 def test_remove_label_matches_scheduler_advance_path(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
-    GitHubTracker().remove_label("42", "spec-pending-review")
+    result = GitHubTracker().remove_label("42", "spec-pending-review")
     assert calls[0] == [
         "gh", "issue", "edit", "42", "--repo", identity.SLUG,
         "--remove-label", "spec-pending-review",
     ]
+    assert result is True
+
+
+def test_add_label_returns_false_and_prints_stderr_on_gh_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="rate limited"),
+    )
+    result = GitHubTracker().add_label("42", "needs-discussion")
+    assert result is False
+    err = capsys.readouterr().err
+    assert "42" in err
+    assert "needs-discussion" in err
+    assert "rate limited" in err
+
+
+def test_remove_label_returns_false_and_prints_stderr_on_gh_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="rate limited"),
+    )
+    result = GitHubTracker().remove_label("42", "spec-pending-review")
+    assert result is False
+    err = capsys.readouterr().err
+    assert "42" in err
+    assert "spec-pending-review" in err
+    assert "rate limited" in err
 
 
 def test_upsert_comment_delegates_to_board_post_or_update_comment(monkeypatch):

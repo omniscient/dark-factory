@@ -270,13 +270,14 @@ def test_add_label_reads_then_puts_merged_labels(monkeypatch):
         return {}
 
     monkeypatch.setattr(JiraTracker, "_request", fake_request)
-    tracker.add_label("PROJ-1", "needs-discussion")
+    result = tracker.add_label("PROJ-1", "needs-discussion")
 
     get_call, put_call = calls
     assert get_call[:3] == ("GET", "/issue/PROJ-1", {"fields": "labels"})
     assert put_call[0] == "PUT"
     assert put_call[1] == "/issue/PROJ-1"
     assert set(put_call[3]["fields"]["labels"]) == {"existing-label", "needs-discussion"}
+    assert result is True
 
 
 def test_remove_label_reads_then_puts_without_it(monkeypatch):
@@ -293,10 +294,11 @@ def test_remove_label_reads_then_puts_without_it(monkeypatch):
         return {}
 
     monkeypatch.setattr(JiraTracker, "_request", fake_request)
-    tracker.remove_label("PROJ-1", "spec-pending-review")
+    result = tracker.remove_label("PROJ-1", "spec-pending-review")
 
     _, put_call = calls
     assert put_call[1]["fields"]["labels"] == ["keep-me"]
+    assert result is True
 
 
 def test_upsert_comment_creates_when_marker_absent(monkeypatch):

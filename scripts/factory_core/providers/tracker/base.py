@@ -39,12 +39,19 @@ class Tracker(ABC):
         to handle it)."""
 
     @abstractmethod
-    def add_label(self, id: str, name: str) -> None:
-        ...
+    def add_label(self, id: str, name: str) -> bool:
+        """True iff the label was applied. The meaning of False is
+        implementation-dependent: GitHub returns False on a failed gh/API call
+        (transport failures do not raise there), while Jira has no false-on-failure
+        path at all -- `JiraTracker.add_label` returns True unconditionally and lets
+        `_request`'s RuntimeError on HTTP errors propagate instead (same distinction
+        as `set_status`). Callers that need attempt-all-then-report semantics across
+        both providers must catch RuntimeError as well as check the return value."""
 
     @abstractmethod
-    def remove_label(self, id: str, name: str) -> None:
-        ...
+    def remove_label(self, id: str, name: str) -> bool:
+        """True iff the label was removed; see add_label docstring for the
+        per-provider difference in how failure is signaled (False vs. raise)."""
 
     @abstractmethod
     def upsert_comment(self, id: str, marker: str, body: str) -> None:

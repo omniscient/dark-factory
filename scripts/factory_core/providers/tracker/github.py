@@ -149,17 +149,23 @@ class GitHubTracker(Tracker):
             return False
         return board._item_edit_status(item_id, identity.STATUS[canonical])
 
-    def add_label(self, id: str, name: str) -> None:
-        subprocess.run(
+    def add_label(self, id: str, name: str) -> bool:
+        r = subprocess.run(
             ["gh", "issue", "edit", id, "--repo", identity.SLUG, "--add-label", name],
-            capture_output=True,
+            capture_output=True, text=True,
         )
+        if r.returncode != 0:
+            print(f"github: add-label {name!r} failed for #{id}: {r.stderr.strip()}", file=sys.stderr)
+        return r.returncode == 0
 
-    def remove_label(self, id: str, name: str) -> None:
-        subprocess.run(
+    def remove_label(self, id: str, name: str) -> bool:
+        r = subprocess.run(
             ["gh", "issue", "edit", id, "--repo", identity.SLUG, "--remove-label", name],
-            capture_output=True,
+            capture_output=True, text=True,
         )
+        if r.returncode != 0:
+            print(f"github: remove-label {name!r} failed for #{id}: {r.stderr.strip()}", file=sys.stderr)
+        return r.returncode == 0
 
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
         board.post_or_update_comment(id, marker, body)

@@ -258,7 +258,7 @@ spec_advance_check() {
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:refine"
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-      --remove "spec-pending-review" 2>/dev/null || true
+      --remove "spec-pending-review" || true
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running with new feedback.
@@ -277,7 +277,7 @@ ${FOOTER}" 2>/dev/null || true
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$SPEC_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
       python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-        --remove "spec-pending-review" 2>/dev/null || true
+        --remove "spec-pending-review" || true
       set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" || true
     else
       echo "[$(date -u +%FT%TZ)] spec_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${SPEC_GRACE_MINUTES}m action=waiting"
@@ -294,7 +294,7 @@ plan_advance_check() {
   if [ "$has_new" = "yes" ]; then
     reset_retry "${issue_num}:plan"
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-      --remove "plan-pending-review" 2>/dev/null || true
+      --remove "plan-pending-review" || true
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
 "🔄 **Refinement Pipeline** — Re-running plan with new feedback.
@@ -318,7 +318,7 @@ ${FOOTER}" 2>/dev/null || true
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$PLAN_GRACE_MINUTES" ]; then
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
       python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-        --remove "plan-pending-review" 2>/dev/null || true
+        --remove "plan-pending-review" || true
       set_board_status "$issue_num" "$FACTORY_STATUS_READY" || true
     else
       echo "[$(date -u +%FT%TZ)] plan_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${PLAN_GRACE_MINUTES}m action=waiting"
@@ -1046,7 +1046,7 @@ stage_ready_implement() {
       if ! has_above_ceiling_label "$item"; then
         echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
         python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
-          --add "$ABOVE_CEILING_LABEL" 2>/dev/null || true
+          --add "$ABOVE_CEILING_LABEL" || true
         set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
         FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
         gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
