@@ -119,3 +119,42 @@ class TestPushGateCheckScript:
         result = run_script("docs/superpowers/specs/", "212", git_repo)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
+
+    def test_commit_subject_only_reference_detected(self, git_repo):
+        """Reproduces #382: a spec committed with a numberless filename and no issue
+        number in its content, where the issue number appears only in the commit
+        subject, must still be detected via the pass-2 commit-subject association."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-08-31-handoff-example-design.md"
+        spec_file.write_text("# Design\n\nNo issue reference in the body.\n")
+        git("add", "docs/superpowers/specs/2026-08-31-handoff-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "docs(spec): #212 handoff example design", cwd=str(git_repo))
+
+        result = run_script("docs/superpowers/specs/", "212", git_repo)
+        assert result.returncode == 0, result.stderr
+        assert (
+            result.stdout.strip()
+            == "docs/superpowers/specs/2026-08-31-handoff-example-design.md"
+        )
+
+    def test_commit_subject_match_is_per_commit_not_global(self, git_repo):
+        """Discriminator: a side commit that merely mentions the issue number in its
+        subject, but does not itself touch any file under the artifact prefix, must
+        NOT cause an unrelated numberless candidate file to be reported. A global
+        'any commit on the branch mentions #<num>' fallback would mis-associate the
+        two; per-commit association must keep this empty (the #212 failure class)."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-08-31-unrelated-numberless-design.md"
+        spec_file.write_text("# Design\n\nNo issue reference in the body.\n")
+        git("add", "docs/superpowers/specs/2026-08-31-unrelated-numberless-design.md", cwd=str(git_repo))
+        git("commit", "-m", "docs(spec): draft design notes", cwd=str(git_repo))
+
+        (git_repo / "memory-note.txt").write_text("lessons from issue #212\n")
+        git("add", "memory-note.txt", cwd=str(git_repo))
+        git("commit", "-m", "memory: lessons from issue #212", cwd=str(git_repo))
+
+        result = run_script("docs/superpowers/specs/", "212", git_repo)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
