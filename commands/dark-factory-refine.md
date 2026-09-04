@@ -112,13 +112,18 @@ Follow this process:
 1. Propose 2-3 approaches with trade-offs
 2. Select the best approach based on Q&A answers and codebase patterns
 3. Write the spec to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` following existing spec format:
+   - A `**Issue:** #<num>` line directly under the title — required (#382) so the
+     content-only `grep -rl "#${ISSUE}"` call sites elsewhere in the DAG (budget
+     telemetry, the PR-push archive step) can find this artifact even when the push
+     gate itself associates it via commit subject instead
    - Overview / problem statement
    - Requirements (from Q&A)
    - Architecture / approach
    - Alternatives considered
    - Open questions (non-blocking)
    - Assumptions (flagged)
-4. Self-review: placeholder scan, consistency check, scope check, ambiguity check. Fix inline.
+4. Self-review: placeholder scan, consistency check, scope check, ambiguity check,
+   issue-number line present. Fix inline.
 5. Run the OOS gate — detect and revert any files committed outside the refine allowlist:
    ```bash
    OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/specs/ .archon/memory/" refine)  # TARGET-PATH

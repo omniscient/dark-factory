@@ -68,12 +68,18 @@ MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh"
 
 Write a full implementation plan following these conventions:
 - Save to `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`
-- Start with the standard plan header (Goal, Architecture, Tech Stack)
+- A `**Issue:** #<num>` line directly under the title, before the standard plan
+  header (Goal, Architecture, Tech Stack) — required (#382) so the content-only
+  `grep -rl "#${ISSUE}"` call sites elsewhere in the DAG (budget telemetry, the
+  PR-push archive step) can find this artifact even when the push gate itself
+  associates it via commit subject instead
 - Include a File Structure table
 - Break into bite-sized tasks (each step is one 2-5 minute action)
 - Every task has: Files list, TDD steps (write failing test → verify fail → implement → verify pass → commit)
 - No placeholders — every step has actual code blocks and exact file paths
 - Exact commands with expected output
+- Self-review before publishing: confirm the issue-number line is present, alongside
+  the existing no-placeholders check
 
 ## Phase 3: ARCHITECT REVIEW
 
