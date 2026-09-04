@@ -580,3 +580,39 @@ def test_bot_markers_follow_product_name(monkeypatch):
     importlib.reload(cd)
     body = "---\n*Posted by Acme Dark Factory*"
     assert cd._BOT_RE.search(body), "marker regex must track FACTORY_PRODUCT_NAME"
+
+
+# ── R7 drift guard: heading list vs. live command templates ──────────────────
+
+def test_gate_verdict_headings_cover_all_command_templates():
+    """R7 drift test: every issue-level '## ... — Blocked' comment heading posted by
+    commands/*.md must be covered (by prefix) by _GATE_VERDICT_HEADINGS, so a future
+    third gate template that starts posting a new '— Blocked' heading fails CI with an
+    explicit 'register this heading' signal instead of silently bypassing the fix.
+
+    Note: this scans whole-file text for the '## ... — Blocked' pattern rather than
+    restricting to `gh issue comment --body` payload lines, because the existing
+    dark-factory-plan.md:140 heading is illustrative markdown with no `--body` on its
+    line. A future unrelated prose heading happening to end in '— Blocked' would also
+    be caught here and would need an explicit exemption or a narrower marker — accepted
+    as a known, low-probability false-positive risk (fails loud, not silent) rather
+    than building speculative narrowing for a case that doesn't exist today."""
+    import re
+    from pathlib import Path
+
+    commands_dir = Path(__file__).resolve().parents[1] / "commands"
+    heading_re = re.compile(r'## [^\n"]*?— Blocked[^\n"]*')
+    found_headings: set[str] = set()
+    for f in sorted(commands_dir.glob("dark-factory-*.md")):
+        text = f.read_text(encoding="utf-8")
+        found_headings.update(m.strip() for m in heading_re.findall(text))
+
+    assert found_headings, "expected at least one '## ... — Blocked' heading in commands/*.md"
+    uncovered = [
+        h for h in found_headings
+        if not any(h.startswith(known) for known in cd._GATE_VERDICT_HEADINGS)
+    ]
+    assert not uncovered, (
+        f"Found '— Blocked' heading(s) not covered by _GATE_VERDICT_HEADINGS: {uncovered} "
+        "— register the new heading in comment_digest._GATE_VERDICT_HEADINGS."
+    )
