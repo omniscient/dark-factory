@@ -22,3 +22,7 @@ def test_plan_writing_mandates_issue_number_line():
         "Phase 2 (Plan Writing) conventions must mandate a '**Issue:** #<num>' line "
         "in the plan body for the same reason as the refine command (#382)"
     )
+    assert "issue number line" in text.lower() or "issue-number line" in text.lower(), (
+        "Phase 2's self-review step must explicitly check for the mandated line, "
+        "the same way the refine command's self-review already does"
+    )

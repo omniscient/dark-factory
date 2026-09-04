@@ -158,3 +158,25 @@ class TestPushGateCheckScript:
         result = run_script("docs/superpowers/specs/", "212", git_repo)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
+
+    def test_commit_subject_match_on_deleted_file_not_reported(self, git_repo):
+        """Guards the `git cat-file -e "HEAD:$_touched"` check (push_gate_check.sh):
+        a spec that exists on main and is deleted by a branch commit whose subject
+        carries '#<num>' (e.g. the archive step's 'docs: archive spec/plan for issue
+        #N' move out of docs/superpowers/specs/) still shows up in the three-dot
+        diff as a deletion. Without the existence guard, pass 2 would associate and
+        report a path that no longer exists on HEAD. Must print nothing, exit 0."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-07-15-example-design.md"
+        spec_file.write_text("# Design\n\nNo issue reference in the body.\n")
+        git("add", "docs/superpowers/specs/2026-07-15-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+        git("push", "origin", "HEAD:main", cwd=str(git_repo))
+
+        git("rm", "docs/superpowers/specs/2026-07-15-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "docs: archive spec/plan for issue #212", cwd=str(git_repo))
+
+        result = run_script("docs/superpowers/specs/", "212", git_repo)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""

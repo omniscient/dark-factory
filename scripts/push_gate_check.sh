@@ -85,7 +85,7 @@ if [ "$HAS_COMMITS" -gt 0 ]; then
       while IFS= read -r -d '' _touched; do
         if git cat-file -e "HEAD:$_touched" 2>/dev/null; then
           _assoc["$_touched"]=1
-          echo "push_gate_check: associated $_touched via commit subject $_sha" >&2
+          echo "push_gate_check: candidate association $_touched via commit subject $_sha" >&2
         fi
       done < <(git diff-tree --no-commit-id -r -z --name-only "$_sha" -- "$ARTIFACT_PREFIX" 2>/dev/null)
     fi
@@ -93,6 +93,7 @@ if [ "$HAS_COMMITS" -gt 0 ]; then
 
   for _file in ${_candidates[@]+"${_candidates[@]}"}; do
     if [[ -n "${_assoc["$_file"]+x}" ]]; then
+      echo "push_gate_check: selected $_file via commit-subject association" >&2
       printf '%s\n' "$_file"
       exit 0
     fi
