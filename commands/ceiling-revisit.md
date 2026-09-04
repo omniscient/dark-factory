@@ -135,16 +135,23 @@ if [ "$L_NEEDS_ISSUE" = "True" ]; then
     --json number,title,state,stateReason \
     --jq '[.[] | select(.title | test("always-above-ceiling"; "i"))] | sort_by(-.number)')
 
-  OPEN_MATCH=$(echo "$MATCHES" | jq -r '[.[] | select(.state=="OPEN")] | first.number // empty')
-  NEWEST_NUM=$(echo "$MATCHES" | jq -r 'first.number // empty')
-  NEWEST_REASON=$(echo "$MATCHES" | jq -r 'first.stateReason // empty')
-
-  if [ -n "$OPEN_MATCH" ]; then
-    XL_ACTION="skip-duplicate"; XL_CITE="$OPEN_MATCH"
-  elif [ -n "$NEWEST_NUM" ] && [ "$NEWEST_REASON" = "NOT_PLANNED" ]; then
-    XL_ACTION="skip-policy"; XL_CITE="$NEWEST_NUM"
+  # Fail closed (#361): if the tracker lookup itself failed (auth, rate limit, network),
+  # MATCHES may be empty or not valid JSON. Falling through in that case would silently
+  # file exactly the duplicate this guard exists to prevent — skip filing instead.
+  if [ -z "$MATCHES" ] || ! echo "$MATCHES" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    XL_ACTION="skip-lookup-failed"
   else
-    XL_ACTION="file"
+    OPEN_MATCH=$(echo "$MATCHES" | jq -r '[.[] | select(.state=="OPEN")] | first.number // empty')
+    NEWEST_NUM=$(echo "$MATCHES" | jq -r 'first.number // empty')
+    NEWEST_REASON=$(echo "$MATCHES" | jq -r 'first.stateReason // empty')
+
+    if [ -n "$OPEN_MATCH" ]; then
+      XL_ACTION="skip-duplicate"; XL_CITE="$OPEN_MATCH"
+    elif [ -n "$NEWEST_NUM" ] && [ "$NEWEST_REASON" = "NOT_PLANNED" ]; then
+      XL_ACTION="skip-policy"; XL_CITE="$NEWEST_NUM"
+    else
+      XL_ACTION="file"
+    fi
   fi
 
   if [ "$XL_ACTION" = "file" ]; then
@@ -172,6 +179,11 @@ in \`scripts/scheduler_lib.sh\` may be overly conservative.
 *Filed automatically by weekly ceiling revisit*" \
       --label "enhancement" \
       --label "priority: should-have"
+  elif [ "$XL_ACTION" = "skip-lookup-failed" ]; then
+    gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "XL-bucket success rate cleared the \
+>70%-at-n>=5 threshold again this cycle, but the duplicate/policy tracker lookup (\`gh issue \
+list\`) failed, so no issue was filed this cycle to avoid risking a duplicate. Re-run the \
+weekly revisit, or file the XL-bucket issue manually if this recurs."
   else
     REASON=$([ "$XL_ACTION" = "skip-policy" ] && echo "closed by operator policy decision" \
                                                 || echo "already open, covering this observation")

@@ -58,8 +58,9 @@ def test_guard_anchor_matches_filed_title_substring():
     # so the guard can never drift out of sync with what Phase 4 itself files (#361). Extract
     # both literals by regex (rather than asserting each in isolation) so this test would fail
     # if a future edit changed one anchor without the other.
-    filter_match = re.search(r'test\("([^"]+)"', text)
-    title_match = re.search(r'--title "Revisit ([^"]+) rule', text)
+    phase4_text = text[text.index("## Phase 4"):]
+    filter_match = re.search(r'test\("([^"]+)"', phase4_text)
+    title_match = re.search(r'--title "([^"]+)"', phase4_text)
     assert filter_match and title_match, "guard filter or filed title not found"
     assert filter_match.group(1) in title_match.group(1), (
         f"guard anchor {filter_match.group(1)!r} must be a substring of the filed title "
