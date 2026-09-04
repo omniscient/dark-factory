@@ -97,18 +97,56 @@ def _feedback_sections(human_comments: list[dict], reviews: list[dict], inline: 
     return "".join(parts)
 
 
+_GATE_VERDICT_HEADINGS = (
+    "## Code Review — Blocked",
+    "## Spec Conformance — Blocked",
+)
+
+
+def _is_gate_verdict(body: str) -> bool:
+    stripped = body.lstrip()
+    return (
+        any(stripped.startswith(h) for h in _GATE_VERDICT_HEADINGS)
+        and _is_factory_comment(body)
+    )
+
+
+def _latest_gate_verdict(comments: list[dict]) -> dict | None:
+    for c in reversed(comments):
+        if _is_gate_verdict(c.get("body") or ""):
+            return c
+    return None
+
+
+def _gate_verdict_section(gate_verdict: dict | None) -> str:
+    if not gate_verdict:
+        return ""
+    created_at = gate_verdict.get("createdAt") or ""
+    body = gate_verdict.get("body") or ""
+    return (
+        "\n### Gate verdict (factory-posted, action required)\n\n"
+        f"- [{created_at}] {body}\n"
+    )
+
+
 def build_digest(issue_data: dict) -> str:
     """Build a comment digest from parsed issue.json data.
 
     Finds the latest factory boundary marker in the comments array, then
     extracts human-authored comments, PR reviews (filtered by submittedAt >
     boundary AND non-bot body), and inline comments (filtered by created_at >
-    boundary). Returns a spec-format markdown string, or a sentinel if nothing
-    human is found.
+    boundary). Also scans the full comment array, independent of the boundary,
+    for the latest gate-verdict comment (Gate-2/Gate-3 "— Blocked" findings) and
+    always includes it in its own section — human feedback keeps presentation
+    priority, but the gate finding must never be dropped. Returns a spec-format
+    markdown string, or a sentinel if nothing human or gate-verdict is found.
     """
     comments: list[dict] = issue_data.get("comments") or []
     pr_reviews_data: dict = issue_data.get("pr_reviews") or {}
     inline_comments: list[dict] = issue_data.get("pr_inline_comments") or []
+
+    gate_verdict = _latest_gate_verdict(comments)
+    gate_section = _gate_verdict_section(gate_verdict)
 
     # Find index, timestamp, matched marker, and body of the last factory boundary
     last_factory_idx = -1
@@ -151,20 +189,30 @@ def build_digest(issue_data: dict) -> str:
 
     no_boundary = last_factory_idx == -1
 
-    # No-boundary case: all human content with a note, or empty sentinel
+    # No-boundary case: all human content (+ gate verdict) with a note, or empty sentinel.
+    # Defensive per spec R3: _is_gate_verdict requires _is_factory_comment (R1), so any
+    # comment matching it also sets last_factory_idx above, meaning `no_boundary and
+    # gate_section` cannot both be true with today's heading list — this branch's
+    # gate_section checks are unreachable in practice but kept so this composes correctly
+    # if that coupling ever changes (e.g. a future heading that isn't itself a factory
+    # marker).
     if no_boundary:
         all_human = [c for c in comments if not _is_factory_comment(c.get("body") or "")]
         all_reviews_nb = [r for r in all_reviews if not _is_factory_comment(r.get("body") or "")]
         all_inline = inline_comments
         if not all_human and not all_reviews_nb and not all_inline:
+            if gate_section:
+                return f"<!-- no-boundary: true -->\n## Human feedback since last factory run\n{gate_section}"
             return "<!-- no-human-feedback -->\n"
         sections = _feedback_sections(all_human, all_reviews_nb, all_inline)
-        return f"<!-- no-boundary: true -->\n## Human feedback since last factory run\n{sections}"
+        return f"<!-- no-boundary: true -->\n## Human feedback since last factory run\n{sections}{gate_section}"
 
     # With boundary
     header = f'<!-- comment-digest: cutoff={boundary_ts} marker="{boundary_marker}" -->'
 
     if not human_comments and not reviews and not inline:
+        if gate_section:
+            return f"{header}\n{gate_section}"
         return (
             f"{header}\n"
             "<!-- no-feedback: true -->\n"
@@ -178,7 +226,7 @@ def build_digest(issue_data: dict) -> str:
         f"## Marker\n\n"
         f'Latest factory comment at {boundary_ts}: "{snippet}"\n\n'
         f"## Human feedback since last factory run\n"
-        f"{sections}"
+        f"{sections}{gate_section}"
     )
 
 

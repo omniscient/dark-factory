@@ -403,6 +403,175 @@ def test_comments_cap_build_digest_stays_pure(monkeypatch):
     assert "<!-- truncated:" not in result
 
 
+# ── R354: gate-verdict comments surfaced in continue-run digests ─────────────
+
+def test_gate_verdict_last_comment_included_not_swallowed():
+    """R7#1: gate-verdict comment as the last comment in the thread is the primary
+    reported symptom (#354) — the digest must not collapse to the no-feedback sentinel."""
+    issue_data = {
+        "comments": [
+            {"body": "please look into this", "author": {"login": "user"}, "createdAt": "2026-08-24T10:00:00Z"},
+            {
+                "body": "## Code Review — Blocked\n\nThe AI code reviewer found 1 blocking issue(s).\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:34:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "No human feedback found after last factory marker." not in result
+    assert "### Gate verdict (factory-posted, action required)" in result
+    assert "The AI code reviewer found 1 blocking issue(s)." in result
+
+
+def test_gate_verdict_included_despite_later_factory_report_comment():
+    """R7#2: a later, non-gate-verdict factory comment (e.g. the report node) must not
+    push the gate verdict out of the digest — inclusion is position-independent (R2)."""
+    issue_data = {
+        "comments": [
+            {
+                "body": "## Code Review — Blocked\n\nThe AI code reviewer found 1 blocking issue(s).\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:34:00Z",
+            },
+            {
+                "body": "---\n*Posted by MarketHawk Dark Factory*\nRun report.",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:40:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "### Gate verdict (factory-posted, action required)" in result
+    assert "The AI code reviewer found 1 blocking issue(s)." in result
+
+
+def test_gate_verdict_as_sole_comment_included():
+    """R7#3: a gate-verdict comment with no other factory or human comment in the
+    thread. Note: because _is_gate_verdict requires _is_factory_comment (R1), a
+    matching comment always sets the boundary itself, so this exercises the
+    *with-boundary* empty-sentinel branch (167-172), same as the next test below —
+    not the true no_boundary branch (152-162), which is defensive/unreachable dead
+    code today (see the comment on that branch in build_digest). Kept as its own
+    test because it's the minimal single-comment reproduction of the reported bug,
+    distinct in shape from the next test's two-comment case."""
+    issue_data = {
+        "comments": [
+            {
+                "body": "## Spec Conformance — Blocked\n\nMaterial divergence found.\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:34:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "<!-- no-human-feedback -->" not in result
+    assert "No human feedback found after last factory marker." not in result
+    assert "### Gate verdict (factory-posted, action required)" in result
+    assert "Material divergence found." in result
+
+
+def test_gate_verdict_included_when_it_is_the_boundary_with_no_other_content():
+    """R7#4: empty-sentinel branch (no human/review/inline content) — when the boundary
+    itself is a gate verdict, the gate section must be emitted instead of the sentinel."""
+    issue_data = {
+        "comments": [
+            {"body": "---\n*Posted by MarketHawk Backlog Scheduler*", "author": {"login": "omniscient"}, "createdAt": "2026-08-24T09:00:00Z"},
+            {
+                "body": "## Code Review — Blocked\n\nOne blocker found.\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:34:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "No human feedback found after last factory marker." not in result
+    assert "### Gate verdict (factory-posted, action required)" in result
+    assert "One blocker found." in result
+
+
+def test_heading_prefix_without_footer_not_misrouted_as_gate_verdict():
+    """R1/R7#5: exact heading prefix match alone (no factory footer) must not be
+    classified as a gate verdict — guards against a human pasting the heading text
+    verbatim without the factory footer marker."""
+    issue_data = {
+        "comments": [
+            {"body": "---\n*Posted by MarketHawk Dark Factory*", "author": {"login": "bot"}, "createdAt": "2026-08-24T09:00:00Z"},
+            {
+                "body": "## Code Review — Blocked\n\nI'm quoting this heading in my own comment, no bot footer here.",
+                "author": {"login": "alice"},
+                "createdAt": "2026-08-24T09:30:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "### Gate verdict (factory-posted, action required)" not in result
+    assert "### Issue comments" in result
+    assert "I'm quoting this heading in my own comment, no bot footer here." in result
+
+
+def test_two_gate_verdicts_only_latest_surfaced():
+    """R7#6: two stacked gate-verdict comments across cycles — only the latest is
+    included, avoiding feeding the continue agent a stale round's finding."""
+    issue_data = {
+        "comments": [
+            {
+                "body": "## Code Review — Blocked\n\nFirst round: 2 blockers.\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:00:00Z",
+            },
+            {
+                "body": "---\n*Posted by MarketHawk Dark Factory*\nRun report.",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:10:00Z",
+            },
+            {
+                "body": "## Code Review — Blocked\n\nSecond round: 1 blocker.\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T11:00:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "Second round: 1 blocker." in result
+    assert "First round: 2 blockers." not in result
+
+
+def test_gate_verdict_section_rendered_after_human_sections():
+    """R4: when both human feedback and a gate verdict are present, the gate-verdict
+    section is rendered after the human sections (human comments keep presentation
+    priority)."""
+    issue_data = {
+        "comments": [
+            {
+                "body": "## Code Review — Blocked\n\nOne blocker.\n\n---\n*Posted by MarketHawk Dark Factory*",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:00:00Z",
+            },
+            {"body": "please prioritize the null check", "author": {"login": "alice"}, "createdAt": "2026-08-24T10:05:00Z"},
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert result.index("### Issue comments") < result.index("### Gate verdict (factory-posted, action required)")
+
+
+def test_heading_mid_body_not_matched_as_gate_verdict():
+    """R1: _is_gate_verdict requires the heading at the START of the (lstripped) body,
+    not merely present somewhere in it — a factory comment that happens to quote/mention
+    a heading mid-body must not be misclassified as the gate verdict itself."""
+    issue_data = {
+        "comments": [
+            {
+                "body": "---\n*Posted by MarketHawk Dark Factory*\nRun report. (Note: previous cycle ended with ## Code Review — Blocked.)",
+                "author": {"login": "omniscient"},
+                "createdAt": "2026-08-24T10:00:00Z",
+            },
+        ],
+    }
+    result = cd.build_digest(issue_data)
+    assert "### Gate verdict (factory-posted, action required)" not in result
+
+
 # ── FACTORY_PRODUCT_NAME parameterization ─────────────────────────────────────
 
 def test_bot_markers_follow_product_name(monkeypatch):
