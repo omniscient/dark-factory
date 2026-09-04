@@ -390,7 +390,11 @@ nodes:
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       _CLONE="${CLONE_DIR:-.}"
       _RUN="${RUN_ID:-$(basename "${ARTIFACTS_DIR:-/tmp/budget}")}"
-      SPEC_FILE=$(grep -rl "#${ISSUE}" "$_CLONE/docs/superpowers/specs/" 2>/dev/null | head -1 || true)
+      # Resolve via push_gate_check.sh (#390): only files this branch changed under the
+      # prefix are candidates. A directory-wide first-match grep picked sibling specs that
+      # merely mention #N (it archived issue #197's spec during #199).
+      SPEC_FILE=$(bash "$_CLONE/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/specs/" "$ISSUE")  # TARGET-PATH
+      [ -n "$SPEC_FILE" ] && SPEC_FILE="$_CLONE/$SPEC_FILE"
       python3 "$_CLONE/dark-factory/scripts/context_budget.py" \
         --scenario plan \
         --issue-num "$ISSUE" \
@@ -930,7 +934,11 @@ nodes:
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       _CLONE="${CLONE_DIR:-.}"
       _RUN="${RUN_ID:-$(basename "${ARTIFACTS_DIR:-/tmp/budget}")}"
-      SPEC_FILE=$(grep -rl "#${ISSUE}" "$_CLONE/docs/superpowers/specs/" 2>/dev/null | head -1 || true)
+      # Resolve via push_gate_check.sh (#390): only files this branch changed under the
+      # prefix are candidates. A directory-wide first-match grep picked sibling specs that
+      # merely mention #N (it archived issue #197's spec during #199).
+      SPEC_FILE=$(bash "$_CLONE/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/specs/" "$ISSUE")  # TARGET-PATH
+      [ -n "$SPEC_FILE" ] && SPEC_FILE="$_CLONE/$SPEC_FILE"
       # review_diff.txt is written inside the conformance command session, not before it.
       # Use three-dot (matches what dark-factory-conformance.md sends to Claude) for telemetry
       # fidelity. Note: three-dot is intentional here (measure what command loads), NOT for
@@ -1029,8 +1037,10 @@ nodes:
       echo "Pushing branch and creating/updating PR for issue #${ISSUE}..."
 
       # Archive spec/plan for this issue before pushing
-      SPEC_FILE=$(grep -rl "#${ISSUE}" docs/superpowers/specs/ 2>/dev/null | head -1)
-      PLAN_FILE=$(grep -rl "#${ISSUE}" docs/superpowers/plans/ 2>/dev/null | head -1)
+      # Resolve via push_gate_check.sh (#390) — branch-scoped and fail-closed. The
+      # directory-wide first-match grep archived issue #197's spec during #199 (f4ddbcb).
+      SPEC_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/specs/" "$ISSUE")  # TARGET-PATH
+      PLAN_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plans/" "$ISSUE")  # TARGET-PATH
 
       ARCHIVED=0
       if [ -n "$SPEC_FILE" ]; then

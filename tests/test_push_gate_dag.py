@@ -114,3 +114,29 @@ def test_dag_validator_passes():
     from check_workflow_dag import check
     errors = check(_WORKFLOW)
     assert errors == [], "\n".join(errors)
+
+
+# ── #390: every SPEC_FILE/PLAN_FILE lookup resolves through push_gate_check.sh ──────
+# A directory-wide `grep -rl "#N" | head -1` treats any sibling spec that merely mentions
+# #N as a candidate (three specs on main mention #196); it archived issue #197's spec
+# during #199. push_gate_check.sh only ever prints a file this branch changed under the
+# prefix, so the wrong artifact can no longer be planned against, measured, or archived.
+_RAW_FIRST_MATCH_GREP = 'grep -rl "#${ISSUE}"'
+
+
+@pytest.mark.parametrize("node_id,prefixes", [
+    ("budget-plan", ["docs/superpowers/specs/"]),
+    ("budget-conformance", ["docs/superpowers/specs/"]),
+    ("push-and-pr", ["docs/superpowers/specs/", "docs/superpowers/plans/"]),
+])
+class TestArtifactLookupNodes:
+    def test_node_resolves_artifacts_via_push_gate_check(self, node_id, prefixes):
+        bash = _workflow_nodes()[node_id]["bash"]
+        for prefix in prefixes:
+            assert f'push_gate_check.sh" "{prefix}"' in bash, (
+                f"'{node_id}' must resolve '{prefix}' through push_gate_check.sh (#390)")
+
+    def test_node_has_no_directory_wide_first_match_grep(self, node_id, prefixes):
+        bash = _workflow_nodes()[node_id]["bash"]
+        assert _RAW_FIRST_MATCH_GREP not in bash, (
+            f"'{node_id}' still uses the first-match grep that picks sibling specs (#390)")
