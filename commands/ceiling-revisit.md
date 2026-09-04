@@ -118,16 +118,40 @@ Closes #${ISSUE_NUM} (if this is the actionable change)." \
 fi
 ```
 
-## Phase 4 — File L-Bucket Code-Change Issue (conditional)
+## Phase 4 — File XL-Bucket Code-Change Issue, Guarded (conditional)
 
-Only execute if `L_NEEDS_ISSUE` is `True`.
+Only execute if `L_NEEDS_ISSUE` is `True`. Before filing, query the tracker once for an
+existing `always-above-ceiling`-titled issue (open+closed) and branch on its
+`state`/`stateReason`: an open match is a duplicate (skip), a closed/`NOT_PLANNED` match is a
+prior operator policy decision (skip), otherwise file a new issue.
 
 ```bash
 if [ "$L_NEEDS_ISSUE" = "True" ]; then
-  gh issue create \
-    --repo "$REPO" \
-    --title "Revisit XL=always-above-ceiling rule in is_above_ceiling() — scheduler_lib.sh" \
-    --body "## Purpose
+  # Duplicate/policy guard (#361). "always-above-ceiling" is the stable substring across both
+  # the L->XL rename and the scheduler.sh->scheduler_lib.sh split, and is guaranteed to match
+  # the title this Phase itself files below — the guard and the filed title can never drift
+  # apart as long as both are anchored to this same substring.
+  MATCHES=$(gh issue list --repo "$REPO" --state all --limit 500 \
+    --json number,title,state,stateReason \
+    --jq '[.[] | select(.title | test("always-above-ceiling"; "i"))] | sort_by(-.number)')
+
+  OPEN_MATCH=$(echo "$MATCHES" | jq -r '[.[] | select(.state=="OPEN")] | first.number // empty')
+  NEWEST_NUM=$(echo "$MATCHES" | jq -r 'first.number // empty')
+  NEWEST_REASON=$(echo "$MATCHES" | jq -r 'first.stateReason // empty')
+
+  if [ -n "$OPEN_MATCH" ]; then
+    XL_ACTION="skip-duplicate"; XL_CITE="$OPEN_MATCH"
+  elif [ -n "$NEWEST_NUM" ] && [ "$NEWEST_REASON" = "NOT_PLANNED" ]; then
+    XL_ACTION="skip-policy"; XL_CITE="$NEWEST_NUM"
+  else
+    XL_ACTION="file"
+  fi
+
+  if [ "$XL_ACTION" = "file" ]; then
+    gh issue create \
+      --repo "$REPO" \
+      --title "Revisit XL=always-above-ceiling rule in is_above_ceiling() — scheduler_lib.sh" \
+      --body "## Purpose
 
 The weekly dispatch ceiling analysis (issue #${ISSUE_NUM}, window ${SINCE}→${UNTIL})
 found the L+XL bucket success rate exceeds 70% at n≥5. The XL=always-above-ceiling rule
@@ -146,8 +170,15 @@ in \`scripts/scheduler_lib.sh\` may be overly conservative.
 
 ---
 *Filed automatically by weekly ceiling revisit*" \
-    --label "enhancement" \
-    --label "priority: should-have"
+      --label "enhancement" \
+      --label "priority: should-have"
+  else
+    REASON=$([ "$XL_ACTION" = "skip-policy" ] && echo "closed by operator policy decision" \
+                                                || echo "already open, covering this observation")
+    gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "XL-bucket success rate cleared the \
+>70%-at-n>=5 threshold again this cycle, but issue #${XL_CITE} is ${REASON} — see #${XL_CITE} \
+instead of filing a duplicate."
+  fi
 fi
 ```
 

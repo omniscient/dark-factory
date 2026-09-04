@@ -37,3 +37,31 @@ def test_target_path_markers_preserved():
         "Phase 1's two '# TARGET-PATH' markers on the python3 dark-factory/scripts/... lines "
         "must survive this text/logic fix untouched (#361 is not a path fix)"
     )
+
+
+def test_phase_4_has_duplicate_policy_guard():
+    text = _text()
+    assert "gh issue list" in text and "--state all" in text, (
+        "Phase 4 must query the tracker for existing always-above-ceiling issues before "
+        "filing, not file unconditionally (#361)"
+    )
+    assert "stateReason" in text and "NOT_PLANNED" in text, (
+        "Phase 4 must branch on stateReason/NOT_PLANNED to distinguish a policy-declined "
+        "issue (skip) from a completed cadence issue (file) — a purely textual comment "
+        "without the actual gh/jq branch does not satisfy this (#361)"
+    )
+
+
+def test_guard_anchor_matches_filed_title_substring():
+    text = _text()
+    # The jq filter's search substring and the filed --title must share the same anchor
+    # so the guard can never drift out of sync with what Phase 4 itself files (#361). Extract
+    # both literals by regex (rather than asserting each in isolation) so this test would fail
+    # if a future edit changed one anchor without the other.
+    filter_match = re.search(r'test\("([^"]+)"', text)
+    title_match = re.search(r'--title "Revisit ([^"]+) rule', text)
+    assert filter_match and title_match, "guard filter or filed title not found"
+    assert filter_match.group(1) in title_match.group(1), (
+        f"guard anchor {filter_match.group(1)!r} must be a substring of the filed title "
+        f"{title_match.group(1)!r} — they must never drift apart"
+    )
