@@ -39,12 +39,16 @@ class Tracker(ABC):
         to handle it)."""
 
     @abstractmethod
-    def add_label(self, id: str, name: str) -> None:
-        ...
+    def add_label(self, id: str, name: str) -> bool:
+        """True iff the label was applied (the underlying gh/API call succeeded).
+        False on failure; never raises for a transport failure at this layer
+        (JiraTracker's `_request` RuntimeError on HTTP errors is the one
+        documented exception, same distinction as `set_status`)."""
 
     @abstractmethod
-    def remove_label(self, id: str, name: str) -> None:
-        ...
+    def remove_label(self, id: str, name: str) -> bool:
+        """True iff the label was removed; False on failure, never raises for a
+        transport failure at this layer (see add_label docstring)."""
 
     @abstractmethod
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
