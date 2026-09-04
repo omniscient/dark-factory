@@ -250,10 +250,10 @@ def test_label_add_and_remove_round_trip(tracker_and_controller):
     id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
     controller.seed_item(id1, labels=[])
 
-    tracker.add_label(id1, "needs-discussion")
+    assert tracker.add_label(id1, "needs-discussion") is True
     assert "needs-discussion" in controller.items[id1]["labels"]
 
-    tracker.remove_label(id1, "needs-discussion")
+    assert tracker.remove_label(id1, "needs-discussion") is True
     assert "needs-discussion" not in controller.items[id1]["labels"]
 
 
