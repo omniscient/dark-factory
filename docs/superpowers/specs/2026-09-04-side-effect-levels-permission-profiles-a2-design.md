@@ -4,6 +4,8 @@
 **Status:** spec-pending-review — **human-reviewed spec** (drafted by the operator session for
 Frank's review; the four policy decisions below were taken by Frank on 2026-09-04)
 **Revised:** 2026-09-04 (operator draft)
+**Revised:** 2026-09-04 (operator amendment after plan review — Trust model, R1, R3, R4, R5,
+R8.3; see the plan's "Plan revision 2026-09-04" note for the F1–F15 findings that drove it)
 
 ## Why this spec is human-authored
 
@@ -76,6 +78,14 @@ phases, and the audit trail — exercised by tests in the factory image — not 
   adapter's `hard_exclude_paths` (`.factory/adapter.yaml:20-26`) and this spec adds nothing to
   them — permission rules there are not enforced in bypass mode and would only invite the
   `allowed-tools: Bash(*)`-plus-blocklist anti-pattern the skills policy bans (#42 spec §4).
+- **Factory-owned policy and enforcement code only.** Phase levels are read from the
+  factory's baked config (`/opt/dark-factory/config/config.yaml`), and the shims and
+  `side_effect.py` used for enforcement are the baked copies under
+  `/opt/dark-factory/scripts` — the target clone (including a target's own `dark-factory/`
+  subtree or `.claude/skills/refinement/config.yaml`) is never consulted, so a target cannot
+  raise its own level or replace the shim, and a stale target-side copy cannot resolve a run
+  to level 1 by accident (a MarketHawk clone carries both of those files today, without any
+  `side_effect:` block).
 
 ## Requirements
 
@@ -87,19 +97,32 @@ Level 6 has no profile (D1).
 
 | Level | Name | Layer A — tools removed | Layer B — shim denies | Net effect |
 |---|---|---|---|---|
-| 1 | read-only research | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `git`: `commit`, `push`, `tag`, `remote add/set-url`; `gh`: everything except `view`, `list`, `status`, `search`, `api` with method GET and no body | Can read and run read-only commands. Output is its return value / stdout only. |
+| 1 | read-only research | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `git`: **allow-list** of curated read verbs only (`log`, `status`, `diff`, `show`, `branch`, `remote` (not `add`/`set-url`), `fetch`, `blame`, `describe`, `rev-parse`, `ls-files`, `ls-tree`, `cat-file`, `shortlog`, `reflog`, `grep`, `help`, `version`, …); `commit`, `push`, `tag`, `remote add/set-url` and every unlisted verb are denied. `gh`: everything except `view`, `list`, `status`, `search`, `api` with method GET and no body — the never-list (level 5) still applies, so `secret`, `auth`, `ssh-key`, `gpg-key` are denied even as `list`/`status` | Can read and run read-only commands. Output is its return value / stdout only. |
 | 2 | artifact writing | none | `git`: `push`, `tag`, `remote set-url`; `gh`: all mutating verbs (as level 1) | Writes files and local commits; nothing leaves the container except via an A5 manifest picked up by the factory. |
 | 3 | GitHub ticket creation | none | `git`: `push`, `tag`, `remote set-url`; `gh`: as level 2 **except** `issue create`, `issue comment`, `issue edit` are allowed | Can file and annotate issues; cannot modify code (no push, no PR). |
-| 4 | code modification | none | `gh`: `pr create/merge/ready/review/close`, `release *`, `repo *`, `secret *`, `auth *`, `api` non-GET; `git push` allowed only to the run's own branch (`FACTORY_RUN_BRANCH`), never `--force`/`--delete`, never `main` | Commits and pushes its branch; cannot open or merge PRs. |
-| 5 | PR creation | none | the **never-list** only: `gh repo delete/archive/rename`, `gh secret *`, `gh auth *`, `gh ssh-key *`, `gh gpg-key *`, `gh api -X DELETE`, `git push --delete`/`:refspec` deletions | Today's implement / push-and-pr behaviour. The never-list must be shown (plan task) to match nothing the DAG or `commands/*.md` do today. |
+| 4 | code modification | none | `gh`: `pr create/merge/ready/review/close`, `release *`, `repo *`, `secret *`, `auth *`, `api` non-GET (plus the never-list); `git push` allowed only to the run's own branch (`FACTORY_RUN_BRANCH`), never `--force`/`--delete`, never `main`, never `--all`/`--mirror`/`--tags`/`--prune`/`--branches`, never `+refspec` force syntax. With `FACTORY_RUN_BRANCH` unset, "own branch" is the checked-out branch and the guarantee degrades to "not `main`, no force, no delete, no wide push" | Commits and pushes its branch; cannot open or merge PRs. |
+| 5 | PR creation | none | the **never-list** only: `gh repo delete/archive/rename`, `gh secret *`, `gh auth *`, `gh ssh-key *`, `gh gpg-key *`, `gh api -X DELETE`, `git push --delete`/`:refspec` deletions. **The never-list is denied at every level (1–5), checked before any allow-list.** | Today's implement / push-and-pr behaviour. The never-list must be shown (plan task) to match nothing the DAG, `commands/*.md` or `scripts/**` do today. |
 | 6 | external production side effect | — | — | Rejected at validation (R2). |
 
 "Modify code" (issue AC2) means *push to any branch*. Local edits at levels 2–3 are permitted
 and never leave the container.
 
+**Enforcement modes.** Level 1 `git` is **allow-list** gated (the curated read verbs above; an
+unlisted verb is denied). Levels 2–5 `git` are **deny-list** gated on the enumerated
+remote-facing verbs (`push`, `tag`, `remote set-url` at 2–3; the push-scope rule at 4; the
+never-list at 5), so ordinary local artifact work (`add`, `commit`, `checkout -b`, `stash`,
+`reset`, …) keeps working. `gh` is allow-list gated at levels 1–3 (the read verbs, plus level
+3's `issue create/comment/edit`) and deny-list gated at levels 4–5 (the mutation sets above).
+The level-5 never-list is denied at every level and is checked before any allow-list. At
+level 4 with `FACTORY_RUN_BRANCH` unset, "own branch" is the currently checked-out branch
+(an agent can `checkout -b` first), so the guarantee degrades to "not `main`, no force, no
+delete, no `--all`/`--mirror`/`--tags`/`--prune`/`--branches`, no `+refspec`"; a loop runner
+that pins `FACTORY_RUN_BRANCH` gets the full own-branch guarantee.
+
 `profile_for(level: int) -> Profile` returns `denied_tools: list[str]`,
 `git_denied: list[str]`, `gh_denied: list[str]`, `gh_allowed: list[str]`, `profile_version:
-str` (`"v1"`). `effective_level(value) -> int` implements D4: `None`, non-int, bool, out of
+str` (`"v1"`), plus the mode/scope fields the shim needs to express the table above
+(`git_mode`, `git_allowed`, `gh_mode`, `push_scope`). `effective_level(value) -> int` implements D4: `None`, non-int, bool, out of
 range → 1. A `render` CLI prints a profile as JSON for the DAG test and the run record.
 `FACTORY_OWNED_MIN_LEVEL = 4` and `TARGET_DEFINABLE_MAX_LEVEL = 3` live here; a test asserts
 `verifier._FACTORY_OWNED_MIN_LEVEL == side_effect.FACTORY_OWNED_MIN_LEVEL` without modifying
@@ -131,23 +154,47 @@ side_effect:
     validate: 5
     conformance: 5
     code_review: 5
-    deconflict: 5
+    revise_advisory: 5   # seventh command: node (R4)
+    deconflict: 5        # entrypoint.sh's inline flow; deconflict.py:143 runs `claude -p`
+    fix_main: 5          # entrypoint.sh's fix-main flow; main_red_fixer.py:190 runs `claude -p`
   # env: SIDE_EFFECT_LEVEL_<PHASE> overrides one phase (e.g. SIDE_EFFECT_LEVEL_REFINE=4).
 ```
 
-A run container executes one intent, which maps to a fixed set of phases
-(`refine → [refine]`, `plan → [plan]`, `new`/`continue → [implement, validate, conformance,
-code_review]`, `resolve → [deconflict]`, `close → []`). The container's **effective level** is
-the maximum over that set. `entrypoint.sh` computes it (via `side_effect.py`), exports
+A run container executes one intent, which maps to a fixed set of phases. The map is keyed on
+`entrypoint.sh`'s **own** `$INTENT` vocabulary (`entrypoint.sh:87-90`: the regex-parsed
+`fix|continue|close|refine|plan|deconflict|recheck`, plus the `fix-main` special case) — not
+the DAG's `parse-intent` vocabulary (`new`/`resolve`), which only exists after archon starts
+and is never what `entrypoint.sh` holds:
+
+| `$INTENT` | phases |
+|---|---|
+| `fix`, `continue` | `implement, validate, conformance, code_review, revise_advisory` |
+| `refine` | `refine` |
+| `plan` | `plan` |
+| `deconflict` | `deconflict` (resolved inline by `entrypoint.sh`; `deconflict.py:143` runs a `claude -p` session) |
+| `fix-main` | `fix_main` (`main_red_fixer.py:190` runs a `claude -p` session) |
+| `close`, `recheck` | none → level 1 (neither has a Claude Bash-tool path: `close` is bash nodes only, `recheck` exits at `entrypoint.sh:713`) |
+
+The container's **effective level** is the maximum over that set. `entrypoint.sh` computes it
+via the **baked** `side_effect.py` from the **baked** config
+(`/opt/dark-factory/config/config.yaml`; Trust model) — never from the target clone — exports
 `FACTORY_SIDE_EFFECT_LEVEL` and `FACTORY_SIDE_EFFECT_PROFILE_VERSION` before invoking archon,
-and logs `side_effect_level=<n> profile=<version> phases=<list>` once. A missing or invalid
-config value resolves to 1 for that phase and logs a warning — fail closed, not open.
+and logs `side_effect_level=<n> profile=<version> phases=<list>` once.
+`SIDE_EFFECT_LEVEL_<PHASE>` overrides one phase. A missing `side_effect:` block, a missing
+phase, or an unparsable value resolves to 1 for that phase and logs a warning — fail closed,
+not open (D4). `entrypoint.sh` prepends the baked shim directory to `PATH` for the
+**remainder of the script**, not only the archon invocation: this is deliberate, so that the
+`claude -p` sessions started by `deconflict.py` and `main_red_fixer.py` (whose Bash-tool
+subprocesses carry `CLAUDECODE=1`) run under the same profile; `entrypoint.sh`'s own
+`git`/`gh` calls are unaffected because they never carry `CLAUDECODE`.
 
 ### R4 — Layer A: tool removal per DAG node
 
-Each phase-agent node (`refine`, `plan`, `implement`, `validate`, `conformance`,
-`code-review`) carries an explicit `denied_tools:` equal to `profile_for(level).denied_tools`
-for its configured level. At level 5 that is `denied_tools: []` — explicit, so its absence is
+Each of the **seven** phase-agent `command:` nodes (`refine`, `plan`, `implement`, `validate`,
+`conformance`, `code-review`, `revise-advisory` — the last is a Claude agent that runs
+`git push origin HEAD` and `gh api` itself, `commands/dark-factory-revise-advisory.md:119,130`,
+so leaving it undeclared would be a real gap) carries an explicit `denied_tools:` equal to
+`profile_for(level).denied_tools` for its configured level. At level 5 that is `denied_tools: []` — explicit, so its absence is
 detectable. `tests/test_side_effect_dag.py` (pattern: `tests/test_budget_enforce_dag.py`)
 asserts, for every phase node, that the key is present and equals the rendered profile for the
 level in `config.yaml`; a phase node with no `denied_tools` key fails the test. The DAG is
@@ -155,21 +202,34 @@ static YAML; this test is what keeps it honest when the config changes.
 
 ### R5 — Layer B: the `git`/`gh` command shim
 
-- New executables `scripts/shims/git` and `scripts/shims/gh` (bash, no dependencies). Each
-  reads `FACTORY_SIDE_EFFECT_LEVEL`, resolves the real binary (`command -v` after removing the
-  shim directory from `PATH`), parses only the leading verb (and for `gh api` the method / body
-  flags; for `git push` the remote, refspec and force/delete flags), and either execs the real
-  binary or exits 1 with
-  `side-effect guard: '<verb>' is denied at level <n> (<name>); see docs/factory-target-boundary.md`.
+- New executables `scripts/shims/git` and `scripts/shims/gh` (bash, no dependencies), baked to
+  `/opt/dark-factory/scripts/shims` — the baked path is the one `entrypoint.sh` uses (Trust
+  model). Each reads `FACTORY_SIDE_EFFECT_LEVEL`, resolves the real binary by walking `PATH`
+  and skipping its own directory — compared as **physical** paths (`pwd -P`), so a relative,
+  trailing-slash or symlinked `PATH` entry cannot make the shim exec itself — and parses only
+  the leading verb. For `git` the verb is read **after** skipping git's global options (`-C`,
+  `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--exec-path`, `--super-prefix`,
+  `--config-env`, each taking a value; `-p`/`-P`/`--paginate`/`--no-pager`/`--bare`/
+  `--no-optional-locks`/`--literal-pathspecs` without), so `git -C dir push` is judged as
+  `push`. For `gh api` it parses the method and body flags — `-f`/`-F`/`--input` with no
+  explicit method count as **POST**, which is what `gh` actually sends. For `git push` it
+  parses the remote, refspec, force/delete flags and the wide flags
+  (`--all`/`--mirror`/`--tags`/`--prune`/`--branches`, `+refspec`). It either execs the real
+  binary with argv untouched or exits 1 with
+  `side-effect guard: '<verb>' is denied at level <n> (<name>); see docs/adapter-authoring-guide.md#side-effect-levels`
+  (re-point at `docs/factory-target-boundary.md` once #201 creates it).
 - **Activation.** The shim enforces only when **both** `FACTORY_SIDE_EFFECT_LEVEL` is set and
   `CLAUDECODE=1` is in the calling environment (the marker the Claude CLI sets for its Bash-tool
   subprocesses; archon's own DAG `bash:` nodes — `setup-branch`, `refine-push`,
   `plan-push-and-advance`, `push-and-pr`, `push-resolve`, `post-merge-update-codeindex` — do
   not carry it and keep factory privilege). Without both markers the shim is a transparent
   passthrough. `entrypoint.sh` prepends `/opt/dark-factory/scripts/shims` to `PATH` for the
-  archon invocation only.
-- The shim never parses flags it does not need; unknown verbs at levels 4–5 pass through,
-  unknown verbs at levels 1–3 are **denied** (fail closed).
+  remainder of the script (R3 says why).
+- The shim never parses flags it does not need. Fail-closed rule: unknown `gh` verbs at levels
+  1–3 are **denied**; unknown `git` verbs are denied at level 1 only; at levels 2–3 only the
+  enumerated remote-facing `git` verbs are denied, so local artifact work keeps working; at
+  levels 4–5 unknown verbs of both tools pass through. The never-list is denied at every
+  level (R1).
 - Denials emit a health event `side_effect.denied` with `{tool, verb, level}` through
   `run_record.emit_health_event` (R6) and write one line to stderr; they never post comments.
 - `tests/test_side_effect_shims.sh` runs in the factory image: for each level, a matrix of
@@ -203,8 +263,11 @@ Recorded in the plan with evidence from the factory image, before any code lands
 2. `CLAUDECODE=1` is present in the environment of a Bash-tool subprocess and absent in an
    archon `bash:` node. If this discriminator does not hold, **stop and amend this spec** —
    do not invent another one in the plan.
-3. `grep` of `workflows/archon-dark-factory.yaml` and `commands/*.md` for every never-list verb
-   (R1, level 5) returns nothing, so level 5 cannot regress an existing phase.
+3. `grep` of `scripts/`, `commands/`, `refinement-skills/`, `.claude/skills/` and `workflows/`
+   for every never-list verb (R1, level 5) returns nothing, so level 5 cannot regress an
+   existing phase. `scripts/` is in scope because phase agents reach `gh` through
+   `scripts/factory_core/providers/cli.py` from Bash-tool subprocesses, which inherit
+   `CLAUDECODE=1` and therefore hit the shim.
 4. `scripts/factory_core/providers/cli.py` tracker/codehost calls shell out to `gh` (so the
    shim covers them). Any direct HTTPS client found instead is listed in the plan as a shim
    bypass to be covered by the D3 follow-up.
@@ -228,7 +291,7 @@ Recorded in the plan with evidence from the factory image, before any code lands
 - `scripts/factory_core/handoff.py` — R2 range, R7 import.
 - `scripts/factory_core/run_record.py` — R6.
 - `entrypoint.sh` — R3 export + R5 `PATH` prepend, one log line.
-- `workflows/archon-dark-factory.yaml` — explicit `denied_tools:` on the six phase nodes (R4).
+- `workflows/archon-dark-factory.yaml` — explicit `denied_tools:` on the seven phase nodes (R4).
 - `config/config.yaml` — R3 block.
 - `docs/adapter-authoring-guide.md` — R7 section.
 - `.github/workflows/ci.yml` — run `tests/test_side_effect_shims.sh`.
@@ -245,7 +308,7 @@ existing permission: level 5 removes no tool and denies only the never-list.
 | Issue AC | Disposition |
 |---|---|
 | A level-1 loop's container demonstrably cannot push, comment, or open PRs | R4 + R5 at level 1, proven by `test_side_effect_shims.sh` and the DAG test in the image (no loop runner exists to run live). |
-| A level-3 loop can file issues but not modify code | R5 level 3 matrix: `gh issue create/comment/edit` pass, `git push` and `gh pr create` denied. |
+| A level-3 loop can file issues but not modify code | R5 level 3 matrix: `gh issue create/comment/edit` pass, `git push`, `git -C . push` and `gh pr create` denied. |
 | Existing factory phases run unchanged under their assigned levels (bench/tests green) | D2: all phases at level 5; R8.3 proves the never-list is unused; full suite + `smoke_gate.sh` + DAG checks green; one refine and one plan dry run on a scratch issue. |
 | Profile is recorded per run for audit | R6 fields on every `runs.jsonl` row, tested. |
 
