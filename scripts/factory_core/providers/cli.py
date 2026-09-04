@@ -57,10 +57,20 @@ def _tracker_set_status(args):
 
 def _tracker_label(args):
     tracker = get_tracker()
-    for name in (args.add or []):
-        tracker.add_label(args.id, name)
-    for name in (args.remove or []):
-        tracker.remove_label(args.id, name)
+    ok = True
+    try:
+        for name in (args.add or []):
+            if not tracker.add_label(args.id, name):
+                ok = False
+        for name in (args.remove or []):
+            if not tracker.remove_label(args.id, name):
+                ok = False
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ok:
+        print(f"ERROR: one or more label operations failed for issue {args.id}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _tracker_comment(args):
