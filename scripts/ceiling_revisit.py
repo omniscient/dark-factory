@@ -138,6 +138,8 @@ def generate_report(
     l_data = bucket_table["L+XL"]
     l_rate = l_data["rate"]
     l_n = l_data["n"]
+    # Name stays L-scoped intentionally: it's a wire-format/JSON-key contract naming the
+    # *measured* L+XL bucket, not the XL-specific "always-above-ceiling" rule it gates (#361).
     l_bucket_needs_issue = bool(l_rate is not None and l_rate > 0.70 and l_n >= 5)
 
     lines = [
@@ -224,9 +226,9 @@ def generate_report(
         lines.append(f"L+XL success rate: {_fmt_rate(l_rate)} (n={l_n}). ")
         if l_bucket_needs_issue:
             lines += [
-                "**The L=always-above-ceiling rule may be overly conservative.**",
+                "**The XL=always-above-ceiling rule may be overly conservative.**",
                 "A separate code-change issue should be filed to revisit `is_above_ceiling()`"
-                " in `scheduler.sh`.",
+                " in `scripts/scheduler_lib.sh`.",
                 "",
             ]
         else:
