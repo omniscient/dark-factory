@@ -112,10 +112,41 @@ def _is_gate_verdict(body: str) -> bool:
 
 
 def _latest_gate_verdict(comments: list[dict]) -> dict | None:
-    for c in reversed(comments):
-        if _is_gate_verdict(c.get("body") or ""):
-            return c
-    return None
+    """Return the most recent gate-verdict comment, or None.
+
+    Selects by max `createdAt`, falling back to array position as a tiebreak for
+    missing/equal timestamps — matching the boundary-marker loop in build_digest
+    below, which deliberately does not trust array position alone for recency (an
+    older-by-index comment can carry a newer timestamp, or vice versa; see the
+    `boundary_ts` comment there).
+
+    Note: this intentionally does NOT bound the scan to "the current cycle" (e.g.
+    treating a verdict as stale once some other factory comment posts after it).
+    That's R5 in docs/archive/2026-09-04-continue-digest-gate-verdict-design.md:
+    an accepted, documented limitation. Whether the `report` DAG node posts a
+    comment after a same-run gate block is unresolved Archon-executor
+    `trigger_rule` behavior (flagged in
+    docs/archive/2026-07-28-conformance-review-gate-node-design.md), so a bound
+    keyed off "is this the last factory comment" would be tuned to a guess about
+    that ordering and could silently reintroduce the original bug (#354) under
+    the other guess — see that spec's "Alternatives considered" #1 and #4 for the
+    full rejection rationale. A staleness guard is better done as a follow-up once
+    the executor semantics are confirmed.
+    """
+    best: dict | None = None
+    best_ts = ""
+    for i, c in enumerate(comments):
+        body = c.get("body") or ""
+        if not _is_gate_verdict(body):
+            continue
+        ts = c.get("createdAt") or ""
+        if best is None or ts >= best_ts:
+            best = c
+            best_ts = ts
+    return best
+
+
+_GATE_SECTION_HEADING = "### Gate verdict (factory-posted, action required)"
 
 
 def _gate_verdict_section(gate_verdict: dict | None) -> str:
@@ -124,7 +155,7 @@ def _gate_verdict_section(gate_verdict: dict | None) -> str:
     created_at = gate_verdict.get("createdAt") or ""
     body = gate_verdict.get("body") or ""
     return (
-        "\n### Gate verdict (factory-posted, action required)\n\n"
+        f"\n{_GATE_SECTION_HEADING}\n\n"
         f"- [{created_at}] {body}\n"
     )
 
@@ -189,23 +220,25 @@ def build_digest(issue_data: dict) -> str:
 
     no_boundary = last_factory_idx == -1
 
-    # No-boundary case: all human content (+ gate verdict) with a note, or empty sentinel.
-    # Defensive per spec R3: _is_gate_verdict requires _is_factory_comment (R1), so any
-    # comment matching it also sets last_factory_idx above, meaning `no_boundary and
-    # gate_section` cannot both be true with today's heading list — this branch's
-    # gate_section checks are unreachable in practice but kept so this composes correctly
-    # if that coupling ever changes (e.g. a future heading that isn't itself a factory
-    # marker).
+    # _is_gate_verdict requires _is_factory_comment (R1), so any comment matching it also
+    # sets last_factory_idx above — `no_boundary` and a non-empty `gate_section` can never
+    # both be true with today's heading list. Assert the coupling instead of branching on
+    # it, so a future heading that broke this invariant would fail loudly here rather than
+    # silently rotting an untestable branch.
+    assert not (no_boundary and gate_section), (
+        "gate verdict implies a factory boundary; no_boundary and gate_section "
+        "should never both be true"
+    )
+
+    # No-boundary case: all human content with a note, or empty sentinel.
     if no_boundary:
         all_human = [c for c in comments if not _is_factory_comment(c.get("body") or "")]
         all_reviews_nb = [r for r in all_reviews if not _is_factory_comment(r.get("body") or "")]
         all_inline = inline_comments
         if not all_human and not all_reviews_nb and not all_inline:
-            if gate_section:
-                return f"<!-- no-boundary: true -->\n## Human feedback since last factory run\n{gate_section}"
             return "<!-- no-human-feedback -->\n"
         sections = _feedback_sections(all_human, all_reviews_nb, all_inline)
-        return f"<!-- no-boundary: true -->\n## Human feedback since last factory run\n{sections}{gate_section}"
+        return f"<!-- no-boundary: true -->\n## Feedback since last factory run\n{sections}"
 
     # With boundary
     header = f'<!-- comment-digest: cutoff={boundary_ts} marker="{boundary_marker}" -->'
@@ -225,7 +258,7 @@ def build_digest(issue_data: dict) -> str:
         f"{header}\n"
         f"## Marker\n\n"
         f'Latest factory comment at {boundary_ts}: "{snippet}"\n\n'
-        f"## Human feedback since last factory run\n"
+        f"## Feedback since last factory run\n"
         f"{sections}{gate_section}"
     )
 
@@ -252,15 +285,26 @@ def main() -> None:
     max_tokens = _get_comments_max_tokens()
     max_chars = max_tokens * 4 if max_tokens is not None else None
     if max_chars is not None and len(digest) > max_chars:
-        # If max_chars would cut inside a leading HTML comment, extend to its closing -->
-        # so the marker is never emitted in a malformed (mid-token) state.
-        safe_cut = max_chars
-        if digest.startswith("<!--"):
-            close = digest.find("-->")
-            if close >= 0 and max_chars < close + 3:
-                safe_cut = close + 3
-        dropped = len(digest) - safe_cut
-        digest = digest[:safe_cut] + f"\n<!-- truncated: {dropped} chars dropped (cap={max_tokens} tokens) -->\n"
+        # The gate-verdict section must never be dropped (build_digest's own invariant) —
+        # exempt it from the cap entirely. Truncate only the content before it, then always
+        # re-append it in full, so a future truncation cap can't silently cut the one
+        # section that's required to survive.
+        gate_idx = digest.find(_GATE_SECTION_HEADING)
+        gate_full = digest[gate_idx:] if gate_idx != -1 else ""
+        head = digest[:gate_idx] if gate_idx != -1 else digest
+
+        if len(head) > max_chars:
+            # If max_chars would cut inside a leading HTML comment, extend to its closing
+            # --> so the marker is never emitted in a malformed (mid-token) state.
+            safe_cut = max_chars
+            if head.startswith("<!--"):
+                close = head.find("-->")
+                if close >= 0 and max_chars < close + 3:
+                    safe_cut = close + 3
+            dropped = len(head) - safe_cut
+            head = head[:safe_cut] + f"\n<!-- truncated: {dropped} chars dropped (cap={max_tokens} tokens) -->\n"
+
+        digest = head + gate_full
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(digest)
