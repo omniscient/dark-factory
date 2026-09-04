@@ -129,11 +129,17 @@ def test_generate_report(tmp_path):
     # L+XL rate 5/6 > 0.70 and n=6 >= 5 → issue warranted
     assert l_needs_issue is True
 
-    # Bucket table rendered; keeps 'scheduler.sh' (not prefixed with dark-factory/)
+    # Bucket table rendered; keeps 'scheduler_lib.sh' (not prefixed with dark-factory/)
     assert "### Per-Bucket Triad" in report
     assert "| L+XL |" in report
-    assert "`scheduler.sh`" in report
-    assert "dark-factory/scheduler.sh" not in report
+    assert "`scripts/scheduler_lib.sh`" in report
+    assert "dark-factory/scripts/scheduler_lib.sh" not in report
+
+    # Actionable rule name is XL-specific, not the merged L+XL measured cohort.
+    # Anchored on "The L=..." (not bare "L=always-above-ceiling") because that bare
+    # substring is also present inside the correct "XL=always-above-ceiling" text.
+    assert "XL=always-above-ceiling" in report
+    assert "The L=always-above-ceiling" not in report
 
     # No closed M PRs → no add-candidates
     assert new_candidates == []
