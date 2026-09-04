@@ -180,3 +180,40 @@ class TestPushGateCheckScript:
         result = run_script("docs/superpowers/specs/", "212", git_repo)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
+
+
+class TestSiblingArtifactOnMainNotSelected:
+    """#390: a directory-wide `grep -rl "#N" | head -1` picked sibling specs that merely
+    mention #N (it archived issue #197's spec during #199). The script's candidate list is
+    branch-scoped, so a sibling on main is structurally never printed."""
+
+    def _push_sibling_to_main(self, work):
+        git("checkout", "main", cwd=str(work))
+        specs = work / "docs" / "superpowers" / "specs"
+        specs.mkdir(parents=True, exist_ok=True)
+        (specs / "2026-01-01-sibling-design.md").write_text(
+            "# Sibling\n\n**Issue:** #999\n\nDefers level semantics to #212 (A2).\n")
+        git("add", ".", cwd=str(work))
+        git("commit", "-m", "docs(#999): sibling spec that cross-references #212", cwd=str(work))
+        git("push", "origin", "HEAD:main", cwd=str(work))
+        git("checkout", "refine/issue-212-test", cwd=str(work))
+        git("merge", "--no-edit", "main", cwd=str(work))
+        return specs
+
+    def test_own_branch_spec_selected_over_sibling_on_main(self, git_repo):
+        specs = self._push_sibling_to_main(git_repo)
+        (specs / "2026-01-02-issue-212-design.md").write_text("# Own\n\n**Issue:** #212\n")
+        git("add", ".", cwd=str(git_repo))
+        git("commit", "-m", "docs: own spec", cwd=str(git_repo))
+        result = run_script("docs/superpowers/specs/", "212", cwd=git_repo)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "docs/superpowers/specs/2026-01-02-issue-212-design.md"
+
+    def test_only_sibling_on_main_yields_empty(self, git_repo):
+        self._push_sibling_to_main(git_repo)
+        (git_repo / "notes.md").write_text("unrelated branch work\n")
+        git("add", ".", cwd=str(git_repo))
+        git("commit", "-m", "chore: unrelated", cwd=str(git_repo))
+        result = run_script("docs/superpowers/specs/", "212", cwd=git_repo)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
