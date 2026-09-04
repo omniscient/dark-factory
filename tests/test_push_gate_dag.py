@@ -54,9 +54,12 @@ class TestPushGateNodes:
         guard = f'if python3 "$_PCLI" tracker label --id "$ISSUE" --add {label}'
         assert guard in bash, f"'{node_id}': the gate-label call must be guarded by an if/else"
 
-        marker_call = 'tracker comment --id "$ISSUE" --marker "<!-- df-gate-label-failure -->"'
+        # The marker comment is posted via the shared post_marker_comment.sh helper (not an
+        # inline tracker-comment call) so the mktemp/footer/rm sequence lives in one place.
+        marker_call = 'post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->"'
         assert marker_call in bash, \
-            f"'{node_id}' must post the <!-- df-gate-label-failure --> marker comment on label failure"
+            f"'{node_id}' must post the <!-- df-gate-label-failure --> marker comment " \
+            "(via post_marker_comment.sh) on label failure"
 
         # the label-failure branch is the `if`'s else-clause, not the artifact-miss else-clause:
         # it must appear between the guard and that guard's own closing `fi`, and it must not
@@ -86,12 +89,12 @@ class TestPushGateNodes:
             f"'{node_id}': the label-failure branch must not exit 1 — the push already " \
             "succeeded and is the node's load-bearing side effect"
 
-        # the warn-advisory comment upsert is || true-guarded
+        # the warn-advisory comment upsert is || true-guarded. The post_marker_comment.sh
+        # invocation is a backslash-continued multi-line command (issue/marker/body args), so
+        # the guard is on its final line rather than necessarily the line containing the
+        # marker_call text itself — check it appears anywhere after the call starts.
         comment_pos = label_failure_branch.index(marker_call)
-        comment_line_start = label_failure_branch.rfind("\n", 0, comment_pos) + 1
-        comment_line_end = label_failure_branch.find("\n", comment_pos)
-        comment_line = label_failure_branch[comment_line_start:comment_line_end]
-        assert "|| true" in comment_line, \
+        assert "|| true" in label_failure_branch[comment_pos:], \
             f"'{node_id}': the gate-label-failure marker comment must be || true-guarded"
 
     def test_node_depends_on_and_when_unchanged(self, node_id, prefix, label, noun):
@@ -100,7 +103,10 @@ class TestPushGateNodes:
         intent = "refine" if node_id == "refine-push" else "plan"
         assert node["depends_on"] == [upstream]
         assert intent in node["when"]
-        assert node["timeout"] == 30000
+        # 60s (raised from 30s): the label-failure branch's post_marker_comment.sh call adds
+        # a get-comments + create/update gh round trip on top of the push+label, and it fires
+        # exactly when the GitHub API is slowest (rate exhaustion) — see workflow comment.
+        assert node["timeout"] == 60000
 
 
 def test_dag_validator_passes():

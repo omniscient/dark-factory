@@ -40,15 +40,18 @@ class Tracker(ABC):
 
     @abstractmethod
     def add_label(self, id: str, name: str) -> bool:
-        """True iff the label was applied (the underlying gh/API call succeeded).
-        False on failure; never raises for a transport failure at this layer
-        (JiraTracker's `_request` RuntimeError on HTTP errors is the one
-        documented exception, same distinction as `set_status`)."""
+        """True iff the label was applied. The meaning of False is
+        implementation-dependent: GitHub returns False on a failed gh/API call
+        (transport failures do not raise there), while Jira has no false-on-failure
+        path at all -- `JiraTracker.add_label` returns True unconditionally and lets
+        `_request`'s RuntimeError on HTTP errors propagate instead (same distinction
+        as `set_status`). Callers that need attempt-all-then-report semantics across
+        both providers must catch RuntimeError as well as check the return value."""
 
     @abstractmethod
     def remove_label(self, id: str, name: str) -> bool:
-        """True iff the label was removed; False on failure, never raises for a
-        transport failure at this layer (see add_label docstring)."""
+        """True iff the label was removed; see add_label docstring for the
+        per-provider difference in how failure is signaled (False vs. raise)."""
 
     @abstractmethod
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
