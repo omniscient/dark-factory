@@ -171,19 +171,21 @@ class JiraTracker(Tracker):
         data = self._request("GET", f"/issue/{id}", params={"fields": "labels"})
         return set((data.get("fields") or {}).get("labels", []))
 
-    def add_label(self, id: str, name: str) -> None:
+    def add_label(self, id: str, name: str) -> bool:
         """Read-then-write the full labels array (Jira Server/DC v2 has no atomic
         add-one-label operation via `fields`). Last writer wins: a label change made by
         another actor between the GET and PUT here is silently overwritten."""
         labels = self._current_labels(id)
         labels.add(name)
         self._request("PUT", f"/issue/{id}", json_body={"fields": {"labels": sorted(labels)}})
+        return True
 
-    def remove_label(self, id: str, name: str) -> None:
+    def remove_label(self, id: str, name: str) -> bool:
         """Same read-then-write, last-writer-wins caveat as `add_label` above."""
         labels = self._current_labels(id)
         labels.discard(name)
         self._request("PUT", f"/issue/{id}", json_body={"fields": {"labels": sorted(labels)}})
+        return True
 
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
         data = self._request("GET", f"/issue/{id}/comment")
