@@ -2,6 +2,34 @@
 
 **Issue:** #196
 
+**Plan revision 2026-09-04 (operator review)** — amendments applied after the independent
+plan review; the spec was amended in the same commit series (Trust model, R1, R3, R4, R5, R8.3):
+
+- F1 (BLOCKING): phase levels, `side_effect.py` and the shims are read from the **baked**
+  `/opt/dark-factory/...` paths only — never the target clone (Task 8; spec Trust model).
+- F2: the git shim skips git's global options (`-C`, `-c`, `--git-dir`, …) before reading the
+  verb, so `git -C dir push` is judged as `push` (Tasks 6/7; spec R5).
+- F3: `gh api` with `-f`/`-F`/`--input` and no explicit method counts as POST (Tasks 6/7; R5).
+- F4: level-4 own-branch push also denies `--all`/`--mirror`/`--tags`/`--prune`/`--branches`
+  and `+refspec`; the `FACTORY_RUN_BRANCH`-unset degradation is documented (Tasks 6/7; R1).
+- F5: spec R3 re-keyed on `entrypoint.sh`'s intent vocabulary, R4 lists seven nodes, R5's
+  fail-closed wording matches the allow/deny modes implemented here; the never-list now
+  applies at every level, checked before any allow-list (Tasks 1/6/7).
+- F6: the additions note below lists every deviation from the spec's original text
+  (`revise-advisory`, `fix_main`, whole-script PATH prepend) with the section that now
+  authorizes it.
+- F7: Task 0's R8.3 grep widened to `scripts/ commands/ refinement-skills/ .claude/skills/
+  workflows/` (still clean).
+- F8: the shims' self-recursion guard compares physical paths (`pwd -P`).
+- F9: the whole-script PATH prepend is recorded as deliberate (spec R3).
+- F10/F11: two wrong comments fixed (`deconflict.py:143` does run `claude -p`; refine/plan do
+  spawn subagents, `entrypoint.sh:661`) — conclusions unchanged.
+- F12: `FACTORY_SIDE_EFFECT_PROFILE_VERSION` is read from `render … | jq -r .profile_version`.
+- F13: the denial message points at `docs/adapter-authoring-guide.md#side-effect-levels` until
+  #201 creates `docs/factory-target-boundary.md`.
+- F14: `render --level 6` raises instead of rendering level 1's profile.
+- F15: level-4 matrix rows use `check` (no `sh -c`); a note on the hermetic guard's text scan.
+
 ## Goal
 
 Turn `side_effect_level` (1–6, already validated by #195/#301's adapter schema) from a
@@ -15,18 +43,24 @@ Claude phase-agent nodes (`refine`, `plan`, `implement`, `validate`, `conformanc
 unrestricted behavior exactly (no regression) — tightening any phase to level 4 is a
 separate, later, reviewed change (F2).
 
-**Plan-level addition beyond the spec's literal enumeration:** R1/R3/R4's text names six
-phases (`refine, plan, implement, validate, conformance, code-review`); `revise-advisory`
-(`workflows/archon-dark-factory.yaml:1192`, `command: dark-factory-revise-advisory`) is a
-seventh `command:` node — a Claude phase agent that edits code to auto-address advisory
-code-review findings — that the spec's enumeration omits. This plan adds it everywhere the
-spec lists the six, applying D2's already-decided principle ("all current factory phases
-start at level 5, no regression") symmetrically rather than leaving one current phase
-undeclared and undetectable. This is purely additive (level 5 removes no tools either
-way) and narrows a gap rather than widening any permission surface, so it does not need a
-fresh human-reviewed spec under `CLAUDE.md`'s tool-allow/deny-surface rule — but it is
-flagged here explicitly, once, so the conformance reviewer and any human reader can see
-exactly where the plan diverges from the spec's literal text and why.
+**Additions beyond the spec's original enumeration (each now authorized by the amended spec):**
+
+1. `revise-advisory` (`workflows/archon-dark-factory.yaml:1192` on this branch, `:1202` on
+   main; `command: dark-factory-revise-advisory`) is the seventh `command:` node — a Claude
+   phase agent that edits code to auto-address advisory code-review findings and itself runs
+   `git push origin HEAD` / `gh api` (`commands/dark-factory-revise-advisory.md:119,130`).
+   The spec's first draft named six; amended R4 names seven. Declared at level 5 like the
+   rest (D2: no regression).
+2. `fix_main` (config key) for `entrypoint.sh`'s `fix-main` intent: `main_red_fixer.py:190`
+   runs a live `claude -p … --allowedTools …,Bash` session whose Bash subprocesses carry
+   `CLAUDECODE=1`; under the spec's original R3 map it would have fallen to `[]` → level 1.
+   Amended R3 lists it (level 5, D2).
+3. The shim `PATH` prepend covers the **remainder of `entrypoint.sh`**, not only the archon
+   invocation, so the `claude -p` sessions of `deconflict.py:143` and `main_red_fixer.py:190`
+   are covered (both intents map to level 5). Amended R3/R5 say so.
+
+All three are additive (level 5 removes no tools and denies only the never-list) and narrow
+gaps rather than widening any permission surface.
 
 ## Architecture
 
@@ -40,7 +74,8 @@ under `bypassPermissions` (confirmed: this is not a permission-prompt mechanism,
 `bypassPermissions` does not bypass it).
 
 **Layer B (git/gh command shim).** New `scripts/shims/git` and `scripts/shims/gh` — bash,
-no dependencies — are prepended onto `PATH` for the `archon workflow run` invocation only.
+no dependencies, baked to `/opt/dark-factory/scripts/shims` — are prepended onto `PATH` by
+`entrypoint.sh` for the remainder of the script (spec R3; F9).
 Each shim activates *only* when both `FACTORY_SIDE_EFFECT_LEVEL` and `CLAUDECODE=1` are
 present in its own process environment (verified in Task 0 to be the exact, and only,
 discriminator between a phase agent's own Bash-tool subprocess and one of archon's DAG
@@ -58,10 +93,12 @@ defaulting to `1` / `"unknown"` when absent (fail closed — a row can never cla
 profile than it can prove).
 
 **Config.** `config/config.yaml` gains a `side_effect.phase_levels` map (all seven phases +
-`deconflict` at `5`), with a `SIDE_EFFECT_LEVEL_<PHASE>` env override per phase.
+`deconflict` + `fix_main` at `5`), with a `SIDE_EFFECT_LEVEL_<PHASE>` env override per phase.
 `entrypoint.sh` computes the container's *effective* level as the max over the phase set
-its `INTENT` dispatches (`side_effect.py intent-phases`), before `archon workflow run`
-starts, and exports it once for the whole run.
+its `INTENT` dispatches (`side_effect.py intent-phases`), reading ONLY the baked
+`/opt/dark-factory/config/config.yaml` with the baked `side_effect.py` (spec Trust model,
+F1 — the target clone's `dark-factory/` subtree and `.claude/skills/refinement/config.yaml`
+are never consulted), before `archon workflow run` starts, and exports it once for the run.
 
 ## Tech Stack
 
@@ -82,8 +119,8 @@ test harness (`tests/*.sh`, pattern: `tests/test_hooks.sh` / `tests/test_smoke_g
 | `scripts/factory_core/adapter.py` | R2 — level 6 rejected (1–5 range + dedicated message) |
 | `scripts/factory_core/handoff.py` | R2 — manifest range 1–5; R7 — import `FACTORY_OWNED_MIN_LEVEL` from `side_effect` |
 | `scripts/factory_core/run_record.py` | R6 — `side_effect_level`/`side_effect_profile` fields + CLI flags |
-| `entrypoint.sh` | R3 — compute/export/log; R5 — `PATH` prepend + plumb new flags |
-| `workflows/archon-dark-factory.yaml` | R4 — `denied_tools: []` on 6 phase nodes |
+| `entrypoint.sh` | R3 — compute/export/log from the baked config/scripts only (F1); R5 — `PATH` prepend + plumb new flags |
+| `workflows/archon-dark-factory.yaml` | R4 — `denied_tools: []` on 7 phase nodes |
 | `config/config.yaml` | R3 — `side_effect.phase_levels` block |
 | `docs/adapter-authoring-guide.md` | R7 — "Side-effect levels" section |
 | `.github/workflows/ci.yml` | Wire `test_side_effect_shims.sh` into `tests:` job |
@@ -129,15 +166,26 @@ inspection of the factory image's own archon source and a live check:**
 **Conclusion: the discriminator holds.** `command:` nodes' Bash-tool subprocesses carry
 `CLAUDECODE=1`; `bash:` nodes never do. Proceed with Task 6 as designed.
 
-**R8.3 (never-list verbs unused today) — already verified:**
+**R8.3 (never-list verbs unused today) — already verified, scope widened in operator review (F7):**
 
 ```bash
 grep -nE "gh (repo (delete|archive|rename)|secret|auth|ssh-key|gpg-key|api -X DELETE)|git push .*(--delete|:.*)" \
   workflows/archon-dark-factory.yaml commands/*.md
+# widened: phase agents also reach gh through scripts/factory_core/providers/cli.py from
+# Bash-tool subprocesses (which inherit CLAUDECODE=1 and therefore hit the shim), so the
+# never-list must be absent from everything a Bash-tool subprocess can execute:
+grep -rnE "DELETE|gh auth|\"auth\"|'auth'|gh secret|ssh-key|gpg-key|repo (delete|archive|rename)|push --delete|push -d |push [a-z]+ :" \
+  scripts/ commands/ refinement-skills/ .claude/skills/ workflows/ \
+  --include='*.py' --include='*.sh' --include='*.md' --include='*.yaml' | grep -v '^\s*#'
 ```
 
-returned nothing. The level-5 never-list matches nothing the DAG or `commands/*.md` do
-today — level 5 (all current phases) cannot regress.
+Both returned nothing relevant (the widened grep's only hits are `DELETED=` shell variables
+in `commands/dark-factory-implement.md:376` / `dark-factory-validate.md:56`, a CORS
+`allowed_methods` list in `scripts/iii-config.agentmemory.yaml:9`, and a `"auth" in src`
+substring test in `scripts/diff_rank.py:212` — none is a `gh`/`git` invocation). The level-5
+never-list matches nothing the DAG, `commands/*.md` or `scripts/**` do today — level 5 (all
+current phases) cannot regress. `entrypoint.sh:23`'s own `gh auth status` runs without
+`CLAUDECODE` and is a passthrough.
 
 **R8.4 (GitHub calls all shell out through `gh`) — already verified:**
 
@@ -172,11 +220,12 @@ changes:**
    designed; escalate (do not silently fall back to some other mechanism the spec didn't
    choose).
 4. **If `Write` is removed for the top-level agent but NOT for the subagent**: this is a
-   narrower gap than a full stop-and-amend, since Task 9's seven phase nodes rarely spawn
-   subagents mid-node in a way that matters for `Write`/`Edit`/`MultiEdit`/`NotebookEdit`
-   removal specifically (only level 1 removes any tools at all, and level 1 is not assigned
-   to any phase in v1) — record the gap as a new line in the spec's "Known limitations and
-   follow-ups" section (a small doc edit, not a design change) and proceed.
+   narrower gap than a full stop-and-amend. Refine and plan DO spawn subagents via the
+   `Agent` tool (`entrypoint.sh:661` says so explicitly), so the gap would be real for those
+   phases — but only level 1 removes any tools at all, and level 1 is not assigned to any
+   phase in v1, so nothing regresses today (F2's tightening to level 4 removes no tools
+   either). Record the gap as a new line in the spec's "Known limitations and follow-ups"
+   section (a small doc edit, not a design change) and proceed.
 
 ---
 
@@ -217,6 +266,10 @@ def test_profile_for_level_1_removes_write_tools():
     assert p.gh_mode == "allow"
     assert "api:GET" in p.gh_allowed
     assert "view" in p.gh_allowed and "list" in p.gh_allowed
+    # R1 (amended): the level-5 never-list is denied at EVERY level and checked before the
+    # allow-list -- `gh secret list` / `gh auth status` must not ride in on "list"/"status".
+    for verb in ("secret", "auth", "ssh-key", "gpg-key", "api:DELETE"):
+        assert verb in p.gh_denied
     assert "remote add" in p.git_denied and "remote set-url" in p.git_denied
     assert p.push_scope == "denied"
     # R5 fail-closed: level 1 must be allow-list, not deny-list, for git too — a git
@@ -256,6 +309,8 @@ def test_profile_for_level_4_own_branch_push_only():
                  "release", "repo", "secret", "auth"):
         assert verb in p.gh_denied
     assert "api:non-GET" in p.gh_denied
+    for verb in ("ssh-key", "gpg-key", "api:DELETE"):  # never-list at every level
+        assert verb in p.gh_denied
 
 
 def test_profile_for_level_5_never_list_only():
@@ -348,6 +403,13 @@ def test_render_cli_prints_json(tmp_path, capsys):
     assert data["level"] == 4
     assert data["push_scope"] == "own_branch_only"
     assert data["profile_version"] == "v1"
+
+
+def test_render_cli_level_6_raises():
+    # F14: render must never silently downgrade an out-of-range level to level 1's profile;
+    # the shim treats a render failure as "cannot resolve profile" and denies (fail closed).
+    with pytest.raises(ValueError):
+        side_effect.main(["render", "--level", "6"])
 
 
 def test_effective_container_level_cli_is_max_over_phases(tmp_path, capsys):
@@ -448,7 +510,8 @@ class Profile:
     `git remote -v`). "api:GET" / "api:non-GET" / "api:DELETE" are sentinels the gh
     shim special-cases (they depend on flag parsing, not verb position). Deny checks
     always run before an allow-list gate, so e.g. level 1's specific "remote add"/
-    "remote set-url" denials take precedence over "remote" being read-permitted.
+    "remote set-url" denials take precedence over "remote" being read-permitted, and the
+    never-list (present in gh_denied at every level) is checked before gh_allowed.
     """
     level: int
     name: str
@@ -463,11 +526,12 @@ class Profile:
     profile_version: str = "v1"
 
 
-# Spec-faithful non-monotonicity, noted here so it doesn't read as an oversight: R1's
-# level-1 wording ("everything except view/list/status/search") literally permits
-# `gh secret list` / `gh auth status`, even though level 5's never-list forbids `gh
-# secret *` / `gh auth *` outright -- a stricter level (1) can read more gh state than a
-# looser one (5) blocks writing to. This is what the spec's table says; not a bug.
+# R1 (amended after plan review): the level-5 never-list is denied at EVERY level and is
+# checked before any allow-list, so level 1's "everything except view/list/status/search"
+# does not admit `gh secret list` / `gh auth status` through the VERB2-alone read match.
+_GH_NEVER = ["repo delete", "repo archive", "repo rename", "secret", "auth",
+             "ssh-key", "gpg-key", "api:DELETE"]
+_GIT_NEVER = ["push --delete", "push :refspec-delete"]
 _READ_VERBS = ["view", "list", "status", "search", "api:GET"]
 
 # Level 1 only (see the Profile docstring for why levels 2-3 stay deny-list-only):
@@ -486,7 +550,7 @@ _PROFILES = {
         git_denied=["commit", "push", "tag", "remote add", "remote set-url"],
         push_scope="denied",
         git_mode="allow", git_allowed=list(_GIT_READ_VERBS),
-        gh_mode="allow", gh_allowed=list(_READ_VERBS), gh_denied=[],
+        gh_mode="allow", gh_allowed=list(_READ_VERBS), gh_denied=list(_GH_NEVER),
     ),
     2: Profile(
         level=2, name=LEVELS[2],
@@ -494,7 +558,7 @@ _PROFILES = {
         git_denied=["push", "tag", "remote set-url"],
         push_scope="denied",
         git_mode="deny", git_allowed=[],
-        gh_mode="allow", gh_allowed=list(_READ_VERBS), gh_denied=[],
+        gh_mode="allow", gh_allowed=list(_READ_VERBS), gh_denied=list(_GH_NEVER),
     ),
     3: Profile(
         level=3, name=LEVELS[3],
@@ -504,7 +568,7 @@ _PROFILES = {
         git_mode="deny", git_allowed=[],
         gh_mode="allow",
         gh_allowed=list(_READ_VERBS) + ["issue create", "issue comment", "issue edit"],
-        gh_denied=[],
+        gh_denied=list(_GH_NEVER),
     ),
     4: Profile(
         level=4, name=LEVELS[4],
@@ -515,18 +579,18 @@ _PROFILES = {
         gh_mode="deny",
         gh_allowed=[],
         gh_denied=["pr create", "pr merge", "pr ready", "pr review", "pr close",
-                   "release", "repo", "secret", "auth", "api:non-GET"],
+                   "release", "repo", "secret", "auth", "api:non-GET"]
+                  + ["ssh-key", "gpg-key", "api:DELETE"],  # rest of the never-list
     ),
     5: Profile(
         level=5, name=LEVELS[5],
         denied_tools=[],
-        git_denied=["push --delete", "push :refspec-delete"],
+        git_denied=list(_GIT_NEVER),
         push_scope="unrestricted",
         git_mode="deny", git_allowed=[],
         gh_mode="deny",
         gh_allowed=[],
-        gh_denied=["repo delete", "repo archive", "repo rename", "secret", "auth",
-                   "ssh-key", "gpg-key", "api:DELETE"],
+        gh_denied=list(_GH_NEVER),
     ),
 }
 
@@ -556,11 +620,12 @@ def profile_for(level: int) -> Profile:
 # should accept. "recheck" is intentionally absent (defaults to [] -> level 1): it exits
 # after the smoke-gate check (entrypoint.sh:713) and never reaches archon, so no Claude
 # session or git/gh call is ever made under it. "deconflict" and "fix-main" both resolve
-# entirely inside entrypoint.sh's own bash logic without going through archon either, but
-# "fix-main" does invoke a live, unsandboxed `claude -p` session (main_red_fixer.py:190)
-# whose Bash-tool subprocesses DO carry CLAUDECODE -- both are mapped defensively to a
-# level-5 phase set (matching D2's "no regression" default) rather than left at level 1's
-# fail-closed default, in case a future change makes either path CLAUDECODE-visible.
+# inside entrypoint.sh's own bash logic without going through archon, but BOTH start a
+# live `claude -p` session whose Bash-tool subprocesses carry CLAUDECODE=1 and therefore
+# hit the shim (F10): deconflict.py:143 (the AI conflict-resolution tier, on by default
+# via CONFLICT_RESOLUTION_AI_TIER) and main_red_fixer.py:190 (the main-red fix agent).
+# Both are mapped to a level-5 phase set (D2's "no regression" default; spec R3) -- NOT
+# left at level 1's fail-closed default, which would deny those sessions' local git work.
 _INTENT_PHASES = {
     "refine": ["refine"],
     "plan": ["plan"],
@@ -608,7 +673,10 @@ def phase_level(phase: str, config_path, env=None) -> int:
 
 
 def _profile_json(level: int) -> dict:
-    return dataclasses.asdict(profile_for(effective_level(level)))
+    # No effective_level() normalization here (F14): `render` is what the shim calls with
+    # the raw env value, and a bad level must surface as an error (-> shim denies, fail
+    # closed), never as level 1's profile rendered under the wrong number.
+    return dataclasses.asdict(profile_for(level))
 
 
 def main(argv=None) -> None:
@@ -1000,21 +1068,20 @@ side_effect:
     conformance: 5
     code_review: 5
     revise_advisory: 5  # #196 plan-level addition (revise-advisory node) — see Architecture note
-    deconflict: 5  # entrypoint.sh's own $INTENT=deconflict flow — resolves/pushes inline, never through archon
+    deconflict: 5  # entrypoint.sh's own $INTENT=deconflict flow — inline, never through archon; deconflict.py:143 runs a claude -p session
     fix_main: 5  # entrypoint.sh's $INTENT=fix-main -- a standalone `claude -p` session (main_red_fixer.py), not a DAG node
 ```
 
-**Note on `.claude/skills/refinement/config.yaml`** (raised in architect review, cycle 2):
-that path is *not* a second committed copy of this config — `git ls-files
-.claude/skills/refinement/` shows it untracked; it is `effective_config.py`'s materialized
-output (baked `config/config.yaml` deep-merged with `.factory/adapter.yaml` overrides,
-written into the clone and git-excluded, per `entrypoint.sh`'s "Effective config" step).
-It will carry this ticket's `side_effect:` block automatically once the image containing
-this change is rebuilt, the same way it already carries `conformance:`/`code_review:`/
-every other block — no second edit needed, and none of this ticket's tests should assert
-against that generated path. The materialization step's own fail-open behavior
-(`|| true`) is a pre-existing property shared by every config block, not something this
-ticket introduces or needs to special-case.
+**Note on `.claude/skills/refinement/config.yaml`** (architect review cycle 2; superseded by
+F1 in operator review): on the self-target that path is untracked (`git ls-files
+.claude/skills/refinement/` is empty) and is `effective_config.py`'s materialized output; on
+the MarketHawk target it is a **committed, stale** copy (no `side_effect:` block — verified on
+a local MarketHawk clone) and `effective_config.py:96-105` leaves a committed copy in place
+untouched. Phase levels are therefore NOT read from that path at all: Task 8 reads the baked
+`/opt/dark-factory/config/config.yaml` only (spec Trust model) — the first fail-*closed*
+consumer of config in `entrypoint.sh` must not depend on a target-owned file. The
+materialized copy will still carry the block (it is deep-merged from the baked file) but
+nothing in this ticket reads it, and none of this ticket's tests assert against it.
 
 ### Step 5.4 — verify pass
 
@@ -1041,15 +1108,35 @@ Design notes (read before implementing):
   Task 0's verified discriminator. Otherwise transparent passthrough.
 - The shim calls `side_effect.py render --level "$FACTORY_SIDE_EFFECT_LEVEL"` once per
   invocation and parses the JSON with `jq` — it never re-declares the table (Trust model:
-  single source of truth).
+  single source of truth). `render` raises on a bad level (F14), which the shim turns into
+  "cannot resolve profile" → exit 1 (fail closed).
+- Verb position (F2): the git shim skips git's global options before reading the verb —
+  `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--exec-path`, `--super-prefix`,
+  `--config-env` consume a value (or come in `=` form); `-p`/`-P`/`--paginate`/`--no-pager`/
+  `--bare`/`--no-optional-locks`/`--literal-pathspecs` (and the other bare pathspec flags)
+  consume none. Without this, `git -C . push` has `VERB1=-C` and every check is bypassed at
+  levels 2–5. argv handed to the real git is never modified. `gh` has no pre-subcommand
+  options, so the gh shim reads `$1`/`$2` directly.
+- `gh api` (F3): a body flag (`-f`/`-F`/`--input`) with no explicit `-X`/`--method` is a
+  POST — that is gh's own rule — and is judged as non-GET at every level.
+- Never-list (R1, amended): `gh_denied` carries it at every level and the gh shim checks
+  `gh_denied` before the allow-list, so `gh secret list` is denied at level 1 despite `list`.
+- Self-recursion guard (F8): `_real_bin` compares each `PATH` entry to the shim directory as
+  physical paths (`pwd -P`), so a relative, trailing-slash or symlinked entry cannot make the
+  shim `exec` itself.
+- Denial message (F13): points at `docs/adapter-authoring-guide.md#side-effect-levels` (the
+  Task 11 section) until #201 creates `docs/factory-target-boundary.md`.
 - `push_scope=own_branch_only` (level 4) is not exercised by any v1 phase (all seven are
   level 5) — it only matters for a future level-4 phase (F2) or loop runner (R7). Rather
   than requiring `FACTORY_RUN_BRANCH` to be pre-computed by `entrypoint.sh` before the
   branch exists (it doesn't — DAG nodes create it mid-run), the shim treats
   `FACTORY_RUN_BRANCH` as an optional pin (a future runner can set it) and otherwise
-  determines "own branch" dynamically via `git symbolic-ref --short HEAD` at push time
-  (the branch is always checked out by the time a real `git push` runs). Task 7's test
-  matrix exercises level 4 directly with `FACTORY_RUN_BRANCH` set explicitly.
+  determines "own branch" dynamically via `git symbolic-ref --short HEAD` at push time.
+  **Degradation (F4, spec R1):** with `FACTORY_RUN_BRANCH` unset an agent can `checkout -b`
+  first, so the guarantee is only "not `main`, no force, no delete, no
+  `--all`/`--mirror`/`--tags`/`--prune`/`--branches`, no `+refspec`"; the wide flags and
+  `+refspec` are denied explicitly because each moves refs beyond the checked-out branch.
+  Task 7's test matrix exercises level 4 with `FACTORY_RUN_BRANCH` set explicitly.
 
 ### Step 6.1 — create the shims (tests come with Task 7, since they're one matrix)
 
@@ -1063,13 +1150,16 @@ Create `scripts/shims/git`:
 # subprocess (both set) and an archon DAG bash: node (neither set to both).
 set -euo pipefail
 
-SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 _real_bin() {
   local name="$1" d
   IFS=':' read -ra _dirs <<< "$PATH"
   for d in "${_dirs[@]}"; do
-    [ "$d" = "$SHIM_DIR" ] && continue
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    # Physical-path comparison (F8): a relative, trailing-slash or symlinked PATH entry
+    # for the shim dir must still be recognised as "us", or the shim would exec itself.
+    [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$SHIM_DIR" ] && continue
     if [ -x "$d/$name" ]; then echo "$d/$name"; return 0; fi
   done
   return 1
@@ -1117,7 +1207,8 @@ _emit_denied() {
 }
 
 deny() {
-  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/factory-target-boundary.md" >&2
+  # F13: the adapter guide's section until #201 creates docs/factory-target-boundary.md.
+  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/adapter-authoring-guide.md#side-effect-levels" >&2
   _emit_denied "$1"
   exit 1
 }
@@ -1129,8 +1220,27 @@ _in_list() {
   return 1
 }
 
-VERB1="${1:-}"
-VERB2="${2:-}"
+# F2: skip git's global options so the verb is read from the right position (`git -C dir
+# push`, `git -c k=v commit`, `git --no-pager log` are all common agent idioms; without
+# this VERB1 would be "-C" and every check below would be bypassed at levels 2-5). Only a
+# cursor advances -- the argv exec'd at the bottom is still the untouched "$@". Options
+# that take a value (separate arg, or =form) vs. bare flags per git(1).
+_ARGS=("$@")
+_I=0
+while [ "$_I" -lt "${#_ARGS[@]}" ]; do
+  case "${_ARGS[$_I]}" in
+    -C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)
+      _I=$((_I + 2)) ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--super-prefix=*|--config-env=*|\
+    -p|-P|--paginate|--no-pager|--bare|--no-optional-locks|--literal-pathspecs|\
+    --glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch)
+      _I=$((_I + 1)) ;;
+    *) break ;;
+  esac
+done
+VERB1="${_ARGS[$_I]:-}"
+VERB2="${_ARGS[$((_I + 1))]:-}"
+VERB_ARGS=("${_ARGS[@]:$((_I + 1))}")   # everything after the verb (push flag parsing)
 
 case "$VERB1" in
   commit) _in_list "commit" "${GIT_DENIED[@]}" && deny "commit" ;;
@@ -1147,17 +1257,21 @@ case "$VERB1" in
         deny "push"
         ;;
       own_branch_only)
-        FORCE=0; DELETE=0; REMOTE=""; REFSPEC=""
-        for arg in "${@:2}"; do
+        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPEC=""
+        for arg in "${VERB_ARGS[@]}"; do
           case "$arg" in
-            --force|--force-with-lease*|-f) FORCE=1 ;;
+            --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
             --delete|-d) DELETE=1 ;;
+            # F4: wide pushes move refs other than the run's own branch (main included).
+            --all|--mirror|--tags|--prune|--branches) WIDE="$arg" ;;
             -*) : ;;
+            +*) deny "push (+refspec force)" ;;
             *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPEC="$arg"; fi ;;
           esac
         done
         [ "$FORCE" = "1" ] && deny "push --force"
         [ "$DELETE" = "1" ] && deny "push --delete"
+        [ -n "$WIDE" ] && deny "push $WIDE"
         case "$REFSPEC" in :*) deny "push (refspec delete)" ;; esac
         TARGET_BRANCH="${REFSPEC#*:}"
         [ "$TARGET_BRANCH" = "$REFSPEC" ] && TARGET_BRANCH="$REFSPEC"
@@ -1172,6 +1286,11 @@ case "$VERB1" in
         # bare `git symbolic-ref` would re-enter this shim (render+jq again) before
         # falling through; harmless today but a real hazard once this verb table grows.
         [ -z "$TARGET_BRANCH" ] && TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")
+        # Own branch: FACTORY_RUN_BRANCH when a runner pins it (R7 env contract), else the
+        # checked-out branch. entrypoint.sh cannot pin it (DAG nodes create the branch
+        # mid-run), so in v1 the level-4 guarantee degrades to "not main, no force, no
+        # delete, no wide push, no +refspec" -- an agent can `checkout -b` first (spec R1,
+        # F4). A future loop runner that sets FACTORY_RUN_BRANCH gets the full check.
         OWN_BRANCH="${FACTORY_RUN_BRANCH:-$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")}"
         [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
         if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "$OWN_BRANCH" ]; then
@@ -1181,7 +1300,7 @@ case "$VERB1" in
       unrestricted)
         # Read git_denied instead of hardcoding --delete/:* — the Trust model section
         # is explicit that nothing may re-declare the table side_effect.py owns.
-        for arg in "${@:2}"; do
+        for arg in "${VERB_ARGS[@]}"; do
           case "$arg" in
             --delete|-d) _in_list "push --delete" "${GIT_DENIED[@]}" && deny "push --delete" ;;
             :*) _in_list "push :refspec-delete" "${GIT_DENIED[@]}" && deny "push (refspec delete)" ;;
@@ -1211,13 +1330,16 @@ Create `scripts/shims/gh`:
 # side-effect guard (#196/R5): PATH-shadows `gh`. Same activation rule as scripts/shims/git.
 set -euo pipefail
 
-SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 _real_bin() {
   local name="$1" d
   IFS=':' read -ra _dirs <<< "$PATH"
   for d in "${_dirs[@]}"; do
-    [ "$d" = "$SHIM_DIR" ] && continue
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    # Physical-path comparison (F8): a relative, trailing-slash or symlinked PATH entry
+    # for the shim dir must still be recognised as "us", or the shim would exec itself.
+    [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$SHIM_DIR" ] && continue
     if [ -x "$d/$name" ]; then echo "$d/$name"; return 0; fi
   done
   return 1
@@ -1258,7 +1380,8 @@ _emit_denied() {
 }
 
 deny() {
-  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/factory-target-boundary.md" >&2
+  # F13: the adapter guide's section until #201 creates docs/factory-target-boundary.md.
+  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/adapter-authoring-guide.md#side-effect-levels" >&2
   _emit_denied "$1"
   exit 1
 }
@@ -1275,7 +1398,7 @@ VERB2="${2:-}"
 TWO_WORD="$VERB1 $VERB2"
 
 if [ "$VERB1" = "api" ]; then
-  METHOD="GET"; HAS_BODY=0; TAKE_NEXT=0
+  METHOD=""; HAS_BODY=0; TAKE_NEXT=0
   for arg in "${@:2}"; do
     if [ "$TAKE_NEXT" = "1" ]; then METHOD="$arg"; TAKE_NEXT=0; continue; fi
     case "$arg" in
@@ -1285,6 +1408,12 @@ if [ "$VERB1" = "api" ]; then
       -f*|--field*|-F*|--raw-field*|--input*) HAS_BODY=1 ;;
     esac
   done
+  # F3: gh's own rule -- "the default HTTP request method is GET normally and POST if any
+  # parameters were added" -- so a body with no explicit method IS a POST and must be
+  # judged as one by the deny-mode (level 4/5) checks below, not waved through as GET.
+  if [ -z "$METHOD" ]; then
+    if [ "$HAS_BODY" = "1" ]; then METHOD="POST"; else METHOD="GET"; fi
+  fi
   METHOD=$(printf '%s' "$METHOD" | tr '[:lower:]' '[:upper:]')
   if [ "$GH_MODE" = "allow" ]; then
     if [ "$METHOD" != "GET" ] || [ "$HAS_BODY" = "1" ]; then
@@ -1305,6 +1434,11 @@ DISPLAY_VERB="$VERB1"
 [ -n "$VERB2" ] && DISPLAY_VERB="$TWO_WORD"
 
 if [ "$GH_MODE" = "allow" ]; then
+  # Never-list first (R1: denied at every level, checked before any allow-list) -- this is
+  # what keeps `gh secret list` / `gh auth status` out despite the VERB2-alone read match.
+  if _in_list "$VERB1" "${GH_DENIED[@]}" || _in_list "$TWO_WORD" "${GH_DENIED[@]}"; then
+    deny "$DISPLAY_VERB"
+  fi
   # Three checks, not two: gh_allowed mixes single-word read verbs that must match in
   # EITHER position ("view"/"list"/"status"/"search" — e.g. `gh issue view`, `gh pr
   # list`, bare `gh status`) with exact two-word grants ("issue create" etc., which
@@ -1358,6 +1492,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # block must run with it unset, or _emit_denied's `[ -n "$artdir" ] || return 0` guard
 # would fire on every deny case and try to reach a real run-record CLI path.
 unset ARTIFACTS_DIR || true
+
+# tests/test_run_record_hermetic.sh statically scans every tests/*.sh that mentions
+# `cli.py` for the literal words "run-record" + "record"/"assemble" (comments included)
+# and then demands a SCHEDULER_STATE_DIR export (F15b). This file must therefore never
+# spell out those two subcommand names; the only run-record subcommand the shims call is
+# the health-event one, which the scan does not (and need not) cover.
 
 # The shims resolve side_effect.py/cli.py relative to their OWN location (scripts/shims/
 # is a sibling of scripts/factory_core/ in the real repo), never via $CLONE_DIR — see the
@@ -1445,6 +1585,10 @@ FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git tag v1
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote add x https://example.com
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote set-url origin https://example.com
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow git remote -v
+# F2: global options before the verb -- stripped, so the verb is judged, not the flag.
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git --no-pager log
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git -C . -c color.ui=false log
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git -c user.name=x commit -m x
 # R5 fail-closed default at level 1: verbs R1's table never names must still deny by
 # default (git_mode=allow), not silently pass — the gap architect review cycle 2 caught.
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git checkout -b x
@@ -1459,6 +1603,9 @@ FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git apply patch.diff
 # concatenation, which denied both of these (caught by architect review, cycle 1).
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh issue view 1
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh pr list
+# Never-list at every level (R1, amended): denied before the read allow-list is consulted.
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  gh secret list
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  gh auth status
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh api repos/o/r/issues
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  gh api repos/o/r/issues -X POST -f title=x
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  gh issue create --title x
@@ -1467,6 +1614,7 @@ FACTORY_SIDE_EFFECT_LEVEL=1 check deny  gh pr create
 # --- Level 2: artifact writing ---
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git commit -m x
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git -C . push origin HEAD   # F2
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git tag v1
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git remote add x https://example.com
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git remote set-url origin https://example.com
@@ -1479,6 +1627,8 @@ FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh issue create --title x
 # --- Level 3: GitHub ticket creation ---
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow git commit -m x
 FACTORY_SIDE_EFFECT_LEVEL=3 check deny  git push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=3 check deny  git -C . push origin HEAD   # F2
+FACTORY_SIDE_EFFECT_LEVEL=3 check deny  gh auth status              # never-list
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue create --title x
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue comment 1 --body hi
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue edit 1 --add-label x
@@ -1486,21 +1636,32 @@ FACTORY_SIDE_EFFECT_LEVEL=3 check deny  gh pr create
 
 # --- Level 4: code modification (own branch push only) ---
 # No real git repo needed here: FACTORY_RUN_BRANCH is pinned explicitly below, so the
-# shim's own_branch_only branch never falls back to `git symbolic-ref` for these three
-# cases (bash short-circuits ${FACTORY_RUN_BRANCH:-...} once the var is set) — and `git`
-# on PATH at this point is the stub (which just echoes its argv), not a real repo, so an
-# `init`/`checkout -b` here would be theater, not a real fixture.
+# shim's own_branch_only branch never falls back to `git symbolic-ref` for these cases
+# (bash short-circuits ${FACTORY_RUN_BRANCH:-...} once the var is set) — and `git` on
+# PATH at this point is the stub (which just echoes its argv), not a real repo, so an
+# `init`/`checkout -b` here would be theater, not a real fixture. Plain `check` (F15a):
+# the shim runs in this process's PATH/env like every other row; no `sh -c` needed.
 export FACTORY_RUN_BRANCH="feat/issue-196-x"
-FACTORY_SIDE_EFFECT_LEVEL=4 sh -c "cd '$TMP' && git push origin feat/issue-196-x" \
-  && PASS=$((PASS+1)) || { echo "FAIL: level4 own-branch push should allow"; FAIL=$((FAIL+1)); }
-FACTORY_SIDE_EFFECT_LEVEL=4 sh -c "cd '$TMP' && ! git push origin main" \
-  && PASS=$((PASS+1)) || { echo "FAIL: level4 push to main must deny"; FAIL=$((FAIL+1)); }
-FACTORY_SIDE_EFFECT_LEVEL=4 sh -c "cd '$TMP' && ! git push --force origin feat/issue-196-x" \
-  && PASS=$((PASS+1)) || { echo "FAIL: level4 --force must deny"; FAIL=$((FAIL+1)); }
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push origin feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push -u origin HEAD:feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin main
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin HEAD:refs/heads/main
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --force origin feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --delete origin feat/issue-196-x
+# F4: wide pushes and +refspec force syntax move refs beyond the run's own branch.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --all origin
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --mirror origin
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --tags origin
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin +feat/issue-196-x
+# F2: global options before the verb must not bypass the push-scope check.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git -C . push origin main
 FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh issue create --title x
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh pr create
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh repo delete o/r
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh api repos/o/r -X POST
+# F3: a body with no explicit method is a POST in gh, so it is non-GET here too.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh api graphql -f query=x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh ssh-key list   # never-list at every level
 FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh api repos/o/r
 unset FACTORY_RUN_BRANCH
 
@@ -1508,6 +1669,8 @@ unset FACTORY_RUN_BRANCH
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh pr create
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git push --delete origin some-branch
+FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git -C . push --delete origin some-branch   # F2
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -C . push origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh repo delete o/r
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh secret set X
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh auth login
@@ -1591,7 +1754,10 @@ before editing) establishes the exact scaffolding every case in that file must r
 file), an `assert_true "desc" "condition"` helper that increments `PASSED`/`FAILED`
 (**not** a subshell `exit 1`, which the file's `set -uo pipefail` — no `-e` — would not
 propagate as a failure), `CLONE_DIR` is set from `FACTORY_CLONE_DIR` at `entrypoint.sh:14`
-(exporting `CLONE_DIR` directly before sourcing has no effect — it gets overwritten), and
+(exporting `CLONE_DIR` directly before sourcing has no effect — it gets overwritten; after F1
+the new function does not read `CLONE_DIR` at all — it takes `FACTORY_CONFIG_PATH` /
+`FACTORY_SCRIPTS_DIR`, the same override pattern as `IDENTITY_SH` / `FACTORY_PROVIDERS_CLI` at
+the file's top), and
 the file's own trailing `echo "Results: ..."` / `[ "$FAILED" -eq 0 ]` lines are the
 script's actual exit status, so a new case must be inserted **before** them, not appended
 after.
@@ -1601,51 +1767,73 @@ Insert this new case immediately before the file's existing `# Cleanup` /
 `assert_true "multi-phase intent 'fix' -> stage='unknown'" ...` line):
 
 ```bash
-# --- #196: FACTORY_SIDE_EFFECT_LEVEL is computed and exported before archon runs ---
+# --- #196: FACTORY_SIDE_EFFECT_LEVEL is computed from the BAKED config/scripts only (F1) ---
+# The function under test takes FACTORY_CONFIG_PATH / FACTORY_SCRIPTS_DIR overrides (defaults
+# /opt/dark-factory/config/config.yaml and /opt/dark-factory/scripts, which do not exist on a
+# bare CI checkout) -- same pattern as IDENTITY_SH / FACTORY_PROVIDERS_CLI above.
 TMP_SE=$(mktemp -d /tmp/196-clone-XXXXXX)
-mkdir -p "$TMP_SE/.claude/skills/refinement"
-cat > "$TMP_SE/.claude/skills/refinement/config.yaml" <<'EOF'
+SE_SCRIPTS=$(mktemp -d /tmp/196-scripts-XXXXXX)
+SE_LOG="$SE_SCRIPTS/compute.log"
+mkdir -p "$SE_SCRIPTS/factory_core" "$SE_SCRIPTS/shims"
+cp "$SCRIPT_DIR/../scripts/factory_core/side_effect.py" "$SE_SCRIPTS/factory_core/"
+SE_CFG_WITH="$SE_SCRIPTS/config-with-block.yaml"
+SE_CFG_WITHOUT="$SE_SCRIPTS/config-without-block.yaml"
+cat > "$SE_CFG_WITH" <<'EOF'
 side_effect:
   phase_levels:
-    plan: 5
+    plan: 4
     implement: 5
     validate: 5
     conformance: 5
     code_review: 5
     revise_advisory: 5
 EOF
-mkdir -p "$TMP_SE/dark-factory/scripts/factory_core"
-cp "$SCRIPT_DIR/../scripts/factory_core/side_effect.py" "$TMP_SE/dark-factory/scripts/factory_core/"
+printf 'scheduler:\n  factory_wip_limit: 1\n' > "$SE_CFG_WITHOUT"
+# A clone-resident config (the MarketHawk transition layout) claiming a HIGHER level than
+# the baked one for 'plan': must be ignored -- the clone is never consulted (spec Trust model).
+mkdir -p "$TMP_SE/.claude/skills/refinement"
+printf 'side_effect:\n  phase_levels:\n    plan: 5\n' > "$TMP_SE/.claude/skills/refinement/config.yaml"
+export FACTORY_SCRIPTS_DIR="$SE_SCRIPTS"
+export FACTORY_CONFIG_PATH="$SE_CFG_WITH"
 
 ARTIFACTS_DIR=$(mktemp -d /tmp/208-artifacts-XXXXXX)
 export ARTIFACTS_DIR
-FACTORY_CLONE_DIR="$TMP_SE" ARGUMENTS="Plan issue #1" \
-  ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh" "Plan issue #1"
 
-trap - ERR
-set +e; set +u; set +o pipefail
-
-# entrypoint.sh:14 sets CLONE_DIR="$FACTORY_CLONE_DIR" during the source above, so
-# CLONE_DIR is already $TMP_SE in this shell — no need to re-set it.
-_compute_side_effect_level >/dev/null
-
-assert_true "#196 single-phase intent 'plan' -> level 5" "[ '$FACTORY_SIDE_EFFECT_LEVEL' = '5' ]"
-assert_true "#196 profile version is v1" "[ '$FACTORY_SIDE_EFFECT_PROFILE_VERSION' = 'v1' ]"
-
-# entrypoint.sh's own $INTENT vocabulary uses "fix" (not the DAG's "new") for a first-time
-# implement dispatch -- this is exactly the mismatch architect review (cycle 3) caught:
-# intent_phases() must be fed entrypoint.sh's actual $INTENT or every real `Fix issue #N`
-# run silently resolves to level 1 and the shim denies every git/gh call the implement
-# phase needs.
-unset FACTORY_SIDE_EFFECT_LEVEL FACTORY_SIDE_EFFECT_PROFILE_VERSION
+# Case A: baked config WITH the block, multi-phase intent 'fix' -> 5. entrypoint.sh's own
+# $INTENT vocabulary uses "fix" (not the DAG's "new") for a first-time implement dispatch --
+# exactly the mismatch architect review (cycle 3) caught: intent_phases() must be fed
+# entrypoint.sh's actual $INTENT or every real `Fix issue #N` run silently resolves to
+# level 1 and the shim denies every git/gh call the implement phase needs.
 FACTORY_CLONE_DIR="$TMP_SE" ARGUMENTS="Fix issue #1" \
   ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh" "Fix issue #1"
 trap - ERR
 set +e; set +u; set +o pipefail
-_compute_side_effect_level >/dev/null
-assert_true "#196 multi-phase intent 'fix' -> level 5 (not 1)" "[ '$FACTORY_SIDE_EFFECT_LEVEL' = '5' ]"
 
-rm -rf "$TMP_SE" "$ARTIFACTS_DIR"
+# Called directly, NOT in a $(...) subshell: the exports must land in this shell.
+_compute_side_effect_level >"$SE_LOG" 2>&1
+assert_true "#196 multi-phase intent 'fix' -> level 5 from the baked config (not 1)" "[ '$FACTORY_SIDE_EFFECT_LEVEL' = '5' ]"
+assert_true "#196 profile version comes from render (v1)" "[ '$FACTORY_SIDE_EFFECT_PROFILE_VERSION' = 'v1' ]"
+assert_true "#196 log line names the phase set" "grep -q 'phases=implement validate conformance code-review revise-advisory' '$SE_LOG'"
+assert_true "#196 baked shim dir is prepended to PATH" "case ':$PATH:' in *':$SE_SCRIPTS/shims:'*) true;; *) false;; esac"
+
+# Case B: 'plan' -> baked says 4, the clone-resident file says 5 -> 4 (clone never consulted).
+unset FACTORY_SIDE_EFFECT_LEVEL FACTORY_SIDE_EFFECT_PROFILE_VERSION
+FACTORY_CLONE_DIR="$TMP_SE" ARGUMENTS="Plan issue #1" \
+  ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh" "Plan issue #1"
+trap - ERR
+set +e; set +u; set +o pipefail
+_compute_side_effect_level >"$SE_LOG" 2>&1
+assert_true "#196 clone-resident config.yaml is ignored (baked 4 wins over clone 5)" "[ '$FACTORY_SIDE_EFFECT_LEVEL' = '4' ]"
+
+# Case C: baked config WITHOUT the block -> 1 with a warning (D4, fail closed).
+unset FACTORY_SIDE_EFFECT_LEVEL FACTORY_SIDE_EFFECT_PROFILE_VERSION
+export FACTORY_CONFIG_PATH="$SE_CFG_WITHOUT"
+_compute_side_effect_level >"$SE_LOG" 2>&1
+assert_true "#196 missing side_effect block -> level 1 (fail closed)" "[ '$FACTORY_SIDE_EFFECT_LEVEL' = '1' ]"
+assert_true "#196 missing block logs a 'defaulting to 1' warning" "grep -q 'defaulting to 1' '$SE_LOG'"
+
+unset FACTORY_CONFIG_PATH FACTORY_SCRIPTS_DIR
+rm -rf "$TMP_SE" "$SE_SCRIPTS" "$ARTIFACTS_DIR"
 set -uo pipefail
 ```
 
@@ -1664,32 +1852,46 @@ definition, before the `--- Parse arguments ---` section):
 
 ```bash
 # Compute and export the container's effective side-effect level (#196/R3) + prepend
-# the git/gh shim onto PATH (#196/R5). Single source of truth: side_effect.py. Must run
-# post-clone (needs CLONE_DIR/config.yaml) and before `archon workflow run` (both the
-# export and the PATH prepend must be visible to every node's subprocess).
+# the git/gh shim onto PATH (#196/R5). Single source of truth: side_effect.py.
+#
+# FACTORY-OWNED INPUTS ONLY (spec Trust model; operator review F1): the baked config and
+# the baked scripts. The target clone -- its dark-factory/ subtree, its committed
+# .claude/skills/refinement/config.yaml (MarketHawk carries both, without any side_effect:
+# block), the materialized effective config -- is never consulted here: a stale target
+# copy must not resolve a run to level 1, and a target must not be able to raise its own
+# level or replace the shim. This is the first fail-CLOSED consumer of config in this
+# file, so it cannot share _entrypoint_cfg_apply's clone-first lookup (whose knobs all
+# fail open). The two env overrides exist for tests/test_entrypoint_current_run.sh (same
+# pattern as IDENTITY_SH / FACTORY_PROVIDERS_CLI at the top) and are never set in the image.
+# Runs post-clone (keeps the same call site as _entrypoint_cfg_apply) and before
+# `archon workflow run`, so the export and the PATH prepend reach every node's subprocess
+# -- and, deliberately, the rest of this script (deconflict.py / main_red_fixer.py's
+# `claude -p` sessions; spec R3).
 _compute_side_effect_level() {
-  local cfg=""
-  for cfg in "${CLONE_DIR}/.claude/skills/refinement/config.yaml" "/opt/refinement-skills/config.yaml"; do
-    [ -f "$cfg" ] && break
-    cfg=""
-  done
-  local se_cli="${CLONE_DIR}/dark-factory/scripts/factory_core/side_effect.py"
+  local cfg="${FACTORY_CONFIG_PATH:-/opt/dark-factory/config/config.yaml}"
+  local scripts_dir="${FACTORY_SCRIPTS_DIR:-/opt/dark-factory/scripts}"
+  local se_cli="${scripts_dir}/factory_core/side_effect.py"
   local err
   err=$(mktemp)
   if FACTORY_SIDE_EFFECT_LEVEL=$(python3 "$se_cli" effective-container-level \
-      --intent "${INTENT:-unknown}" ${cfg:+--config "$cfg"} 2>"$err"); then
-    :
+      --intent "${INTENT:-unknown}" --config "$cfg" 2>"$err"); then
+    # phase_level's own D4 warnings ("no configured level ... defaulting to 1") -- surface
+    # them in the run log rather than swallowing them on the success path.
+    if [ -s "$err" ]; then sed 's/^/[side-effect] /' "$err" >&2; fi
   else
     echo "WARNING: side-effect level resolution failed ($(cat "$err")) — defaulting to 1" >&2
     FACTORY_SIDE_EFFECT_LEVEL=1
   fi
   rm -f "$err"
-  FACTORY_SIDE_EFFECT_PROFILE_VERSION="v1"
+  # F12: the profile version comes from the profile itself, never a second literal here.
+  FACTORY_SIDE_EFFECT_PROFILE_VERSION=$(python3 "$se_cli" render --level "$FACTORY_SIDE_EFFECT_LEVEL" 2>/dev/null \
+      | jq -r '.profile_version' 2>/dev/null || true)
+  FACTORY_SIDE_EFFECT_PROFILE_VERSION="${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}"
   export FACTORY_SIDE_EFFECT_LEVEL FACTORY_SIDE_EFFECT_PROFILE_VERSION
   local phases
   phases=$(python3 "$se_cli" intent-phases --intent "${INTENT:-unknown}" 2>/dev/null || echo "")
   echo "side_effect_level=${FACTORY_SIDE_EFFECT_LEVEL} profile=${FACTORY_SIDE_EFFECT_PROFILE_VERSION} phases=${phases}"
-  export PATH="${CLONE_DIR}/dark-factory/scripts/shims:${PATH}"
+  export PATH="${scripts_dir}/shims:${PATH}"
 }
 ```
 
@@ -1744,7 +1946,7 @@ its own trailing `|| true` line.
 bash tests/test_entrypoint_current_run.sh
 ```
 
-Expected: `Results: <n> passed, 0 failed` including the three new `#196 ...` assertions, and
+Expected: `Results: <n> passed, 0 failed` including the seven new `#196 ...` assertions, and
 the file's existing checks all still pass.
 
 ### Step 8.5 — commit
