@@ -126,18 +126,18 @@ Only execute if `L_NEEDS_ISSUE` is `True`.
 if [ "$L_NEEDS_ISSUE" = "True" ]; then
   gh issue create \
     --repo "$REPO" \
-    --title "Revisit L=always-above-ceiling rule in is_above_ceiling() — scheduler.sh" \
+    --title "Revisit XL=always-above-ceiling rule in is_above_ceiling() — scheduler_lib.sh" \
     --body "## Purpose
 
 The weekly dispatch ceiling analysis (issue #${ISSUE_NUM}, window ${SINCE}→${UNTIL})
-found the L-bucket success rate exceeds 70% at n≥5. The L=always-above-ceiling rule
-in \`scheduler.sh\` may be overly conservative.
+found the L+XL bucket success rate exceeds 70% at n≥5. The XL=always-above-ceiling rule
+in \`scripts/scheduler_lib.sh\` may be overly conservative.
 
 ## What to review
 
-- Inspect \`is_above_ceiling()\` in \`scheduler.sh\` (~line 213).
-- Assess whether the L-bucket ceiling should be relaxed (e.g. L+keyword pattern only).
-- This is a **code change** (not an env-var change) — requires PR to \`scheduler.sh\`.
+- Inspect \`is_above_ceiling()\` in \`scripts/scheduler_lib.sh\`.
+- Assess whether the XL-bucket ceiling should be relaxed (e.g. XL+keyword pattern only).
+- This is a **code change** (not an env-var change) — requires PR to \`scripts/scheduler_lib.sh\`.
 
 ## References
 
