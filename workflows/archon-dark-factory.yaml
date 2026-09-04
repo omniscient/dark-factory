@@ -434,8 +434,25 @@ nodes:
 
       if [ -n "$SPEC_FILE" ]; then
         git push -u origin "$BRANCH"
-        python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review
-        echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+        if python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review; then
+          echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+        else
+          echo "WARNING: spec-pending-review failed to apply for #$ISSUE — spec pushed to $BRANCH but gate label missing; check board state manually"
+          _FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker refinement 2>/dev/null || echo "")
+          _WARN_BODY="<!-- df-gate-label-failure -->
+      ## Refinement Pipeline — Gate Label Missing
+
+      The spec was pushed to \`$BRANCH\` but the \`spec-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
+
+      **Remediation:** \`gh issue edit $ISSUE --add-label spec-pending-review\`
+
+      ---
+      ${_FOOTER}"
+          TMPFILE=$(mktemp /tmp/gate-label-failure-XXXXXX.md)
+          printf '%s' "$_WARN_BODY" > "$TMPFILE"
+          python3 "$_PCLI" tracker comment --id "$ISSUE" --marker "<!-- df-gate-label-failure -->" --body-file "$TMPFILE" || true
+          rm -f "$TMPFILE"
+        fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \
@@ -483,8 +500,25 @@ nodes:
 
       if [ -n "$PLAN_FILE" ]; then
         git push -u origin "$BRANCH"
-        python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review
-        echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+        if python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review; then
+          echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+        else
+          echo "WARNING: plan-pending-review failed to apply for #$ISSUE — plan pushed to $BRANCH but gate label missing; check board state manually"
+          _FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker refinement 2>/dev/null || echo "")
+          _WARN_BODY="<!-- df-gate-label-failure -->
+      ## Refinement Pipeline — Gate Label Missing
+
+      The plan was pushed to \`$BRANCH\` but the \`plan-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
+
+      **Remediation:** \`gh issue edit $ISSUE --add-label plan-pending-review\`
+
+      ---
+      ${_FOOTER}"
+          TMPFILE=$(mktemp /tmp/gate-label-failure-XXXXXX.md)
+          printf '%s' "$_WARN_BODY" > "$TMPFILE"
+          python3 "$_PCLI" tracker comment --id "$ISSUE" --marker "<!-- df-gate-label-failure -->" --body-file "$TMPFILE" || true
+          rm -f "$TMPFILE"
+        fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
           | jq -r '.labels[].name' \

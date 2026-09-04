@@ -49,6 +49,51 @@ class TestPushGateNodes:
         assert gate_pos < label_pos, \
             f"'{node_id}': push_gate_check.sh must run before the gate label is applied"
 
+    def test_node_guards_label_call_and_warns_on_failure(self, node_id, prefix, label, noun):
+        bash = _workflow_nodes()[node_id]["bash"]
+        guard = f'if python3 "$_PCLI" tracker label --id "$ISSUE" --add {label}'
+        assert guard in bash, f"'{node_id}': the gate-label call must be guarded by an if/else"
+
+        marker_call = 'tracker comment --id "$ISSUE" --marker "<!-- df-gate-label-failure -->"'
+        assert marker_call in bash, \
+            f"'{node_id}' must post the <!-- df-gate-label-failure --> marker comment on label failure"
+
+        # the label-failure branch is the `if`'s else-clause, not the artifact-miss else-clause:
+        # it must appear between the guard and that guard's own closing `fi`, and it must not
+        # contain the artifact-miss marker (spec R6: the two markers are distinct and unrelated).
+        # Match "else"/"fi" as whole stripped lines, not bare substrings — a substring search
+        # for "fi" would falsely match inside "marker refinement" (the _FOOTER line), which
+        # appears before the real closing fi and would truncate the branch too early.
+        lines = bash.split("\n")
+        guard_line_idx = next(i for i, l in enumerate(lines) if guard in l)
+        else_line_idx = next(
+            i for i in range(guard_line_idx, len(lines)) if lines[i].strip() == "else"
+        )
+        fi_line_idx = next(
+            i for i in range(else_line_idx, len(lines)) if lines[i].strip() == "fi"
+        )
+        label_failure_branch = "\n".join(lines[else_line_idx:fi_line_idx])
+        assert "df-gate-label-failure" in label_failure_branch, \
+            f"'{node_id}': the label-failure branch must post the df-gate-label-failure marker"
+        assert "df-refine-failure" not in label_failure_branch, \
+            f"'{node_id}': the label-failure branch must not reuse the df-refine-failure marker " \
+            "(that marker means 'no artifact, retry safe' and must not be overloaded)"
+
+        # the label-failure branch warns (log echo) and does not exit 1 (push already succeeded)
+        assert "WARNING:" in label_failure_branch, \
+            f"'{node_id}': the label-failure branch must log a WARNING echo"
+        assert "exit 1" not in label_failure_branch, \
+            f"'{node_id}': the label-failure branch must not exit 1 — the push already " \
+            "succeeded and is the node's load-bearing side effect"
+
+        # the warn-advisory comment upsert is || true-guarded
+        comment_pos = label_failure_branch.index(marker_call)
+        comment_line_start = label_failure_branch.rfind("\n", 0, comment_pos) + 1
+        comment_line_end = label_failure_branch.find("\n", comment_pos)
+        comment_line = label_failure_branch[comment_line_start:comment_line_end]
+        assert "|| true" in comment_line, \
+            f"'{node_id}': the gate-label-failure marker comment must be || true-guarded"
+
     def test_node_depends_on_and_when_unchanged(self, node_id, prefix, label, noun):
         node = _workflow_nodes()[node_id]
         upstream = "refine" if node_id == "refine-push" else "plan"
