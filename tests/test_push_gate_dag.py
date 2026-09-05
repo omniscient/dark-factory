@@ -195,7 +195,8 @@ class TestSetupBranchTransfersRefineArtifacts:
     def test_setup_branch_timeout_raised_for_network_call(self):
         # #387: transfer_refine_artifacts.sh adds a git fetch + two push_gate_check.sh
         # passes over the refine branch's full commit history; 15s was already tight
-        # for a fresh checkout -b, raised to 30s to give the added network round trip
-        # headroom (same rationale as #358's push-and-pr label-failure timeout raise).
+        # for a fresh checkout -b. Raised to 30s, then to 60s (code-review advisory) to
+        # give the fetch/gate-check/checkout/commit sequence headroom against a slow
+        # origin without turning a best-effort copy into a hard node failure.
         node = _workflow_nodes()["setup-branch"]
-        assert node["timeout"] == 30000
+        assert node["timeout"] == 60000

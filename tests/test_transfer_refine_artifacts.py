@@ -217,9 +217,12 @@ class TestTransferRefineArtifactsScript:
         after the previous one was merged (spec already archived under docs/archive/
         on main) must not resurrect the pre-archive path — that would collide with
         push-and-pr's next git mv attempt."""
+        # Content must match what _push_refine_branch below actually pushes for this
+        # issue/slug — the resurrection guard now compares blob content (not just
+        # basename) so it doesn't mask a same-named-but-different sibling artifact.
         archived = git_repo / "docs" / "archive" / "2026-09-05-test-design.md"
         archived.parent.mkdir(parents=True, exist_ok=True)
-        archived.write_text("# Design (archived)\n\n**Issue:** #212\n")
+        archived.write_text("# Design\n\n**Issue:** #212\n")
         git("add", "docs/archive/2026-09-05-test-design.md", cwd=str(git_repo))
         git("commit", "-m", "docs: archive spec/plan for issue #212", cwd=str(git_repo))
         git("push", "origin", "HEAD:main", cwd=str(git_repo))

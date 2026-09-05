@@ -307,12 +307,20 @@ nodes:
         if git fetch origin "$BRANCH" 2>/dev/null && git checkout "$BRANCH"; then
           :
         else
-          git checkout -b "$BRANCH"
-          NEW_BRANCH=true
+          if git checkout -b "$BRANCH"; then
+            NEW_BRANCH=true
+          else
+            echo "setup-branch: git checkout -b $BRANCH failed" >&2
+            exit 1
+          fi
         fi
       else
-        git checkout -b "$BRANCH"
-        NEW_BRANCH=true
+        if git checkout -b "$BRANCH"; then
+          NEW_BRANCH=true
+        else
+          echo "setup-branch: git checkout -b $BRANCH failed" >&2
+          exit 1
+        fi
       fi
 
       if [ "$NEW_BRANCH" = "true" ]; then
@@ -322,7 +330,7 @@ nodes:
       echo "$BRANCH"
     depends_on: [parse-intent, fetch-issue]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
-    timeout: 30000
+    timeout: 60000
 
   # Refinement branch setup (refine/issue-N-slug)
   - id: setup-refine-branch

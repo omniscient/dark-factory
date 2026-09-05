@@ -19,8 +19,9 @@
 #                       comment below for why).
 #   <ref>               (optional, default HEAD) git ref to inspect instead of the
 #                       currently checked-out HEAD — e.g. a not-checked-out remote
-#                       refine branch (#387). Every existing 2-arg caller is
-#                       byte-for-byte unaffected.
+#                       refine branch (#387). Existing 2-arg callers keep the same
+#                       REF=HEAD semantics, except the content match now reads the
+#                       committed blob.
 #
 # Stdout: path of the first matching committed file, or nothing if none found.
 # Exit: always 0 — "no artifact" is a valid outcome for the caller to branch on, not a

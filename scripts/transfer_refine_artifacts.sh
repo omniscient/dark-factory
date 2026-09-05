@@ -51,11 +51,23 @@ for PREFIX in docs/superpowers/specs/ docs/superpowers/plans/; do
   # previous feat branch was merged/deleted, while its refine/issue-N-* branch still
   # exists on origin, must not re-add a file at its pre-archive path — push-and-pr's
   # next `git mv "$FILE" docs/archive/` would then collide with an existing destination.
+  # Specs and plans are archived into one flat docs/archive/ and routinely share a
+  # basename (e.g. the same design doc name under both specs/ and plans/), so this must
+  # only fire when $FILE itself is genuinely gone from origin/main *and* the archived
+  # blob at that basename is actually this file's content — not merely a same-named
+  # sibling artifact that happened to get archived already.
   _archived_path="docs/archive/$(basename -- "$FILE")"
-  if git cat-file -e "origin/main:${_archived_path}" 2>/dev/null; then
-    echo "transfer_refine_artifacts: skipping $FILE — already archived on origin/main as ${_archived_path}" >&2
-    continue
+  if ! git cat-file -e "origin/main:${FILE}" 2>/dev/null \
+    && git cat-file -e "origin/main:${_archived_path}" 2>/dev/null; then
+    _refine_blob=$(git rev-parse "${REFINE_REF}:${FILE}" 2>/dev/null || true)
+    _archived_blob=$(git rev-parse "origin/main:${_archived_path}" 2>/dev/null || true)
+    if [ -n "$_refine_blob" ] && [ "$_refine_blob" = "$_archived_blob" ]; then
+      echo "transfer_refine_artifacts: skipping $FILE — already archived on origin/main as ${_archived_path}" >&2
+      continue
+    fi
   fi
+
+  git cat-file -e "${REFINE_REF}:$FILE" 2>/dev/null || continue
 
   git checkout "$REFINE_REF" -- "$FILE"
   git add "$FILE"
@@ -69,8 +81,11 @@ for PREFIX in docs/superpowers/specs/ docs/superpowers/plans/; do
 done
 
 if [ "$STAGED" -gt 0 ]; then
-  git commit -m "docs(#${ISSUE}): copy spec/plan onto the implementation branch" >/dev/null
-  echo "SPEC_TRANSFER: ${STAGED} file(s) from ${REFINE_REF}"
+  if git commit -m "docs(#${ISSUE}): copy spec/plan onto the implementation branch" >/dev/null; then
+    echo "SPEC_TRANSFER: ${STAGED} file(s) from ${REFINE_REF}"
+  else
+    echo "SPEC_TRANSFER: none (commit failed)"
+  fi
 else
   echo "SPEC_TRANSFER: none (no matching spec/plan found on ${REFINE_REF} for #${ISSUE})"
 fi
