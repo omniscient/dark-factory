@@ -1,6 +1,7 @@
 # Shadow-run Claude Fable 5.1 as the conformance reviewer
 
 **Issue:** #394
+**Revised:** 2026-09-05 (operator amendment: R8 — no rubric edit; `.claude/skills/` is hard-excluded)
 
 ---
 
@@ -91,21 +92,12 @@ verdicts against the operator's actual gate decisions and decide whether to flip
    the baked default in `config.yaml` requires an image rebuild and is *not* the trial's fast
    off-switch — the actual stop-the-trial lever is exporting `CONFORMANCE_SHADOW_MODEL=` (empty) via
    `.archon/.env`, which `entrypoint.sh` already reads into the container environment with no rebuild.
-8. **Prompt hygiene — minimal, deferred.** The three carve-out paragraphs in the conformance rubric
-   (Formatter/import-ordering, Documentation, Security-sensitive) stay semantically and substantively
-   untouched in this ticket. They exist to prevent under-flagging, and the security-sensitive carve-out
-   specifically is what stops `.claude/skills/**`, `.claude/settings*.json`, `.mcp.json`, and
-   `.factory/hooks/**` edits from being waved through as documentation — shortening it is exactly the
-   "weaken a safety gate as a side effect of another change" CLAUDE.md prohibits. "Over-prescriptive for
-   Fable" is also an empirical claim best evidenced by real shadow output; rewriting the rubric before
-   any exists just perturbs the one rubric both models must read identically (Requirement 2 depends on
-   that identity for a fair comparison). The one bounded, strictly non-semantic exception that ships in
-   this ticket: the rubric's Out-of-Scope intro paragraph currently restates the Documentation exception
-   inline as a parenthetical before defining it again in full further down; collapse the parenthetical
-   to a one-line pointer ("see **Documentation exception** below"). Nothing else changes. Because
-   `.claude/skills/conformance/RUBRIC.md` lives under `.claude/skills/**` (a security-sensitive path per
-   the rubric's own carve-out), this edit must be explicitly spec-named — done, here — or the
-   conformance gate reviewing *this ticket's own PR* would correctly flag it `[OOS]`.
+8. **Prompt hygiene — none in this ticket (operator amendment 2026-09-05).** The conformance rubric
+   (`.claude/skills/conformance/RUBRIC.md`) and its byte-identical baked mirror
+   (`refinement-skills/conformance-reviewer-prompt.md`) are **not** edited. `.claude/skills/` is in the
+   adapter's `hard_exclude_paths` (`.factory/adapter.yaml`), so a factory implement cannot write there and
+   the mirror must stay identical to it; and Requirement 2 depends on both models reading the identical
+   rubric. Any rubric trim is a separate, evidence-based ticket after the shadow data exists.
 9. **Out of scope** (restated from the issue, unchanged): which model gates (the follow-up flip); the
    architect or product-owner model pins; any `gate_*`, breaker, budget, or tool-permission change; the
    exact wording of a future, evidence-based rubric trim.
@@ -165,12 +157,6 @@ conformance:
   ...
   shadow_model: claude-fable-5-1  # env: CONFORMANCE_SHADOW_MODEL overrides — empty = no shadow
 ```
-
-**Rubric (`.claude/skills/conformance/RUBRIC.md` and its byte-identical baked mirror
-`refinement-skills/conformance-reviewer-prompt.md`):** collapse the Out-of-Scope intro's inline
-parenthetical restatement of the Documentation exception to a one-line pointer, per Requirement 8.
-Update any test that asserts the removed text verbatim (`tests/test_conformance_skill_files.py`,
-`tests/test_conformance_prompt_formatter_rule.py`, `tests/test_rubric_skill_security.py`) to match.
 
 **Task 0:** first step of the plan or implement phase for this ticket, spawn a trivial one-line-reply
 subagent with the literal `model: claude-fable-5-1` under the factory OAuth token; if rejected, stop and
