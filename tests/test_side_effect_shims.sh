@@ -128,6 +128,9 @@ FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote remove origin
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote prune origin
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git log --output=out.txt
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git diff --output out.patch
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git grep -o foo          # -o is a match flag here, not output
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git --version
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh --version
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git send-pack origin HEAD
 # Exercises the VERB2-alone match: gh_allowed's "view"/"list" must match as either
 # gh's first word (bare `gh status`) or second word (`gh issue view`, `gh pr list`) —
@@ -166,7 +169,9 @@ FACTORY_SIDE_EFFECT_LEVEL=3 check deny  gh auth status              # never-list
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue create --title x
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue comment 1 --body hi
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue edit 1 --add-label x
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue -R o/r create --title x   # persistent flag between the words
 FACTORY_SIDE_EFFECT_LEVEL=3 check deny  gh pr create
+FACTORY_SIDE_EFFECT_LEVEL=3 check deny  gh pr -R o/r create
 
 # --- Level 4: code modification (own branch push only) ---
 # No real git repo needed here: FACTORY_RUN_BRANCH is pinned explicitly below, so the
@@ -201,6 +206,12 @@ FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push -o ci.skip origin feat/issue-19
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push -o ci.skip origin main
 # Plumbing bypass is denied wherever push is restricted.
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git send-pack origin feat/issue-196-x
+# Clustered short options are expanded before judging (-fu = --force --set-upstream).
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push -fu origin feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push -u origin feat/issue-196-x
+# Persistent gh flag between the command words must not hide the subcommand.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh pr -R o/r create
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh pr --repo=o/r create
 FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh issue create --title x
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh pr create
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh repo delete o/r
@@ -215,6 +226,7 @@ unset FACTORY_RUN_BRANCH
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh pr create
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git push --delete origin some-branch
+FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git push -df origin some-branch   # clustered -d must still deny
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git -C . push --delete origin some-branch   # F2
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -C . push origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git send-pack origin some-branch   # unrestricted push scope

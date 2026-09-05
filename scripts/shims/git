@@ -97,6 +97,23 @@ VERB1="${_ARGS[$_I]:-}"
 VERB2="${_ARGS[$((_I + 1))]:-}"
 VERB_ARGS=("${_ARGS[@]:$((_I + 1))}")   # everything after the verb (push flag parsing)
 
+# Version/help never mutate anything.
+case "$VERB1" in --version|--help|-h|help|version) exec "$REAL_GIT" "$@" ;; esac
+
+# Operator review of PR #396 (#2): git accepts clustered short options (`push -df`,
+# `push -fu`), which a token-wise `case` never sees as -d/-f. Expand clusters into
+# single letters for the push loops only; the argv exec'd at the bottom stays "$@".
+# A value glued to `-o` (`-oci.skip`) is expanded too and can only produce a spurious
+# deny (fail closed), never a spurious allow.
+PUSH_ARGS=()
+for _a in "${VERB_ARGS[@]}"; do
+  case "$_a" in
+    --*) PUSH_ARGS+=("$_a") ;;
+    -[A-Za-z][A-Za-z]*) for ((_k = 1; _k < ${#_a}; _k++)); do PUSH_ARGS+=("-${_a:$_k:1}"); done ;;
+    *) PUSH_ARGS+=("$_a") ;;
+  esac
+done
+
 case "$VERB1" in
   commit) _in_list "commit" "${GIT_DENIED[@]}" && deny "commit" ;;
   tag)    _in_list "tag" "${GIT_DENIED[@]}" && deny "tag" ;;
@@ -113,7 +130,7 @@ case "$VERB1" in
         ;;
       own_branch_only)
         FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPECS=(); SKIP=0
-        for arg in "${VERB_ARGS[@]}"; do
+        for arg in "${PUSH_ARGS[@]}"; do
           if [ "$SKIP" = "1" ]; then SKIP=0; continue; fi
           case "$arg" in
             --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
@@ -160,7 +177,7 @@ case "$VERB1" in
       unrestricted)
         # Read git_denied instead of hardcoding --delete/:* — the Trust model section
         # is explicit that nothing may re-declare the table side_effect.py owns.
-        for arg in "${VERB_ARGS[@]}"; do
+        for arg in "${PUSH_ARGS[@]}"; do
           case "$arg" in
             --delete|-d) _in_list "push --delete" "${GIT_DENIED[@]}" && deny "push --delete" ;;
             :*) _in_list "push :refspec-delete" "${GIT_DENIED[@]}" && deny "push (refspec delete)" ;;
@@ -190,11 +207,15 @@ fi
 # Gate 3 on PR #396 (advisory, level-1 allow-list gaps): the allow-list is verb-level,
 # and a few read verbs carry writing forms. Fail closed on those at level 1 only.
 if [ "$GIT_MODE" = "allow" ]; then
-  for arg in "${VERB_ARGS[@]}"; do
-    case "$arg" in
-      --output|--output=*|-o) deny "$VERB1 (writes a file)" ;;   # log/diff/show/format-patch
-    esac
-  done
+  # Only the verbs whose -o/--output writes a file; `git grep -o` is a match flag.
+  case "$VERB1" in
+    log|diff|show|format-patch|shortlog|whatchanged)
+      for arg in "${VERB_ARGS[@]}"; do
+        case "$arg" in
+          --output|--output=*|-o|-o*) deny "$VERB1 (writes a file)" ;;
+        esac
+      done ;;
+  esac
   case "$VERB1" in
     branch)
       # `git branch <name>` creates; -d/-m/-c/-u/... mutate. Only listing forms pass.

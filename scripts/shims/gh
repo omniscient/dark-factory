@@ -65,8 +65,23 @@ _in_list() {
   return 1
 }
 
-VERB1="${1:-}"
-VERB2="${2:-}"
+_GH_ARGS=("$@")
+VERB1="${_GH_ARGS[0]:-}"
+# Version/help never mutate anything and gh accepts them at any level.
+case "$VERB1" in --version|--help|-h|help|version) exec "$REAL_GH" "$@" ;; esac
+# Operator review of PR #396 (#1): cobra accepts persistent flags between the command
+# words (`gh pr -R o/r create` runs `pr create`), so the second word is read after
+# skipping them -- otherwise `TWO_WORD="pr -R"` matched nothing and passed at level 4
+# while the legitimate `gh issue -R o/r create` was wrongly denied at level 3.
+_J=1
+while [ "$_J" -lt "${#_GH_ARGS[@]}" ]; do
+  case "${_GH_ARGS[$_J]}" in
+    -R|--repo) _J=$((_J + 2)) ;;
+    --repo=*|-*) _J=$((_J + 1)) ;;
+    *) break ;;
+  esac
+done
+VERB2="${_GH_ARGS[$_J]:-}"
 TWO_WORD="$VERB1 $VERB2"
 
 if [ "$VERB1" = "api" ]; then
