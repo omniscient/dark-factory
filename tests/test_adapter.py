@@ -563,7 +563,7 @@ def test_human_checkpoint_wrong_type_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
-@pytest.mark.parametrize("sel", [4, 5, 6])
+@pytest.mark.parametrize("sel", [4, 5])
 def test_side_effect_level_high_without_budget_caps_raises(tmp_path, sel):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
@@ -588,12 +588,12 @@ def test_side_effect_level_high_with_budget_caps_missing_human_checkpoint_raises
 def test_side_effect_level_high_with_both_caps_accepted(tmp_path):
     d = tmp_path / ".factory"; d.mkdir()
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
-    parsed["loops"][0]["side_effect_level"] = 6
+    parsed["loops"][0]["side_effect_level"] = 5
     parsed["loops"][0]["budget_caps"] = {"max_tokens": 50000, "max_retry_spend": 10000}
     parsed["loops"][0]["human_checkpoint"] = "manual-approval:slack-#factory-ops"
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
     merged = adapter.load(str(tmp_path))
-    assert merged["loops"][0]["side_effect_level"] == 6
+    assert merged["loops"][0]["side_effect_level"] == 5
 
 
 def test_side_effect_level_3_without_either_accepted(tmp_path):
@@ -633,7 +633,7 @@ def test_loop_entry_side_effect_level_out_of_range_raises(tmp_path, bad_level):
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
     parsed["loops"][0]["side_effect_level"] = bad_level
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 5"):
         adapter.load(str(tmp_path))
 
 
@@ -642,7 +642,7 @@ def test_loop_entry_side_effect_level_non_int_raises(tmp_path):
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
     parsed["loops"][0]["side_effect_level"] = "two"
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 5"):
         adapter.load(str(tmp_path))
 
 
@@ -654,7 +654,7 @@ def test_loop_entry_side_effect_level_bool_raises(tmp_path, bad_bool):
     parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
     parsed["loops"][0]["side_effect_level"] = bad_bool
     (d / "adapter.yaml").write_text(yaml.dump(parsed))
-    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 6"):
+    with pytest.raises(adapter.AdapterError, match="side_effect_level' must be an int between 1 and 5"):
         adapter.load(str(tmp_path))
 
 
@@ -1045,3 +1045,18 @@ def test_adapter_load_accepts_loop_with_independent_verifier(tmp_path):
     (d / "adapter.yaml").write_text(_VALID_LOOP_ENTRY)
     merged = adapter.load(str(tmp_path))
     assert merged["loops"][0]["name"] == "nightly-scan-triage"
+
+
+def test_loop_entry_side_effect_level_6_rejected_with_scope_message(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    parsed = yaml.safe_load(_VALID_LOOP_ENTRY)
+    parsed["loops"][0]["side_effect_level"] = 6
+    (d / "adapter.yaml").write_text(yaml.dump(parsed))
+    with pytest.raises(
+        adapter.AdapterError,
+        match=re.escape(
+            "side_effect_level 6 (external production side effect) is out of scope "
+            "for v1 (#194); declare 1-5"
+        ),
+    ):
+        adapter.load(str(tmp_path))

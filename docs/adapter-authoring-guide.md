@@ -222,7 +222,7 @@ in the archived spec; this section is the current, authoritative shape.)
 schema_version: 1
 artifact_id: scan-2026-08-30-001            # non-empty string, opaque, ^[A-Za-z0-9._-]+$, <=128 chars
 producing_loop: nightly-scan-triage         # must match a loops[].name in .factory/adapter.yaml
-side_effect_level: 2                        # int 1-6; must equal that loop's declared side_effect_level
+side_effect_level: 2                        # int 1-5; must equal that loop's declared side_effect_level
 verifier_verdict:                           # OPTIONAL, informational only -- never gated on
   path: artifacts/scan_verdict.md
 source_references:                          # list of strings, <=50 items, <=512 chars each
@@ -274,3 +274,39 @@ code block (`scheduler.sh::_scan_body_for_deps` skips fenced code when scanning 
 `Depends on:`), and every string rendered outside that fence is checked for backtick/newline
 injection (`unsafe_string`). See
 `docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md` for the full design.
+
+## Side-effect levels
+
+Every `loops[]` entry declares `side_effect_level` (1–5; 6 is rejected at validation — out
+of scope for v1, #194). `scripts/factory_core/side_effect.py` is the single source of
+truth for what each level enforces:
+
+| Level | Name | Layer A — tools removed | Layer B — shim denies | Net effect |
+|---|---|---|---|---|
+| 1 | read-only research | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `git`: **allow-list** of read verbs only (`log`, `status`, `diff`, `show`, `branch` listing, `remote` `show`/`get-url`/`-v`, `fetch`, `blame`, `describe`, `rev-parse`, `ls-files`, `ls-tree`, `cat-file`, `shortlog`, `reflog`, `grep`, …); `commit`, `push`, `tag`, `remote add/set-url`, `branch` create/delete/move, `--output`/`-o` on `log`/`diff`/`show`/`format-patch`, and every unlisted verb are denied. `gh`: `view`, `list`, `status`, `search`, `api` GET without a body; the never-list applies, so `secret`, `auth`, `ssh-key`, `gpg-key` are denied even as `list`/`status` | Can read and run read-only commands. |
+| 2 | artifact writing | none | `git`: `push`, `tag`, `remote set-url`, `send-pack`/`http-push`; `gh`: all mutating verbs (as level 1) | Writes files and local commits; nothing leaves the container. |
+| 3 | GitHub ticket creation | none | `git`: as level 2; `gh`: as level 2 except `issue create`/`issue comment`/`issue edit` allowed | Can file and annotate issues; cannot modify code (no push, no PR). |
+| 4 | code modification | none | `gh`: `pr create/merge/ready/review/close`, `release *`, `repo *`, `secret *`, `auth *`, `api` non-GET (plus the never-list); `git push` only to the run's own branch (`FACTORY_RUN_BRANCH`, else the checked-out branch) — **every** refspec judged, never `main`, never `--force`/`--delete`, never `--all`/`--mirror`/`--tags`/`--prune`/`--branches` or `+refspec`; `send-pack`/`http-push` denied | Commits and pushes its branch; cannot open or merge PRs. |
+| 5 | PR creation | none | never-list only: `gh repo delete/archive/rename`, `gh secret *`, `gh auth *`, `gh ssh-key *`, `gh gpg-key *`, `gh api -X DELETE`, `git push --delete`/refspec deletions | Full PR-creation workflow (today's implement/push-and-pr behavior). |
+| 6 | external production side effect | — | rejected at validation | Out of scope for v1. |
+
+Enforcement modes: level 1 `git` is allow-list gated; levels 2–5 `git` are deny-list gated on the
+remote-facing verbs above (local work such as `add`, `commit`, `checkout -b`, `stash` keeps
+working); `gh` is allow-list gated at levels 1–3 and deny-list gated at 4–5. The never-list is
+checked first at every level. The shims strip `git`'s global options (`-C`, `-c`, …) and `gh`'s
+persistent flags (`-R`/`--repo`) before reading the verb, expand clustered short options
+(`push -df`), and treat `gh api` with `-f`/`-F`/`--input` and no explicit method as POST.
+
+`side_effect.effective_level(value)` fails closed: an undeclared, non-int, boolean, or
+out-of-1–5-range level resolves to **1** (the most restrictive profile), never to an open
+default. `FACTORY_OWNED_MIN_LEVEL = 4` — a loop declaring level ≥ 4 is factory-owned and is
+rejected by the manifest-handoff path (`handoff.py::cross_check`) until a real loop runner
+applies `side_effect.profile_for()` itself (tracked as #196's F3 follow-up).
+
+**What this does and does not claim.** The shim (`scripts/shims/git`, `scripts/shims/gh`)
+is a `PATH` shim guarding the two CLIs a Bash-tool subprocess would otherwise reach
+directly; a process invoking `/usr/bin/git` by absolute path bypasses it. v1 is a policy
+boundary against mistaken or prompt-injected behavior, not a security boundary against a
+deliberately hostile agent — see `docs/factory-target-boundary.md` (#201) for the full
+trust-model writeup, and #196's spec (`docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md`)
+Known limitations section for the credential-scoping follow-up (F1) that closes this gap.

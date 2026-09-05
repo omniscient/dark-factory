@@ -119,6 +119,23 @@ main_red_autofix:
   throttle_minutes: 15        # min minutes between fixer dispatches (scheduler; env MAIN_RED_AUTOFIX_THROTTLE_MIN)
   ci_wait_minutes: 20         # bounded wait for branch CI (container default; env MAIN_RED_AUTOFIX_CI_WAIT_MINUTES)
 
+side_effect:
+  # Side-effect level each factory phase runs at (#196). 1..5; 6 is never valid here
+  # (adapter.py/handoff.py reject 6 outright — see side_effect.py). All phases start at
+  # 5 (today's unrestricted behavior). Tightening any phase (e.g. refine/plan -> 4) is a
+  # separate, later, reviewed change (see #196's F2 follow-up).
+  # env: SIDE_EFFECT_LEVEL_<PHASE> overrides one phase (e.g. SIDE_EFFECT_LEVEL_REFINE=4).
+  phase_levels:
+    refine: 5
+    plan: 5
+    implement: 5
+    validate: 5
+    conformance: 5
+    code_review: 5
+    revise_advisory: 5  # #196 plan-level addition (revise-advisory node) — see Architecture note
+    deconflict: 5  # entrypoint.sh's own $INTENT=deconflict flow — inline, never through archon; deconflict.py:143 runs a claude -p session
+    fix_main: 5  # entrypoint.sh's $INTENT=fix-main -- a standalone `claude -p` session (main_red_fixer.py), not a DAG node
+
 token_optimization:
   enabled: true               # measure token usage per run; env: TOKEN_OPTIMIZATION_ENABLED overrides
   enforce_budgets: true       # true = enforce budgets for per-scenario enforce: true scenarios; NO env override — rollback is a git commit to main (see runbook)

@@ -141,14 +141,23 @@ def _validate_loop(entry, index: int) -> None:
         if not isinstance(val, str) or not val:
             raise AdapterError(
                 f"loops[{index}] ('{name}'): field '{field}' must be a non-empty string")
-    # side_effect_level scale (owned by #193, enforced by #196 — reproduced here
-    # only as a range check, not redefined): 1=read-only research, 2=artifact
-    # writing, 3=ticket creation, 4=code modification, 5=PR creation,
-    # 6=external production side effect (A2 rejects 6; A1.5 does not).
+    # side_effect_level scale (owned by #193; enforced by #196 R4-R6). 1=read-only
+    # research, 2=artifact writing, 3=ticket creation, 4=code modification,
+    # 5=PR creation, 6=external production side effect. #196/D1 rejects 6 here — out
+    # of scope for v1 (#194); A1.5 (#301) left the rejection to this ticket.
     sel = entry["side_effect_level"]
-    if isinstance(sel, bool) or not isinstance(sel, int) or not (1 <= sel <= 6):
+    if isinstance(sel, bool) or not isinstance(sel, int):
         raise AdapterError(
-            f"loops[{index}] ('{name}'): field 'side_effect_level' must be an int between 1 and 6")
+            f"loops[{index}] ('{name}'): field 'side_effect_level' must be an int "
+            f"between 1 and 5")
+    if sel == 6:
+        raise AdapterError(
+            f"loops[{index}] ('{name}'): side_effect_level 6 (external production side "
+            f"effect) is out of scope for v1 (#194); declare 1-5")
+    if not (1 <= sel <= 5):
+        raise AdapterError(
+            f"loops[{index}] ('{name}'): field 'side_effect_level' must be an int "
+            f"between 1 and 5")
 
     _validate_subblock(entry, index, name, "discovery",
                         str_fields=("trigger",), list_fields=("inputs",),

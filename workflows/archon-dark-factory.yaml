@@ -380,6 +380,7 @@ nodes:
   # Layer 2a: Refine — generate spec via multi-agent brainstorming
   - id: refine
     command: dark-factory-refine
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.refine) — profile removes no tools
     depends_on: [enforce-budget-refine, setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'refine'"
     idle_timeout: 600000
@@ -419,6 +420,7 @@ nodes:
   # Layer 2b: Plan — generate implementation plan with architect review
   - id: plan
     command: dark-factory-plan
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.plan) — profile removes no tools
     depends_on: [enforce-budget-plan, setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'plan'"
     idle_timeout: 600000
@@ -580,6 +582,7 @@ nodes:
   # Layer 2: Implement the feature (status set to "In Progress" by entrypoint or epic resolver)
   - id: implement
     command: dark-factory-implement
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.implement) — profile removes no tools
     depends_on: [enforce-budget-implement, update-codeindex, fetch-issue, digest-comments]
     # OR-join: digest-comments runs only on continue; skipped on new.
     # none_failed_min_one_success ensures this node runs when digest-comments is skipped.
@@ -921,6 +924,7 @@ nodes:
 
   - id: validate
     command: dark-factory-validate
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.validate) — profile removes no tools
     depends_on: [preview-up, preview-up-resolve]
     # OR-join: preview-up (new/continue) and preview-up-resolve (resolve) are mutually
     # exclusive, so one is always skipped. Without this, all_success skips validate every run.
@@ -970,6 +974,7 @@ nodes:
   # Layer 3.5: Verify implementation conforms to spec (Gate 2 — code vs spec)
   - id: conformance
     command: dark-factory-conformance
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.conformance) — profile removes no tools
     depends_on: [enforce-budget-conformance, validate]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     idle_timeout: 600000
@@ -1194,6 +1199,7 @@ nodes:
   # Layer 4.5: AI code review of the diff (Gate 3 — correctness/security)
   - id: code-review
     command: dark-factory-code-review
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.code_review)
     depends_on: [enforce-budget-code-review, push-and-pr]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     idle_timeout: 600000
@@ -1201,6 +1207,7 @@ nodes:
   # Layer 4.6: Auto-address advisory findings from code review
   - id: revise-advisory
     command: dark-factory-revise-advisory
+    denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.revise_advisory) — profile removes no tools; plan-level addition, see Architecture note
     depends_on: [code-review]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     idle_timeout: 600000
