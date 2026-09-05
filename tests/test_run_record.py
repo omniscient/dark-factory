@@ -74,6 +74,38 @@ def test_record_writes_jsonl(tmp_path, monkeypatch):
     assert rec["detail"]["cycles"] == 2
 
 
+class _RecordArgsWithProfile(_RecordArgs):
+    side_effect_level = 4
+    side_effect_profile = "v1"
+
+
+def test_record_writes_side_effect_fields(tmp_path, monkeypatch):
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    rr.cmd_record(_RecordArgsWithProfile())
+
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["side_effect_level"] == 4
+    assert rec["side_effect_profile"] == "v1"
+
+
+def test_record_side_effect_fields_default_when_absent(tmp_path, monkeypatch):
+    """getattr guard, same precedent as 'origin' — a bare Namespace without the flags
+    (no CLI --side-effect-level/--side-effect-profile) must never crash, and must never
+    claim a wider profile than it can prove (R6 fail-closed default)."""
+    jsonl = tmp_path / "runs.jsonl"
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+
+    rr.cmd_record(_RecordArgs())
+
+    rec = json.loads(jsonl.read_text().strip())
+    assert rec["side_effect_level"] == 1
+    assert rec["side_effect_profile"] == "unknown"
+
+
 def test_record_appends_multiple(tmp_path, monkeypatch):
     jsonl = tmp_path / "runs.jsonl"
     monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
@@ -721,6 +753,27 @@ def test_assemble_emits_jsonl_per_stage(tmp_path, monkeypatch):
     stages = [json.loads(l)["stage"] for l in lines]
     assert "validation" in stages
     assert "conformance" in stages
+
+
+class _AssembleArgsWithProfile(_AssembleArgs):
+    side_effect_level = 5
+    side_effect_profile = "v1"
+
+
+def test_assemble_stage_records_carry_side_effect_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "validation.md").write_text("STATUS: PASS\n")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgsWithProfile(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    lines = [json.loads(l) for l in (tmp_path / "runs.jsonl").read_text().strip().splitlines()]
+    assert lines and all(l["side_effect_level"] == 5 for l in lines)
+    assert all(l["side_effect_profile"] == "v1" for l in lines)
 
 
 def test_assemble_stage_stub_rows_use_null_not_zero(tmp_path, monkeypatch):

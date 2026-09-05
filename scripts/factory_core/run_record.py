@@ -141,6 +141,8 @@ def cmd_record(args) -> None:
         # "target-loop:<name>" for rows written on behalf of a target loop (#199/#378).
         # getattr so callers that build a bare Namespace without the flag keep working.
         "origin": getattr(args, "origin", None) or "factory",
+        "side_effect_level": getattr(args, "side_effect_level", None) or 1,
+        "side_effect_profile": getattr(args, "side_effect_profile", None) or "unknown",
         "gen_ai.system": "dark-factory",
         "gen_ai.operation.name": f"stage.{args.stage}",
         "gen_ai.usage.input_tokens": args.tokens_in,
@@ -688,6 +690,8 @@ def cmd_assemble(args) -> None:
             "intent": args.intent,
             "stage": stage["stage"],
             "verdict": stage["verdict"],
+            "side_effect_level": getattr(args, "side_effect_level", None) or 1,
+            "side_effect_profile": getattr(args, "side_effect_profile", None) or "unknown",
             "gen_ai.system": "dark-factory",
             "gen_ai.operation.name": f"stage.{stage['stage']}",
             "gen_ai.usage.input_tokens": None,
@@ -828,6 +832,8 @@ def main() -> None:
     r.add_argument("--verdict", required=True)
     r.add_argument("--origin", default="factory",
                    help='row producer: "factory" (default) or "target-loop:<loop_name>"')
+    r.add_argument("--side-effect-level", type=int, default=None)
+    r.add_argument("--side-effect-profile", default=None)
     r.add_argument("--tokens-in", type=int, default=None)
     r.add_argument("--tokens-out", type=int, default=None)
     r.add_argument("--cost-usd", type=float, default=None)
@@ -853,6 +859,8 @@ def main() -> None:
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)
     a.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
+    a.add_argument("--side-effect-level", type=int, default=None)
+    a.add_argument("--side-effect-profile", default=None)
 
     ie = sub.add_parser("issue-economics", help="Read-only cross-run rollup for an issue")
     ie.add_argument("--issue", type=int, required=True)
