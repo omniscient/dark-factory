@@ -5,7 +5,7 @@
 # actually existing, rather than on the upstream command node merely being reported
 # "completed" — a killed/parked agent can be misreported as completed (#212).
 #
-# Usage: push_gate_check.sh <artifact-prefix> <issue-number>
+# Usage: push_gate_check.sh <artifact-prefix> <issue-number> [<ref>]
 #   <artifact-prefix>  path prefix to search, e.g. "docs/superpowers/specs/"
 #   <issue-number>     issue number to match via "#<issue-number>" in file content, or
 #                       "<issue-number>" delimited by non-digits in the filename (e.g.
@@ -17,6 +17,11 @@
 #                       under the artifact prefix — never a global "any commit
 #                       mentions the number" fallback (see #212 in the pass-2 code
 #                       comment below for why).
+#   <ref>               (optional, default HEAD) git ref to inspect instead of the
+#                       currently checked-out HEAD — e.g. a not-checked-out remote
+#                       refine branch (#387). Existing 2-arg callers keep the same
+#                       REF=HEAD semantics, except the content match now reads the
+#                       committed blob.
 #
 # Stdout: path of the first matching committed file, or nothing if none found.
 # Exit: always 0 — "no artifact" is a valid outcome for the caller to branch on, not a
@@ -34,8 +39,8 @@
 # this check fail closed.
 set -uo pipefail
 
-ARTIFACT_PREFIX="${1:?Usage: push_gate_check.sh <artifact-prefix> <issue-number>}"
-ISSUE_NUM="${2:?Usage: push_gate_check.sh <artifact-prefix> <issue-number>}"
+ARTIFACT_PREFIX="${1:?Usage: push_gate_check.sh <artifact-prefix> <issue-number> [<ref>]}"
+ISSUE_NUM="${2:?Usage: push_gate_check.sh <artifact-prefix> <issue-number> [<ref>]}"
 
 # Guard against a non-numeric issue number reaching the grep regex below (e.g. a
 # stringified "null" from a bad tracker lookup) — fail closed with an empty result
@@ -46,7 +51,9 @@ case "$ISSUE_NUM" in
     ;;
 esac
 
-HAS_COMMITS=$(git rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+REF="${3:-HEAD}"
+
+HAS_COMMITS=$(git rev-list --count "origin/main..${REF}" 2>/dev/null || echo 0)
 if [ "$HAS_COMMITS" -gt 0 ]; then
   # Capture the three-dot candidate list once so both passes walk the same ordered
   # set — this is the structural fail-closed invariant: nothing is ever printed that
@@ -56,15 +63,21 @@ if [ "$HAS_COMMITS" -gt 0 ]; then
   # containing whitespace is handled as a single filename, not split across args.
   while IFS= read -r -d '' _file; do
     _candidates+=("$_file")
-  done < <(git diff -z --name-only origin/main...HEAD -- "$ARTIFACT_PREFIX" 2>/dev/null)
+  done < <(git diff -z --name-only "origin/main...${REF}" -- "$ARTIFACT_PREFIX" 2>/dev/null)
 
-  # Pass 1 (unchanged): filename- or content-delimited issue number match.
+  # Pass 1 (unchanged): filename- or content-delimited issue number match. The content
+  # match reads the ref-scoped git blob (not the working tree) so a not-checked-out
+  # REF (e.g. a refine branch, #387) is still inspected correctly; for the default
+  # REF=HEAD this also means an uncommitted local edit can no longer flip the verdict.
+  # The `{ ... || true; }` wrapper absorbs git show's SIGPIPE exit (141) when grep -q
+  # matches early and closes the pipe — without it, `pipefail` would propagate git
+  # show's killed-by-SIGPIPE status and silently miss matches on large files (#387).
   for _file in ${_candidates[@]+"${_candidates[@]}"}; do
     _base=$(basename -- "$_file")
     # ISSUE_NUM is validated numeric-only above, so it is safe to interpolate directly
     # into these regexes (no metacharacter/injection risk from a malformed value).
     if [[ "$_base" =~ (^|[^0-9])${ISSUE_NUM}([^0-9]|$) ]] \
-      || grep -Eq "#${ISSUE_NUM}\\b" -- "$_file" 2>/dev/null; then
+      || { git show "${REF}:$_file" 2>/dev/null || true; } | grep -Eq "#${ISSUE_NUM}\\b"; then
       printf '%s\n' "$_file"
       exit 0
     fi
@@ -83,13 +96,13 @@ if [ "$HAS_COMMITS" -gt 0 ]; then
       # NUL-delimited iteration (via `git diff-tree -z` + `read -d ''`) so a touched
       # path containing whitespace is handled as a single filename, not split across args.
       while IFS= read -r -d '' _touched; do
-        if git cat-file -e "HEAD:$_touched" 2>/dev/null; then
+        if git cat-file -e "${REF}:$_touched" 2>/dev/null; then
           _assoc["$_touched"]=1
           echo "push_gate_check: candidate association $_touched via commit subject $_sha" >&2
         fi
       done < <(git diff-tree --no-commit-id -r -z --name-only "$_sha" -- "$ARTIFACT_PREFIX" 2>/dev/null)
     fi
-  done < <(git log --format=%H origin/main..HEAD 2>/dev/null)
+  done < <(git log --format=%H "origin/main..${REF}" 2>/dev/null)
 
   for _file in ${_candidates[@]+"${_candidates[@]}"}; do
     if [[ -n "${_assoc["$_file"]+x}" ]]; then

@@ -140,3 +140,63 @@ class TestArtifactLookupNodes:
         bash = _workflow_nodes()[node_id]["bash"]
         assert _RAW_FIRST_MATCH_GREP not in bash, (
             f"'{node_id}' still uses the first-match grep that picks sibling specs (#390)")
+
+
+class TestSetupBranchTransfersRefineArtifacts:
+    """#387: setup-branch must call transfer_refine_artifacts.sh on its two genuine
+    fresh-fork paths (intent=new; intent=continue's no-remote-branch fallback), and
+    must NOT call it on branch reuse or on setup-branch-resolve."""
+
+    def test_calls_transfer_script(self):
+        bash = _workflow_nodes()["setup-branch"]["bash"]
+        assert "transfer_refine_artifacts.sh" in bash
+
+    def test_transfer_call_is_inside_new_branch_guard(self):
+        bash = _workflow_nodes()["setup-branch"]["bash"]
+        lines = bash.split("\n")
+        guard_idx = next(i for i, l in enumerate(lines) if 'NEW_BRANCH" = "true"' in l)
+        fi_idx = next(i for i in range(guard_idx, len(lines)) if lines[i].strip() == "fi")
+        guarded_block = "\n".join(lines[guard_idx:fi_idx])
+        assert "transfer_refine_artifacts.sh" in guarded_block, (
+            "transfer_refine_artifacts.sh must run only inside the NEW_BRANCH guard"
+        )
+        assert "|| true" in guarded_block, (
+            "the transfer call must be || true-guarded (defense-in-depth on top of "
+            "the script's own unconditional exit 0)"
+        )
+
+    def test_both_checkout_b_sites_set_new_branch_true(self):
+        bash = _workflow_nodes()["setup-branch"]["bash"]
+        assert bash.count('git checkout -b "$BRANCH"') == 2, (
+            "setup-branch must retain both checkout -b sites (new-intent path, "
+            "continue's no-remote-branch fallback)"
+        )
+        assert bash.count("NEW_BRANCH=true") == 2, (
+            "both checkout -b sites must set NEW_BRANCH=true"
+        )
+
+    def test_branch_reuse_path_does_not_set_new_branch_true(self):
+        bash = _workflow_nodes()["setup-branch"]["bash"]
+        reuse_idx = bash.index('git fetch origin "$BRANCH" 2>/dev/null && git checkout "$BRANCH"')
+        else_idx = bash.index("else", reuse_idx)
+        reuse_branch = bash[reuse_idx:else_idx]
+        assert "NEW_BRANCH=true" not in reuse_branch
+
+    def test_setup_branch_resolve_untouched(self):
+        bash = _workflow_nodes()["setup-branch-resolve"]["bash"]
+        assert "transfer_refine_artifacts.sh" not in bash
+        assert "NEW_BRANCH" not in bash
+
+    def test_setup_branch_depends_on_and_when_unchanged(self):
+        node = _workflow_nodes()["setup-branch"]
+        assert node["depends_on"] == ["parse-intent", "fetch-issue"]
+        assert node["when"] == "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
+
+    def test_setup_branch_timeout_raised_for_network_call(self):
+        # #387: transfer_refine_artifacts.sh adds a git fetch + two push_gate_check.sh
+        # passes over the refine branch's full commit history; 15s was already tight
+        # for a fresh checkout -b. Raised to 30s, then to 60s (code-review advisory) to
+        # give the fetch/gate-check/checkout/commit sequence headroom against a slow
+        # origin without turning a best-effort copy into a hard node failure.
+        node = _workflow_nodes()["setup-branch"]
+        assert node["timeout"] == 60000
