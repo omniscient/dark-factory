@@ -68,6 +68,49 @@ _entrypoint_cfg_apply() {
   echo "[entrypoint-config] loaded from ${cfg}"
 }
 
+# Compute and export the container's effective side-effect level (#196/R3) + prepend
+# the git/gh shim onto PATH (#196/R5). Single source of truth: side_effect.py.
+#
+# FACTORY-OWNED INPUTS ONLY (spec Trust model; operator review F1): the baked config and
+# the baked scripts. The target clone -- its dark-factory/ subtree, its committed
+# .claude/skills/refinement/config.yaml (MarketHawk carries both, without any side_effect:
+# block), the materialized effective config -- is never consulted here: a stale target
+# copy must not resolve a run to level 1, and a target must not be able to raise its own
+# level or replace the shim. This is the first fail-CLOSED consumer of config in this
+# file, so it cannot share _entrypoint_cfg_apply's clone-first lookup (whose knobs all
+# fail open). The two env overrides exist for tests/test_entrypoint_current_run.sh (same
+# pattern as IDENTITY_SH / FACTORY_PROVIDERS_CLI at the top) and are never set in the image.
+# Runs post-clone (keeps the same call site as _entrypoint_cfg_apply) and before
+# `archon workflow run`, so the export and the PATH prepend reach every node's subprocess
+# -- and, deliberately, the rest of this script (deconflict.py / main_red_fixer.py's
+# `claude -p` sessions; spec R3).
+_compute_side_effect_level() {
+  local cfg="${FACTORY_CONFIG_PATH:-/opt/dark-factory/config/config.yaml}"
+  local scripts_dir="${FACTORY_SCRIPTS_DIR:-/opt/dark-factory/scripts}"
+  local se_cli="${scripts_dir}/factory_core/side_effect.py"
+  local err
+  err=$(mktemp)
+  if FACTORY_SIDE_EFFECT_LEVEL=$(python3 "$se_cli" effective-container-level \
+      --intent "${INTENT:-unknown}" --config "$cfg" 2>"$err"); then
+    # phase_level's own D4 warnings ("no configured level ... defaulting to 1") -- surface
+    # them in the run log rather than swallowing them on the success path.
+    if [ -s "$err" ]; then sed 's/^/[side-effect] /' "$err" >&2; fi
+  else
+    echo "WARNING: side-effect level resolution failed ($(cat "$err")) — defaulting to 1" >&2
+    FACTORY_SIDE_EFFECT_LEVEL=1
+  fi
+  rm -f "$err"
+  # F12: the profile version comes from the profile itself, never a second literal here.
+  FACTORY_SIDE_EFFECT_PROFILE_VERSION=$(python3 "$se_cli" render --level "$FACTORY_SIDE_EFFECT_LEVEL" 2>/dev/null \
+      | jq -r '.profile_version' 2>/dev/null || true)
+  FACTORY_SIDE_EFFECT_PROFILE_VERSION="${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}"
+  export FACTORY_SIDE_EFFECT_LEVEL FACTORY_SIDE_EFFECT_PROFILE_VERSION
+  local phases
+  phases=$(python3 "$se_cli" intent-phases --intent "${INTENT:-unknown}" 2>/dev/null || echo "")
+  echo "side_effect_level=${FACTORY_SIDE_EFFECT_LEVEL} profile=${FACTORY_SIDE_EFFECT_PROFILE_VERSION} phases=${phases}"
+  export PATH="${scripts_dir}/shims:${PATH}"
+}
+
 # --- Parse arguments ---
 ARGUMENTS="${*}"
 if [ -z "$ARGUMENTS" ] && [ "${ENTRYPOINT_SOURCE_ONLY:-0}" != "1" ]; then
@@ -301,7 +344,9 @@ print("SESSION_WINDOW_MATCH_BRANCH=" + shlex.quote(str(d.get("branch", ""))))
     --intent "${INTENT:-unknown}" \
     --stage paused \
     --verdict paused \
-    "${detail_args[@]}" || true
+    "${detail_args[@]}" \
+    --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
+    --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
   return 0
 }
 
@@ -497,7 +542,9 @@ ${SUMMARY_LINE}"
     --issue "${ISSUE_NUM:-0}" \
     --intent "${INTENT:-unknown}" \
     --stage "failed" \
-    --verdict "failed" || true
+    --verdict "failed" \
+    --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
+    --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
   # Assemble a full run-record.json on the failure path too, so harness_economics'
   # outcome.state == "failed" (score 0.0) is actually reachable — previously only the
   # bare stage event above was written and cmd_assemble never ran on failure.
@@ -519,7 +566,9 @@ ${SUMMARY_LINE}"
       --archon-cost-exit-code "$FAIL_COST_RC" \
       --archon-cost-stderr-file "$FAIL_COST_STDERR" \
       --status failed \
-      --out-file "$ARTIFACTS_DIR/run-record.json" || true
+      --out-file "$ARTIFACTS_DIR/run-record.json" \
+      --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
+      --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
     rm -f "$FAIL_COST_JSON" "$FAIL_COST_STDERR"
   fi
   if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
@@ -639,6 +688,9 @@ PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.effective_config \
 
 # --- Apply config.yaml policy knobs post-clone (env overrides logged when active) ---
 _entrypoint_cfg_apply
+
+# --- Compute effective side-effect level + PATH shim (#196/R3, R5) ---
+_compute_side_effect_level
 
 # --- Copy preview template and seed data into clone ---
 # TARGET-PATH: dark-factory/ exists in the clone in both worlds — the target's own subtree
@@ -897,6 +949,8 @@ python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assembl
   --archon-cost-exit-code "$ARCHON_COST_RC" \
   --archon-cost-stderr-file "$ARCHON_COST_STDERR" \
   --out-file "$ARTIFACTS_DIR/run-record.json" \
+  --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
+  --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" \
   --clone-dir "$CLONE_DIR" || true
 
 rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR"
