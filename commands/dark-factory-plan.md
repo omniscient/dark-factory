@@ -124,8 +124,15 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    falling back to `/opt/refinement-skills/conformance-reviewer-prompt.md` if the clone-live
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 2. Determine `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
-3. Set `CONFORMANCE_DIALOGUE=""` and `CONFORMANCE_CYCLE=0`
+3. Set `CONFORMANCE_DIALOGUE=""`, `SHADOW_DIALOGUE=""`, and `CONFORMANCE_CYCLE=0`
 4. Build the artifact content: the plan document text is `$PLAN_CONTENT`
+4a. Resolve the shadow model pin (Requirement 7: env explicitly set, even to empty, wins;
+    unset falls back to the config default — `${VAR-default}`, not `${VAR:-default}`, so an
+    explicit empty string is preserved rather than replaced):
+    ```bash
+    SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('.claude/skills/refinement/config.yaml')); print(d.get('conformance',{}).get('shadow_model','claude-fable-5-1'))" 2>/dev/null || echo "claude-fable-5-1")
+    SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
+    ```
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
    - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
@@ -134,6 +141,21 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
      - `$SPEC_CONTENT` replaced with the spec file contents
      - `$ARTIFACT_CONTENT` replaced with `$PLAN_CONTENT`
 6. Append the subagent's output to `CONFORMANCE_DIALOGUE`
+6a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
+    after, with the identical rubric/input the Opus spawn just saw:
+   - `description`: "Conformance shadow (fable): plan vs spec (cycle N)"
+   - `model`: `$SHADOW_MODEL_PIN`
+   - `prompt`: identical `RUBRIC_CONTENT` with the same `$ARTIFACT_KIND`/`$SPEC_CONTENT`/
+     `$ARTIFACT_CONTENT` substitution used for the Opus call this cycle
+   - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
+   - Any tool error, timeout, or refusal is caught here rather than propagated — it never
+     blocks or delays the Opus verdict handling in step 7.
+   - Derive `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY` from the
+     response per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s shadow verdict mapping.
+   - Append the raw response to `SHADOW_DIALOGUE` (separate from `CONFORMANCE_DIALOGUE` —
+     never merged; `CONFORMANCE_DIALOGUE` alone drives the verdict check in step 7).
+   If `$SHADOW_MODEL_PIN` is empty, skip this step entirely — no `SHADOW_*` fields, no
+   `SHADOW_DIALOGUE` append, for this cycle.
 7. Parse the **Verdict** line from the output:
    - `✅ Conforms` or `⚠️ Minor deviations` → record `CONFORMANCE_VERDICT` and proceed to Phase 4
    - `⛔ Material divergence` → go to step 8
@@ -158,6 +180,13 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    d. Revise the plan to address each MATERIAL deviation (update the plan file, re-read it)
    e. Re-spawn the conformance reviewer subagent (same prompt format, updated `$PLAN_CONTENT`)
    f. Append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator and `Cycle N:` header
+   f2. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (step 8e's shadow
+       counterpart — same prompt format, updated `$PLAN_CONTENT`, identical to step 6a but for
+       this reconcile cycle). Append its response to `SHADOW_DIALOGUE` with a `---` separator
+       and `Cycle N:` header, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one so
+       a shadow cycle always pairs with the Opus cycle that produced the same-numbered plan
+       revision. Update `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/
+       `SHADOW_SEVERITY` from this cycle's response (best-effort `UNCERTAIN` on any error).
    g. Parse verdict again → loop back to step 7
 
 ## Phase 4: PUBLISH
@@ -212,6 +241,20 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    (If Phase 3.5 was skipped because `conformance.enabled: false`, write: _Conformance check disabled._)
 
    (Otherwise, include the full conformance reviewer output from Phase 3.5 — the final attestation table and verdict. If a reconcile loop ran, include the full dialogue with cycle headers.)
+
+   (If `$SHADOW_MODEL_PIN` was non-empty for this run, append a subsection:)
+
+   ### Shadow (Fable) Review
+
+   ```
+   SHADOW_MODEL: <value>
+   SHADOW_STATUS: <value>
+   SHADOW_FINDINGS_COUNT: <value>
+   SHADOW_SEVERITY: <value>
+   ```
+
+   <full $SHADOW_DIALOGUE, with the same Cycle N: headers as the Architect/Conformance
+   sections above>
 
    ### Next Steps
 

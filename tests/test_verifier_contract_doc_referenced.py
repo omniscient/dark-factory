@@ -54,3 +54,21 @@ def test_verifier_contract_doc_exists_and_documents_env_contract():
     for token in ("CLONE_DIR", "ARTIFACTS_DIR", "ISSUE_NUM", "FACTORY_REPO_SLUG", "LOOP_NAME",
                   "ORIGIN:", "target-loop:"):
         assert token in content
+
+
+def test_verifier_contract_has_per_checker_pin_table():
+    content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
+    assert "| Checker pair | Gating model (pin) | Shadow model" in content
+    assert "${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}" in content
+
+
+def test_verifier_contract_has_refusal_to_uncertain_clause():
+    content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
+    assert "maps to `UNCERTAIN`, never `PASS`" in content
+
+
+def test_verifier_contract_documents_shadow_verdict_mapping():
+    content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
+    for token in ("SHADOW_MODEL", "SHADOW_STATUS", "SHADOW_FINDINGS_COUNT", "SHADOW_SEVERITY"):
+        assert token in content
+    assert "Material divergence" in content and "BLOCKED" in content

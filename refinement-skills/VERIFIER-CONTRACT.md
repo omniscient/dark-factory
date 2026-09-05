@@ -8,26 +8,85 @@ on a `.factory/adapter.yaml` `loops:` entry, #301). See
 design; this doc is the operational reference command authors and target-repo authors
 read directly.
 
-## Checker subagent invocation (Opus-pinned pairs)
+## Checker subagent invocation (per-checker pins)
 
-- **Model pin:** always `claude-opus-4-8` for the checker subagent — never let it
-  inherit the orchestrator's model. This applies to every re-spawn in a reconcile
-  loop, not just the first spawn.
+| Checker pair | Gating model (pin) | Shadow model (advisory, non-gating) |
+|---|---|---|
+| `refine`'s product-owner | `claude-opus-4-8` | — |
+| `plan`'s architect (Phase 3) | `claude-opus-4-8` | — |
+| `plan`'s Phase 3.5 conformance reviewer | `claude-opus-4-8` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
+| `conformance`'s Phase 3 conformance reviewer | `claude-opus-4-8` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
+| `code-review`'s reviewer | `claude-opus-4-8` | — |
+
+- **Model pin (gating):** never let the gating checker subagent inherit the
+  orchestrator's model. This applies to every re-spawn in a reconcile loop, not just
+  the first spawn.
+- **Shadow spawn (advisory only):** the conformance-reviewer pair (plan Phase 3.5,
+  conformance Phase 3) additionally spawns a second, non-gating subagent pinned to
+  the Shadow model column above, immediately after the gating spawn, at every cycle —
+  first pass and every reconcile re-spawn — with the identical rubric/input the
+  gating spawn saw for that same cycle. Its output is recorded (`SHADOW_*` fields,
+  see below) but never influences gating, the reconcile loop's verdict check, or
+  Phase 3.6's out-of-scope excision — those read `CONFORMANCE_DIALOGUE` only, never
+  `SHADOW_DIALOGUE`.
+- **Refusal → `UNCERTAIN`, never `PASS`:** a refusal stop from any checker
+  subagent — gating or shadow — maps to `UNCERTAIN`, never `PASS`. For a gating
+  checker this slots into existing handling (refine: `UNCERTAIN:` →
+  `needs-discussion`; plan/conformance: a refusal is treated as inconclusive,
+  consuming a reconcile cycle rather than silently passing). For a shadow checker it
+  maps to `SHADOW_STATUS: UNCERTAIN` (see below) and never blocks, delays, or
+  retries the gating flow.
 - **Read access:** the checker subagent needs `Glob`, `Grep`, and `Read` to explore
-  the codebase it is reviewing. No tool restriction is introduced or documented as
-  existing beyond this — tool allow/deny changes are a separate, reviewed concern
-  (CLAUDE.md).
+  the codebase it is reviewing — including the shadow subagent. No tool restriction
+  is introduced or documented as existing beyond this — tool allow/deny changes are
+  a separate, reviewed concern (CLAUDE.md).
 - **Clone-live-first resolution (rubric docs only):** `conformance`'s and
   `code-review`'s reviewer rubrics, and `plan`'s Phase 3.5 conformance rubric, read
   the live clone first (e.g. `.claude/skills/conformance/RUBRIC.md`), falling back to
   the baked copy under `/opt/refinement-skills/*.md` only if the clone-live file is
   absent — this lets a target repo override a rubric without a factory image
-  rebuild. `refine`'s product-owner prompt and `plan`'s Phase 3 architect prompt are
-  **not** part of this pattern: they keep reading their baked `/opt/refinement-
-  skills/{product-owner,architect}-prompt.md` copies as-is, unchanged by this
-  ticket. This contract doc itself (`VERIFIER-CONTRACT.md`) is always read at its
-  fixed baked path, `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all four
-  commands — it is not itself subject to clone-live-first resolution.
+  rebuild. The shadow subagent reads the identical resolved rubric text the gating
+  subagent read for the same cycle; it is not a distinct rubric. `refine`'s
+  product-owner prompt and `plan`'s Phase 3 architect prompt are **not** part of
+  this pattern: they keep reading their baked `/opt/refinement-
+  skills/{product-owner,architect}-prompt.md` copies as-is. This contract doc itself
+  (`VERIFIER-CONTRACT.md`) is always read at its fixed baked path,
+  `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all four commands — it is not
+  itself subject to clone-live-first resolution.
+- **Model-value note (Task 0, #394):** the pin strings above are the canonical model
+  identifiers this contract, `config.yaml`, and every command file document. If the
+  executing agent's Agent tool only accepts a short alias (e.g. `opus`/`fable`)
+  rather than the literal ID string, translate the documented pin to its
+  corresponding alias at the call site — this is the same translation every
+  existing `claude-opus-4-8` pin already relies on wherever the underlying tool is
+  alias-only; it is not a new mechanism introduced by the shadow trial.
+
+## Shadow verdict mapping (non-gating)
+
+When a shadow subagent is spawned (table above), map its response to four
+`SHADOW_*` lines — mirroring `emit_verdict`'s four-field shape but under a distinct
+prefix so `scripts/verdict_gate_check.sh` (`grep -m1 '^STATUS:'`) and
+`scripts/factory_core/verdict.py::parse_verdict` (`line.startswith("STATUS:")`)
+never see or act on them. Never omit any of the four lines, even when the shadow
+response is unparseable — a missing field is indistinguishable from "shadow never
+ran" and corrupts the follow-up comparison's denominator:
+
+- `SHADOW_MODEL`: the resolved pin actually used for this spawn (e.g.
+  `claude-fable-5-1`), regardless of verdict.
+- `SHADOW_STATUS`: parse the shadow response's `**Verdict:**` line — `✅ Conforms`
+  or `⚠️ Minor deviations` → `PASS`; `⛔ Material divergence` → `BLOCKED`; a tool
+  error, timeout, refusal, or a response with no parseable `**Verdict:**` line →
+  `UNCERTAIN`.
+- `SHADOW_FINDINGS_COUNT`: the number of `[MINOR]`/`[MATERIAL]` bullets in the
+  shadow response's Deviations section (`0` if "No deviations found."); best-effort
+  `0` when `SHADOW_STATUS: UNCERTAIN`.
+- `SHADOW_SEVERITY`: `high` if any `[MATERIAL]` bullet is present, `low` if only
+  `[MINOR]` bullets are present, `none` if no deviations; best-effort `none` when
+  `SHADOW_STATUS: UNCERTAIN`.
+
+Keep the raw shadow response too, under a labelled "Shadow (Fable) Review"
+heading — the structured lines are for mining, the prose is what an operator reads
+when adjudicating a divergence.
 
 ## Verdict schema
 

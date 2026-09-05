@@ -89,7 +89,7 @@ def _stage_name(fixture_path: pathlib.Path) -> str:
 
 def test_golden_corpus_byte_compat():
     md_files = sorted(_FIXTURES_DIR.glob("*.md"))
-    assert len(md_files) == 17, "golden corpus fixture count changed unexpectedly"
+    assert len(md_files) == 18, "golden corpus fixture count changed unexpectedly"
     for md_path in md_files:
         expected_path = md_path.with_suffix("").with_suffix(".expected.json")
         content = md_path.read_text(encoding="utf-8")
