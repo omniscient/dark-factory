@@ -112,45 +112,50 @@ case "$VERB1" in
         deny "push"
         ;;
       own_branch_only)
-        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPEC=""
+        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPECS=(); SKIP=0
         for arg in "${VERB_ARGS[@]}"; do
+          if [ "$SKIP" = "1" ]; then SKIP=0; continue; fi
           case "$arg" in
             --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
             --delete|-d) DELETE=1 ;;
             # F4: wide pushes move refs other than the run's own branch (main included).
             --all|--mirror|--tags|--prune|--branches) WIDE="$arg" ;;
+            # Value-taking push options: consume the value so it is never mistaken for
+            # the remote or a refspec.
+            -o|--push-option|--receive-pack|--exec|--repo) SKIP=1 ;;
             -*) : ;;
             +*) deny "push (+refspec force)" ;;
-            *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPEC="$arg"; fi ;;
+            *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPECS+=("$arg"); fi ;;
           esac
         done
         [ "$FORCE" = "1" ] && deny "push --force"
         [ "$DELETE" = "1" ] && deny "push --delete"
         [ -n "$WIDE" ] && deny "push $WIDE"
-        case "$REFSPEC" in :*) deny "push (refspec delete)" ;; esac
-        TARGET_BRANCH="${REFSPEC#*:}"
-        [ "$TARGET_BRANCH" = "$REFSPEC" ] && TARGET_BRANCH="$REFSPEC"
-        # HEAD/refs/heads/<x> normalization: v1 dead code (no phase runs at level 4 —
-        # D2), kept correct anyway since F2 (tighten refine/plan -> 4) will exercise
-        # `git push origin HEAD`, the DAG's actual push idiom, immediately.
-        case "$TARGET_BRANCH" in
-          HEAD) TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "") ;;
-          refs/heads/*) TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}" ;;
-        esac
-        # $REAL_GIT, never bare `git` -- SHIM_DIR is still first on PATH here, so a
-        # bare `git symbolic-ref` would re-enter this shim (render+jq again) before
-        # falling through; harmless today but a real hazard once this verb table grows.
-        [ -z "$TARGET_BRANCH" ] && TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")
         # Own branch: FACTORY_RUN_BRANCH when a runner pins it (R7 env contract), else the
         # checked-out branch. entrypoint.sh cannot pin it (DAG nodes create the branch
         # mid-run), so in v1 the level-4 guarantee degrades to "not main, no force, no
         # delete, no wide push, no +refspec" -- an agent can `checkout -b` first (spec R1,
         # F4). A future loop runner that sets FACTORY_RUN_BRANCH gets the full check.
+        # $REAL_GIT, never bare `git` -- SHIM_DIR is still first on PATH here, so a bare
+        # `git symbolic-ref` would re-enter this shim (render+jq again).
         OWN_BRANCH="${FACTORY_RUN_BRANCH:-$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")}"
-        [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
-        if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "$OWN_BRANCH" ]; then
-          deny "push (not own branch)"
-        fi
+        # Gate 3 on PR #396 (high): EVERY refspec is judged, not just the last one --
+        # `git push origin main mybranch` must deny on `main`. No refspec at all means
+        # git pushes the current branch, so judge HEAD.
+        [ "${#REFSPECS[@]}" -eq 0 ] && REFSPECS=("HEAD")
+        for spec in "${REFSPECS[@]}"; do
+          case "$spec" in :*) deny "push (refspec delete)" ;; esac
+          TARGET_BRANCH="${spec#*:}"
+          case "$TARGET_BRANCH" in
+            HEAD) TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "") ;;
+            refs/heads/*) TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}" ;;
+            refs/*) deny "push (non-branch ref)" ;;
+          esac
+          # Fail closed: a target that cannot be resolved (detached HEAD) is not "own".
+          [ -z "$TARGET_BRANCH" ] && deny "push (unresolvable target)"
+          [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
+          [ "$TARGET_BRANCH" != "$OWN_BRANCH" ] && deny "push (not own branch)"
+        done
         ;;
       unrestricted)
         # Read git_denied instead of hardcoding --delete/:* — the Trust model section
@@ -164,6 +169,13 @@ case "$VERB1" in
         ;;
     esac
     ;;
+  send-pack|http-push)
+    # Gate 3 on PR #396 (advisory, plumbing bypass): remote-mutating plumbing must not
+    # slip past the porcelain `push` rule. It cannot be refspec-parsed safely, so it is
+    # denied wherever push is restricted (levels 1-4) and passes only where push is
+    # unrestricted (level 5), where R8.3 showed nothing in the factory uses it anyway.
+    [ "$PUSH_SCOPE" != "unrestricted" ] && deny "$VERB1"
+    ;;
 esac
 
 # R5 fail-closed default (level 1 only — see the Profile docstring for why levels 2-5
@@ -173,6 +185,40 @@ esac
 # level 1 — none of which R1's flat git_denied list names.
 if [ "$GIT_MODE" = "allow" ] && ! _in_list "$VERB1" "${GIT_ALLOWED[@]}"; then
   deny "$VERB1"
+fi
+
+# Gate 3 on PR #396 (advisory, level-1 allow-list gaps): the allow-list is verb-level,
+# and a few read verbs carry writing forms. Fail closed on those at level 1 only.
+if [ "$GIT_MODE" = "allow" ]; then
+  for arg in "${VERB_ARGS[@]}"; do
+    case "$arg" in
+      --output|--output=*|-o) deny "$VERB1 (writes a file)" ;;   # log/diff/show/format-patch
+    esac
+  done
+  case "$VERB1" in
+    branch)
+      # `git branch <name>` creates; -d/-m/-c/-u/... mutate. Only listing forms pass.
+      LIST_ONLY=1
+      for arg in "${VERB_ARGS[@]}"; do
+        case "$arg" in
+          -d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to*|--set-upstream|--unset-upstream|--edit-description|--track|--no-track)
+            deny "branch $arg" ;;
+          -*) : ;;
+          *) LIST_ONLY=0 ;;
+        esac
+      done
+      if [ "$LIST_ONLY" = "0" ] && ! _in_list "--list" "${VERB_ARGS[@]}" && ! _in_list "-l" "${VERB_ARGS[@]}"; then
+        deny "branch (create)"
+      fi
+      ;;
+    remote)
+      # Bare `git remote`, `-v`, `show`, `get-url` read; every other sub-verb mutates.
+      case "${VERB2:-}" in
+        ""|-v|--verbose|show|get-url) : ;;
+        *) deny "remote $VERB2" ;;
+      esac
+      ;;
+  esac
 fi
 
 exec "$REAL_GIT" "$@"

@@ -236,6 +236,8 @@ static YAML; this test is what keeps it honest when the config changes.
   allowed/denied invocations against a stub real binary, plus the activation matrix (no level
   var → passthrough; no `CLAUDECODE` → passthrough).
 
+**R5 addendum (2026-09-05, Gate 3 on PR #396):** the level-4 own-branch rule judges *every* refspec of a push (not only the last), consumes value-taking push options (`-o`, `--push-option`, `--receive-pack`, `--exec`, `--repo`), and denies unresolvable or non-branch targets; remote-mutating plumbing (`send-pack`, `http-push`) is denied wherever `push` is restricted (levels 1–4); at level 1 the verb-level allow-list is tightened against writing forms of read verbs (`branch` create/delete/move/upstream, `remote` sub-verbs other than `show`/`get-url`/`-v`, and `--output`/`-o` on `log`/`diff`/`show`/`format-patch`). All are refinements of R5's fail-closed rule, not new policy.
+
 ### R6 — Layer C: audit in the run record
 
 `run_record.py`'s row (`run_record.py:134-150`) gains `side_effect_level` (int) and

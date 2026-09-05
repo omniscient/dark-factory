@@ -115,6 +115,20 @@ FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git clean -fd
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git stash
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git config user.name x
 FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git apply patch.diff
+# Gate 3 on PR #396 (advisory): writing forms of allow-listed read verbs, and
+# remote-mutating plumbing, must fail closed at level 1 too.
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git branch --list
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git branch -a
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git branch --show-current
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git branch -D x
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git branch newbranch
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git branch -m old new
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git remote show origin
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote remove origin
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git remote prune origin
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git log --output=out.txt
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git diff --output out.patch
+FACTORY_SIDE_EFFECT_LEVEL=1 check deny  git send-pack origin HEAD
 # Exercises the VERB2-alone match: gh_allowed's "view"/"list" must match as either
 # gh's first word (bare `gh status`) or second word (`gh issue view`, `gh pr list`) —
 # the earlier draft of this shim only checked VERB1 and the literal two-word
@@ -140,6 +154,8 @@ FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git remote set-url origin https://exampl
 # unrestricted — only the enumerated remote-facing verbs above are denied.
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git checkout -b x
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git stash
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git branch newbranch      # local; only level 1 is allow-list
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git send-pack origin HEAD  # plumbing push bypass
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh issue create --title x
 
 # --- Level 3: GitHub ticket creation ---
@@ -173,6 +189,18 @@ FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push --tags origin
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin +feat/issue-196-x
 # F2: global options before the verb must not bypass the push-scope check.
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git -C . push origin main
+# Gate 3 on PR #396 (high): every refspec is judged, whatever its position.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin main feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin feat/issue-196-x main
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin feat/issue-196-x :other
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin feat/issue-196-x other
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push origin feat/issue-196-x HEAD:feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push origin HEAD:refs/tags/v1
+# Value-taking push options must not be mistaken for the remote/refspec.
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push -o ci.skip origin feat/issue-196-x
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git push -o ci.skip origin main
+# Plumbing bypass is denied wherever push is restricted.
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny  git send-pack origin feat/issue-196-x
 FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh issue create --title x
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh pr create
 FACTORY_SIDE_EFFECT_LEVEL=4 check deny  gh repo delete o/r
@@ -189,6 +217,7 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git push --delete origin some-branch
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  git -C . push --delete origin some-branch   # F2
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -C . push origin some-branch
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git send-pack origin some-branch   # unrestricted push scope
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh repo delete o/r
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh secret set X
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh auth login
