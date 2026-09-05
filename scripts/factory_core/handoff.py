@@ -20,6 +20,7 @@ import yaml
 from . import adapter as _adapter
 from . import identity as _identity
 from . import run_record as _run_record
+from . import side_effect as _side_effect
 from . import verdict as _verdict
 from . import verifier as _verifier
 
@@ -151,10 +152,18 @@ def validate_manifest(manifest: dict) -> None:
             )
 
     sel = manifest["side_effect_level"]
-    if isinstance(sel, bool) or not isinstance(sel, int) or not (1 <= sel <= 6):
+    if isinstance(sel, bool) or not isinstance(sel, int):
         raise HandoffError(
-            "schema_invalid", "field 'side_effect_level' must be an int between 1 and 6"
+            "schema_invalid", "field 'side_effect_level' must be an int between 1 and 5")
+    if sel == 6:
+        raise HandoffError(
+            "schema_invalid",
+            "field 'side_effect_level' 6 (external production side effect) is out of "
+            "scope for v1 (#194); declare 1-5",
         )
+    if not (1 <= sel <= 5):
+        raise HandoffError(
+            "schema_invalid", "field 'side_effect_level' must be an int between 1 and 5")
 
     for field in ("source_references", "acceptance_thresholds"):
         items = manifest[field]
@@ -234,8 +243,8 @@ def validate_manifest(manifest: dict) -> None:
 def cross_check(manifest: dict, loops) -> dict:
     """R3: producing_loop must resolve to a loops[].name in the adapter; the manifest's
     declared side_effect_level must equal that loop's declared level; that level must be
-    below verifier._FACTORY_OWNED_MIN_LEVEL (Trust model -- factory-owned until #196
-    ships profile enforcement; reuses the same named constant verifier.py's own
+    below side_effect.FACTORY_OWNED_MIN_LEVEL (Trust model -- factory-owned; #196 ships
+    profile enforcement; reuses the same named constant verifier.py's own
     resolve_and_run draws this line with, rather than a second literal 4 that could
     drift out of sync with it). Returns the matched loop entry."""
     match = next((l for l in (loops or []) if l.get("name") == manifest["producing_loop"]), None)
@@ -252,11 +261,11 @@ def cross_check(manifest: dict, loops) -> dict:
             f"manifest declares side_effect_level {manifest['side_effect_level']}, loop "
             f"'{match['name']}' declares {declared}",
         )
-    if declared >= _verifier._FACTORY_OWNED_MIN_LEVEL:
+    if declared >= _side_effect.FACTORY_OWNED_MIN_LEVEL:
         raise HandoffError(
             "producing_loop_factory_owned",
             f"loop '{match['name']}' declares side_effect_level {declared} >= "
-            f"{_verifier._FACTORY_OWNED_MIN_LEVEL} (factory-owned)",
+            f"{_side_effect.FACTORY_OWNED_MIN_LEVEL} (factory-owned)",
         )
     return match
 

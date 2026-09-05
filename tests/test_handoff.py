@@ -170,6 +170,13 @@ def test_validate_manifest_rejects_out_of_range_side_effect_level(level):
     assert exc.value.code == "schema_invalid"
 
 
+def test_validate_manifest_rejects_level_6_with_out_of_scope_message():
+    with pytest.raises(handoff.HandoffError) as exc:
+        handoff.validate_manifest(_valid_manifest(side_effect_level=6))
+    assert exc.value.code == "schema_invalid"
+    assert "out of scope for v1" in str(exc.value)
+
+
 @pytest.mark.parametrize("field", ["source_references", "acceptance_thresholds"])
 def test_validate_manifest_rejects_non_list_field(field):
     with pytest.raises(handoff.HandoffError) as exc:
