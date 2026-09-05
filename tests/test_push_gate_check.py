@@ -9,9 +9,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "push_gate_check.sh"
 
 
-def run_script(prefix: str, issue: str, cwd: Path) -> subprocess.CompletedProcess:
+def run_script(prefix: str, issue: str, cwd: Path, ref: str | None = None) -> subprocess.CompletedProcess:
+    args = ["bash", str(SCRIPT), prefix, issue]
+    if ref is not None:
+        args.append(ref)
     return subprocess.run(
-        ["bash", str(SCRIPT), prefix, issue],
+        args,
         capture_output=True,
         text=True,
         cwd=str(cwd),
@@ -180,6 +183,83 @@ class TestPushGateCheckScript:
         result = run_script("docs/superpowers/specs/", "212", git_repo)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
+
+    def test_explicit_ref_checks_that_ref_not_head(self, git_repo):
+        """A third <ref> argument must be diffed/searched instead of HEAD — the
+        artifact can live on a ref that is not currently checked out."""
+        other_branch = "refine/issue-212-other"
+        git("branch", other_branch, cwd=str(git_repo))
+        git("checkout", other_branch, cwd=str(git_repo))
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-07-15-example-design.md"
+        spec_file.write_text("# Design\n\n**Issue:** #212\n")
+        git("add", "docs/superpowers/specs/2026-07-15-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+        git("checkout", "refine/issue-212-test", cwd=str(git_repo))
+
+        # HEAD (refine/issue-212-test) has no commits beyond main -> empty without a ref.
+        result_head = run_script("docs/superpowers/specs/", "212", git_repo)
+        assert result_head.stdout.strip() == ""
+
+        result_ref = run_script("docs/superpowers/specs/", "212", git_repo, ref=other_branch)
+        assert result_ref.returncode == 0, result_ref.stderr
+        assert result_ref.stdout.strip() == "docs/superpowers/specs/2026-07-15-example-design.md"
+
+    def test_omitted_ref_arg_still_defaults_to_head(self, git_repo):
+        """Backward compatibility: a 2-arg call (no ref) must behave exactly as before."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-07-15-example-design.md"
+        spec_file.write_text("# Design\n\n**Issue:** #212\n")
+        git("add", "docs/superpowers/specs/2026-07-15-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+
+        result = run_script("docs/superpowers/specs/", "212", git_repo)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "docs/superpowers/specs/2026-07-15-example-design.md"
+
+    def test_explicit_head_ref_matches_omitted_ref(self, git_repo):
+        """Passing 'HEAD' explicitly as the 3rd arg must be equivalent to omitting it."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-07-15-example-design.md"
+        spec_file.write_text("# Design\n\n**Issue:** #212\n")
+        git("add", "docs/superpowers/specs/2026-07-15-example-design.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+
+        result = run_script("docs/superpowers/specs/", "212", git_repo, ref="HEAD")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "docs/superpowers/specs/2026-07-15-example-design.md"
+
+    def test_nonexistent_ref_returns_empty_and_exits_zero(self, git_repo):
+        """A ref that doesn't exist on origin/locally must yield empty output, exit 0 —
+        never a script error (the fail-closed contract extends to a bad ref)."""
+        result = run_script("docs/superpowers/specs/", "212", git_repo, ref="origin/refine/issue-999999-nope")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
+
+    def test_large_artifact_past_pipe_buffer_still_detected(self, git_repo):
+        """Regression test for Architect Review Cycle 3: pass 1's content match must
+        not silently miss a file larger than a pipe buffer. `**Issue:** #212` is
+        placed on line 3 (matching every real spec/plan in this repo, where the
+        `**Issue:**` line is always near the top) followed by ~120KB of padding, so
+        `grep -q`'s early match races the pipe against `git show` still writing —
+        exposing the set -uo pipefail + SIGPIPE trap if the `|| true` guard around
+        `git show` is missing. Runs multiple times: the failure mode is
+        size/timing-dependent, not 100% deterministic on every miss."""
+        spec_dir = git_repo / "docs" / "superpowers" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "2026-07-15-large-design.md"
+        padding = ("y" * 100 + "\n") * 1200  # ~120KB
+        spec_file.write_text(f"# Design\n\n**Issue:** #212\n{padding}")
+        git("add", "docs/superpowers/specs/2026-07-15-large-design.md", cwd=str(git_repo))
+        git("commit", "-m", "spec", cwd=str(git_repo))
+
+        for _ in range(5):
+            result = run_script("docs/superpowers/specs/", "212", git_repo)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == "docs/superpowers/specs/2026-07-15-large-design.md"
 
 
 class TestSiblingArtifactOnMainNotSelected:
