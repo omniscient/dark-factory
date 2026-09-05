@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# side-effect guard (#196/R5): PATH-shadows `gh`. Same activation rule as scripts/shims/git.
+set -euo pipefail
+
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+_real_bin() {
+  local name="$1" d
+  IFS=':' read -ra _dirs <<< "$PATH"
+  for d in "${_dirs[@]}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    # Physical-path comparison (F8): a relative, trailing-slash or symlinked PATH entry
+    # for the shim dir must still be recognised as "us", or the shim would exec itself.
+    [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$SHIM_DIR" ] && continue
+    if [ -x "$d/$name" ]; then echo "$d/$name"; return 0; fi
+  done
+  return 1
+}
+
+REAL_GH=$(_real_bin gh) || { echo "side-effect guard: real gh not found on PATH" >&2; exit 1; }
+
+if [ -z "${FACTORY_SIDE_EFFECT_LEVEL:-}" ] || [ "${CLAUDECODE:-}" != "1" ]; then
+  exec "$REAL_GH" "$@"
+fi
+
+LEVEL="$FACTORY_SIDE_EFFECT_LEVEL"
+# Resolved relative to this script's own location, not $CLONE_DIR — same rationale as
+# scripts/shims/git (see its matching comment): CLONE_DIR is never inherited by a phase
+# agent's own Bash-tool subprocess.
+FACTORY_CORE_DIR="$(cd "$SHIM_DIR/.." && pwd)/factory_core"
+CLI="$FACTORY_CORE_DIR/side_effect.py"
+PROFILE_JSON=$(python3 "$CLI" render --level "$LEVEL" 2>/dev/null) || {
+  echo "side-effect guard: cannot resolve profile for level ${LEVEL}" >&2
+  exit 1
+}
+LEVEL_NAME=$(jq -r '.name' <<<"$PROFILE_JSON")
+GH_MODE=$(jq -r '.gh_mode' <<<"$PROFILE_JSON")
+mapfile -t GH_ALLOWED < <(jq -r '.gh_allowed[]' <<<"$PROFILE_JSON")
+mapfile -t GH_DENIED  < <(jq -r '.gh_denied[]'  <<<"$PROFILE_JSON")
+
+_emit_denied() {
+  local verb="$1"
+  local artdir="${ARTIFACTS_DIR:-}"
+  [ -n "$artdir" ] || return 0
+  local run issue
+  run=$(basename "$artdir")
+  issue=$(jq -r '.resolved_number // empty' "$artdir/issue.json" 2>/dev/null || true)
+  [ -n "$issue" ] || issue=0
+  python3 "$FACTORY_CORE_DIR/cli.py" run-record health-event \
+    --run-id "$run" --issue "$issue" --event side_effect.denied \
+    --detail tool=gh "verb=${verb}" "level=${LEVEL}" >/dev/null 2>&1 || true
+}
+
+deny() {
+  # F13: the adapter guide's section until #201 creates docs/factory-target-boundary.md.
+  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/adapter-authoring-guide.md#side-effect-levels" >&2
+  _emit_denied "$1"
+  exit 1
+}
+
+_in_list() {
+  local needle="$1"; shift
+  local x
+  for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+  return 1
+}
+
+VERB1="${1:-}"
+VERB2="${2:-}"
+TWO_WORD="$VERB1 $VERB2"
+
+if [ "$VERB1" = "api" ]; then
+  METHOD=""; HAS_BODY=0; TAKE_NEXT=0
+  for arg in "${@:2}"; do
+    if [ "$TAKE_NEXT" = "1" ]; then METHOD="$arg"; TAKE_NEXT=0; continue; fi
+    case "$arg" in
+      -X|--method) TAKE_NEXT=1 ;;
+      -X*) METHOD="${arg#-X}" ;;
+      --method=*) METHOD="${arg#--method=}" ;;
+      -f*|--field*|-F*|--raw-field*|--input*) HAS_BODY=1 ;;
+    esac
+  done
+  # F3: gh's own rule -- "the default HTTP request method is GET normally and POST if any
+  # parameters were added" -- so a body with no explicit method IS a POST and must be
+  # judged as one by the deny-mode (level 4/5) checks below, not waved through as GET.
+  if [ -z "$METHOD" ]; then
+    if [ "$HAS_BODY" = "1" ]; then METHOD="POST"; else METHOD="GET"; fi
+  fi
+  METHOD=$(printf '%s' "$METHOD" | tr '[:lower:]' '[:upper:]')
+  if [ "$GH_MODE" = "allow" ]; then
+    if [ "$METHOD" != "GET" ] || [ "$HAS_BODY" = "1" ]; then
+      deny "api ${METHOD}"
+    fi
+  else
+    if [ "$METHOD" = "DELETE" ] && _in_list "api:DELETE" "${GH_DENIED[@]}"; then
+      deny "api -X DELETE"
+    fi
+    if [ "$METHOD" != "GET" ] && _in_list "api:non-GET" "${GH_DENIED[@]}"; then
+      deny "api ${METHOD}"
+    fi
+  fi
+  exec "$REAL_GH" "$@"
+fi
+
+DISPLAY_VERB="$VERB1"
+[ -n "$VERB2" ] && DISPLAY_VERB="$TWO_WORD"
+
+if [ "$GH_MODE" = "allow" ]; then
+  # Never-list first (R1: denied at every level, checked before any allow-list) -- this is
+  # what keeps `gh secret list` / `gh auth status` out despite the VERB2-alone read match.
+  if _in_list "$VERB1" "${GH_DENIED[@]}" || _in_list "$TWO_WORD" "${GH_DENIED[@]}"; then
+    deny "$DISPLAY_VERB"
+  fi
+  # Three checks, not two: gh_allowed mixes single-word read verbs that must match in
+  # EITHER position ("view"/"list"/"status"/"search" — e.g. `gh issue view`, `gh pr
+  # list`, bare `gh status`) with exact two-word grants ("issue create" etc., which
+  # must NOT become "anything ending in create" — `gh pr create` must stay denied).
+  # VERB2-alone is safe to check unconditionally: "create"/"comment"/"edit" never
+  # appear as bare single-word entries in any level's gh_allowed list, only as the
+  # second half of a two-word entry, so this can't accidentally admit `gh pr create`.
+  if _in_list "$VERB1" "${GH_ALLOWED[@]}" || _in_list "$VERB2" "${GH_ALLOWED[@]}" \
+      || _in_list "$TWO_WORD" "${GH_ALLOWED[@]}"; then
+    exec "$REAL_GH" "$@"
+  fi
+  deny "$DISPLAY_VERB"
+else
+  if _in_list "$VERB1" "${GH_DENIED[@]}" || _in_list "$TWO_WORD" "${GH_DENIED[@]}"; then
+    deny "$DISPLAY_VERB"
+  fi
+  exec "$REAL_GH" "$@"
+fi

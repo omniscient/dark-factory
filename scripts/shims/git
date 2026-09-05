@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# side-effect guard (#196/R5): PATH-shadows `git`. Passthrough unless BOTH
+# FACTORY_SIDE_EFFECT_LEVEL and CLAUDECODE=1 are set in this process's own env — the
+# discriminator verified in the #196 plan's Task 0 between a phase agent's Bash-tool
+# subprocess (both set) and an archon DAG bash: node (neither set to both).
+set -euo pipefail
+
+SHIM_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+_real_bin() {
+  local name="$1" d
+  IFS=':' read -ra _dirs <<< "$PATH"
+  for d in "${_dirs[@]}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    # Physical-path comparison (F8): a relative, trailing-slash or symlinked PATH entry
+    # for the shim dir must still be recognised as "us", or the shim would exec itself.
+    [ "$(cd "$d" 2>/dev/null && pwd -P)" = "$SHIM_DIR" ] && continue
+    if [ -x "$d/$name" ]; then echo "$d/$name"; return 0; fi
+  done
+  return 1
+}
+
+REAL_GIT=$(_real_bin git) || { echo "side-effect guard: real git not found on PATH" >&2; exit 1; }
+
+if [ -z "${FACTORY_SIDE_EFFECT_LEVEL:-}" ] || [ "${CLAUDECODE:-}" != "1" ]; then
+  exec "$REAL_GIT" "$@"
+fi
+
+LEVEL="$FACTORY_SIDE_EFFECT_LEVEL"
+# Resolved relative to this script's own location, NOT $CLONE_DIR: CLONE_DIR is a plain
+# (non-exported) shell variable inside entrypoint.sh and is never inherited by a phase
+# agent's own Bash-tool subprocess (confirmed empirically in the #196 plan's Task 0 and
+# by workflows/archon-dark-factory.yaml:355's own comment for bash: nodes) — a
+# ${CLONE_DIR:-.}-relative path would silently fall back to "." and break the instant an
+# agent `cd`s anywhere else, denying every git/gh call for the rest of that session.
+# scripts/shims/<tool> always sits at <root>/scripts/shims/, so <root>/scripts is exactly
+# one directory up from SHIM_DIR, in both the baked (/opt/dark-factory/scripts) and clone
+# ($CLONE_DIR/dark-factory/scripts) layouts.
+FACTORY_CORE_DIR="$(cd "$SHIM_DIR/.." && pwd)/factory_core"
+CLI="$FACTORY_CORE_DIR/side_effect.py"
+PROFILE_JSON=$(python3 "$CLI" render --level "$LEVEL" 2>/dev/null) || {
+  echo "side-effect guard: cannot resolve profile for level ${LEVEL}" >&2
+  exit 1
+}
+LEVEL_NAME=$(jq -r '.name' <<<"$PROFILE_JSON")
+PUSH_SCOPE=$(jq -r '.push_scope' <<<"$PROFILE_JSON")
+GIT_MODE=$(jq -r '.git_mode' <<<"$PROFILE_JSON")
+mapfile -t GIT_DENIED < <(jq -r '.git_denied[]' <<<"$PROFILE_JSON")
+mapfile -t GIT_ALLOWED < <(jq -r '.git_allowed[]' <<<"$PROFILE_JSON")
+
+_emit_denied() {
+  local verb="$1"
+  local artdir="${ARTIFACTS_DIR:-}"
+  [ -n "$artdir" ] || return 0
+  local run issue
+  run=$(basename "$artdir")
+  issue=$(jq -r '.resolved_number // empty' "$artdir/issue.json" 2>/dev/null || true)
+  [ -n "$issue" ] || issue=0
+  python3 "$FACTORY_CORE_DIR/cli.py" run-record health-event \
+    --run-id "$run" --issue "$issue" --event side_effect.denied \
+    --detail tool=git "verb=${verb}" "level=${LEVEL}" >/dev/null 2>&1 || true
+}
+
+deny() {
+  # F13: the adapter guide's section until #201 creates docs/factory-target-boundary.md.
+  echo "side-effect guard: '$1' is denied at level ${LEVEL} (${LEVEL_NAME}); see docs/adapter-authoring-guide.md#side-effect-levels" >&2
+  _emit_denied "$1"
+  exit 1
+}
+
+_in_list() {
+  local needle="$1"; shift
+  local x
+  for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+  return 1
+}
+
+# F2: skip git's global options so the verb is read from the right position (`git -C dir
+# push`, `git -c k=v commit`, `git --no-pager log` are all common agent idioms; without
+# this VERB1 would be "-C" and every check below would be bypassed at levels 2-5). Only a
+# cursor advances -- the argv exec'd at the bottom is still the untouched "$@". Options
+# that take a value (separate arg, or =form) vs. bare flags per git(1).
+_ARGS=("$@")
+_I=0
+while [ "$_I" -lt "${#_ARGS[@]}" ]; do
+  case "${_ARGS[$_I]}" in
+    -C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)
+      _I=$((_I + 2)) ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--super-prefix=*|--config-env=*|\
+    -p|-P|--paginate|--no-pager|--bare|--no-optional-locks|--literal-pathspecs|\
+    --glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--no-lazy-fetch)
+      _I=$((_I + 1)) ;;
+    *) break ;;
+  esac
+done
+VERB1="${_ARGS[$_I]:-}"
+VERB2="${_ARGS[$((_I + 1))]:-}"
+VERB_ARGS=("${_ARGS[@]:$((_I + 1))}")   # everything after the verb (push flag parsing)
+
+case "$VERB1" in
+  commit) _in_list "commit" "${GIT_DENIED[@]}" && deny "commit" ;;
+  tag)    _in_list "tag" "${GIT_DENIED[@]}" && deny "tag" ;;
+  remote)
+    case "$VERB2" in
+      add)     _in_list "remote add" "${GIT_DENIED[@]}" && deny "remote add" ;;
+      set-url) _in_list "remote set-url" "${GIT_DENIED[@]}" && deny "remote set-url" ;;
+    esac
+    ;;
+  push)
+    case "$PUSH_SCOPE" in
+      denied)
+        deny "push"
+        ;;
+      own_branch_only)
+        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPEC=""
+        for arg in "${VERB_ARGS[@]}"; do
+          case "$arg" in
+            --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
+            --delete|-d) DELETE=1 ;;
+            # F4: wide pushes move refs other than the run's own branch (main included).
+            --all|--mirror|--tags|--prune|--branches) WIDE="$arg" ;;
+            -*) : ;;
+            +*) deny "push (+refspec force)" ;;
+            *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPEC="$arg"; fi ;;
+          esac
+        done
+        [ "$FORCE" = "1" ] && deny "push --force"
+        [ "$DELETE" = "1" ] && deny "push --delete"
+        [ -n "$WIDE" ] && deny "push $WIDE"
+        case "$REFSPEC" in :*) deny "push (refspec delete)" ;; esac
+        TARGET_BRANCH="${REFSPEC#*:}"
+        [ "$TARGET_BRANCH" = "$REFSPEC" ] && TARGET_BRANCH="$REFSPEC"
+        # HEAD/refs/heads/<x> normalization: v1 dead code (no phase runs at level 4 —
+        # D2), kept correct anyway since F2 (tighten refine/plan -> 4) will exercise
+        # `git push origin HEAD`, the DAG's actual push idiom, immediately.
+        case "$TARGET_BRANCH" in
+          HEAD) TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "") ;;
+          refs/heads/*) TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}" ;;
+        esac
+        # $REAL_GIT, never bare `git` -- SHIM_DIR is still first on PATH here, so a
+        # bare `git symbolic-ref` would re-enter this shim (render+jq again) before
+        # falling through; harmless today but a real hazard once this verb table grows.
+        [ -z "$TARGET_BRANCH" ] && TARGET_BRANCH=$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")
+        # Own branch: FACTORY_RUN_BRANCH when a runner pins it (R7 env contract), else the
+        # checked-out branch. entrypoint.sh cannot pin it (DAG nodes create the branch
+        # mid-run), so in v1 the level-4 guarantee degrades to "not main, no force, no
+        # delete, no wide push, no +refspec" -- an agent can `checkout -b` first (spec R1,
+        # F4). A future loop runner that sets FACTORY_RUN_BRANCH gets the full check.
+        OWN_BRANCH="${FACTORY_RUN_BRANCH:-$("$REAL_GIT" symbolic-ref --short HEAD 2>/dev/null || echo "")}"
+        [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
+        if [ -n "$TARGET_BRANCH" ] && [ "$TARGET_BRANCH" != "$OWN_BRANCH" ]; then
+          deny "push (not own branch)"
+        fi
+        ;;
+      unrestricted)
+        # Read git_denied instead of hardcoding --delete/:* — the Trust model section
+        # is explicit that nothing may re-declare the table side_effect.py owns.
+        for arg in "${VERB_ARGS[@]}"; do
+          case "$arg" in
+            --delete|-d) _in_list "push --delete" "${GIT_DENIED[@]}" && deny "push --delete" ;;
+            :*) _in_list "push :refspec-delete" "${GIT_DENIED[@]}" && deny "push (refspec delete)" ;;
+          esac
+        done
+        ;;
+    esac
+    ;;
+esac
+
+# R5 fail-closed default (level 1 only — see the Profile docstring for why levels 2-5
+# stay pure deny-list): any verb not already denied above and not in git_allowed is
+# denied, not silently passed through. This is what actually stops `git checkout`,
+# `git reset --hard`, `git clean -fd`, `git stash`, `git config`, `git apply`, etc. at
+# level 1 — none of which R1's flat git_denied list names.
+if [ "$GIT_MODE" = "allow" ] && ! _in_list "$VERB1" "${GIT_ALLOWED[@]}"; then
+  deny "$VERB1"
+fi
+
+exec "$REAL_GIT" "$@"
