@@ -91,7 +91,7 @@ Prepend `$MEMORY_CONTEXT` to the architect prompt as a "## Memory: Accumulated P
 
 Spawn an architect subagent using the Agent tool:
 - `description`: "Architect review: validate plan against spec"
-- `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
+- `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
 - `prompt`: Content of `architect-prompt.md` with `$SPEC_CONTENT` and `$PLAN_CONTENT` replaced with the actual file contents, and with `$MEMORY_CONTEXT` prepended as shown:
 
   ```
@@ -135,7 +135,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
     ```
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
-   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
+   - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
    - `prompt`: `RUBRIC_CONTENT` (resolved in step 1) with:
      - `$ARTIFACT_KIND` replaced with `PLAN`
      - `$SPEC_CONTENT` replaced with the spec file contents
@@ -144,7 +144,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 6a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
     after, with the identical rubric/input the Opus spawn just saw:
    - `description`: "Conformance shadow (fable): plan vs spec (cycle N)"
-   - `model`: `$SHADOW_MODEL_PIN`
+   - `model`: `$SHADOW_MODEL_PIN`, passed as the Agent tool's `fable` alias when the pin is
+     `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
    - `prompt`: identical `RUBRIC_CONTENT` with the same `$ARTIFACT_KIND`/`$SPEC_CONTENT`/
      `$ARTIFACT_CONTENT` substitution used for the Opus call this cycle
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
@@ -156,24 +157,42 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
      never merged; `CONFORMANCE_DIALOGUE` alone drives the verdict check in step 7).
    If `$SHADOW_MODEL_PIN` is empty, skip this step entirely — no `SHADOW_*` fields, no
    `SHADOW_DIALOGUE` append, for this cycle.
-7. Parse the **Verdict** line from the output:
+7. Parse the **Verdict** line from the step-5 (Opus) output:
    - `✅ Conforms` or `⚠️ Minor deviations` → record `CONFORMANCE_VERDICT` and proceed to Phase 4
    - `⛔ Material divergence` → go to step 8
+   - No parseable `**Verdict:**` line, a tool error/timeout, or a refusal → treat as
+     `⛔ Material divergence` with the raw output (or the error text) as the deviation
+     description → go to step 8 (there is nothing to revise in 8d for an inconclusive
+     checker; re-spawn per 8e). An inconclusive checker consumes a reconcile cycle and
+     never passes silently (refusal → `UNCERTAIN`, never `PASS`, per
+     `/opt/refinement-skills/VERIFIER-CONTRACT.md`).
 8. **Reconcile loop** (only if MATERIAL):
    a. Increment `CONFORMANCE_CYCLE`
    b. If `CONFORMANCE_CYCLE > MAX_CYCLES`:
       - Post the conformance dialogue as an issue comment (fetch the footer first via
         `python3 dark-factory/scripts/factory_core/cli.py marker refinement`):
-        ```
+        ````
         ## Spec Conformance — Blocked (Plan)
 
         The plan has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
 
         $CONFORMANCE_DIALOGUE
 
+        <!-- If $SHADOW_MODEL_PIN was non-empty for this run, insert this subsection here so the shadow data survives a BLOCKED plan too (Requirement 5): -->
+        ### Shadow (Fable) Review
+
+        ```
+        SHADOW_MODEL: <value>
+        SHADOW_STATUS: <value>
+        SHADOW_FINDINGS_COUNT: <value>
+        SHADOW_SEVERITY: <value>
+        ```
+
+        <full $SHADOW_DIALOGUE, with the same Cycle N: headers as $CONFORMANCE_DIALOGUE above>
+
         ---
         <fetched footer text>
-        ```
+        ````
       - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
       - Exit cleanly (do not abort — this is a known state)
    c. Read the MATERIAL deviation descriptions from the conformance reviewer output

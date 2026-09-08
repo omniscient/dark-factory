@@ -24,8 +24,18 @@ def test_reconcile_loop_mirrors_shadow_spawn():
     # reconcile loop step 8 area must reference re-spawning the shadow subagent, not just the
     # first pass, per Requirement 2 ("mirrors every Opus spawn, including reconcile re-spawns")
     reconcile_idx = text.find("**Reconcile loop** (only if MATERIAL)")
-    assert reconcile_idx != -1
-    assert "SHADOW_DIALOGUE" in text[reconcile_idx:]
+    publish_idx = text.find("## Phase 4: PUBLISH")
+    assert reconcile_idx != -1 and publish_idx > reconcile_idx
+    section = text[reconcile_idx:publish_idx]  # bounded: Phase 4 also mentions SHADOW_DIALOGUE
+    assert "SHADOW_DIALOGUE" in section
+    assert "f2. If" in section, "reconcile loop must re-spawn the shadow (step 8 f2)"
+    # Requirement 5: the step-8b BLOCKED comment must carry the shadow subsection too
+    assert "### Shadow (Fable) Review" in section
+
+
+def test_unparseable_verdict_is_material_never_silent_pass():
+    text = CMD.read_text(encoding="utf-8")
+    assert "No parseable `**Verdict:**` line" in text
 
 
 def test_shadow_dialogue_never_feeds_conformance_dialogue():

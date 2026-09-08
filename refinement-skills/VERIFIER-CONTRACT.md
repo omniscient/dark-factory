@@ -18,6 +18,12 @@ read directly.
 | `conformance`'s Phase 3 conformance reviewer | `claude-opus-4-8` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
 | `code-review`'s reviewer | `claude-opus-4-8` | — |
 
+Pin strings are documentary identities. The Agent tool's `model` parameter is an
+alias-only enum (`sonnet|opus|haiku|fable`); call sites pass `opus` for
+`claude-opus-4-8` and `fable` for `claude-fable-5-1`. On the current image (Claude Code
+CLI 2.1.261) `opus` resolves to `claude-opus-5`, not a 4.8 build — the pin fixes the
+tier, not the exact snapshot.
+
 - **Model pin (gating):** never let the gating checker subagent inherit the
   orchestrator's model. This applies to every re-spawn in a reconcile loop, not just
   the first spawn.
@@ -29,13 +35,16 @@ read directly.
   see below) but never influences gating, the reconcile loop's verdict check, or
   Phase 3.6's out-of-scope excision — those read `CONFORMANCE_DIALOGUE` only, never
   `SHADOW_DIALOGUE`.
-- **Refusal → `UNCERTAIN`, never `PASS`:** a refusal stop from any checker
-  subagent — gating or shadow — maps to `UNCERTAIN`, never `PASS`. For a gating
-  checker this slots into existing handling (refine: `UNCERTAIN:` →
-  `needs-discussion`; plan/conformance: a refusal is treated as inconclusive,
-  consuming a reconcile cycle rather than silently passing). For a shadow checker it
-  maps to `SHADOW_STATUS: UNCERTAIN` (see below) and never blocks, delays, or
-  retries the gating flow.
+- **Refusal → `UNCERTAIN`, never `PASS`:** a refusal, tool error, timeout, or
+  unparseable verdict from a checker subagent maps to `UNCERTAIN`, never `PASS`.
+  Gating handling: refine `UNCERTAIN:` → `needs-discussion`; plan/conformance treat it
+  as `⛔ Material divergence` (see the "no parseable Verdict" bullet in each command's
+  step 7), consuming a reconcile cycle and ending in BLOCKED + `needs-discussion` if it
+  persists. **Exception:** `code-review` under `code_review.fail_open: true` (the
+  default) deliberately writes `STATUS: ERROR`, which `scripts/verdict_gate_check.sh`
+  passes — that is a documented fail-open, not a silent `PASS`. A shadow checker maps to
+  `SHADOW_STATUS: UNCERTAIN` (see below) and never blocks, delays, or retries the
+  gating flow.
 - **Read access:** the checker subagent needs `Glob`, `Grep`, and `Read` to explore
   the codebase it is reviewing — including the shadow subagent. No tool restriction
   is introduced or documented as existing beyond this — tool allow/deny changes are
@@ -53,13 +62,10 @@ read directly.
   (`VERIFIER-CONTRACT.md`) is always read at its fixed baked path,
   `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all four commands — it is not
   itself subject to clone-live-first resolution.
-- **Model-value note (Task 0, #394):** the pin strings above are the canonical model
-  identifiers this contract, `config.yaml`, and every command file document. If the
-  executing agent's Agent tool only accepts a short alias (e.g. `opus`/`fable`)
-  rather than the literal ID string, translate the documented pin to its
-  corresponding alias at the call site — this is the same translation every
-  existing `claude-opus-4-8` pin already relies on wherever the underlying tool is
-  alias-only; it is not a new mechanism introduced by the shadow trial.
+- **Model-value note (Task 0, #394):** Task 0 confirmed the literal `claude-fable-5-1`
+  is rejected by the Agent tool and `fable` is accepted; the same is true of every
+  `claude-opus-4-8` pin (→ `opus`). The translation happens only at the call site;
+  config, prose, and `SHADOW_MODEL:` keep the literal.
 
 ## Shadow verdict mapping (non-gating)
 

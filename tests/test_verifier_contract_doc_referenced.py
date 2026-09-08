@@ -65,6 +65,8 @@ def test_verifier_contract_has_per_checker_pin_table():
 def test_verifier_contract_has_refusal_to_uncertain_clause():
     content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
     assert "maps to `UNCERTAIN`, never `PASS`" in content
+    # the one documented fail-open must be named, not hidden behind "never PASS"
+    assert "code_review.fail_open" in content
 
 
 def test_verifier_contract_documents_shadow_verdict_mapping():

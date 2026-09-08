@@ -99,7 +99,7 @@ Follow this process:
 2. For each question, spawn a product-owner subagent using the Agent tool:
    - `description`: "Product owner: <short question summary>"
    - `prompt`: Content of `product-owner-prompt.md` with the $ISSUE_CONTEXT, $QA_HISTORY, and $QUESTION placeholders replaced with actual values
-   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (do not let it inherit the orchestrator's model)
+   - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (do not let it inherit the orchestrator's model)
 3. If the subagent returns a response starting with `UNCERTAIN:`:
    - Post a comment on the issue explaining the question and context gathered so far
    - Run: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`

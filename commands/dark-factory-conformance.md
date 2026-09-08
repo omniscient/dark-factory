@@ -225,7 +225,7 @@ fi
 
 4. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: code vs spec"
-   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
+   - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
    - `prompt`: `RUBRIC_CONTENT` (resolved in Phase 1 step 3) with:
      - `$ARTIFACT_KIND` replaced with `IMPLEMENTATION`
      - `$SPEC_CONTENT` replaced with the spec file contents (or issue body if `NO_SPEC=true`)
@@ -236,7 +236,8 @@ fi
 5a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
     after, with the identical rubric/input the Opus spawn just saw:
    - `description`: "Conformance shadow (fable): code vs spec"
-   - `model`: `$SHADOW_MODEL_PIN`
+   - `model`: `$SHADOW_MODEL_PIN`, passed as the Agent tool's `fable` alias when the pin is
+     `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
    - `prompt`: identical `RUBRIC_CONTENT` with the same `$ARTIFACT_KIND`/`$SPEC_CONTENT`/
      `$ARTIFACT_CONTENT` substitution used for the Opus call in step 4
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
@@ -260,11 +261,17 @@ fi
    - If `SCOPE_ENFORCEMENT=true` and any `[OOS]` entries exist → go to Phase 3.6 (scope remediation) BEFORE processing the verdict
    - If `SCOPE_ENFORCEMENT=false` or no `[OOS]` entries → skip Phase 3.6
 
-7. Parse the **Verdict** line:
+7. Parse the **Verdict** line from the step-4 (Opus) output:
    - `✅ Conforms` or `⚠️ Minor deviations` → go to Phase 4 (PASS)
    - `⛔ Material divergence`:
      - If `NO_SPEC=true` OR `BLOCK_ON_MATERIAL=false` → treat as advisory (`⚠️ Minor deviations`), go to Phase 4
      - Otherwise → go to Phase 3.5 (reconcile loop)
+   - No parseable `**Verdict:**` line, a tool error/timeout, or a refusal → treat as
+     `⛔ Material divergence` with the raw output (or the error text) as the deviation
+     description → go to Phase 3.5 (reconcile loop). The `NO_SPEC`/`BLOCK_ON_MATERIAL`
+     advisory downgrade does not apply to an unparseable verdict: an inconclusive checker
+     consumes a reconcile cycle and never passes silently (refusal → `UNCERTAIN`, never
+     `PASS`, per `/opt/refinement-skills/VERIFIER-CONTRACT.md`).
 
 ## Phase 3.6: SCOPE REMEDIATION (Out-of-scope changes only)
 
@@ -500,7 +507,7 @@ $FOOTER"
   TMPFILE=$(mktemp /tmp/df-shadow-review-XXXXXX.md)
   printf '%s' "$SHADOW_BODY" > "$TMPFILE"
   python3 dark-factory/scripts/factory_core/providers/cli.py tracker comment \
-    --id "$ISSUE_NUM" --marker "<!-- df-shadow-review -->" --body-file "$TMPFILE"  # TARGET-PATH
+    --id "$ISSUE_NUM" --marker "<!-- df-shadow-review -->" --body-file "$TMPFILE" || true  # TARGET-PATH — advisory post, never blocks PASS (Requirement 3)
   rm -f "$TMPFILE"
 fi
 ```
@@ -565,14 +572,12 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 1. Post a "Spec Conformance — Blocked" comment on the issue:
    ```bash
    FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
-   gh issue comment $ISSUE_NUM --body "## Spec Conformance — Blocked
-
-   The implementation has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
-
-   $CONFORMANCE_DIALOGUE
-
-   <!-- If SHADOW_MODEL_PIN was non-empty, insert before ### Next Steps: -->
-   ## Shadow (Fable) Review — conformance
+   # Requirements 4/5: a real shell guard, not a prose note inside the body string — when
+   # the shadow never ran (SHADOW_MODEL_PIN empty) nothing is posted, so an empty
+   # SHADOW_MODEL: line can never masquerade as an UNCERTAIN shadow verdict.
+   SHADOW_BLOCK=""
+   if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
+     SHADOW_BLOCK="## Shadow (Fable) Review — conformance
 
    ${SHADOW_VERDICT_LINE:-**Verdict:** (unparseable — SHADOW_STATUS: UNCERTAIN)}
 
@@ -583,7 +588,15 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    SHADOW_SEVERITY: ${SHADOW_SEVERITY:-none}
    \`\`\`
 
-   $SHADOW_DIALOGUE
+   $SHADOW_DIALOGUE"
+   fi
+   gh issue comment $ISSUE_NUM --body "## Spec Conformance — Blocked
+
+   The implementation has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
+
+   $CONFORMANCE_DIALOGUE
+
+   $SHADOW_BLOCK
 
    ### Next Steps
 
