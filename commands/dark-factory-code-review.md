@@ -93,7 +93,7 @@ rm -f "$RANK_IN"
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 3. Spawn a code-reviewer subagent using the Agent tool:
    - `description`: "Code review: diff vs correctness/security"
-   - `model`: `claude-opus-4-8` — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
+   - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
    - `prompt`: `RUBRIC_CONTENT` (resolved in step 2) with `$ISSUE_CONTEXT` replaced by the issue context from step 1 and `$DIFF_CONTENT` replaced by the contents of `$ARTIFACTS_DIR/review_diff.txt`.
 4. Save the subagent's full output to `$ARTIFACTS_DIR/review_findings.md`.
    - If the subagent errored, timed out, or returned empty/unparseable output:

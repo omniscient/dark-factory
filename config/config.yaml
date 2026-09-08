@@ -37,6 +37,7 @@ conformance:
   scope_enforcement: true    # detect & remediate out-of-scope changes at the conformance gate
   excise_out_of_scope: true  # revert out-of-scope changes from the branch (false = file backlog ticket only)
   backlog_label: scope-spillover  # label applied to auto-created spillover tickets
+  shadow_model: claude-fable-5-1  # env: CONFORMANCE_SHADOW_MODEL overrides (unset falls back to this; explicitly empty = no shadow spawn)
 
 code_review:
   enabled: true
