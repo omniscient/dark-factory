@@ -123,11 +123,9 @@ Before feeding the diff to the reviewer, strip noise that would pollute the out-
 
 ```bash
 RAW_DIFF=$(git diff main...HEAD \
-  -- ':!*.lock' ':!*.md' \
+  -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' \
   ':!.archon/memory/**' \
   ':!codeindex.json' ':!symbolindex.json' \
-  ':!docs/codeindex-hotspots.md' \
-  ':!docs/database-schema.md' \
   2>/dev/null)
 ```
 
@@ -288,7 +286,8 @@ just churns the docs the implement agent correctly wrote (the exact failure that
 `scope-spillover` doc tickets this rule removes).
 
 Before any excision (3.6.1) or ticketing (3.6.2), **drop every `[OOS]` entry whose file/area is
-a documentation file** — its file/area (the text before the `—` separator) matching `.md` or
+a documentation file** — its file/area (the text before the `—` separator) matching
+`ARCHITECTURE.md`, `PROJECT_STRUCTURE.md`, `ENV_VARIABLES.md`, `README.md`, or `CLAUDE.md`, or
 under `docs/`. Only non-doc (code / config / seed) OOS entries proceed to remediation. Log
 each dropped doc entry:
 `echo "scope-enforcement: doc change kept in-scope (not excised/ticketed): <entry>"`.
@@ -334,7 +333,7 @@ while IFS= read -r line; do
   # DOCUMENT), so doc-map updates are never excised/ticketed. Match only the file/area
   # (before the em-dash) so a code finding that merely *mentions* a doc isn't dropped.
   area="${stripped%%—*}"
-  if printf '%s' "$area" | grep -qiE '\.md([^a-z0-9]|$)|(^|[^a-z])docs/'; then
+  if printf '%s' "$area" | grep -qiE '(^|[^a-z0-9_])(ARCHITECTURE|PROJECT_STRUCTURE|ENV_VARIABLES|README|CLAUDE)\.md([^a-z0-9]|$)|(^|[^a-z])docs/'; then
     echo "scope-enforcement: doc change kept in-scope (not excised/ticketed): $stripped"
     continue
   fi
@@ -457,7 +456,7 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
    - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
 5. Re-get the diff:
    ```bash
-   git diff main...HEAD -- ':!*.lock' ':!*.md' 2>/dev/null | head -1000
+   git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000
    ```
 6. Re-spawn the conformance reviewer subagent (same prompt format, updated diff)
 7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator
