@@ -1,6 +1,8 @@
 # Fix Gate 2/3 diff construction: `*.md` blanket exclusion hides executable-policy changes
 
 **Issue:** #399
+**Related:** #403 (diff_rank low-tier summarisation), #394 (evidence)
+**Operator review:** 2026-09-08 (spec gate) — amendments F1-F8 from an independent read-only review applied.
 
 ---
 
@@ -55,7 +57,7 @@ the fix has to change what gets excluded in the first place, not add a carve-out
    - `commands/dark-factory-code-review.md:63` (Phase 2, `review_diff.txt`)
 4. Conformance's Step 3.6.0 doc-exemption guard (`commands/dark-factory-conformance.md:337`,
    `grep -qiE '\.md([^a-z0-9]|$)|(^|[^a-z])docs/'`) is narrowed so it no longer treats *any* `.md`
-   file as an automatically-in-scope "doc change." See Requirement 4 rationale below — this is a
+   file as an automatically-in-scope "doc change." The narrowed pattern is anchored on a non-identifier boundary and keeps `README.md` (see Architecture; operator review F1/F2). See Requirement 4 rationale below — this is a
    necessary companion to Requirement 1, not scope creep.
 5. A new test proves the issue's literal acceptance criterion: a diff touching only
    `commands/*.md` yields a non-empty reviewer artifact under the new pathspec. A second,
@@ -65,6 +67,18 @@ the fix has to change what gets excluded in the first place, not add a carve-out
    image at container start — see Assumptions) and no new shared script/`gate_lib.sh` addition —
    the fix is a literal pathspec/regex edit at each existing call site, matching how the two gates'
    duplicated exclusion logic is maintained today.
+7. **Scope of the guarantee (operator review F3).** This ticket restores *pathspec* visibility: the
+   raw diff handed to `scripts/diff_rank.py` contains the policy files. It does not by itself
+   guarantee they survive ranking: `diff_rank.py` summarises every "low"-tier file to one line
+   regardless of budget (#403), and `commands/**` / `refinement-skills/**` match no
+   `critical_diff_paths`, so a ≤50-line policy edit ranks "low" unless the spec names the file.
+   Gate 2 passes `--spec-file` and is therefore covered when the spec names its files; Gate 3 passes
+   no `--spec-file`, so its `review_diff.txt` can still show nothing for a small policy edit until
+   #403 lands. Requirement 5's behavioral test asserts the raw diff (`RAW_DIFF` / `$RANK_IN`), not
+   `review_diff.txt`.
+8. **Non-goal (operator review F5):** `commands/dark-factory-implement.md`'s self-review TODO/debug
+   scan uses a fourth, long-form exclusion (`':(exclude)*.md'`). It is not a gate and is
+   intentionally untouched; the static lock in Requirement 5 is scoped to the two gate files.
 
 ### Requirement 4 rationale (why the Step 3.6.0 exemption must be narrowed too)
 
@@ -177,8 +191,10 @@ Net effect, verified against the current repo tree (`git ls-files`): of 225 trac
 171 sit under `docs/**` (specs/plans/archive/etc., correctly stay excluded) and the remaining ~54
 now become visible to both gates, including every `commands/*.md`, `refinement-skills/*.md`,
 `.claude/skills/**/*.md`, `.archon/memory/*.md` (this one intentionally re-excluded separately),
-root `CLAUDE.md`/`README.md`, and the `tests/fixtures/verdicts/*.md` fixtures the allowlist
-approach would have missed.
+root `CLAUDE.md`/`README.md`, and `tests/fixtures/verdicts/*.md` (which match `diff_rank.py`'s
+`TEST_PATH_PATTERNS` and are always summarised, so they gain visibility of existence rather than
+content — operator review F8; the failure-direction argument, not this example, carries the
+design).
 
 **Step 3.6.0 exemption narrowing** (`commands/dark-factory-conformance.md:337`), replacing
 ```
@@ -186,12 +202,22 @@ grep -qiE '\.md([^a-z0-9]|$)|(^|[^a-z])docs/'
 ```
 with
 ```
-grep -qiE '(^|/)(ARCHITECTURE|PROJECT_STRUCTURE|ENV_VARIABLES|CLAUDE)\.md([^a-z0-9]|$)|(^|[^a-z])docs/'
+grep -qiE '(^|[^a-z0-9_])(ARCHITECTURE|PROJECT_STRUCTURE|ENV_VARIABLES|README|CLAUDE)\.md([^a-z0-9]|$)|(^|[^a-z])docs/'
 ```
-This keeps `docs/**` (specs/plans, always in-scope per existing convention) and the four
-implement-Phase-4 doc-map targets exempt from excision/ticketing, while an OOS finding against
-`commands/*.md`, `refinement-skills/*.md`, `.claude/skills/**`, or `README.md` now flows through
-to excision/spillover-ticket handling like any other code file.
+This keeps `docs/**` (specs/plans, always in-scope per existing convention) and the five
+implement-Phase-4 doc-map targets (`ARCHITECTURE.md`, `PROJECT_STRUCTURE.md`, `ENV_VARIABLES.md`,
+`README.md`, `CLAUDE.md` — `README.md` stays because the conformance rubric and Step 3.6.0's own
+prose both list it as a doc-map target; operator review F2) exempt from excision/ticketing, while an
+OOS finding against `commands/*.md`, `refinement-skills/*.md` or `.claude/skills/**` now flows
+through to excision/spillover-ticket handling like any other code file.
+
+The left boundary is `(^|[^a-z0-9_])`, not `(^|/)` (operator review F1): Step 3.6.0 tests the
+`area` string, which begins with `[OOS] ` and often wraps the path in backticks, so a root-level
+filename is preceded by a space or a backtick, never by start-of-string or `/`. The `(^|/)` form
+never matched anything and would have turned every doc-map update into excision churn — the
+regression Step 3.6.0 exists to prevent. Verified against realistic area strings:
+`[OOS] ARCHITECTURE.md` and `` [OOS] `CLAUDE.md` (…) `` → exempt; `[OOS] commands/dark-factory-plan.md`,
+`[OOS] refinement-skills/VERIFIER-CONTRACT.md` and `` [OOS] `.claude/skills/x/SKILL.md` `` → enforced.
 
 **No shared script.** Both gates already duplicate this exclusion list inline and are documented
 as intentionally kept in sync by comment (`dark-factory-code-review.md`'s "the SAME pre-triage
@@ -199,25 +225,39 @@ exclusions" note); this fix preserves that pattern rather than introducing a new
 `scripts/gate_lib.sh` explicitly reserves itself for "only the three shared primitives" — adding
 pathspec-construction logic there was considered and rejected (see Alternatives).
 
+**Size bound (operator review F7).** Nothing in this change is unbounded: non-critical `.md` content
+goes through `diff_rank.py`'s `max_review_tokens` cap (6000 in `config/config.yaml`, floor 3000 via
+`token-opt-caps.env`); critical-path `.md` (`.claude/skills/*/SKILL.md`; on MarketHawk
+`dark-factory/**`) bypasses the cap but is small (≤~100 lines each); the Phase 3.5 re-diff is
+unranked but already bounded by `head -1000`; and #387's spec/plan/archive copies never enter the
+diff (`:!docs/*.md`). Over budget never fails closed — the caps shrink lower tiers and the
+summaries are recorded in `diff-ranking.json`.
+
 **Tests:**
 
 - New `tests/test_gate_diff_md_visibility.sh` (behavioral, matching the `tests/test_close_preview_teardown.sh`-style pattern of exercising real `git` commands against a temp repo): builds a
   throwaway git repo, commits a baseline, then modifies only a `commands/*.md`-analog file plus a
-  `docs/*.md`-analog file, and asserts `git diff main...HEAD -- ':!*.lock' ':!docs/*.md'
-  ':!evals/*.md' ':!bench/*.md'` (the new pathspec) is non-empty and contains the commands-file
-  change but not the docs-file change — directly proving the issue's stated acceptance criterion.
+  `docs/*.md`-analog file, parses the pathspec tokens out of `commands/dark-factory-conformance.md`
+  (precedent: `tests/test_command_issue_context_contract.py`) rather than hard-coding them, runs
+  `git diff main...HEAD -- <tokens>` and asserts the result is non-empty and contains the
+  commands-file change but not the docs-file change — proving the pathspec half of the issue's
+  acceptance criterion, i.e. the raw diff the ranker receives (`RAW_DIFF` / `$RANK_IN`), not
+  `review_diff.txt` (Requirement 7; operator review F3/F4).
   Wired into `.github/workflows/ci.yml`'s explicit per-file list (new safety/observability-relevant
   coverage should not join the existing pile of unwired `.sh` tests, matching the precedent set in
   `docs/superpowers/specs/2026-07-23-budget-gate-consolidation-design.md`).
 - New static assertions (extending `tests/test_conformance_formatter_step.py` or a sibling
   `tests/test_gate_diff_pathspec_tokens.py`, auto-discovered by `python -m pytest tests/ -v`, no
-  `ci.yml` change needed): assert `':!*.md'` no longer appears literally in
-  `commands/dark-factory-conformance.md` or `commands/dark-factory-code-review.md`, and that
-  `':!docs/*.md'` appears at all three call sites — a cheap regression lock against a future edit
-  silently reintroducing the blanket token.
+  `ci.yml` change needed): assert the three-token sequence `':!docs/*.md' ':!evals/*.md'
+  ':!bench/*.md'` occurs exactly twice in `commands/dark-factory-conformance.md` and exactly once in
+  `commands/dark-factory-code-review.md`, and that `':!*.md'` occurs zero times in both (operator
+  review F4: presence-only checks drift; count the exact sequence) — a cheap regression lock
+  against a future edit silently reintroducing the blanket token.
 - One static assertion that the narrowed Step 3.6.0 regex no longer bare-matches an arbitrary
-  `.md` filename (e.g. `commands/dark-factory-plan.md` should not match the exemption pattern,
-  while `ARCHITECTURE.md` and `docs/superpowers/specs/foo.md` should).
+  `.md` filename, exercised with realistic **area strings** as Step 3.6.0 sees them — never bare
+  filenames (operator review F1): `[OOS] commands/dark-factory-plan.md — ...` must not match;
+  `` [OOS] `ARCHITECTURE.md` (...) ``, `[OOS] README.md` and `[OOS] docs/superpowers/specs/foo.md — ...`
+  must.
 
 ---
 
@@ -275,8 +315,10 @@ pathspec-construction logic there was considered and rejected (see Alternatives)
   this repo's tracked `commands/*.md` via `Dockerfile:139`) only when a clone lacks its own
   `.archon/commands/` — which is always true on a fresh checkout of this repo, since these files are
   untracked. Editing `commands/*.md` and merging is the complete, sufficient fix path;
-  `.github/workflows/publish.yml` rebuilds the image on merge to `main`, and the next dispatched run's
-  fallback copy carries the fix forward.
+  `.github/workflows/publish.yml` rebuilds the image on merge to `main`; the scheduler pulls only when
+  the image is *missing* on the host, so the fix is live after the publish run **and** a host
+  `docker pull` of `:latest` (operator practice since #196; operator review F6). Verify on the first
+  run after that via the run log line `[self-contained] baked commands copied`.
 - `evals/**` and `bench/**` contain only generated/measurement content today (spot-checked
   `bench/baseline.md` and two files under `evals/`) — if either directory later gains authored,
   agent-followed policy prose, the blanket per-directory exclusion would need to be revisited (see
