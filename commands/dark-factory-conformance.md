@@ -455,7 +455,7 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
    - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
 5. Re-get the diff:
    ```bash
-   git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' 2>/dev/null | head -1000
+   git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000
    ```
 6. Re-spawn the conformance reviewer subagent (same prompt format, updated diff)
 7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator

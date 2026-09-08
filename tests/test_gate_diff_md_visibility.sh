@@ -74,7 +74,7 @@ else
   git add -A
   git commit -qm "feature change" >/dev/null
 
-  DIFF_OUT=$(git diff main...HEAD -- "${TOKENS[@]}" 2>&1)
+  DIFF_OUT=$(git diff main...HEAD -- "${TOKENS[@]}" 2>/dev/null)
 
   assert_contains "diff includes commands/*.md change" "changed commands content" "$DIFF_OUT"
   assert_not_contains "diff excludes docs/*.md change" "changed docs content" "$DIFF_OUT"
