@@ -159,6 +159,7 @@ Script location (operator review F9): invoke the **baked** copy, `/opt/dark-fact
 - **OD4 — who clears a `boundary-escalation` block.** The change must be covered by a human-reviewed spec on a branch (CLAUDE.md). The delegated operator session may remove `needs-discussion` and re-run validate on that basis (2026-08-22 delegation); a boundary change without such a spec waits for the repo owner.
 - **OD5 — kill-switch source** (Requirement 8): base ref, never PR HEAD.
 - **OD6 — fail closed on an unparseable adapter** (Requirement 5): matches #196's fail-closed default.
+- **OD7 — `.claude/**` prose blocks at the gate** (recorded at the plan gate, 2026-09-08). The floor's `^\.claude/` entry makes any `.claude/**` edit — including `SKILL.md`/`RUBRIC.md` prose, visibility-only under #46 — `HUMAN_REQUIRED` in `gate_blast_radius.py`; `DEFAULTS`' own lists and `diff_rank` ordering are untouched, and `SKILL_SECURITY_TOKENS` is broadened from `claude/skills` to `claude/` so the trigger label reads `skill-security` rather than `migration-seed` (label-only; no existing classification changes). Practical impact on the self target is nil (phase agents cannot write `.claude/**`); consistent with CLAUDE.md's human-only framing of that surface. Decided by the delegated operator; reversible by removing `^\.claude/` from the blocking floor.
 
 ## Assumptions (flagged)
 

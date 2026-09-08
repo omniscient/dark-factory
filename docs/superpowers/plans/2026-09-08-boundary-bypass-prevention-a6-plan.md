@@ -1,6 +1,7 @@
 # Implementation Plan: Factory-owned critical paths and boundary-escalation detection (A6)
 
 **Issue:** #200
+**Operator review (plan gate):** 2026-09-08 — amendments P1—P3, P5—P7 from an independent read-only review applied; OD7 recorded in the spec.
 **Spec:** `docs/superpowers/specs/2026-09-08-boundary-bypass-prevention-a6-design.md`
 **Depends on:** #196 (A2, shipped — `side_effect.FACTORY_OWNED_MIN_LEVEL`, `_validate_loop`'s
 budget_caps/human_checkpoint enforcement). Every task builds against `main` as it exists today.
@@ -104,22 +105,16 @@ Not touched (out of scope per spec Alternative 3 / Owner decision OD3):
 ## Assumptions & known limitations (carried into the PR description)
 
 - **`.claude/skills/refinement/config.yaml` is untracked in the dark-factory self-target repo
-  itself.** It is generated at container start by `entrypoint.sh`/`factory_core.effective_config`
-  from the baked `config/config.yaml` and is listed in `.git/info/exclude` (verified: `git show
-  main:.claude/skills/refinement/config.yaml` fails with "exists on disk, but not in 'main'").
-  Under Requirement 8's design, `load_config`'s `git show <base-ref>:...` will therefore always
-  miss on *this* repo and fall back to `{}` (hardcoded Python defaults: `enabled: True,
-  hotspot_score_floor: 5.0, size_budget_lines: 400, size_budget_blocks: False`). Today those
-  defaults numerically match `config/config.yaml`'s real values, so this is not an observable
-  regression right now — but a *future* change to `config/config.yaml`'s `blast_radius:` block
-  will not reach the gate unless an operator also commits `.claude/skills/refinement/config.yaml`.
-  This is flagged, not fixed, here: redesigning the self-target config-generation pipeline is out
-  of this ticket's scope (boundary-bypass prevention, not config-pipeline architecture). For a
-  target repo that commits `.claude/skills/refinement/config.yaml` directly (per
-  `entrypoint.sh`'s own comment, e.g. MarketHawk), the base-ref read behaves exactly as designed.
-  `load_config`'s fallback direction (missing/unresolvable → `{}` → `enabled: True`, the
-  gate-runs-normally default) is the safe side of this ambiguity, unlike `_adapter_snapshot`'s
-  fail-closed requirement below, where an empty fallback could hide a real finding.
+  itself** (materialized at container start from the baked `config/config.yaml`; listed in
+  `.git/info/exclude`). Under Requirement 8 the base-ref read therefore always misses on *this*
+  repo. Operator review P1: `load_config` layers the **image-baked** `config/config.yaml`
+  `blast_radius:` block underneath the base-ref read (`/opt/dark-factory/config/config.yaml`,
+  `FACTORY_CONFIG_PATH` override as in `entrypoint.sh`), so on the self target the baked block
+  governs and a future change to `config/config.yaml`'s `blast_radius:` reaches the gate on the
+  next image; a target that commits the file has its committed values win key by key. Both
+  layers are trusted (the image and the merged base), never the PR under review; hardcoded
+  defaults apply only to keys neither layer sets. Test fixtures point `FACTORY_CONFIG_PATH` at
+  an absent file so runs inside the image stay hermetic.
 - **The baked `/opt/dark-factory/scripts/gate_blast_radius.py` path (Task 6) is preferred but
   not required** — the invocation falls back to the clone-relative copy when the baked path is
   absent (e.g. local/non-container test runs), per spec F9's explicit fallback allowance.
@@ -264,6 +259,12 @@ SKILL_SECURITY_TOKENS = (
    (Replacing `"claude/skills"` with `"claude/"`; `"claude/plugins"` becomes redundant
    under the broader `"claude/"` token but is left in place — harmless duplication, not
    worth a separate cleanup task.)
+
+3b. Update the two `SKILL.md is visibility-only` comments in `scripts/factory_core/adapter_defaults.py`
+   (the `critical_diff_paths` block, ~lines 65-66, and the `migration_seed_auth_patterns` block,
+   ~lines 80-83): append the sentence "Superseded at the gate by `FACTORY_OWNED_MIGRATION_SEED_FLOOR`
+   (`^\\.claude/`, #200/OD7): the floor blocks any `.claude/**` edit; this DEFAULTS list stays as it is."
+   so the comments no longer contradict the floor (operator review P6). Comment-only; no test.
 
 4. Run: `python -m pytest tests/test_adapter.py -k "boundary_floor or skill_security" -v`
    → both pass. This task is fully self-contained and green on its own — the
@@ -704,7 +705,7 @@ def _parse(stdout: str) -> dict:
 
 
 @pytest.fixture
-def run_script(tmp_path):
+def run_script(tmp_path, monkeypatch):
     """Run the gate against a fresh git repo whose config.yaml is committed on `main`
     each call (Requirement 8: blast_radius.* is read from --base-ref via `git show`,
     never the working tree, so a real repo is required even for the simplest case).
@@ -716,6 +717,8 @@ def run_script(tmp_path):
     """
     root = tmp_path
     _init_repo(root)
+    # Hermetic: never read the image's real baked config from inside a test run (P1).
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
 
     def _run(changed_files, hotspots_content="", lines_changed=50, config_extra=None,
               base_ref="main", worktree_config_extra=None):
@@ -723,7 +726,7 @@ def run_script(tmp_path):
         hf = root / "hotspots.md"
         hf.write_text(hotspots_content)
         _git(root, "add", "-A")
-        _git(root, "commit", "-q", "-m", "config")
+        _git(root, "commit", "-q", "--allow-empty", "-m", "config")
         if worktree_config_extra is not None:
             _write_config(root, worktree_config_extra)
         proc = subprocess.run(
@@ -835,7 +838,10 @@ def test_kill_switch_reads_base_ref_not_working_tree(run_script):
     migration-seed/floor match regardless (this floor match is unsuppressible anyway,
     per test_disabled_does_not_suppress_migration_seed_match above); this test isolates
     the kill switch itself by also proving the working-tree copy has zero effect."""
-    out = run_script([".factory/hooks/h.sh"], worktree_config_extra={"enabled": False})
+    out = run_script(
+        [".factory/hooks/h.sh", ".claude/skills/refinement/config.yaml"],
+        worktree_config_extra={"enabled": False},
+    )
     assert out["STATUS"] == "HUMAN_REQUIRED"
 
 
@@ -850,6 +856,59 @@ def test_kill_switch_working_tree_cannot_re_enable_size_trigger(run_script):
         worktree_config_extra={"enabled": True, "size_budget_lines": 400, "size_budget_blocks": True},
     )
     assert out["STATUS"] == "SKIPPED"
+
+
+def test_kill_switch_working_tree_disable_does_not_suppress_hotspot(run_script):
+    """Operator review P2: isolates the kill switch itself. Base ref enabled:True; the PR
+    flips its working-tree copy to enabled:false; a hotspot file must still block with the
+    hotspot label -- the working-tree value has no effect on the hotspot trigger."""
+    hotspots = "    7.2  backend/app/services/scanner.py  (2d / 10t)  200 loc\n"
+    out = run_script(["backend/app/services/scanner.py"], hotspots_content=hotspots,
+                     worktree_config_extra={"enabled": False})
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "hotspot"
+
+
+def test_kill_switch_falls_back_to_baked_when_base_ref_lacks_config(tmp_path, monkeypatch):
+    """Operator review P1: on the self target .claude/skills/refinement/config.yaml is
+    untracked (materialized at container start), so `git show <base-ref>:<path>` always
+    misses. blast_radius.* must then come from the image-baked config (trusted, never the
+    PR under review), not from hardcoded defaults."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root)
+    (root / "README.md").write_text("base\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base without config")
+    baked = tmp_path / "baked.yaml"
+    baked.write_text(yaml.dump({"blast_radius": {"size_budget_lines": 100, "size_budget_blocks": True}}))
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(baked))
+    hf = root / "hotspots.md"
+    hf.write_text("")
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "200",
+         "--hotspots", str(hf), "--config", _CONFIG_REL, "--clone-dir", str(root), "--base-ref", "main"],
+        input="frontend/src/components/Foo.tsx", capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = _parse(proc.stdout)
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "size"
+
+
+def test_kill_switch_base_ref_config_wins_over_baked(run_script, tmp_path, monkeypatch):
+    """Operator review P1: a target that commits its config has the committed (base-ref)
+    values win over the baked layer, key by key."""
+    baked = tmp_path / "baked.yaml"
+    baked.write_text(yaml.dump({"blast_radius": {"size_budget_lines": 100000, "size_budget_blocks": False}}))
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(baked))
+    out = run_script(
+        ["frontend/src/components/Foo.tsx"],
+        lines_changed=200,
+        config_extra={"size_budget_lines": 100, "size_budget_blocks": True},
+    )
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "size"
 
 
 def test_settings_json_triggers_skill_security(run_script):
@@ -895,9 +954,9 @@ def test_dark_factory_own_adapter_yaml_protects_skill_security():
     MarketHawk-parity default) to guard the A4 merge-semantics gap end to end.
     --base-ref HEAD: this repo's .claude/skills/refinement/config.yaml is itself
     untracked (see .git/info/exclude and this plan's Assumptions section), so
-    `git show` misses and load_config falls back to {} / enabled=True defaults --
-    irrelevant here since this test only exercises the floor-pattern match, not the
-    kill switch."""
+    `git show` misses and load_config falls back to the baked blast_radius block (or,
+    outside the image, to {} / enabled=True defaults) -- irrelevant here since this test
+    only exercises the floor-pattern match, not the kill switch."""
     repo_root = Path(SCRIPT).resolve().parents[1]
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as hf:
         hf.write("")
@@ -918,7 +977,7 @@ def test_dark_factory_own_adapter_yaml_protects_skill_security():
    or execution, since `--base-ref` is not yet a recognized flag and `load_config` still
    reads disk directly (the temp-repo's config path is never consulted the old way).
 
-3. Implement in `scripts/gate_blast_radius.py`. Add `import subprocess` to the top-level
+3. Implement in `scripts/gate_blast_radius.py`. Add `import os` and `import subprocess` to the top-level
    imports (after `import re`). Add the CLI flag in `parse_args()`, directly after
    `--clone-dir`:
 
@@ -934,32 +993,50 @@ def test_dark_factory_own_adapter_yaml_protects_skill_security():
    Replace `load_config`:
 
 ```python
+_BAKED_CONFIG_PATH = "/opt/dark-factory/config/config.yaml"  # == effective_config._BAKED_PATH; entrypoint.sh:88
+
+
+def _baked_blast_config() -> dict:
+    """blast_radius.* from the image-baked config -- COPY'd at image build from main,
+    never the PR under review. FACTORY_CONFIG_PATH mirrors entrypoint.sh:88 (test seam;
+    never set in the image). {} when absent/unreadable."""
+    try:
+        import yaml  # type: ignore
+        with open(os.environ.get("FACTORY_CONFIG_PATH", _BAKED_CONFIG_PATH), encoding="utf-8") as f:
+            blk = (yaml.safe_load(f) or {}).get("blast_radius", {})
+        return blk if isinstance(blk, dict) else {}
+    except Exception:
+        return {}
+
+
 def load_config(path: str, clone_dir: str, base_ref: str) -> dict:
-    """Load blast_radius.* from `git show <base-ref>:<path>` inside clone_dir, never
-    the working tree (Requirement 8 / operator review F1) -- a PR under review must
-    not be able to flip its own kill switch. Falls back to {} (all hardcoded defaults
-    apply, i.e. enabled=True -- the gate-runs-normally side of the ambiguity) when the
-    file is absent/unreadable/unresolvable at that ref; unlike _adapter_snapshot below,
-    this fallback does not need a stricter fail-closed distinction, since {} always
-    resolves to the safer "gate runs" default, never a silently-suppressed finding.
+    """Layered, never from the working tree (Requirement 8 / F1; operator review P1):
+    baked blast_radius block  <-  `git show <base-ref>:<path>` block (key by key).
+
+    On the self target <path> is untracked (materialized from the baked file at container
+    start and git-excluded), so the base-ref read misses and the baked block governs; a
+    target that commits <path> has its committed values win. Hardcoded defaults apply only
+    to keys neither layer sets. Both layers are trusted -- the image and the merged base --
+    so the fallback direction stays "gate runs normally", never a PR-controlled value.
 
     `path` must be relative to clone_dir -- `git show <ref>:<path>` requires a
-    repo-relative path, so an absolute --config value would never match and silently
-    fall back to {}. The one caller (commands/dark-factory-validate.md, Task 6) always
+    repo-relative path. The one caller (commands/dark-factory-validate.md, Task 6) always
     passes the existing relative literal ".claude/skills/refinement/config.yaml".
     """
+    cfg = dict(_baked_blast_config())
     try:
         import yaml  # type: ignore
         proc = subprocess.run(
             ["git", "-C", clone_dir, "show", f"{base_ref}:{path}"],
             capture_output=True, text=True, timeout=30,
         )
-        if proc.returncode != 0:
-            return {}
-        data = yaml.safe_load(proc.stdout)
-        return (data or {}).get("blast_radius", {})
+        if proc.returncode == 0:
+            blk = (yaml.safe_load(proc.stdout) or {}).get("blast_radius", {})
+            if isinstance(blk, dict):
+                cfg.update(blk)
     except Exception:
-        return {}
+        pass
+    return cfg
 ```
 
    In `main()`, replace the `cfg = load_config(args.config)` line and the early-return
@@ -1082,7 +1159,7 @@ def _adapter_doc(safety=None, loops=None):
 
 
 @pytest.fixture
-def adapter_diff_run(tmp_path):
+def adapter_diff_run(tmp_path, monkeypatch):
     """Commit a base `.factory/adapter.yaml` on `main`, then hand back a callable that
     overwrites the *working-tree* copy (simulating a PR's HEAD state, uncommitted) and
     invokes the gate -- the semantic diff compares --base-ref vs. the working tree
@@ -1090,6 +1167,7 @@ def adapter_diff_run(tmp_path):
     --base-ref), never two commits."""
     root = tmp_path
     _init_repo(root)
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))  # hermetic (P1)
 
     def _setup(base_adapter):
         _write_config(root)
@@ -1324,6 +1402,7 @@ def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
     """
     import yaml
     from factory_core import adapter as _adapter
+    from factory_core import verifier as _verifier
 
     try:
         if ref is None:
@@ -1350,6 +1429,7 @@ def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
         seen_names = set()
         for i, entry in enumerate(data.get("loops", []) or []):
             _adapter._validate_loop(entry, i)
+            _verifier.assert_verifier_independent(entry)  # same check load() applies (operator review P5)
             name = entry.get("name")
             if name in seen_names:
                 raise _adapter.AdapterError(f"duplicate loop name '{name}'")
@@ -1673,9 +1753,12 @@ python -m pytest tests/ -v
 ```
    Expect all tests green, including every test touched/added in Tasks 1-6.
 
-2. Run the project's own smoke gate (per CLAUDE.md conventions):
+2. Run the smoke-gate test and the workflow DAG checks exactly as CI's `tests` and `dag-check` jobs do
+   (operator review P3: `bash smoke_gate.sh` is the production gate itself, not the CI check):
 ```bash
-bash smoke_gate.sh
+bash tests/test_smoke_gate.sh
+python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
+python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
 ```
 
 3. Confirm no out-of-scope files were touched:
