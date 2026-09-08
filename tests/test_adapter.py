@@ -899,6 +899,34 @@ def test_migration_seed_auth_patterns_adapter_override(tmp_path):
     assert "^custom/migrations/" in pattern_strings
 
 
+def test_migration_seed_auth_patterns_exception_fallback_still_floored(tmp_path, monkeypatch):
+    """Requirement 9: even if adapter.get() itself raises (broken/unimportable adapter
+    module), the except-Exception fallback must not drop the boundary floor."""
+    sys.path.insert(0, "scripts")
+    import gate_blast_radius as gbr
+
+    def _boom(*a, **kw):
+        raise RuntimeError("adapter unimportable")
+
+    monkeypatch.setattr("factory_core.adapter.get", _boom)
+    patterns = [p.pattern for p in gbr._migration_seed_auth_patterns(str(tmp_path))]
+    for pat in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert pat in patterns
+
+
+def test_safety_path_patterns_exception_fallback_still_floored(tmp_path, monkeypatch):
+    sys.path.insert(0, "scripts")
+    import diff_rank as dr
+
+    def _boom(*a, **kw):
+        raise RuntimeError("adapter unimportable")
+
+    monkeypatch.setattr("factory_core.adapter.get", _boom)
+    patterns = [p.pattern for p in dr._safety_path_patterns(str(tmp_path))]
+    for pat in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert pat in patterns
+
+
 # ── Consumer 4: epic_autopilot._hard_exclude_paths + _sensitive_keywords ───────
 
 def test_hard_exclude_paths_default_parity(tmp_path):

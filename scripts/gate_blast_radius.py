@@ -88,6 +88,9 @@ def parse_hotspots(path: str, score_floor: float) -> set:
 # adapter_defaults is the sole source of truth. A missing/broken import fails
 # loudly here instead of silently falling back to a stale copy.
 from factory_core.adapter_defaults import DEFAULTS as _AD
+from factory_core.adapter_defaults import (
+    FACTORY_OWNED_MIGRATION_SEED_FLOOR as _MIGRATION_SEED_FLOOR,
+)
 
 MIGRATION_SEED_AUTH_PATTERNS = [
     re.compile(p) for p in _AD["safety"]["migration_seed_auth_patterns"]
@@ -97,8 +100,13 @@ MIGRATION_SEED_AUTH_PATTERNS = [
 def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
     """Return compiled migration/seed/auth patterns, reading from adapter at use-time.
 
-    Falls back to MIGRATION_SEED_AUTH_PATTERNS (which re-exports adapter_defaults.DEFAULTS)
-    on any error so behaviour is identical to today when no adapter file is present.
+    Falls back to MIGRATION_SEED_AUTH_PATTERNS ∪ the boundary floor on any error, so a
+    broken/unimportable adapter module can never drop the floor (Requirement 9). The
+    bare MIGRATION_SEED_AUTH_PATTERNS module constant is left un-floored -- it stays a
+    verbatim re-export of DEFAULTS so tests/test_adapter.py::test_migration_seed_auth_patterns_default_parity's
+    sibling identity checks (e.g. test_skill_md_not_in_migration_seed_auth_patterns,
+    which reads adapter_defaults.DEFAULTS directly, not this function) keep pinning
+    DEFAULTS exactly.
     """
     try:
         from factory_core import adapter
@@ -107,7 +115,9 @@ def _migration_seed_auth_patterns(clone_dir: str | None = None) -> list:
             return [re.compile(p) for p in val]
     except Exception:
         pass
-    return MIGRATION_SEED_AUTH_PATTERNS
+    raw = _AD["safety"]["migration_seed_auth_patterns"]
+    floored = list(raw) + [p for p in _MIGRATION_SEED_FLOOR if p not in raw]
+    return [re.compile(p) for p in floored]
 
 
 # Sub-classifies a migration_seed_auth_patterns match by matched-pattern source
