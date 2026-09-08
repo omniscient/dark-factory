@@ -60,7 +60,7 @@ Build the review diff with the SAME pre-triage exclusions the conformance gate u
 RANK_IN=$(mktemp /tmp/rank_in_XXXXXX.txt)
 [ -f "$ARTIFACTS_DIR/token-opt-caps.env" ] && . "$ARTIFACTS_DIR/token-opt-caps.env" || true
 git diff main...HEAD \
-  -- ':!*.lock' ':!*.md' \
+  -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' \
   ':!.archon/memory/**' \
   ':!codeindex.json' ':!symbolindex.json' \
   ':!docs/codeindex-hotspots.md' ':!docs/database-schema.md' \

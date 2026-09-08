@@ -35,6 +35,7 @@ jobs:
       - run: bash tests/test_budget_gate.sh
       - run: bash tests/test_verdict_gate_check.sh
       - run: bash tests/test_budget_context.sh
+      - run: bash tests/test_gate_diff_md_visibility.sh
   dag-check:
     runs-on: ubuntu-latest
     steps:
