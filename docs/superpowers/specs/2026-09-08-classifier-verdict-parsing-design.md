@@ -1,6 +1,8 @@
 # Fix scheduler comment-classifier verdict parsing, caching, and log noise
 
 **Issue:** #402
+**Operator review:** 2026-09-08 (spec gate) — amendments F1—F7 from an independent read-only review, plus the operator's MERGE-strict and ambiguity rules, applied.
+**Surface note:** `scripts/factory_core/breaker.py` is a Blast-Radius hotspot and a CLAUDE.md safety surface; this change is additive (string state helpers, reset hygiene) and touches no retry logic. The PR takes the operator-review path.
 
 ---
 
@@ -26,9 +28,12 @@ Impact, per the issue:
 - The SKIP fallback happens to be harmless on #394 (both comments were in fact bot-authored), but
   the same failure mode on a REVISE/APPROVE-shaped human reply would silently drop real reviewer
   feedback and leave a PR stalled In Review with no further signal.
-- `classify_comments` re-runs a paid `claude -p` call every poll (default 60s,
-  `config/config.yaml:3`) for as long as an In-Review issue's comment set is unchanged, and the
-  47 identical raw-response dumps drowned the log.
+- `classify_comments` re-runs a paid `claude -p` call on every poll that reaches
+  `stage_review_triage` (skipped when the factory is at capacity or an earlier stage dispatched;
+  observed ≈ 1/hour, 47 in 48 h) for as long as an In-Review issue's comment set is unchanged,
+  and the 47 identical raw-response dumps drowned the log. Saving ≈ 47 Haiku calls per 48 h per
+  stuck issue (~$0.05); the primary win is log signal and the latent dropped-instruction bug.
+  The classifier model stays `haiku` (unchanged).
 
 This is a self-hosting fix: `scheduler.sh` and `scripts/factory_core/breaker.py` are Dark Factory's
 own scheduler and shared per-issue state store, not target-repo application code.
@@ -39,13 +44,29 @@ Distilled from the issue's Fix list and the Q&A below.
 
 1. **Token extraction must match the raw response, not a cleaned one.** Replace the
    destroy-then-match approach with an anchored, case-insensitive regex applied to the untouched
-   `claude -p` stdout: `^[^[:alnum:]]*(MERGE|CONTINUE|SKIP)\b`. The `[^[:alnum:]]*` prefix class
-   absorbs markdown/formatting noise the model commonly wraps a token in — `**SKIP**`, `` `SKIP` ``,
-   a leading `-`/`>`/bullet, and trailing punctuation like `SKIP.`/`SKIP:` — without requiring a
-   distinct rule per noise shape. The match stays **anchored to the start of the response** and
-   never scans the whole body, so a CONTINUE-shaped justification that happens to contain the word
-   "merge" mid-sentence cannot flip the verdict. Only the captured group is uppercased; nothing
-   else in the response is touched.
+   `claude -p` **stdout** (stderr is captured separately — see Architecture, F1):
+   `^[^[:alnum:]]*(MERGE|CONTINUE|SKIP)([^[:alnum:]_-]|$)`. The `[^[:alnum:]]*` prefix class absorbs
+   markdown/formatting noise the model commonly wraps a token in — `**SKIP**`, `` `SKIP` ``, a
+   leading `-`/`>`/bullet — and the explicit tail class replaces `\b` (operator review F2):
+   `\b` is a glibc extension that also matches before `-`, so `Merge-ready, ship it` parsed as
+   MERGE; the tail class rejects `Merge-ready`, `MERGED`, `Skipping`, `skip_this`. If the
+   implementation uses `[[ =~ ]]`, the pattern must live in a variable (an unquoted `\b` is
+   shell-mangled). The match stays **anchored to the start of the response** and never scans the
+   whole body, so a CONTINUE-shaped justification that mentions "merge" mid-sentence cannot flip
+   the verdict. Only the captured group is uppercased; nothing else in the response is touched.
+   Two further rules, both operator-added at the spec gate because MERGE dispatches
+   `Close issue #N` — a merge — and is therefore the only verdict whose false positive is
+   costly:
+   - **MERGE is strict.** MERGE is accepted only when the first line's alphanumeric content is
+     exactly the token — `^[^[:alnum:]]*MERGE[^[:alnum:]]*$` against the first line (so `MERGE`,
+     `**MERGE**`, `merge.` parse; `MERGE — approved by the reviewer` and `MERGE is not
+     appropriate` do **not**). A MERGE followed by any explanation is unparseable — uncached
+     fallback SKIP, logged — and simply retries next poll. CONTINUE and SKIP keep the lenient
+     token-plus-explanation grammar: their false positives cost a run or a wait, not a merge.
+   - **Ambiguity is unparseable.** If the raw response contains two or more *distinct* verdict
+     tokens anywhere (case-insensitive, bounded by non-`[[:alnum:]_-]`), the response is
+     unparseable — uncached fallback SKIP, logged — regardless of which token came first
+     (`SKIP — but MERGE would be reasonable` and `MERGE? No — SKIP` both fall back).
 2. **Extraction lives in a standalone, unit-testable function**, `parse_comment_verdict()`, taking
    the raw response string and echoing the matched uppercase token or nothing. This gives fix item
    3's test a target it can drive directly without a paid `claude -p` call, and keeps
@@ -90,29 +111,43 @@ Distilled from the issue's Fix list and the Q&A below.
    reviewer wrote — restating the constraint after the comment block is a low-cost mitigation for
    the observed instruction-drift. This is best-effort: `parse_comment_verdict()` is the actual
    safety net regardless of prompt compliance, not the prompt wording.
-8. **Tests** (in `tests/test_scheduler.sh`, alongside the existing `classify_comments` stub at
-   line ~1199):
-   - `parse_comment_verdict()` correctly extracts the token from "TOKEN + explanation" responses,
-     including markdown-wrapped (`**SKIP**`), backtick-wrapped, bulleted (`- SKIP`),
-     blockquoted (`> SKIP`), and trailing-punctuation (`SKIP.`, `SKIP:`) shapes.
-   - A CONTINUE-shaped response containing the word "merge" mid-sentence does **not** parse as
-     MERGE (anchoring test).
-   - An unparseable response is not cached: two consecutive `classify_comments` calls for the same
-     unchanged comment set both invoke the `claude` stub (no cache short-circuit) and both fall
-     back to SKIP.
-   - A successful classification is cached: a second `classify_comments` call for the same issue
-     with the same latest-comment-id does **not** invoke the `claude` stub and returns the cached
-     verdict.
-   - A new comment (different latest-comment-id) busts the cache and re-invokes the stub.
-   - `reset_retry` clears the new cache/dedup suffixes.
+8. **Tests**, split so that everything safety-relevant runs in CI (operator review F3: CI runs
+   `python -m pytest tests/ -v` plus an explicit list of `.sh` files that does **not** include
+   `tests/test_scheduler.sh`):
+   - **Parser fixtures, CI-run.** A new pytest file, `tests/test_scheduler_comment_verdict.py`,
+     drives `parse_comment_verdict` through a subprocess exactly as `tests/test_scheduler.sh` loads
+     the scheduler (`bash -c 'SCHEDULER_SOURCE_ONLY=1 source ./scheduler.sh; parse_comment_verdict
+     "$1"' _ "<reply>"`), one case per row, expected output in the right column:
+     bare `SKIP` → SKIP; `skip` → SKIP; `**SKIP**`, `` `SKIP` ``, `- SKIP`, `> SKIP`, `SKIP.`,
+     `SKIP:` → SKIP; `SKIP Both comments are from automated systems` → SKIP;
+     `CONTINUE — the reviewer wants a merge later` → CONTINUE (anchoring: "merge" mid-sentence
+     does not flip it); `MERGE`, `**MERGE**`, `merge.` → MERGE; `MERGE — approved` and
+     `MERGE is not appropriate` → no match (MERGE strict); `SKIP — but MERGE would be
+     reasonable` and `MERGE? No — SKIP` → no match (ambiguity); `Merge-ready, ship it`,
+     `MERGED already`, `Skipping this`, `skip_this`, `Verdict: SKIP`, empty → no match.
+   - **Breaker helpers, CI-run.** In `tests/test_factory_core_breaker.py`: `get_state_str` /
+     `set_state_str` round-trip through the same `_read_state`/`_atomic_write` path; `reset_retry`
+     pops `:cverdict`, `:cid`, `:crawlog` **while still popping** `:sig`, `:delivery`, `:loop:*`;
+     `state-set` rejects a key outside the allowed shape.
+   - **Orchestration, bash.** In `tests/test_scheduler.sh` (alongside the existing
+     `classify_comments` stub, ~line 1199): an unparseable response is not cached (two consecutive
+     calls both invoke the `claude` stub and both fall back to SKIP); a successful classification
+     is cached (second call does not invoke the stub); a new comment id busts the cache; a stderr
+     warning from the stub does not defeat the parse (F1). These run locally and via the `verify`
+     skill; wiring `tests/test_scheduler.sh` into `ci.yml` is a separate operator commit, because
+     a `.github/workflows/` edit trips the blast-radius gate (#374) — not part of this ticket.
 
 ## Architecture / Approach
 
 **Extraction.** `parse_comment_verdict()` is a new bash function near `classify_comments()`:
 matches `^[^[:alnum:]]*(MERGE|CONTINUE|SKIP)\b` case-insensitively against `$1` (e.g. via `grep -Eio`
 or a `[[ =~ ]]` with `shopt -s nocasematch`), echoes the uppercased captured group, or echoes
-nothing on no match. `classify_comments()` calls this on the raw `$result` (no `tr -d` step);
-anything it doesn't match is the existing logged, uncached fallback SKIP.
+nothing on no match. `classify_comments()` calls this on the raw **stdout** only (no `tr -d` step). Today's call
+merges stderr into `$result` (`2>&1`, `scheduler.sh:805`), so any CLI warning printed first would
+defeat the anchor and bring the every-poll fallback back (operator review F1): capture them apart
+— `result=$(echo "$prompt" | claude -p --model haiku 2>"$err_tmp")` — match stdout, and append
+the last 200 chars of `$err_tmp` to the deduped raw-response log line. Anything the parser does
+not match is the existing logged, uncached fallback SKIP.
 
 **Cache storage.** `scheduler-state.json`'s existing shape is a flat `{key: value}` dict
 (`scripts/factory_core/breaker.py`), used today for int-valued retry counters (`_write_key`) and a
@@ -126,7 +161,10 @@ internally for `:sig`, generalized into a small public pair rather than duplicat
 - Two new `cli.py` subcommands, `state-get --key` (prints the value or nothing) and `state-set
   --key --value`, mirroring the existing `breaker-get`/`breaker-set-retry` wiring
   (`cli.py:37-76`), so `scheduler.sh` can call them the same way it calls
-  `STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-get ...` today.
+  `STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" breaker-get ...` today. Both validate
+  `--key` against `^[0-9]+:(cverdict|cid|crawlog)$` and reject anything else (operator review F6):
+  the scheduler gets exactly the three keys it needs, not an unbounded write path into the
+  breaker's state file.
 - Suffixes on the bare-issue-number key (matching `reset_retry`'s existing key shape): `<issue>:cverdict`
   (cached token), `<issue>:cid` (latest comment id the verdict was computed for), `<issue>:crawlog`
   (comment id the raw-response dump was last logged for — independent of `:cverdict` so writing one
@@ -139,7 +177,8 @@ claude ...)` line onward):
 1. Read `<issue>:cid`. If it equals the current latest comment id (last element's `.id` in
    `$comments_json`) and `<issue>:cverdict` is non-empty, return the cached verdict — no `claude -p`
    call.
-2. Otherwise call `claude -p --model haiku` with the tightened prompt (Requirement 7).
+2. Otherwise call `claude -p --model haiku` with the tightened prompt (Requirement 7), capturing
+   stdout and stderr separately (F1).
 3. On non-zero exit or empty output: emit the compact fallback line, dedupe-log the raw response
    per `<issue>:crawlog`, return `SKIP` uncached (unchanged from today's error path other than the
    two-tier logging).
@@ -180,6 +219,10 @@ claude ...)` line onward):
   `test_scheduler.sh` is not among the named files). New tests added there per Requirement 8 will
   run locally and via the project's `verify` skill but are not CI-enforced today — a pre-existing
   gap, not introduced by this ticket, and out of scope to fix here.
+
+- MERGE dispatches `Close issue #N` without an `is_issue_running` check (`scheduler.sh:1013-1016`);
+  a cached MERGE inherits this. Pre-existing and unchanged here (operator review F7); the MERGE-strict
+  rule above narrows how often a MERGE is produced at all.
 
 ## Assumptions
 
