@@ -1,6 +1,7 @@
 # Implementation Plan: Fix Gate 2/3 diff construction — stop blanket-excluding `*.md`
 
 **Issue:** #399
+**Spec:** `docs/superpowers/specs/2026-09-08-gate-diff-md-exclusion-fix-design.md`
 
 ## Goal
 
@@ -197,7 +198,7 @@ else
   git add -A
   git commit -qm "feature change" >/dev/null
 
-  DIFF_OUT=$(git diff main...feature -- "${TOKENS[@]}" 2>&1)
+  DIFF_OUT=$(git diff main...HEAD -- "${TOKENS[@]}" 2>&1)
 
   assert_contains "diff includes commands/*.md change" "changed commands content" "$DIFF_OUT"
   assert_not_contains "diff excludes docs/*.md change" "changed docs content" "$DIFF_OUT"
@@ -287,11 +288,19 @@ echo "============================="
      2>/dev/null > "$RANK_IN"
    ```
 
-5. Wire the new bash test into CI. In `.github/workflows/ci.yml`, after the existing
-   `- run: bash tests/test_budget_context.sh` line, add:
+5. Wire the new bash test into CI. In `.github/workflows/ci.yml`, replace the existing step
 
    ```
-         - run: bash tests/test_gate_diff_md_visibility.sh
+      - run: bash tests/test_budget_context.sh
+   ```
+
+   with the same line followed by the new step. Keep the new line at exactly the same
+   indentation as the existing `- run:` steps (six spaces before the dash in the file; a deeper
+   indent is a YAML `ScannerError` that fails the whole workflow):
+
+   ```
+      - run: bash tests/test_budget_context.sh
+      - run: bash tests/test_gate_diff_md_visibility.sh
    ```
 
 6. Verify pass:
@@ -354,6 +363,11 @@ def test_command_file_contains_narrowed_regex():
     assert NARROWED_REGEX in text, (
         "Step 3.6.0's doc-exemption guard must use the narrowed doc-map regex, "
         "not the old blanket '\\.md(...)' pattern"
+    )
+    # The old blanket guard is a literal substring of the new one, so presence of the
+    # new regex alone would not catch a re-added blanket guard elsewhere in the file.
+    assert "grep -qiE '\\.md([^a-z0-9]|$)" not in text, (
+        "the old blanket '\\.md(...)' guard must be gone, not merely accompanied by the new one"
     )
 
 
@@ -434,7 +448,7 @@ def test_narrowed_regex_enforces_policy_files():
    ```bash
    bash smoke_gate.sh
    python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
-   python scripts/check_workflow_when.py
+   python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
    ```
 
 4. Self-review checklist (per Requirements, re-verified against the diff):
