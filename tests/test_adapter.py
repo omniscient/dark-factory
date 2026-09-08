@@ -985,6 +985,44 @@ def test_skill_security_tokens_parity():
     assert gbr._SKILL_SECURITY_TOKENS is adapter_defaults.SKILL_SECURITY_TOKENS
 
 
+# ── Boundary floor constants (#200/A6) ──────────────────────────────────────
+
+def test_boundary_floor_constants_shape():
+    floor = adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR
+    blocking = adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR
+    for pat in (
+        r"^\.factory/hooks/", r"^\.factory/adapter\.yaml$", r"^\.claude/",
+        r"^workflows/", r"^commands/", r"^\.archon/commands/",
+        r"^\.archon/workflows/", r"^dark-factory/scripts/",
+    ):
+        assert pat in floor, f"{pat} missing from FACTORY_OWNED_CRITICAL_DIFF_FLOOR"
+    assert len(floor) == 8
+    # adapter.yaml itself and workflows/commands are visibility-only (OD1/OD2):
+    # present in the critical-diff floor, excluded from the blocking floor.
+    for visibility_only in (r"^\.factory/adapter\.yaml$", r"^workflows/", r"^commands/"):
+        assert visibility_only not in blocking
+    for hard_trigger in (
+        r"^\.factory/hooks/", r"^\.claude/", r"^\.archon/commands/",
+        r"^\.archon/workflows/", r"^dark-factory/scripts/",
+    ):
+        assert hard_trigger in blocking
+    assert len(blocking) == 5
+    # blocking floor is derived from the critical-diff floor, not hand-duplicated
+    assert set(blocking) <= set(floor)
+
+
+def test_skill_security_tokens_matches_bare_claude_prefix():
+    """SKILL_SECURITY_TOKENS must sub-classify the new floor's bare ^\\.claude/ entry
+    as skill-security (CLAUDE.md's own framing: '.claude/** self-modification
+    mechanism (#46)'), not the generic migration-seed bucket -- otherwise the blocking
+    issue comment's verbatim TRIGGER label misdescribes a Claude-Skills-surface
+    finding. Checked directly against the constant here (self-contained to this task);
+    tests/test_adapter.py::test_boundary_floor_claude_prefix_classifies_as_skill_security
+    (Task 2) verifies the same thing end-to-end through classify_file once the floor
+    is actually wired into gate_blast_radius.py's pattern list."""
+    assert any(tok in r"^\.claude/" for tok in adapter_defaults.SKILL_SECURITY_TOKENS)
+
+
 # ── config.yaml drift guard (#184) ──────────────────────────────────────────
 # config.yaml keeps its own copy of these safety constants for operator
 # visibility; these tests guarantee it cannot silently diverge from
