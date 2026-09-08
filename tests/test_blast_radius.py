@@ -176,9 +176,18 @@ def test_factory_hooks_triggers_skill_security():
     assert out["TRIGGER"] == "skill-security"
 
 
-def test_skill_md_alone_does_not_trigger():
+def test_skill_md_now_triggers_via_broadened_claude_floor():
+    """Behavior change from the pre-#200 gate (intentional, per spec Requirement 3/4a
+    and CLAUDE.md's '.claude/** self-modification mechanism' framing): the new
+    FACTORY_OWNED_MIGRATION_SEED_FLOOR entry ^\\.claude/ is broader than DEFAULTS'
+    existing migration_seed_auth_patterns (which deliberately exempt bare SKILL.md,
+    spec Q2/A2 of #46) and now blocks any .claude/ path, including SKILL.md prose.
+    DEFAULTS itself is unchanged -- test_skill_md_not_in_migration_seed_auth_patterns
+    (tests/test_adapter.py) still passes -- this is the *floor* catching what DEFAULTS
+    alone does not."""
     out = run_script([".claude/skills/code-review/SKILL.md"])
-    assert out["STATUS"] == "PASS"
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "skill-security"
 
 
 def test_migration_file_trigger_label_still_migration_seed():

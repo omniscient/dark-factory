@@ -213,10 +213,30 @@ def _deep_merge(base: dict, override: dict) -> dict:
             out[k] = copy.deepcopy(v)
     return out
 
+def _apply_boundary_floor(safety: dict) -> dict:
+    """Union the non-overridable boundary floor into critical_diff_paths and
+    migration_seed_auth_patterns -- extend-only, never removes a target's own entries
+    (Requirement 7). Called from every load() return path (Requirement 9)."""
+    def _union(existing, floor):
+        return list(existing) + [p for p in floor if p not in existing]
+    safety = dict(safety)
+    safety["critical_diff_paths"] = _union(
+        safety.get("critical_diff_paths", []),
+        adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR,
+    )
+    safety["migration_seed_auth_patterns"] = _union(
+        safety.get("migration_seed_auth_patterns", []),
+        adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR,
+    )
+    return safety
+
+
 def load(clone_dir: str) -> dict:
     path = os.path.join(clone_dir, ".factory", "adapter.yaml")
     if not os.path.isfile(path):
-        return copy.deepcopy(adapter_defaults.DEFAULTS)
+        data = copy.deepcopy(adapter_defaults.DEFAULTS)
+        data["safety"] = _apply_boundary_floor(data["safety"])
+        return data
     try:
         import yaml
         with open(path, encoding="utf-8") as f:
@@ -257,7 +277,9 @@ def load(clone_dir: str) -> dict:
             if name in seen_names:
                 raise AdapterError(f"loops[{i}] ('{name}'): duplicate loop name '{name}'")
             seen_names.add(name)
-    return _deep_merge(adapter_defaults.DEFAULTS, data)
+    merged = _deep_merge(adapter_defaults.DEFAULTS, data)
+    merged["safety"] = _apply_boundary_floor(merged["safety"])
+    return merged
 
 def get(clone_dir: str, dotted: str):
     node = load(clone_dir)
