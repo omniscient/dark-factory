@@ -58,11 +58,15 @@ else
   git init -q -b main
   git config user.email test@example.com
   git config user.name test
-  mkdir -p commands docs evals bench
+  mkdir -p commands docs evals bench refinement-skills .claude/skills/example
   echo baseline > commands/dark-factory-plan.md
   echo baseline > docs/some-spec.md
   echo baseline > evals/some-scorecard.md
   echo baseline > bench/baseline.md
+  echo baseline > refinement-skills/reviewer.md
+  echo baseline > .claude/skills/example/SKILL.md
+  echo baseline > README.md
+  echo baseline > CLAUDE.md
   git add -A
   git commit -qm baseline >/dev/null
 
@@ -71,6 +75,10 @@ else
   echo "changed docs content" > docs/some-spec.md
   echo "changed evals content" > evals/some-scorecard.md
   echo "changed bench content" > bench/baseline.md
+  echo "changed refinement-skills content" > refinement-skills/reviewer.md
+  echo "changed claude skills content" > .claude/skills/example/SKILL.md
+  echo "changed readme content" > README.md
+  echo "changed claude-md content" > CLAUDE.md
   git add -A
   git commit -qm "feature change" >/dev/null
 
@@ -80,6 +88,10 @@ else
   assert_not_contains "diff excludes docs/*.md change" "changed docs content" "$DIFF_OUT"
   assert_not_contains "diff excludes evals/*.md change" "changed evals content" "$DIFF_OUT"
   assert_not_contains "diff excludes bench/*.md change" "changed bench content" "$DIFF_OUT"
+  assert_contains "diff includes refinement-skills/*.md change" "changed refinement-skills content" "$DIFF_OUT"
+  assert_contains "diff includes .claude/skills/**/*.md change" "changed claude skills content" "$DIFF_OUT"
+  assert_contains "diff includes root README.md change" "changed readme content" "$DIFF_OUT"
+  assert_contains "diff includes root CLAUDE.md change" "changed claude-md content" "$DIFF_OUT"
   if [ -n "$DIFF_OUT" ]; then
     echo "  PASS: diff is non-empty"; PASSED=$((PASSED+1))
   else

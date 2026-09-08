@@ -63,7 +63,6 @@ git diff main...HEAD \
   -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' \
   ':!.archon/memory/**' \
   ':!codeindex.json' ':!symbolindex.json' \
-  ':!docs/codeindex-hotspots.md' ':!docs/database-schema.md' \
   2>/dev/null > "$RANK_IN"
 python3 dark-factory/scripts/diff_rank.py \  # TARGET-PATH
   --diff "$RANK_IN" \

@@ -286,7 +286,8 @@ just churns the docs the implement agent correctly wrote (the exact failure that
 `scope-spillover` doc tickets this rule removes).
 
 Before any excision (3.6.1) or ticketing (3.6.2), **drop every `[OOS]` entry whose file/area is
-a documentation file** — its file/area (the text before the `—` separator) matching `.md` or
+a documentation file** — its file/area (the text before the `—` separator) matching
+`ARCHITECTURE.md`, `PROJECT_STRUCTURE.md`, `ENV_VARIABLES.md`, `README.md`, or `CLAUDE.md`, or
 under `docs/`. Only non-doc (code / config / seed) OOS entries proceed to remediation. Log
 each dropped doc entry:
 `echo "scope-enforcement: doc change kept in-scope (not excised/ticketed): <entry>"`.
