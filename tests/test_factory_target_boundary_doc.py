@@ -171,3 +171,13 @@ def test_handoff_reason_code_is_real():
     """`producing_loop_factory_owned` is quoted bare in the doc; tie it to its source."""
     src = (REPO_ROOT / "scripts" / "factory_core" / "handoff.py").read_text(encoding="utf-8")
     assert "producing_loop_factory_owned" in src
+
+
+def test_readme_links_to_boundary_doc_near_loops_row():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/factory-target-boundary.md" in readme
+    loops_idx = readme.index("| `loops` |")
+    link_idx = readme.index("docs/factory-target-boundary.md")
+    assert abs(readme.count("\n", 0, loops_idx) - readme.count("\n", 0, link_idx)) <= 3, (
+        "pointer should be within a few lines of the `loops` table row"
+    )
