@@ -6,6 +6,7 @@ verifier contract), #198 (A4 stop-condition schema), #199 (A5 handoff manifest) 
 closed. #200 (A6 bypass prevention) is also closed and is in scope per the issue body's
 "bypass rules (A6)" bullet even though not listed in a `Depends on:` line.
 **Status:** spec-pending-review
+**Operator spec gate:** 2026-09-09 — approved with amendments AM-1—AM-10 from an independent read-only review that re-verified every claim against `origin/main`. Two blocking omissions (committed forward references, and overlap with `docs/adapter-authoring-guide.md`) plus four accuracy corrections are folded in below.
 
 ---
 
@@ -49,19 +50,53 @@ regardless of the comment's signature, so this spec resolves that discrepancy ex
     keyword/path defense-in-depth, not a factory-wide hard block — and note dark-factory's
     own analogous exclusions (`deploy/instances/`, `publish.yml`, the skill/settings/MCP
     self-modification surfaces) as the parallel example for the self-target instance.
+    State precisely what `hard_exclude_paths` does, because the obvious reading is wrong: its
+    only consumer is `scripts/factory_core/epic_autopilot.py` (`_hard_exclude_paths` /
+    `_load_exclude_paths` → `hard_excluded()`), which filters epic-autopilot candidate
+    *tickets*. It never inspects a diff, never aborts a run, and `config/config.yaml` ships
+    `epic_autopilot.enabled: false`. Do **not** repeat `README.md:167`'s phrasing ("Path
+    prefixes the factory will never touch; matched diff paths abort the run") — that is not
+    what the code does, and the doc must not inherit the error. What actually holds
+    `deploy/instances/` and `publish.yml` on the self target is CLAUDE.md's Hard limits plus
+    `.factory/adapter.yaml`'s `migration_seed_auth_patterns` entries `^deploy/` and
+    `^\.github/workflows/` reaching `gate_blast_radius.py`.
 - Doc lives at `docs/factory-target-boundary.md` (issue's explicit path) — a durable,
   living reference doc at the `docs/` root, not under `docs/superpowers/` (in-flight
   artifact) or `docs/archive/` (completed-workflow artifact); same tier as `README.md`,
   `CLAUDE.md`, `ARCHITECTURE.md`.
 - README's existing `## Adapter contract` section (`README.md:155`) gets a pointer to the
   new doc; the `loops` row of the `adapter.yaml keys` table
-  (`README.md:174`, currently citing `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md`)
+  (the `loops` row, cited by its key rather than by line number — it is at `README.md:175` on
+  `origin/main`, already one line off this spec's own citation; it currently points at
+  `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md`)
   is the natural anchor since it already flags loop-schema-adjacent contract detail.
 - `docs/domain.md` conventions: glossary-term discipline against `CONTEXT.md` is N/A —
   this repo has no `CONTEXT.md`, and `docs/domain.md` itself says to proceed silently
   when that file is absent. ADR-conflict flagging: checked `docs/adr/0008` (autonomous
   development trust model) and `docs/adr/0011` (GELF logging) — neither conflicts with
   the boundary contract; no flag needed.
+- **`docs/adapter-authoring-guide.md` overlap and authority order (mandatory).** That doc
+  already ships `## Side-effect levels` (the full level→profile table, the `effective_level`
+  fail-closed rule, `FACTORY_OWNED_MIN_LEVEL`) and `## Handoff manifest (A5)` (schema, intake
+  path, reason codes, trust boundary). The new doc must NOT restate either: its A2 and A5
+  sections give the one-paragraph contract statement plus a link, and the doc declares the
+  authority order explicitly, mirroring the guide's own header convention ("if they disagree,
+  the design doc is authoritative"). Duplicating those tables would create the second,
+  drifting source of truth this ticket exists to prevent.
+- **A trust-model section is a committed obligation, not an option (mandatory).**
+  `docs/adapter-authoring-guide.md:310` already reads "see `docs/factory-target-boundary.md`
+  (#201) for the full trust-model writeup", and A2's design spec
+  (`docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md:72`) says "Say
+  this plainly in `docs/factory-target-boundary.md` (#201)". Two live code comments wait on it
+  as well (`scripts/shims/git:65`, `scripts/shims/gh:55`, both "F13: the adapter guide's
+  section until #201 creates docs/factory-target-boundary.md"). The doc must therefore carry a
+  trust-model section stating: the shim is a `PATH` shim, so a process invoking `/usr/bin/git`
+  by absolute path bypasses it; v1 is a policy boundary against mistaken or prompt-injected
+  behaviour, **not** a security boundary against a deliberately hostile agent; the boundary
+  against a hostile agent is the credential, deferred as #196/D3. Without this section the
+  merge leaves four in-repo references pointing at a writeup that does not exist — the exact
+  failure this ticket exists to prevent. Retargeting the shims' deny message is out of scope
+  for #201; file it as a follow-up.
 - Known gaps must be named honestly, each citing its open issue number and current
   status (all three open as of this spec): #374 (a `HUMAN_REQUIRED` block from
   `gate_blast_radius.py` has no approval memory — re-running validate after a
@@ -69,7 +104,23 @@ regardless of the comment's signature, so this spec resolves that discrepancy ex
   `blast.md`; `scripts/verdict_gate_check.sh` guards only `conformance.md`/`review.md`),
   #412 (fail-closed findings from `gate_blast_radius.py::_adapter_snapshot` carry no
   diagnostic beyond "adapter.yaml unparseable at `<ref>`", and the base ref is validated
-  against HEAD's current schema, not the schema that was live at the base commit).
+  against HEAD's current schema, not the schema that was live at the base commit). Plus the
+  following, verified against the shipped A6 code and not optional — a gaps list that omits
+  them overstates the boundary:
+  - `workflows/**` and `commands/**` are visibility-only, never blocking
+    (`adapter_defaults._VISIBILITY_ONLY`; A6 OD1) — a PR editing the DAG or a phase command
+    reaches Gates 2/3 but never `HUMAN_REQUIRED`.
+  - `.factory/adapter.yaml` itself is visibility-only for the same reason (OD2); its
+    escalation risk is caught only by the semantic diff, and only when that file is in the
+    changed set.
+  - `safety.hard_exclude_paths` is deliberately outside the floor (OD3): a PR can shrink it,
+    caught only by the `safety:`-block diff under the same condition.
+  - #411 (open) — the conformance agent refuses self-target runs whose subject is the
+    shadowing paths, i.e. the floor's own `dark-factory/scripts/` entry.
+  - `tests/test_scheduler.sh` is not in `.github/workflows/ci.yml`'s named bash-test list —
+    include this only if the doc claims CI coverage for a boundary mechanism.
+  - #414 is a scheduler dispatch-guard bug with no boundary relevance and is deliberately
+    excluded.
 
 ## Architecture / Approach
 
@@ -88,12 +139,20 @@ implement phase should write against.
    - Maker never validates maker (`scripts/factory_core/verifier.py::assert_verifier_independent()`,
      called from `adapter.py` on every loop at load time; docstring cites the
      "clean-room-grader principle", #189).
-   - Externally checkable stop conditions — `verification.stop_condition` is a required
-     string field (`adapter.py`'s `str_fields`/`required_fields` for the `verification`
-     sub-block); runtime evaluation in `scripts/factory_core/breaker.py::evaluate_stop_condition()`
-     (`max_iterations`/`deadline`/`max_tokens`).
-   - Side-effect levels 4–5 are factory-owned (`adapter.py` requires `budget_caps` +
-     `human_checkpoint` at level ≥4).
+   - Declared, machine-evaluable stop conditions — `verification.stop_condition` is a
+     required field (`adapter.py`'s `required_fields` for the `verification` sub-block) but is
+     validated only as a non-empty string; **nothing parses its content**. The caps actually
+     evaluated are `scheduling.max_iterations`, `scheduling.deadline_seconds` and
+     `budget_caps.max_tokens`, read by `breaker.py::_evaluate_loop_caps()`. The doc must not
+     call these "externally checkable": `evaluate_stop_condition`'s own docstring says
+     "Cap-class-only stop evaluator (state-file I/O only — no subprocess, no network; the
+     external-predicate class lives on #197's verifier.py seam, never here)".
+   - Side-effect levels 4–5 are factory-owned — enforced at three sites, all keyed on
+     `side_effect.FACTORY_OWNED_MIN_LEVEL = 4`: `adapter.py` requires `budget_caps` +
+     `human_checkpoint` at level ≥4; `verifier.py::resolve_and_run` returns
+     `STATUS: BLOCKED` / `REQUIRED_PROFILE: factory-owned` for any level ≥4; and
+     `handoff.py::cross_check` rejects such a manifest with `producing_loop_factory_owned`.
+     A target may *declare* a level-4/5 loop; nothing will run it.
    - Level 6 is human-approved and out of v1 (`side_effect.py` has no level-6 profile;
      `adapter.py` raises `AdapterError` on `sel == 6`, citing "#196/D1" and "out of scope
      for v1" — not "permanently", matching the issue's own framing more precisely than
@@ -135,18 +194,56 @@ implement phase should write against.
    `docs/superpowers/specs/2026-09-08-boundary-bypass-prevention-a6-design.md`, including
    its **OD1** decision that `workflows/**` and `commands/**` stay visibility-only (not
    blocking) while `.factory/hooks/**`, `.claude/**`, `.archon/commands/**`,
-   `.archon/workflows/**`, and `dark-factory/scripts/**` are in the blocking floor.
-9. **Known gaps** — #374, #407, #412 as listed in Requirements above, stated as open
-   items, not resolved history.
-10. **README pointer** — one line in `README.md`'s `## Adapter contract` section (near
+   `.archon/workflows/**`, and `dark-factory/scripts/**` are in the blocking floor, and that
+   `.factory/adapter.yaml` itself is visibility-only (OD2). Cite the "every return path" claim
+   by its two call sites (`adapter.py`'s no-file branch and its merged branch) plus
+   `gate_blast_radius.py`, which re-unions the floor when `adapter.load()` raises — not by
+   quoting the docstring that makes the claim, which would be a docstring vouching for itself.
+   Two further shipped A6 mechanisms the section must name: `gate_blast_radius.py::load_config()`
+   reads `blast_radius.*` from the image-baked config layered with `git show <base-ref>:<path>`,
+   never the working tree, so a PR cannot flip its own kill switch; and
+   `commands/dark-factory-validate.md` prefers the baked
+   `/opt/dark-factory/scripts/gate_blast_radius.py` over the clone copy, so a target that tracks
+   its own `dark-factory/scripts/` is not the copy that decides its own gate.
+9. **Trust model (mandatory — see Requirements).** The shim is a `PATH` shim; an absolute
+   `/usr/bin/git` bypasses it. v1 is a policy boundary against mistaken or prompt-injected
+   behaviour, not a security boundary against a deliberately hostile agent; that boundary is
+   the credential, deferred as #196/D3. Four in-repo references already point here for this.
+10. **What is declared vs. what runs (mandatory).** There is no loop dispatcher.
+    `verifier.py::resolve_and_run`'s docstring calls itself "the primitive a *future*
+    dispatcher, the CLI below, or a test calls per declared loop";
+    `breaker.py::format_trip_reason` records that "No live caller constructs the three
+    loop-scoped variants today"; the only production caller of `evaluate_stop_condition` is
+    `factory_core/cli.py`. A1/A3/A4/A5 are a validated declaration surface plus tested
+    primitives — `README.md`'s `loops` row ("parse/validate/surface only, no runtime
+    enforcement yet") is accurate and the doc must agree with it. A6 and A2's shims are what
+    runs today; all factory phases are configured at `side_effect: 5` (`config/config.yaml`),
+    so the level profiles constrain nothing in current operation. Without this section, A1 and
+    A3–A5 read as running machinery.
+11. **Known gaps** — as listed in Requirements above, stated as open items, not resolved
+    history.
+12. **README pointer** — one line in `README.md`'s `## Adapter contract` section (near
     the `loops` table row) linking to `docs/factory-target-boundary.md`.
 
 ### Self-review the implement phase must run
 
-Before committing the doc, re-verify every file:line citation against the checkout at
-implement time (not this spec's snapshot) — code moves between refine and implement.
-The acceptance criterion is "matches shipped behavior," so a stale line number is a
-correctness bug in the doc, not a nitpick.
+**Cite symbols, not line numbers.** Every citation is `path::symbol` — a function, class or
+module constant (`adapter.py::_apply_boundary_floor`,
+`adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR`,
+`gate_blast_radius.py::_boundary_escalation_findings`) — never `path:line`. Line numbers drift
+within days: this spec's own `README.md:174` citation was already off by one before the spec
+gate ran, and the doc would have been stale before it merged.
+
+**Add a drift guard.** The implement phase adds one pytest that reads
+`docs/factory-target-boundary.md`, extracts every `path::symbol` citation, and asserts the
+symbol still appears in that file — following the existing precedent of
+`tests/test_verifier_contract_doc_referenced.py` (doc/command reference pinning) and
+`tests/test_adapter.py::test_config_yaml_hard_exclude_paths_matches_defaults` (config/code list
+pinning). Without it, "matches shipped behavior" has no enforcement after the merge commit, and
+this doc becomes the stale artifact it was written to replace.
+
+Before committing, re-verify every citation against the checkout at implement time, not this
+spec's snapshot.
 
 ## Alternatives considered
 
@@ -167,11 +264,10 @@ correctness bug in the doc, not a nitpick.
 
 ## Open questions (non-blocking)
 
-- Whether `README.md`'s `loops` table row should also be updated to drop "no runtime
-  enforcement yet" if A1.5/A2's shipped behavior has since added enforcement — out of
-  this ticket's scope (README's adapter-contract table accuracy is a pre-existing
-  concern, not something #201 introduces), but worth a follow-up ticket if the implement
-  phase finds it stale.
+- ~~Whether `README.md`'s `loops` table row should drop "no runtime enforcement yet".~~
+  **Resolved at the spec gate: it is accurate, keep it.** No loop dispatcher exists (see doc
+  outline section 10); `verifier.resolve_and_run` and the loop-scoped breaker trip reasons have
+  no live callers. No follow-up ticket needed. Retained here for the record.
 
 ## Assumptions (flagged)
 
