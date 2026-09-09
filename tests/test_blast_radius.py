@@ -313,3 +313,241 @@ def test_dark_factory_own_adapter_yaml_protects_skill_security():
     assert proc.returncode == 0, proc.stderr
     assert "STATUS: HUMAN_REQUIRED" in proc.stdout
     assert "TRIGGER: skill-security" in proc.stdout
+
+
+# ── Boundary-escalation semantic diff (#200/A6, Requirement 5) ─────────────────
+
+_BASE_LOOP = {
+    "name": "refine-loop",
+    "purpose": "test loop",
+    "side_effect_level": 2,
+    "discovery": {"trigger": "label", "inputs": ["issue"]},
+    "handoff": {"manifest": "manifest.json", "outputs": ["out.md"]},
+    "verification": {"verifier": "scripts/verify.sh", "stop_condition": "scripts/stop.sh"},
+    "persistence": {"artifacts": ["out.md"]},
+    "scheduling": {"failure_behavior": "retry"},
+}
+
+
+def _adapter_doc(safety=None, loops=None):
+    return {"schema_version": 1, "safety": safety or {}, "loops": loops or []}
+
+
+@pytest.fixture
+def adapter_diff_run(tmp_path, monkeypatch):
+    """Commit a base `.factory/adapter.yaml` on `main`, then hand back a callable that
+    overwrites the *working-tree* copy (simulating a PR's HEAD state, uncommitted) and
+    invokes the gate -- the semantic diff compares --base-ref vs. the working tree
+    (Architecture section 3: 'new' is loaded from the working tree, 'old' from
+    --base-ref), never two commits."""
+    root = tmp_path
+    _init_repo(root)
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))  # hermetic (P1)
+
+    def _setup(base_adapter):
+        _write_config(root)
+        (root / "hotspots.md").write_text("")
+        d = root / ".factory"; d.mkdir(exist_ok=True)
+        text = base_adapter if isinstance(base_adapter, str) else yaml.dump(base_adapter)
+        (d / "adapter.yaml").write_text(text)
+        _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "base")
+
+        def _run(new_adapter, changed_files=None):
+            text = new_adapter if isinstance(new_adapter, str) else yaml.dump(new_adapter)
+            (d / "adapter.yaml").write_text(text)
+            files = changed_files if changed_files is not None else [".factory/adapter.yaml"]
+            proc = subprocess.run(
+                [
+                    sys.executable, str(SCRIPT),
+                    "--changed-files-stdin",
+                    "--lines-changed", "10",
+                    "--hotspots", str(root / "hotspots.md"),
+                    "--config", _CONFIG_REL,
+                    "--clone-dir", str(root),
+                    "--base-ref", "main",
+                ],
+                input="\n".join(files),
+                capture_output=True, text=True,
+            )
+            assert proc.returncode == 0, proc.stderr
+            return _parse(proc.stdout)
+
+        return _run
+
+    return _setup
+
+
+def test_boundary_diff_no_op_no_false_positive(adapter_diff_run):
+    base = _adapter_doc(loops=[dict(_BASE_LOOP)])
+    run = adapter_diff_run(base)
+    out = run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    assert out["STATUS"] == "PASS"
+    assert "boundary-escalation" not in out["_stdout"]
+
+
+def test_boundary_diff_skipped_when_adapter_not_changed(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    out = run(_adapter_doc(safety={"x": "y"}), changed_files=["frontend/src/Foo.tsx"])
+    assert out["STATUS"] == "PASS"
+
+
+def test_boundary_diff_safety_block_change_flags(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(safety={"critical_diff_paths": ["^a/"]}))
+    out = run(_adapter_doc(safety={"critical_diff_paths": ["^a/", "^b/"]}))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["TRIGGER"] == "boundary-escalation"
+    assert "safety: block changed" in out["_stdout"]
+
+
+def test_boundary_diff_side_effect_level_increase_flags(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP, side_effect_level=2)]))
+    out = run(_adapter_doc(loops=[dict(_BASE_LOOP, side_effect_level=3)]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "side_effect_level increased 2 -> 3" in out["_stdout"]
+
+
+def test_boundary_diff_side_effect_level_decrease_not_flagged(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP, side_effect_level=3)]))
+    out = run(_adapter_doc(loops=[dict(_BASE_LOOP, side_effect_level=2)]))
+    assert out["STATUS"] == "PASS"
+
+
+def test_boundary_diff_verifier_change_flags(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    new_loop = dict(_BASE_LOOP,
+                     verification={"verifier": "scripts/other.sh", "stop_condition": "scripts/stop.sh"})
+    out = run(_adapter_doc(loops=[new_loop]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "verification.verifier changed" in out["_stdout"]
+
+
+def test_boundary_diff_stop_condition_change_flags(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    new_loop = dict(_BASE_LOOP,
+                     verification={"verifier": "scripts/verify.sh", "stop_condition": "scripts/other_stop.sh"})
+    out = run(_adapter_doc(loops=[new_loop]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "verification.stop_condition changed" in out["_stdout"]
+
+
+def test_boundary_diff_new_factory_owned_loop_flags(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[]))
+    new_loop = dict(_BASE_LOOP, name="new-loop", side_effect_level=4,
+                     budget_caps={"max_tokens": 1000}, human_checkpoint="required")
+    out = run(_adapter_doc(loops=[new_loop]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "new loop declares side_effect_level 4" in out["_stdout"]
+
+
+def test_boundary_diff_new_low_level_loop_not_flagged(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[]))
+    new_loop = dict(_BASE_LOOP, name="new-loop", side_effect_level=2)
+    out = run(_adapter_doc(loops=[new_loop]))
+    assert out["STATUS"] == "PASS"
+
+
+def test_boundary_diff_factory_owned_loop_entry_change_flags(adapter_diff_run):
+    """F7: any change to a >=4-level loop's entry is a finding, not just sel/verifier."""
+    old_loop = dict(_BASE_LOOP, name="lvl4", side_effect_level=4,
+                     budget_caps={"max_tokens": 1000}, human_checkpoint="required")
+    run = adapter_diff_run(_adapter_doc(loops=[old_loop]))
+    new_loop = dict(old_loop, purpose="changed purpose")
+    out = run(_adapter_doc(loops=[new_loop]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "factory-owned loop" in out["_stdout"]
+
+
+def test_boundary_diff_factory_owned_loop_removal_flags(adapter_diff_run):
+    old_loop = dict(_BASE_LOOP, name="lvl4", side_effect_level=4,
+                     budget_caps={"max_tokens": 1000}, human_checkpoint="required")
+    run = adapter_diff_run(_adapter_doc(loops=[old_loop]))
+    out = run(_adapter_doc(loops=[]))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "removed" in out["_stdout"]
+
+
+def test_boundary_diff_duplicate_loop_name_fails_closed(adapter_diff_run):
+    """A duplicate loop name would silently collapse in the {name: loop} comparison
+    maps -- adapter.py::load()'s own duplicate check must also gate this snapshot."""
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    dup = [dict(_BASE_LOOP), dict(_BASE_LOOP, side_effect_level=3)]
+    out = run(_adapter_doc(loops=dup))
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "unparseable" in out["_stdout"]
+
+
+def test_boundary_diff_unparseable_head_fails_closed(adapter_diff_run):
+    run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
+    out = run("{broken: [\n")
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "unparseable" in out["_stdout"]
+
+
+def test_boundary_diff_unparseable_base_fails_closed(tmp_path):
+    root = tmp_path
+    _init_repo(root)
+    _write_config(root)
+    (root / "hotspots.md").write_text("")
+    d = root / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("{broken: [\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    (d / "adapter.yaml").write_text(yaml.dump(_adapter_doc(loops=[dict(_BASE_LOOP)])))
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
+         "--hotspots", str(root / "hotspots.md"), "--config", _CONFIG_REL,
+         "--clone-dir", str(root), "--base-ref", "main"],
+        input=".factory/adapter.yaml", capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "STATUS: HUMAN_REQUIRED" in proc.stdout
+    assert "unparseable" in proc.stdout
+
+
+def test_boundary_diff_unresolvable_base_ref_fails_closed(tmp_path):
+    """Requirement 5's fail-closed rule extends to a base ref that doesn't resolve at
+    all (e.g. a shallow clone without `main` reachable) -- distinct from "the file is
+    simply absent at a ref that does resolve", which is a valid, non-error state."""
+    root = tmp_path
+    _init_repo(root)
+    _write_config(root)
+    (root / "hotspots.md").write_text("")
+    d = root / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(yaml.dump(_adapter_doc(loops=[dict(_BASE_LOOP)])))
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
+         "--hotspots", str(root / "hotspots.md"), "--config", _CONFIG_REL,
+         "--clone-dir", str(root), "--base-ref", "totally-bogus-ref-xyz"],
+        input=".factory/adapter.yaml", capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "STATUS: HUMAN_REQUIRED" in proc.stdout
+
+
+def test_boundary_diff_file_absent_at_resolvable_base_ref_is_not_an_error(tmp_path):
+    """The base ref resolving fine but simply not having .factory/adapter.yaml at all
+    yet (e.g. this PR is the one introducing it) is a valid 'no prior adapter' state,
+    not a parse failure -- exercises the git-show stderr-inspection branch in
+    _adapter_snapshot directly (the base commit below has no .factory/ directory at
+    all, so `git show main:.factory/adapter.yaml` genuinely exits non-zero with "does
+    not exist in" rather than succeeding on an empty-but-tracked file)."""
+    root = tmp_path
+    _init_repo(root)
+    _write_config(root)
+    (root / "hotspots.md").write_text("")
+    (root / "README.md").write_text("no adapter.yaml at this ref\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base, no adapter.yaml yet")
+    d = root / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(yaml.dump(_adapter_doc(loops=[])))
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
+         "--hotspots", str(root / "hotspots.md"), "--config", _CONFIG_REL,
+         "--clone-dir", str(root), "--base-ref", "main"],
+        input=".factory/adapter.yaml", capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "STATUS: PASS" in proc.stdout

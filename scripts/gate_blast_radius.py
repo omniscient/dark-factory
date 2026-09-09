@@ -191,6 +191,127 @@ def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> li
     return cats
 
 
+def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
+    """Return (parsed adapter.yaml dict, parse_ok) for `ref` (None = working tree).
+
+    A missing file -- at the working tree, or at a *resolvable* ref -- is a valid "no
+    adapter" state (matches adapter.py::load()'s own no-file branch) and returns
+    ({}, True). parse_ok is False when: the ref itself does not resolve (distinct from
+    the file being absent at a ref that does resolve -- inspected via `git show`'s
+    stderr text, since both cases exit non-zero); the file exists but is malformed
+    YAML or not a top-level mapping; a loops[] entry fails adapter.py's own
+    loop-schema validation; or two loops[] entries share a name (mirrors
+    adapter.py::load()'s duplicate-name check, since a duplicate would otherwise
+    silently collapse in the {name: loop} comparison maps below). The caller fails
+    closed on parse_ok=False (Requirement 5/OD6).
+    """
+    import yaml
+    from factory_core import adapter as _adapter
+    from factory_core import verifier as _verifier
+
+    try:
+        if ref is None:
+            path = Path(clone_dir) / ".factory" / "adapter.yaml"
+            if not path.is_file():
+                return {}, True
+            text = path.read_text(encoding="utf-8")
+        else:
+            proc = subprocess.run(
+                ["git", "-C", clone_dir, "show", f"{ref}:.factory/adapter.yaml"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                stderr = proc.stderr
+                if "does not exist in" in stderr or "exists on disk, but not in" in stderr:
+                    return {}, True
+                return None, False
+            text = proc.stdout
+        data = yaml.safe_load(text)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return None, False
+        seen_names = set()
+        for i, entry in enumerate(data.get("loops", []) or []):
+            _adapter._validate_loop(entry, i)
+            _verifier.assert_verifier_independent(entry)  # same check load() applies (operator review P5)
+            name = entry.get("name")
+            if name in seen_names:
+                raise _adapter.AdapterError(f"duplicate loop name '{name}'")
+            seen_names.add(name)
+        return data, True
+    except Exception:
+        return None, False
+
+
+def _boundary_escalation_findings(clone_dir: str, base_ref: str) -> list:
+    """Semantic diff of .factory/adapter.yaml, base_ref vs. the working tree
+    (Requirement 5). Only called by main() when that file is in the changed set."""
+    from factory_core import side_effect as _side_effect
+
+    old, old_ok = _adapter_snapshot(clone_dir, base_ref)
+    new, new_ok = _adapter_snapshot(clone_dir, None)
+    if not old_ok:
+        return [f"adapter.yaml unparseable at {base_ref}"]
+    if not new_ok:
+        return ["adapter.yaml unparseable at HEAD"]
+
+    findings = []
+    # `or {}` normalizes "no safety: key at all" (a brand-new adapter.yaml, or the
+    # file absent at that ref) and "safety: {}" (an explicit empty block) to the same
+    # comparable value -- both mean "no explicit safety overrides", so introducing an
+    # adapter.yaml with nothing under safety: must not itself read as a change.
+    if (old.get("safety") or {}) != (new.get("safety") or {}):
+        findings.append("safety: block changed")
+
+    min_level = _side_effect.FACTORY_OWNED_MIN_LEVEL
+    old_loops = {l["name"]: l for l in (old.get("loops") or [])}
+    new_loops = {l["name"]: l for l in (new.get("loops") or [])}
+
+    for name, new_loop in new_loops.items():
+        old_loop = old_loops.get(name)
+        if old_loop is None:
+            sel = new_loop.get("side_effect_level")
+            if isinstance(sel, int) and sel >= min_level:
+                findings.append(
+                    f"loops[{name}]: new loop declares side_effect_level {sel} "
+                    f">= {min_level} (factory-owned)")
+            continue
+
+        old_sel = old_loop.get("side_effect_level")
+        new_sel = new_loop.get("side_effect_level")
+        if isinstance(old_sel, int) and isinstance(new_sel, int) and new_sel > old_sel:
+            findings.append(
+                f"loops[{name}]: side_effect_level increased {old_sel} -> {new_sel}")
+
+        old_ver = old_loop.get("verification") or {}
+        new_ver = new_loop.get("verification") or {}
+        for field in ("verifier", "stop_condition"):
+            if old_ver.get(field) != new_ver.get(field):
+                findings.append(
+                    f"loops[{name}]: verification.{field} changed "
+                    f"{old_ver.get(field)!r} -> {new_ver.get(field)!r}")
+
+        is_factory_owned = (
+            (isinstance(old_sel, int) and old_sel >= min_level)
+            or (isinstance(new_sel, int) and new_sel >= min_level)
+        )
+        if is_factory_owned and old_loop != new_loop:
+            findings.append(
+                f"loops[{name}]: factory-owned loop (side_effect_level >= "
+                f"{min_level}) entry changed")
+
+    for name, old_loop in old_loops.items():
+        if name in new_loops:
+            continue
+        old_sel = old_loop.get("side_effect_level")
+        if isinstance(old_sel, int) and old_sel >= min_level:
+            findings.append(
+                f"loops[{name}]: factory-owned loop (side_effect_level {old_sel}) removed")
+
+    return findings
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config, args.clone_dir, args.base_ref)
@@ -220,10 +341,15 @@ def main() -> None:
         if cats:
             triggered.append((fpath, cats))
 
+    boundary_findings = []
+    if ".factory/adapter.yaml" in changed_files:
+        boundary_findings = _boundary_escalation_findings(clone_dir, args.base_ref)
+
     hard_trigger = bool(triggered)
     size_trigger = enabled and size_blocks and lines_changed > size_budget
+    boundary_trigger = bool(boundary_findings)
 
-    if hard_trigger or size_trigger:
+    if hard_trigger or size_trigger or boundary_trigger:
         status = "HUMAN_REQUIRED"
     elif not enabled:
         status = "SKIPPED"
@@ -231,10 +357,12 @@ def main() -> None:
         status = "PASS"
 
     severity = "critical" if status == "HUMAN_REQUIRED" else "none"
-    findings_count = len(triggered) + (1 if size_trigger else 0)
+    findings_count = len(triggered) + len(boundary_findings) + (1 if size_trigger else 0)
 
     trigger_label = "none"
-    if hard_trigger:
+    if boundary_trigger:
+        trigger_label = "boundary-escalation"
+    elif hard_trigger:
         cats_all = [c for _, cats in triggered for c in cats]
         if "hotspot" in cats_all:
             trigger_label = "hotspot"
@@ -252,6 +380,8 @@ def main() -> None:
     print("---")
     print(f"TRIGGER: {trigger_label}")
     print("TRIGGERED_FILES:")
+    for finding in boundary_findings:
+        print(f"  - {finding}")
     for fpath, cats in triggered:
         label = ", ".join(cats)
         print(f"  - {fpath} (category: {label})")
