@@ -15,6 +15,8 @@ REQUIRED_SECTIONS = [
     "## Non-negotiables",
     "## The `loops:` schema (A1)",
     "## Side-effect levels and enforced profiles (A2)",
+    "## Verifier contract (A3)",
+    "## Stop-condition schema (A4)",
 ]
 
 
@@ -86,3 +88,10 @@ def test_a2_section_links_to_authoring_guide_instead_of_restating_table():
     section = _section(content, "## Side-effect levels and enforced profiles (A2)")
     assert "docs/adapter-authoring-guide.md" in section
     assert "_PROFILES" not in section, "A2 section must link out, not restate the level table"
+
+
+def test_a3_section_names_verdict_schema_tokens():
+    content = _doc_text()
+    section = _section(content, "## Verifier contract (A3)")
+    for token in ("STATUS", "GATE_TYPE", "FINDINGS_COUNT", "SEVERITY"):
+        assert token in section, f"A3 section missing verdict-schema token: {token}"

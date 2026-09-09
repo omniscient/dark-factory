@@ -106,3 +106,29 @@ Level semantics live in one module — `scripts/factory_core/side_effect.py::LEV
 this doc links to it rather than restating it — see the Authority order note above.
 
 Design record: `docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md`.
+
+## Verifier contract (A3)
+
+`scripts/factory_core/verifier.py` implements the maker-not-checker declaration-time check
+(`assert_verifier_independent`, see Non-negotiables), target-verifier registration
+(`verification.verifier` resolved relative to the clone root by
+`scripts/factory_core/verifier.py::resolve_verifier`, fail-closed on an absolute or
+clone-escaping path), and the shared verdict schema
+(`STATUS`/`GATE_TYPE`/`FINDINGS_COUNT`/`SEVERITY`). The full operational contract — env
+vars, output modes, fail-closed defaults, reserved output names — lives in
+`refinement-skills/VERIFIER-CONTRACT.md`, read by each reviewing phase command at phase
+start from the baked `/opt/refinement-skills/` copy (`commands/dark-factory-plan.md`,
+`-conformance.md`, `-code-review.md`), with the inline model pin authoritative if the image
+predates it; this
+doc does not duplicate it.
+
+Design record: `docs/superpowers/specs/2026-08-28-verifier-abstraction-a3-design.md`.
+
+## Stop-condition schema (A4)
+
+`verification.stop_condition` (see Non-negotiables for exactly what it does and does not
+validate) plus `scripts/factory_core/breaker.py::evaluate_stop_condition`, the
+cap-class-only evaluator. The only production caller today is
+`scripts/factory_core/cli.py`.
+
+Design record: `docs/archive/2026-08-29-loop-declarative-stop-conditions-a4-design.md`.
