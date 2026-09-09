@@ -6,7 +6,7 @@
 # MCP surface (#46) rather than a generic migration/auth/trading/factory match. Kept as
 # a single source of truth here so the two gates can't drift out of sync.
 SKILL_SECURITY_TOKENS = (
-    "claude/skills", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+    "claude/", "settings", "mcp", "claude-plugin", "factory/hooks",
 )
 
 DEFAULTS = {
@@ -63,7 +63,10 @@ DEFAULTS = {
             r"^dark-factory/",
             # Claude Skills / settings / hooks / plugin / MCP surface (#46).
             # SKILL.md is visibility-only here — it is deliberately absent from
-            # migration_seed_auth_patterns below (spec Q2/A2).
+            # migration_seed_auth_patterns below (spec Q2/A2). Superseded at the
+            # gate by FACTORY_OWNED_MIGRATION_SEED_FLOOR (^\.claude/, #200/OD7):
+            # the floor blocks any .claude/** edit; this DEFAULTS list stays as
+            # it is.
             r"^\.claude/skills/.*/scripts/",
             r"^\.claude/skills/.*/SKILL\.md$",
             r"^\.claude/settings\.json$",
@@ -81,6 +84,9 @@ DEFAULTS = {
             # excluded: a path glob can't tell a frontmatter permission change
             # from a prose edit, so SKILL.md content is judged by the
             # code-review/conformance RUBRIC personas instead (spec Q2/A2).
+            # Superseded at the gate by FACTORY_OWNED_MIGRATION_SEED_FLOOR
+            # (^\.claude/, #200/OD7): the floor blocks any .claude/** edit;
+            # this DEFAULTS list stays as it is.
             r"^\.claude/skills/.*/scripts/",
             r"^\.claude/settings\.json$",
             r"^\.claude/settings\.local\.json$",
@@ -101,3 +107,34 @@ DEFAULTS = {
     },
     "loops": [],
 }
+
+# Factory-owned boundary paths (#200/A6): unioned into safety.critical_diff_paths and
+# safety.migration_seed_auth_patterns after every adapter.yaml merge (adapter.py::load),
+# regardless of what a target's adapter.yaml declares for those two lists. Deliberately
+# small and boundary-specific -- not the full DEFAULTS lists, which would re-inject
+# MarketHawk-specific paths (e.g. ^alembic/versions/) into every target.
+FACTORY_OWNED_CRITICAL_DIFF_FLOOR = [
+    r"^\.factory/hooks/",
+    r"^\.factory/adapter\.yaml$",
+    r"^\.claude/",
+    r"^workflows/",
+    r"^commands/",
+    # Paths that shadow baked factory enforcement when a target tracks them
+    # (entrypoint.sh copies the baked pieces into the clone only if absent) -- F2.
+    r"^\.archon/commands/",
+    r"^\.archon/workflows/",
+    r"^dark-factory/scripts/",
+]
+
+# migration_seed_auth_patterns is the hard-blocking (HUMAN_REQUIRED) list.
+# .factory/adapter.yaml itself is excluded here: its loops: block is target-definable
+# for side_effect_level 1-3 (#196), so blanket-blocking the whole file on every edit
+# would require human review for benign loop authoring; its escalation risk is caught
+# by gate_blast_radius.py's semantic diff instead. workflows/ and commands/ are
+# excluded in v1 by Owner decision OD1 (visibility-only) -- promoting them is a
+# one-line change to this set. Derived from the list above (not duplicated) so the
+# two floors cannot drift apart.
+_VISIBILITY_ONLY = {r"^\.factory/adapter\.yaml$", r"^workflows/", r"^commands/"}
+FACTORY_OWNED_MIGRATION_SEED_FLOOR = [
+    p for p in FACTORY_OWNED_CRITICAL_DIFF_FLOOR if p not in _VISIBILITY_ONLY
+]

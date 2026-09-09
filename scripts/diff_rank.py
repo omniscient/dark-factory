@@ -54,6 +54,9 @@ from gate_blast_radius import parse_hotspots  # noqa: E402  # re-exported for te
 # adapter_defaults is the sole source of truth. A missing/broken import fails
 # loudly here instead of silently falling back to a stale copy.
 from factory_core.adapter_defaults import DEFAULTS as _AD
+from factory_core.adapter_defaults import (
+    FACTORY_OWNED_CRITICAL_DIFF_FLOOR as _CRITICAL_DIFF_FLOOR,
+)
 
 SAFETY_PATH_PATTERNS = [re.compile(p) for p in _AD["safety"]["critical_diff_paths"]]
 
@@ -61,8 +64,9 @@ SAFETY_PATH_PATTERNS = [re.compile(p) for p in _AD["safety"]["critical_diff_path
 def _safety_path_patterns(clone_dir: str | None = None) -> list:
     """Return compiled safety path patterns, reading from adapter at use-time.
 
-    Falls back to SAFETY_PATH_PATTERNS (which re-exports adapter_defaults.DEFAULTS)
-    on any error so behaviour is identical to today when no adapter file is present.
+    Falls back to SAFETY_PATH_PATTERNS ∪ the boundary floor on any error (Requirement 9).
+    The bare SAFETY_PATH_PATTERNS module constant is left un-floored (parity test pin,
+    tests/test_adapter.py::test_critical_diff_paths_parity).
     """
     try:
         from factory_core import adapter
@@ -71,7 +75,9 @@ def _safety_path_patterns(clone_dir: str | None = None) -> list:
             return [re.compile(p) for p in val]
     except Exception:
         pass
-    return SAFETY_PATH_PATTERNS
+    raw = _AD["safety"]["critical_diff_paths"]
+    floored = list(raw) + [p for p in _CRITICAL_DIFF_FLOOR if p not in raw]
+    return [re.compile(p) for p in floored]
 
 TEST_PATH_PATTERNS = [
     re.compile(r"(^|/)test_[^/]+\.py$"),

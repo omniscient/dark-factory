@@ -23,56 +23,55 @@ labels, and comments.
 
 ## Phase 0: BLAST-RADIUS HARD GATE
 
-Read `blast_radius.enabled` from `.claude/skills/refinement/config.yaml` (default: true).
-
-```bash
-BLAST_ENABLED=$(python3 -c "
-import yaml, sys
-d = yaml.safe_load(open('.claude/skills/refinement/config.yaml'))
-print(str(d.get('blast_radius', {}).get('enabled', True)).lower())
-" 2>/dev/null || echo "true")
-```
-
 Derive the issue number from the persisted issue artifact:
 
 ```bash
 ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 ```
 
-If `BLAST_ENABLED=false`, write `STATUS: SKIPPED` to `$ARTIFACTS_DIR/blast.md` and skip the rest of Phase 0:
+The gate is invoked unconditionally (Requirement 8 / operator review F1): its own
+`blast_radius.enabled` kill switch is resolved *inside* `gate_blast_radius.py` from
+`--base-ref`, never from a working-tree read here — a PR that edits a floor path and flips
+`enabled: false` in the same change must still be blocked. There is deliberately no
+shell-level pre-check that reads `.claude/skills/refinement/config.yaml` and skips the
+invocation; that would silently re-open the bypass this ticket closes.
 
 ```bash
-if [ "$BLAST_ENABLED" = "false" ]; then
-  printf "STATUS: SKIPPED\nGATE_TYPE: blast\nFINDINGS_COUNT: 0\nSEVERITY: none\n---\nTRIGGER: none\n" \
-    > "$ARTIFACTS_DIR/blast.md"
-  BLAST_ENABLED=skip
-fi
+# 1. Get changed files and real line count
+CHANGED=$(git diff main...HEAD --name-only 2>/dev/null || echo "")
+ADDED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
+DELETED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
+LINES=$((ADDED + DELETED))
 
-if [ "$BLAST_ENABLED" != "skip" ]; then
+# 2. Run the blast-radius checker — pass real line count via --lines-changed.
+# Prefer the baked copy (operator review F9): a target that tracks its own
+# dark-factory/scripts/gate_blast_radius.py (the F2 floor's shadowing-path entry
+# detects that at PR time) must not be the copy that decides its own gate. Falls back
+# to the clone-relative copy when the baked path is absent (local/non-container runs)
+# -- spec's explicitly-sanctioned fallback (F9), not a silent skip. --clone-dir points
+# at the actual clone either way, so adapter.yaml/git-history lookups resolve there.
+REPO_ROOT=$(git rev-parse --show-toplevel)
+BASE_SHA=$(git merge-base main HEAD 2>/dev/null || echo main)
+GATE_SCRIPT="/opt/dark-factory/scripts/gate_blast_radius.py"
+[ -f "$GATE_SCRIPT" ] || GATE_SCRIPT="dark-factory/scripts/gate_blast_radius.py"  # TARGET-PATH
+echo "$CHANGED" | python3 "$GATE_SCRIPT" \
+  --changed-files-stdin \
+  --lines-changed "$LINES" \
+  --hotspots docs/codeindex-hotspots.md \
+  --config .claude/skills/refinement/config.yaml \
+  --clone-dir "$REPO_ROOT" \
+  --base-ref "$BASE_SHA" \
+  > "$ARTIFACTS_DIR/blast.md"
 
-  # 1. Get changed files and real line count
-  CHANGED=$(git diff main...HEAD --name-only 2>/dev/null || echo "")
-  ADDED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
-  DELETED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
-  LINES=$((ADDED + DELETED))
+# 3. Read verdict — guard with || true so grep's exit-1-on-no-match doesn't abort under set -e
+BLAST_STATUS=$(grep '^STATUS:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2 || true)
+BLAST_TRIGGER=$(grep '^TRIGGER:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2- || true)
+BLAST_FILES=$(grep '^\s*-' "$ARTIFACTS_DIR/blast.md" | head -10 || true)
 
-  # 2. Run the blast-radius checker — pass real line count via --lines-changed
-  echo "$CHANGED" | python3 dark-factory/scripts/gate_blast_radius.py \  # TARGET-PATH
-    --changed-files-stdin \
-    --lines-changed "$LINES" \
-    --hotspots docs/codeindex-hotspots.md \
-    --config .claude/skills/refinement/config.yaml \
-    > "$ARTIFACTS_DIR/blast.md"
-
-  # 3. Read verdict — guard with || true so grep's exit-1-on-no-match doesn't abort under set -e
-  BLAST_STATUS=$(grep '^STATUS:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2 || true)
-  BLAST_TRIGGER=$(grep '^TRIGGER:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2- || true)
-  BLAST_FILES=$(grep '^\s*-' "$ARTIFACTS_DIR/blast.md" | head -10 || true)
-
-  # 4. Block on HUMAN_REQUIRED
-  if [ "$BLAST_STATUS" = "HUMAN_REQUIRED" ]; then
-    FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
-    gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
+# 4. Block on HUMAN_REQUIRED
+if [ "$BLAST_STATUS" = "HUMAN_REQUIRED" ]; then
+  FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
+  gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
 ## Blast-Radius Gate — BLOCKED
 
 The blast-radius gate has flagged this change as requiring human review before it can auto-merge.
@@ -90,14 +89,12 @@ docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_N
 $FOOTER
 EOF
 )"
-    python3 dark-factory/scripts/factory_core/providers/cli.py \
-      tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
-    # Move to Blocked on the project board
-    python3 dark-factory/scripts/factory_core/providers/cli.py \
-      tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
-    exit 1
-  fi
-
+  python3 dark-factory/scripts/factory_core/providers/cli.py \
+    tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
+  # Move to Blocked on the project board
+  python3 dark-factory/scripts/factory_core/providers/cli.py \
+    tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
+  exit 1
 fi
 ```
 

@@ -9,7 +9,58 @@ from factory_core import adapter, adapter_defaults
 
 def test_no_adapter_file_returns_defaults(tmp_path):
     merged = adapter.load(str(tmp_path))
-    assert merged == adapter_defaults.DEFAULTS
+    expected = copy.deepcopy(adapter_defaults.DEFAULTS)
+    expected["safety"]["critical_diff_paths"] = list(expected["safety"]["critical_diff_paths"]) + [
+        p for p in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR
+        if p not in expected["safety"]["critical_diff_paths"]
+    ]
+    expected["safety"]["migration_seed_auth_patterns"] = list(
+        expected["safety"]["migration_seed_auth_patterns"]
+    ) + [
+        p for p in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR
+        if p not in expected["safety"]["migration_seed_auth_patterns"]
+    ]
+    assert merged == expected
+
+
+def test_boundary_floor_survives_narrowed_safety_lists(tmp_path):
+    """Requirement 7: an adapter.yaml that declares an empty/narrowed
+    critical_diff_paths / migration_seed_auth_patterns still resolves, via
+    adapter.get(), to a list containing the full floor -- the merge is extend-only."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "safety:\n"
+        "  critical_diff_paths: []\n"
+        "  migration_seed_auth_patterns: []\n"
+    )
+    critical = adapter.get(str(tmp_path), "safety.critical_diff_paths")
+    migration = adapter.get(str(tmp_path), "safety.migration_seed_auth_patterns")
+    for pat in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert pat in critical
+    for pat in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert pat in migration
+
+
+def test_boundary_floor_applied_without_adapter_file(tmp_path):
+    """Requirement 9: a target cannot escape the floor by having no adapter.yaml at all."""
+    critical = adapter.get(str(tmp_path), "safety.critical_diff_paths")
+    migration = adapter.get(str(tmp_path), "safety.migration_seed_auth_patterns")
+    for pat in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert pat in critical
+    for pat in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert pat in migration
+
+
+def test_boundary_floor_claude_prefix_classifies_as_skill_security(tmp_path):
+    """End-to-end counterpart to Task 1's test_skill_security_tokens_matches_bare_claude_prefix:
+    once the floor is actually wired into _migration_seed_auth_patterns (this task),
+    gate_blast_radius.classify_file must label a real .claude/ path skill-security, not
+    the generic migration-seed bucket."""
+    sys.path.insert(0, "scripts")
+    import gate_blast_radius as gbr
+    cats = gbr.classify_file(".claude/skills/code-review/SKILL.md", hotspots=set(),
+                              clone_dir=str(tmp_path))
+    assert "skill-security" in cats
 
 
 def test_adapter_overrides_deep_merge(tmp_path):
@@ -799,11 +850,15 @@ def test_adapter_cli_keyvalue_format_override(tmp_path, capsys):
 # ── Consumer 2: diff_rank._safety_path_patterns ────────────────────────────────
 
 def test_safety_path_patterns_default_parity(tmp_path):
-    """Without adapter file, _safety_path_patterns returns compiled patterns from DEFAULTS."""
+    """Without adapter file, _safety_path_patterns returns DEFAULTS ∪ the boundary floor."""
     sys.path.insert(0, "scripts")
     import diff_rank as dr
-    patterns = dr._safety_path_patterns(str(tmp_path))
-    assert [p.pattern for p in patterns] == adapter_defaults.DEFAULTS["safety"]["critical_diff_paths"]
+    patterns = [p.pattern for p in dr._safety_path_patterns(str(tmp_path))]
+    raw = adapter_defaults.DEFAULTS["safety"]["critical_diff_paths"]
+    expected = list(raw) + [
+        p for p in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR if p not in raw
+    ]
+    assert patterns == expected
 
 
 def test_safety_path_patterns_adapter_override(tmp_path):
@@ -821,11 +876,15 @@ def test_safety_path_patterns_adapter_override(tmp_path):
 # ── Consumer 3: gate_blast_radius._migration_seed_auth_patterns ────────────────
 
 def test_migration_seed_auth_patterns_default_parity(tmp_path):
-    """Without adapter file, _migration_seed_auth_patterns returns DEFAULTS patterns."""
+    """Without adapter file, _migration_seed_auth_patterns returns DEFAULTS ∪ the boundary floor."""
     sys.path.insert(0, "scripts")
     import gate_blast_radius as gbr
-    patterns = gbr._migration_seed_auth_patterns(str(tmp_path))
-    assert [p.pattern for p in patterns] == adapter_defaults.DEFAULTS["safety"]["migration_seed_auth_patterns"]
+    patterns = [p.pattern for p in gbr._migration_seed_auth_patterns(str(tmp_path))]
+    raw = adapter_defaults.DEFAULTS["safety"]["migration_seed_auth_patterns"]
+    expected = list(raw) + [
+        p for p in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR if p not in raw
+    ]
+    assert patterns == expected
 
 
 def test_migration_seed_auth_patterns_adapter_override(tmp_path):
@@ -838,6 +897,34 @@ def test_migration_seed_auth_patterns_adapter_override(tmp_path):
     patterns = gbr._migration_seed_auth_patterns(str(tmp_path))
     pattern_strings = [p.pattern for p in patterns]
     assert "^custom/migrations/" in pattern_strings
+
+
+def test_migration_seed_auth_patterns_exception_fallback_still_floored(tmp_path, monkeypatch):
+    """Requirement 9: even if adapter.get() itself raises (broken/unimportable adapter
+    module), the except-Exception fallback must not drop the boundary floor."""
+    sys.path.insert(0, "scripts")
+    import gate_blast_radius as gbr
+
+    def _boom(*a, **kw):
+        raise RuntimeError("adapter unimportable")
+
+    monkeypatch.setattr("factory_core.adapter.get", _boom)
+    patterns = [p.pattern for p in gbr._migration_seed_auth_patterns(str(tmp_path))]
+    for pat in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert pat in patterns
+
+
+def test_safety_path_patterns_exception_fallback_still_floored(tmp_path, monkeypatch):
+    sys.path.insert(0, "scripts")
+    import diff_rank as dr
+
+    def _boom(*a, **kw):
+        raise RuntimeError("adapter unimportable")
+
+    monkeypatch.setattr("factory_core.adapter.get", _boom)
+    patterns = [p.pattern for p in dr._safety_path_patterns(str(tmp_path))]
+    for pat in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert pat in patterns
 
 
 # ── Consumer 4: epic_autopilot._hard_exclude_paths + _sensitive_keywords ───────
@@ -985,6 +1072,44 @@ def test_skill_security_tokens_parity():
     assert gbr._SKILL_SECURITY_TOKENS is adapter_defaults.SKILL_SECURITY_TOKENS
 
 
+# ── Boundary floor constants (#200/A6) ──────────────────────────────────────
+
+def test_boundary_floor_constants_shape():
+    floor = adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR
+    blocking = adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR
+    for pat in (
+        r"^\.factory/hooks/", r"^\.factory/adapter\.yaml$", r"^\.claude/",
+        r"^workflows/", r"^commands/", r"^\.archon/commands/",
+        r"^\.archon/workflows/", r"^dark-factory/scripts/",
+    ):
+        assert pat in floor, f"{pat} missing from FACTORY_OWNED_CRITICAL_DIFF_FLOOR"
+    assert len(floor) == 8
+    # adapter.yaml itself and workflows/commands are visibility-only (OD1/OD2):
+    # present in the critical-diff floor, excluded from the blocking floor.
+    for visibility_only in (r"^\.factory/adapter\.yaml$", r"^workflows/", r"^commands/"):
+        assert visibility_only not in blocking
+    for hard_trigger in (
+        r"^\.factory/hooks/", r"^\.claude/", r"^\.archon/commands/",
+        r"^\.archon/workflows/", r"^dark-factory/scripts/",
+    ):
+        assert hard_trigger in blocking
+    assert len(blocking) == 5
+    # blocking floor is derived from the critical-diff floor, not hand-duplicated
+    assert set(blocking) <= set(floor)
+
+
+def test_skill_security_tokens_matches_bare_claude_prefix():
+    """SKILL_SECURITY_TOKENS must sub-classify the new floor's bare ^\\.claude/ entry
+    as skill-security (CLAUDE.md's own framing: '.claude/** self-modification
+    mechanism (#46)'), not the generic migration-seed bucket -- otherwise the blocking
+    issue comment's verbatim TRIGGER label misdescribes a Claude-Skills-surface
+    finding. Checked directly against the constant here (self-contained to this task);
+    tests/test_adapter.py::test_boundary_floor_claude_prefix_classifies_as_skill_security
+    (Task 2) verifies the same thing end-to-end through classify_file once the floor
+    is actually wired into gate_blast_radius.py's pattern list."""
+    assert any(tok in r"^\.claude/" for tok in adapter_defaults.SKILL_SECURITY_TOKENS)
+
+
 # ── config.yaml drift guard (#184) ──────────────────────────────────────────
 # config.yaml keeps its own copy of these safety constants for operator
 # visibility; these tests guarantee it cannot silently diverge from
@@ -1060,3 +1185,21 @@ def test_loop_entry_side_effect_level_6_rejected_with_scope_message(tmp_path):
         ),
     ):
         adapter.load(str(tmp_path))
+
+
+def test_boundary_floor_survives_a_scalar_safety_value(tmp_path):
+    """A target that writes a single pattern without the YAML list dash yields a str.
+    list("^a/") would compile per-character regexes -- "^" matches every path -- and
+    turn every file in every PR on that target critical. The scalar is dropped; the
+    floor still applies."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "safety:\n"
+        "  critical_diff_paths: \"^also-scalar/\"\n"
+        "  migration_seed_auth_patterns: \"^only-this/\"\n"
+    )
+    for key, floor in (("critical_diff_paths", adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR),
+                       ("migration_seed_auth_patterns", adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR)):
+        vals = adapter.get(str(tmp_path), f"safety.{key}")
+        assert "^" not in vals, f"{key} exploded a scalar into characters: {vals}"
+        assert set(floor) <= set(vals)
