@@ -1185,3 +1185,21 @@ def test_loop_entry_side_effect_level_6_rejected_with_scope_message(tmp_path):
         ),
     ):
         adapter.load(str(tmp_path))
+
+
+def test_boundary_floor_survives_a_scalar_safety_value(tmp_path):
+    """A target that writes a single pattern without the YAML list dash yields a str.
+    list("^a/") would compile per-character regexes -- "^" matches every path -- and
+    turn every file in every PR on that target critical. The scalar is dropped; the
+    floor still applies."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "safety:\n"
+        "  critical_diff_paths: \"^also-scalar/\"\n"
+        "  migration_seed_auth_patterns: \"^only-this/\"\n"
+    )
+    for key, floor in (("critical_diff_paths", adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR),
+                       ("migration_seed_auth_patterns", adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR)):
+        vals = adapter.get(str(tmp_path), f"safety.{key}")
+        assert "^" not in vals, f"{key} exploded a scalar into characters: {vals}"
+        assert set(floor) <= set(vals)

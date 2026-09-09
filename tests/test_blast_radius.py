@@ -335,11 +335,10 @@ def _adapter_doc(safety=None, loops=None):
 
 @pytest.fixture
 def adapter_diff_run(tmp_path, monkeypatch):
-    """Commit a base `.factory/adapter.yaml` on `main`, then hand back a callable that
-    overwrites the *working-tree* copy (simulating a PR's HEAD state, uncommitted) and
-    invokes the gate -- the semantic diff compares --base-ref vs. the working tree
-    (Architecture section 3: 'new' is loaded from the working tree, 'old' from
-    --base-ref), never two commits."""
+    """Commit a base `.factory/adapter.yaml` on `main`, branch, then hand back a
+    callable that commits the PR's version on that branch and invokes the gate -- the
+    semantic diff compares --base-ref vs. HEAD (Requirement 5), so both sides must be
+    real commits."""
     root = tmp_path
     _init_repo(root)
     monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))  # hermetic (P1)
@@ -352,10 +351,13 @@ def adapter_diff_run(tmp_path, monkeypatch):
         (d / "adapter.yaml").write_text(text)
         _git(root, "add", "-A")
         _git(root, "commit", "-q", "-m", "base")
+        _git(root, "checkout", "-q", "-b", "pr")
 
         def _run(new_adapter, changed_files=None):
             text = new_adapter if isinstance(new_adapter, str) else yaml.dump(new_adapter)
             (d / "adapter.yaml").write_text(text)
+            _git(root, "add", "-A")
+            _git(root, "commit", "-q", "--allow-empty", "-m", "pr")
             files = changed_files if changed_files is not None else [".factory/adapter.yaml"]
             proc = subprocess.run(
                 [
@@ -477,6 +479,40 @@ def test_boundary_diff_duplicate_loop_name_fails_closed(adapter_diff_run):
     assert "unparseable" in out["_stdout"]
 
 
+def test_boundary_diff_reads_head_not_the_working_tree(tmp_path, monkeypatch):
+    """An escalation that is committed on the PR branch but reverted in the working
+    tree is still what gets merged. Reading the tree for the 'new' side reported
+    PASS/0 findings on exactly that shape (operator review of PR #410)."""
+    root = tmp_path
+    _init_repo(root)
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
+    _write_config(root)
+    (root / "hotspots.md").write_text("")
+    d = root / ".factory"; d.mkdir()
+    base_text = yaml.dump(_adapter_doc(loops=[dict(_BASE_LOOP, name="lvl4", side_effect_level=4,
+                                                    budget_caps={"max_tokens": 1000},
+                                                    human_checkpoint="required")]))
+    (d / "adapter.yaml").write_text(base_text)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    _git(root, "checkout", "-q", "-b", "pr")
+    (d / "adapter.yaml").write_text(yaml.dump(_adapter_doc(loops=[
+        dict(_BASE_LOOP, name="lvl4", side_effect_level=5,
+             budget_caps={"max_tokens": 1000}, human_checkpoint="required")])))
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "escalate to level 5")
+    (d / "adapter.yaml").write_text(base_text)  # working tree hides the escalation
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
+         "--hotspots", str(root / "hotspots.md"), "--config", _CONFIG_REL,
+         "--clone-dir", str(root), "--base-ref", "main"],
+        input=".factory/adapter.yaml", capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "STATUS: HUMAN_REQUIRED" in proc.stdout
+    assert "side_effect_level increased 4 -> 5" in proc.stdout
+
+
 def test_boundary_diff_unparseable_head_fails_closed(adapter_diff_run):
     run = adapter_diff_run(_adapter_doc(loops=[dict(_BASE_LOOP)]))
     out = run("{broken: [\n")
@@ -541,8 +577,11 @@ def test_boundary_diff_file_absent_at_resolvable_base_ref_is_not_an_error(tmp_pa
     (root / "README.md").write_text("no adapter.yaml at this ref\n")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "base, no adapter.yaml yet")
+    _git(root, "checkout", "-q", "-b", "pr")
     d = root / ".factory"; d.mkdir()
     (d / "adapter.yaml").write_text(yaml.dump(_adapter_doc(loops=[])))
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "introduce adapter.yaml")
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--changed-files-stdin", "--lines-changed", "10",
          "--hotspots", str(root / "hotspots.md"), "--config", _CONFIG_REL,

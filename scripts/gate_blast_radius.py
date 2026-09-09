@@ -191,7 +191,7 @@ def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> li
     return cats
 
 
-def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
+def _adapter_snapshot(clone_dir: str, ref: str) -> tuple:
     """Return (parsed adapter.yaml dict, parse_ok) for `ref` (None = working tree).
 
     A missing file -- at the working tree, or at a *resolvable* ref -- is a valid "no
@@ -210,22 +210,23 @@ def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
     from factory_core import verifier as _verifier
 
     try:
-        if ref is None:
-            path = Path(clone_dir) / ".factory" / "adapter.yaml"
-            if not path.is_file():
+        # `git show <ref>:<path>` for BOTH sides -- never the working tree. A commit that
+        # escalates the adapter plus a working-tree copy restored to the base content is
+        # still the diff that gets pushed and merged, and reading the tree missed it
+        # entirely (operator review of PR #410); Requirement 5 says base branch vs. HEAD.
+        # LC_ALL=C pins git's stderr to English so the "file absent at a resolvable ref"
+        # discrimination below can't degrade to fail-closed under a translated locale.
+        proc = subprocess.run(
+            ["git", "-C", clone_dir, "show", f"{ref}:.factory/adapter.yaml"],
+            capture_output=True, text=True, timeout=30,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr
+            if "does not exist in" in stderr or "exists on disk, but not in" in stderr:
                 return {}, True
-            text = path.read_text(encoding="utf-8")
-        else:
-            proc = subprocess.run(
-                ["git", "-C", clone_dir, "show", f"{ref}:.factory/adapter.yaml"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if proc.returncode != 0:
-                stderr = proc.stderr
-                if "does not exist in" in stderr or "exists on disk, but not in" in stderr:
-                    return {}, True
-                return None, False
-            text = proc.stdout
+            return None, False
+        text = proc.stdout
         data = yaml.safe_load(text)
         if data is None:
             data = {}
@@ -245,12 +246,14 @@ def _adapter_snapshot(clone_dir: str, ref: str | None) -> tuple:
 
 
 def _boundary_escalation_findings(clone_dir: str, base_ref: str) -> list:
-    """Semantic diff of .factory/adapter.yaml, base_ref vs. the working tree
-    (Requirement 5). Only called by main() when that file is in the changed set."""
+    """Semantic diff of .factory/adapter.yaml, base_ref vs. HEAD (Requirement 5).
+    Both sides come from `git show`; the working tree is never consulted, so an
+    escalation that is committed but reverted on disk is still caught. Only called by
+    main() when that file is in the changed set."""
     from factory_core import side_effect as _side_effect
 
     old, old_ok = _adapter_snapshot(clone_dir, base_ref)
-    new, new_ok = _adapter_snapshot(clone_dir, None)
+    new, new_ok = _adapter_snapshot(clone_dir, "HEAD")
     if not old_ok:
         return [f"adapter.yaml unparseable at {base_ref}"]
     if not new_ok:

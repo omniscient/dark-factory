@@ -6,7 +6,7 @@
 # MCP surface (#46) rather than a generic migration/auth/trading/factory match. Kept as
 # a single source of truth here so the two gates can't drift out of sync.
 SKILL_SECURITY_TOKENS = (
-    "claude/", "settings", "mcp", "claude/plugins", "claude-plugin", "factory/hooks",
+    "claude/", "settings", "mcp", "claude-plugin", "factory/hooks",
 )
 
 DEFAULTS = {

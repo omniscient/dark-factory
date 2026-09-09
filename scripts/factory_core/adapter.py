@@ -218,6 +218,12 @@ def _apply_boundary_floor(safety: dict) -> dict:
     migration_seed_auth_patterns -- extend-only, never removes a target's own entries
     (Requirement 7). Called from every load() return path (Requirement 9)."""
     def _union(existing, floor):
+        # A malformed adapter can carry a scalar here (`critical_diff_paths: "^a/"`
+        # without the YAML list dash). Both consumers guard with isinstance(list), so
+        # before the floor existed a scalar was simply ignored; list("^a/") would now
+        # slip per-character regexes ("^" matches everything) past that guard and turn
+        # every file in every PR critical. Treat a non-list as "no target entries".
+        existing = existing if isinstance(existing, list) else []
         return list(existing) + [p for p in floor if p not in existing]
     safety = dict(safety)
     safety["critical_diff_paths"] = _union(
