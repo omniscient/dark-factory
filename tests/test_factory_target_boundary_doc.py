@@ -21,6 +21,7 @@ REQUIRED_SECTIONS = [
     "## Bypass prevention (A6)",
     "## Trust model",
     "## What is declared vs. what runs",
+    "## Known gaps",
 ]
 
 
@@ -127,3 +128,46 @@ def test_declared_vs_runs_names_phase_levels_config_key():
     assert "scripts/factory_core/side_effect.py::_PROFILES" in section, (
         "must name what level 5 actively enforces, not just say levels constrain nothing"
     )
+
+
+def test_known_gaps_names_open_issues_and_ods():
+    content = _doc_text()
+    for token in ("#374", "#407", "#412", "#411", "OD1", "OD2", "OD3"):
+        assert token in content, f"missing known-gap reference: {token}"
+
+
+def test_never_list_verbs_in_doc_match_side_effect_module():
+    """The doc restates level 5's git/gh never-list verbatim -- the one table it
+    duplicates rather than links. Pin it, or a change to _GH_NEVER/_GIT_NEVER leaves the
+    doc silently wrong (operator plan gate, F4)."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from factory_core import side_effect
+
+    content = _normalized(_doc_text())
+    for verb in tuple(side_effect._GH_NEVER) + tuple(side_effect._GIT_NEVER):
+        assert verb in content, f"doc's never-list is missing {verb!r}"
+
+
+def test_every_doc_path_reference_exists():
+    """CITATION_RE pins only .py/.sh symbols. The doc also cites design records and
+    commands by path -- including specs still in the in-flight docs/superpowers/specs/
+    tier, which a later archive step moves. Pin those too (operator plan gate, F5)."""
+    content = _doc_text()
+    refs = set(
+        re.findall(
+            r"`((?:docs|refinement-skills|commands|workflows|config|tests)/[\w./-]+"
+            r"\.(?:md|yaml|yml|sh|py))`",
+            content,
+        )
+    )
+    assert refs, "no path references found -- the regex or the doc changed shape"
+    for rel in sorted(refs):
+        assert (REPO_ROOT / rel).is_file(), f"doc cites a path that does not exist: {rel}"
+
+
+def test_handoff_reason_code_is_real():
+    """`producing_loop_factory_owned` is quoted bare in the doc; tie it to its source."""
+    src = (REPO_ROOT / "scripts" / "factory_core" / "handoff.py").read_text(encoding="utf-8")
+    assert "producing_loop_factory_owned" in src

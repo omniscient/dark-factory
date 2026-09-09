@@ -241,3 +241,40 @@ git/gh never-list on every single run regardless of level — `git push --delete
 `auth` / `ssh-key` / `gpg-key` / `api:DELETE` — the same list `docs/adapter-authoring-guide.md`'s
 level-5 table row spells out. A6 (bypass prevention) is what else actually runs today,
 alongside this always-on level-5 never-list.
+
+## Known gaps
+
+Named honestly as open items, not resolved history — all confirmed open as of this
+writing:
+
+- **#374** — a `HUMAN_REQUIRED` block from `scripts/gate_blast_radius.py` has no approval
+  memory; re-running validate after an operator clears `needs-discussion` re-blocks
+  identically.
+- **#407** — nothing deterministic consumes `blast.md`; `scripts/verdict_gate_check.sh`
+  only guards `conformance.md`/`review.md`.
+- **#412** — fail-closed findings from
+  `scripts/gate_blast_radius.py::_adapter_snapshot` carry no diagnostic beyond
+  "adapter.yaml unparseable at `<ref>`", and the base ref is validated against HEAD's
+  current schema, not the schema live at the base commit.
+- **#411** — the conformance agent refuses self-target runs whose subject is the floor's
+  own shadowing-path entry (`dark-factory/scripts/**`).
+- **OD1** — `workflows/**` and `commands/**` are visibility-only — never `HUMAN_REQUIRED`
+  on boundary-floor grounds (the independent hotspot and size triggers in
+  `scripts/gate_blast_radius.py` are unaffected, and today return nothing for these paths
+  only because no hotspot entry lists them and `size_budget_blocks: false` — data, not
+  structure), never blocking
+  (`scripts/factory_core/adapter_defaults.py::_VISIBILITY_ONLY`). A PR editing the DAG or
+  a phase command reaches Gates 2/3 but never `HUMAN_REQUIRED`.
+- **OD2** — `.factory/adapter.yaml` itself is visibility-only for the same reason; its
+  escalation risk is caught only by the semantic adapter diff, and only when that file is
+  in the changed set.
+- **OD3** — `safety.hard_exclude_paths` is deliberately outside the floor; a PR can shrink
+  it, caught only by the `safety:`-block diff under the same condition. Note also what
+  `hard_exclude_paths` does *not* do: its only consumer is
+  `scripts/factory_core/epic_autopilot.py::hard_excluded`, which filters epic-autopilot
+  candidate *tickets* — it never inspects a diff or aborts a run, and
+  `config/config.yaml` currently ships `epic_autopilot.enabled: false`. `README.md`'s
+  `hard_exclude_paths` row phrasing ("matched diff paths abort the run") does not describe
+  current code; this doc does not repeat that claim.
+- **CI coverage** — `tests/test_scheduler.sh` exists but is not in
+  `.github/workflows/ci.yml`'s bash-test list.
