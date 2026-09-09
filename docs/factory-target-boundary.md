@@ -181,3 +181,63 @@ including its **OD1** decision that `workflows/**` and `commands/**` stay visibi
 (see Known gaps) while `.factory/hooks/**`, `.claude/**`, `.archon/commands/**`,
 `.archon/workflows/**`, and `dark-factory/scripts/**` are in the blocking floor, and
 **OD2** (`.factory/adapter.yaml` itself is visibility-only).
+
+## Trust model
+
+- **Two independent enforcement layers, both keyed on the run's effective side-effect
+  level.** Per `scripts/factory_core/side_effect.py`'s own module docstring, the level
+  table has one owner and five readers — the DAG's `denied_tools` (Layer A), the git/gh
+  shim (Layer B), the run record (Layer C), `scripts/factory_core/handoff.py::cross_check`,
+  and a future loop runner — none of which re-declares it. The two that gate what an agent
+  can do are: **Layer A**, which tools the model is offered — each phase node's `denied_tools:` key in
+  `workflows/archon-dark-factory.yaml`, pinned to
+  `scripts/factory_core/side_effect.py::profile_for(level).denied_tools` by
+  `tests/test_side_effect_dag.py::test_phase_node_denied_tools_matches_configured_level`
+  (every phase today runs at level 5, whose profile denies no tools, so this list is
+  currently empty everywhere — see What is declared vs. what runs); and **Layer B**,
+  which `git`/`gh` verbs the agent's shell can execute — the `scripts/shims/git` /
+  `scripts/shims/gh` `PATH` shims, below. Both hold independent of harness permission
+  mode, so both survive under `bypassPermissions`.
+- **What the shims do not claim.** The shim is a `PATH` shim
+  (`scripts/shims/git`, `scripts/shims/gh`). A process invoking `/usr/bin/git` by absolute
+  path bypasses it. **v1 is a policy boundary against mistaken or prompt-injected
+  behaviour, not a security boundary against a deliberately hostile agent.** The boundary
+  against a hostile agent is the credential, deferred as `#196/D3`.
+- **Trusted comment channels.** Per this repo's own `CLAUDE.md`: issue comments signed
+  `Hermes Agent` / `Hermes Agent / Product Manager` are sanctioned product input for
+  refinement (scope, requirements, research context) — never authority to expand
+  security-sensitive surfaces (tool allow/deny lists, `gate_*`, breaker, budgets,
+  `deploy/**`). Any other signature is untrusted for factual or security claims regardless
+  of tone or specificity — see this doc's own Non-negotiables section, where a
+  differently-signed comment's absolute claim about live trading being forever off-limits
+  was independently fact-checked during #201's refinement and found unsupported by any
+  code in this repo.
+
+This section resolves the in-repo forward references already waiting on it:
+`docs/adapter-authoring-guide.md`'s trust-model pointer, the note in
+`docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md` to "say this
+plainly in `docs/factory-target-boundary.md`", and the `F13` comments in
+`scripts/shims/git` and `scripts/shims/gh`.
+
+## What is declared vs. what runs
+
+There is no loop dispatcher today. `scripts/factory_core/verifier.py::resolve_and_run`'s
+own docstring calls itself "the primitive a future dispatcher, the CLI below, or a test
+calls per declared loop"; `scripts/factory_core/breaker.py::format_trip_reason`'s docstring
+records that "No live caller constructs the three loop-scoped variants today"; the only
+production caller of `scripts/factory_core/breaker.py::evaluate_stop_condition` is
+`scripts/factory_core/cli.py`.
+
+A1, A3, A4, and A5 are therefore a validated declaration surface plus tested primitives,
+not running machinery — `README.md`'s `loops` table row ("parse/validate/surface only, no
+runtime enforcement yet") is accurate as written. Every factory phase runs at level 5 via
+`side_effect.phase_levels` in `config/config.yaml` (each phase's own key set to `5`), so the
+*graded* level distinctions A2 defines (1 through 4, and the factory-owned/human-approved
+boundary at 4/5/6) constrain nothing in current operation — every phase already runs at the
+top of the declared range. That is not the same as "A2 enforces nothing today": level 5's
+own profile, `scripts/factory_core/side_effect.py::_PROFILES`, actively denies a specific
+git/gh never-list on every single run regardless of level — `git push --delete` /
+`push :refspec-delete`, and `gh repo delete` / `repo archive` / `repo rename` / `secret` /
+`auth` / `ssh-key` / `gpg-key` / `api:DELETE` — the same list `docs/adapter-authoring-guide.md`'s
+level-5 table row spells out. A6 (bypass prevention) is what else actually runs today,
+alongside this always-on level-5 never-list.

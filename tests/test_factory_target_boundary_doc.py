@@ -19,6 +19,8 @@ REQUIRED_SECTIONS = [
     "## Stop-condition schema (A4)",
     "## Handoff manifest (A5)",
     "## Bypass prevention (A6)",
+    "## Trust model",
+    "## What is declared vs. what runs",
 ]
 
 
@@ -109,3 +111,19 @@ def test_a6_names_the_floor_the_semantic_diff_and_the_kill_switch():
         "never suppresses the floor or the semantic adapter diff",
     ):
         assert phrase in content, f"missing A6 phrase: {phrase}"
+
+
+def test_trust_model_states_the_path_shim_limit_plainly():
+    content = _normalized(_doc_text())
+    assert "`PATH` shim" in content
+    assert "not a security boundary against a deliberately hostile agent" in content
+    assert "#196/D3" in content
+
+
+def test_declared_vs_runs_names_phase_levels_config_key():
+    content = _doc_text()
+    assert "side_effect.phase_levels" in content
+    section = _section(content, "## What is declared vs. what runs")
+    assert "scripts/factory_core/side_effect.py::_PROFILES" in section, (
+        "must name what level 5 actively enforces, not just say levels constrain nothing"
+    )
