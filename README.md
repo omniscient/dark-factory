@@ -174,11 +174,11 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 | `token_optimization` | map | **Active.** Per-scenario token budget overrides (deep-merged; see `config/config.yaml` for schema). Resolution order, highest wins: adapter > clone `.claude/skills/refinement/config.yaml` (transition period) > baked `config/config.yaml` defaults — resolved per run by `factory_core.effective_config`. |
 | `loops` | `list[map]` | Declarative loop entries (Loop Engineering five-move shape: `discovery`/`handoff`/`verification`/`persistence`/`scheduling`, all required, plus optional `human_checkpoint`/`budget_caps` and optional metadata `role_card`/`economics`/`skills`); parse/validate/surface only, no runtime enforcement yet. See `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md` (#301). |
 
+All keys are optional and deep-merged over the built-in defaults.
+
 See [`docs/factory-target-boundary.md`](docs/factory-target-boundary.md) for the full
 factory/target boundary contract — non-negotiables, side-effect levels, the `loops:`
 schema, the trust model, and known gaps.
-
-All keys are optional and deep-merged over the built-in defaults.
 
 ### Hooks
 

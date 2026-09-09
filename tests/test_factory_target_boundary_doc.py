@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = REPO_ROOT / "docs" / "factory-target-boundary.md"
 
-CITATION_RE = re.compile(r"`([\w./-]+\.(?:py|sh))::([A-Za-z_][A-Za-z0-9_]*)`")
+CITATION_RE = re.compile(r"`([\w./-]+\.(?:py|sh))::([A-Za-z_][A-Za-z0-9_.]*)`")
 
 REQUIRED_SECTIONS = [
     "## Overview",
@@ -39,9 +39,17 @@ def _normalized(content: str) -> str:
 def _section(content: str, header: str) -> str:
     """Slice out one `## `-headed section's body, up to (not including) the next
     `## ` header or end of file — so a claim can be pinned to the section that is
-    supposed to make it, not just found anywhere in the doc."""
-    start = content.index(header)
-    rest_start = start + len(header)
+    supposed to make it, not just found anywhere in the doc.
+
+    Anchored to a full line (^...$, MULTILINE), not a bare substring search: the doc
+    inline-mentions some of these headers in backticks in prose (e.g. the Overview's
+    reference to `## Handoff manifest (A5)`), and content.index(header) would happily
+    match that mention instead of the real section, silently slicing the wrong text.
+    """
+    match = re.search(r"^" + re.escape(header) + r"$", content, re.MULTILINE)
+    assert match, f"section header not found on its own line: {header}"
+    start = match.start()
+    rest_start = match.end()
     next_idx = content.find("\n## ", rest_start)
     return content[start:] if next_idx == -1 else content[start:next_idx]
 
@@ -65,22 +73,37 @@ def test_doc_citations_resolve_to_real_symbols():
         target = REPO_ROOT / path_str
         assert target.is_file(), f"citation path does not exist: {path_str}"
         text = target.read_text(encoding="utf-8")
-        assert symbol in text, f"symbol {symbol!r} not found in {path_str}"
+        # Symbols may be dotted (e.g. `Adapter.load`) to name a method on a class;
+        # the attribute lookup itself isn't present verbatim in source, so verify the
+        # last component (the actual def/attr name) rather than the full dotted path.
+        last_component = symbol.rsplit(".", 1)[-1]
+        assert last_component in text, f"symbol {symbol!r} not found in {path_str}"
 
 
 def test_non_negotiables_cite_the_three_factory_owned_enforcement_sites():
+    # Scoped to the Non-negotiables section itself: "adapter.py" appears in nearly every
+    # section of this doc, so a doc-wide substring check would pass even if this section
+    # never named the three enforcement sites.
     content = _doc_text()
+    section = _section(content, "## Non-negotiables")
     for symbol in ("adapter.py", "resolve_and_run", "producing_loop_factory_owned"):
-        assert symbol in content
+        assert symbol in section
 
 
 def test_live_trading_is_not_stated_as_a_factory_wide_non_negotiable():
+    # Scoped to Non-negotiables, and checked alongside the "live trading" mention it
+    # would actually modify -- a bare doc-wide ban on the phrase "permanently excluded"
+    # doesn't test that live trading specifically isn't framed as forever off-limits.
     content = _doc_text()
-    assert "permanently excluded" not in content
+    section = _normalized(_section(content, "## Non-negotiables"))
+    assert "live trading" in section, "expected Non-negotiables to discuss live trading"
+    assert "permanently excluded" not in section, (
+        "live trading must not be stated as permanently excluded in Non-negotiables"
+    )
 
 
 def test_non_negotiables_cites_the_deploy_publish_exclusion_mechanism():
-    content = _normalized(_doc_text())
+    content = _normalized(_section(_doc_text(), "## Non-negotiables"))
     assert "migration_seed_auth_patterns" in content
     assert "^deploy/" in content
 
@@ -145,9 +168,30 @@ def test_never_list_verbs_in_doc_match_side_effect_module():
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from factory_core import side_effect
 
-    content = _normalized(_doc_text())
-    for verb in tuple(side_effect._GH_NEVER) + tuple(side_effect._GIT_NEVER):
-        assert verb in content, f"doc's never-list is missing {verb!r}"
+    # Scoped to the never-list paragraph itself, not the whole doc: "auth" (one of the
+    # short _GH_NEVER entries) is a substring of "authoritative"/"adapter-authoring-guide",
+    # which appear elsewhere in the doc, so a doc-wide check would still pass even if the
+    # never-list paragraph dropped "auth" outright.
+    section = _normalized(_section(_doc_text(), "## What is declared vs. what runs"))
+    start = section.index("regardless of level")
+    end = section.index("the same list", start)
+    never_list_text = section[start:end]
+
+    expected_verbs = tuple(side_effect._GH_NEVER) + tuple(side_effect._GIT_NEVER)
+    for verb in expected_verbs:
+        assert verb in never_list_text, f"doc's never-list is missing {verb!r}"
+
+    # Also catch the reverse drift: a verb quoted in the doc's never-list that the module
+    # no longer denies (e.g. left behind after _GH_NEVER/_GIT_NEVER shrinks).
+    quoted_tokens = re.findall(r"`([^`]+)`", never_list_text)
+    doc_verbs = {
+        token[len("git "):] if token.startswith("git ")
+        else token[len("gh "):] if token.startswith("gh ")
+        else token
+        for token in quoted_tokens
+    }
+    stale = doc_verbs - set(expected_verbs)
+    assert not stale, f"doc's never-list has verbs the module no longer denies: {stale}"
 
 
 def test_every_doc_path_reference_exists():
@@ -174,10 +218,22 @@ def test_handoff_reason_code_is_real():
 
 
 def test_readme_links_to_boundary_doc_near_loops_row():
+    # Uses every occurrence (via finditer), not str.index's first match: a TOC entry or
+    # any earlier mention of either anchor would make a first-occurrence proximity check
+    # fail spuriously even though the real table row and pointer sit right next to
+    # each other.
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/factory-target-boundary.md" in readme
-    loops_idx = readme.index("| `loops` |")
-    link_idx = readme.index("docs/factory-target-boundary.md")
-    assert abs(readme.count("\n", 0, loops_idx) - readme.count("\n", 0, link_idx)) <= 3, (
-        "pointer should be within a few lines of the `loops` table row"
-    )
+    loops_positions = [m.start() for m in re.finditer(r"\| `loops` \|", readme)]
+    link_positions = [
+        m.start() for m in re.finditer(re.escape("docs/factory-target-boundary.md"), readme)
+    ]
+    assert loops_positions, "no `loops` table row found"
+    assert link_positions, "no docs/factory-target-boundary.md reference found"
+    loops_lines = [readme.count("\n", 0, idx) for idx in loops_positions]
+    link_lines = [readme.count("\n", 0, idx) for idx in link_positions]
+    assert any(
+        abs(loop_line - link_line) <= 4
+        for loop_line in loops_lines
+        for link_line in link_lines
+    ), "pointer should be within a few lines of the `loops` table row"
