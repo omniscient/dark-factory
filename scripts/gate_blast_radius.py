@@ -6,7 +6,9 @@ Writes a blast.md-format verdict to stdout.
 Exit 0 always — the caller reads STATUS from the output.
 """
 import argparse
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,24 +43,64 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to .claude/skills/refinement/config.yaml",
     )
-    import os as _os
     p.add_argument(
         "--clone-dir",
-        default=_os.environ.get("CLONE_DIR", "."),
+        default=os.environ.get("CLONE_DIR", "."),
         help="Clone root for adapter.yaml lookup (default: $CLONE_DIR or '.')",
+    )
+    p.add_argument(
+        "--base-ref",
+        default="main",
+        help="Git ref to read blast_radius.* config (Requirement 8) and the pre-PR "
+             "adapter.yaml snapshot from; never the working tree",
     )
     return p.parse_args()
 
 
-def load_config(path: str) -> dict:
+_BAKED_CONFIG_PATH = "/opt/dark-factory/config/config.yaml"  # == effective_config._BAKED_PATH; entrypoint.sh:88
+
+
+def _baked_blast_config() -> dict:
+    """blast_radius.* from the image-baked config -- COPY'd at image build from main,
+    never the PR under review. FACTORY_CONFIG_PATH mirrors entrypoint.sh:88 (test seam;
+    never set in the image). {} when absent/unreadable."""
     try:
         import yaml  # type: ignore
-
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        return data.get("blast_radius", {})
+        with open(os.environ.get("FACTORY_CONFIG_PATH", _BAKED_CONFIG_PATH), encoding="utf-8") as f:
+            blk = (yaml.safe_load(f) or {}).get("blast_radius", {})
+        return blk if isinstance(blk, dict) else {}
     except Exception:
         return {}
+
+
+def load_config(path: str, clone_dir: str, base_ref: str) -> dict:
+    """Layered, never from the working tree (Requirement 8 / F1; operator review P1):
+    baked blast_radius block  <-  `git show <base-ref>:<path>` block (key by key).
+
+    On the self target <path> is untracked (materialized from the baked file at container
+    start and git-excluded), so the base-ref read misses and the baked block governs; a
+    target that commits <path> has its committed values win. Hardcoded defaults apply only
+    to keys neither layer sets. Both layers are trusted -- the image and the merged base --
+    so the fallback direction stays "gate runs normally", never a PR-controlled value.
+
+    `path` must be relative to clone_dir -- `git show <ref>:<path>` requires a
+    repo-relative path. The one caller (commands/dark-factory-validate.md, Task 6) always
+    passes the existing relative literal ".claude/skills/refinement/config.yaml".
+    """
+    cfg = dict(_baked_blast_config())
+    try:
+        import yaml  # type: ignore
+        proc = subprocess.run(
+            ["git", "-C", clone_dir, "show", f"{base_ref}:{path}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            blk = (yaml.safe_load(proc.stdout) or {}).get("blast_radius", {})
+            if isinstance(blk, dict):
+                cfg.update(blk)
+    except Exception:
+        pass
+    return cfg
 
 
 def parse_hotspots(path: str, score_floor: float) -> set:
@@ -151,12 +193,8 @@ def classify_file(fpath: str, hotspots: set, clone_dir: str | None = None) -> li
 
 def main() -> None:
     args = parse_args()
-    cfg = load_config(args.config)
-
-    if not cfg.get("enabled", True):
-        print("STATUS: SKIPPED\nGATE_TYPE: blast\nFINDINGS_COUNT: 0\nSEVERITY: none")
-        print("---\nTRIGGER: none\nTRIGGERED_FILES:\nLINES_CHANGED: 0")
-        return
+    cfg = load_config(args.config, args.clone_dir, args.base_ref)
+    enabled = cfg.get("enabled", True)
 
     score_floor = float(cfg.get("hotspot_score_floor", 5.0))
     size_budget = int(cfg.get("size_budget_lines", 400))
@@ -169,18 +207,29 @@ def main() -> None:
         changed_files = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
 
     lines_changed = args.lines_changed
+    clone_dir = args.clone_dir
 
-    clone_dir = getattr(args, "clone_dir", None)
+    # enabled:false suppresses only the hotspot and size triggers (operator review
+    # F1/Requirement 8) -- a migration-seed/floor match (and the boundary-escalation
+    # semantic step, wired in Task 5) must never be suppressible by a PR's own change.
     triggered = []
     for fpath in changed_files:
         cats = classify_file(fpath, hotspots, clone_dir=clone_dir)
+        if not enabled:
+            cats = [c for c in cats if c != "hotspot"]
         if cats:
             triggered.append((fpath, cats))
 
     hard_trigger = bool(triggered)
-    size_trigger = size_blocks and lines_changed > size_budget
+    size_trigger = enabled and size_blocks and lines_changed > size_budget
 
-    status = "HUMAN_REQUIRED" if (hard_trigger or size_trigger) else "PASS"
+    if hard_trigger or size_trigger:
+        status = "HUMAN_REQUIRED"
+    elif not enabled:
+        status = "SKIPPED"
+    else:
+        status = "PASS"
+
     severity = "critical" if status == "HUMAN_REQUIRED" else "none"
     findings_count = len(triggered) + (1 if size_trigger else 0)
 
