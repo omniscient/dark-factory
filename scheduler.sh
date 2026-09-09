@@ -830,12 +830,30 @@ classify_comments() {
   local title="$2"
   local comments_json="$3"
 
+  local latest_id
+  latest_id=$(echo "$comments_json" | jq -r '.[-1].id // empty')
+
+  local cached_cid
+  cached_cid=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+    state-get --key "${issue_num}:cid" 2>/dev/null) || true
+  if [ -n "$latest_id" ] && [ "$cached_cid" = "$latest_id" ]; then
+    local cached_verdict
+    cached_verdict=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-get --key "${issue_num}:cverdict" 2>/dev/null) || true
+    if [ -n "$cached_verdict" ]; then
+      echo "  classify_comments #${issue_num}: cache hit verdict=${cached_verdict}" >&2
+      echo "$cached_verdict"
+      return
+    fi
+  fi
+
   local comment_text
   comment_text=$(echo "$comments_json" | jq -r '.[] | "[\(.author.login)] \(.body)"')
 
+  local verdict_rule="Reply with ONLY one word — MERGE, CONTINUE, or SKIP. No explanation, punctuation, markdown, or commentary."
   local prompt
   prompt="You are a PR comment classifier. Read the comments below and decide
-the intent. Reply with exactly one word: MERGE, CONTINUE, or SKIP.
+the intent. ${verdict_rule}
 
 MERGE — the reviewer approves the PR (e.g. \"looks good\", \"ship it\",
 \"approved\", \"LGTM\", thumbs up, ready to merge)
@@ -850,30 +868,62 @@ When in doubt between CONTINUE and SKIP, choose CONTINUE.
 
 PR #${issue_num}: ${title}
 Comments since last factory run:
-${comment_text}"
+${comment_text}
 
-  local result
-  result=$(echo "$prompt" | claude -p --model haiku 2>&1)
-  local exit_code=$?
-  local cleaned
-  cleaned=$(echo "$result" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+${verdict_rule}"
 
-  if [ "$exit_code" -ne 0 ] || [ -z "$cleaned" ]; then
-    echo "  classify_comments #${issue_num}: API error (exit=$exit_code), defaulting to SKIP" >&2
+  local err_tmp result exit_code err_tail
+  err_tmp=$(mktemp)
+  set +e
+  result=$(echo "$prompt" | claude -p --model haiku 2>"$err_tmp")
+  exit_code=$?
+  set -e
+  err_tail=$(tail -c 200 "$err_tmp" 2>/dev/null) || true
+  rm -f "$err_tmp"
+
+  if [ "$exit_code" -ne 0 ] || [ -z "$result" ]; then
+    echo "  classify_comments #${issue_num}: fallback reason=api_error verdict=SKIP cached=no" >&2
+    _log_raw_fallback_once "$issue_num" "$latest_id" "$result" "$err_tail"
     echo "SKIP"
     return
   fi
 
-  case "$cleaned" in
-    MERGE|CONTINUE|SKIP)
-      echo "  classify_comments #${issue_num}: verdict=${cleaned}" >&2
-      echo "$cleaned"
-      ;;
-    *)
-      echo "  classify_comments #${issue_num}: unexpected response '${cleaned}', defaulting to SKIP" >&2
-      echo "SKIP"
-      ;;
-  esac
+  local verdict
+  verdict=$(parse_comment_verdict "$result")
+
+  if [ -z "$verdict" ]; then
+    echo "  classify_comments #${issue_num}: fallback reason=unparsed verdict=SKIP cached=no" >&2
+    _log_raw_fallback_once "$issue_num" "$latest_id" "$result" "$err_tail"
+    echo "SKIP"
+    return
+  fi
+
+  echo "  classify_comments #${issue_num}: verdict=${verdict}" >&2
+  if [ -n "$latest_id" ]; then
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "${issue_num}:cverdict" --value "$verdict" >/dev/null
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "${issue_num}:cid" --value "$latest_id" >/dev/null
+  fi
+  echo "$verdict"
+}
+
+_log_raw_fallback_once() {
+  local issue_num="$1" latest_id="$2" raw="$3" err_tail="$4"
+  local dedup_key="${issue_num}:crawlog"
+  local logged_for
+  logged_for=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+    state-get --key "$dedup_key" 2>/dev/null) || true
+  if [ -n "$latest_id" ] && [ "$logged_for" = "$latest_id" ]; then
+    return
+  fi
+  local truncated
+  truncated=$(printf '%s' "$raw" | head -c 200) || true
+  echo "  classify_comments #${issue_num}: raw response (truncated): '${truncated}' stderr='${err_tail}'" >&2
+  if [ -n "$latest_id" ]; then
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "$dedup_key" --value "$latest_id" >/dev/null
+  fi
 }
 
 # --- Stage functions (poll loop) ---
