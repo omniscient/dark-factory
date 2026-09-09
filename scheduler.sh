@@ -774,6 +774,57 @@ get_new_comments() {
   echo "$comments" | jq --argjson s "$start_idx" '.[$s:]'
 }
 
+parse_comment_verdict() {
+  local response="$1"
+
+  # Ambiguity guard (operator review): a second, literally-capitalized verdict token
+  # anywhere in the body makes the whole reply unparseable. Deliberately case-SENSITIVE
+  # (unlike the primary match below) — the two canonical ambiguous examples both present
+  # the second candidate in the model's instructed all-caps reply form ("SKIP — but
+  # MERGE would be reasonable", "MERGE? No — SKIP"), while a CONTINUE-shaped
+  # justification that uses "merge" as an ordinary lowercase verb ("the reviewer wants
+  # a merge later") must not be flagged.
+  local distinct
+  distinct=$(printf '%s' "$response" \
+    | grep -oP '(?<![[:alnum:]_-])(MERGE|CONTINUE|SKIP)(?![[:alnum:]_-])' 2>/dev/null \
+    | sort -u | wc -l) || true
+  if [ "${distinct:-0}" -ge 2 ]; then
+    return 0
+  fi
+
+  # MERGE is strict (operator review): accepted only when the WHOLE response's
+  # alphanumeric content is exactly the token. MERGE dispatches `Close issue #N` — a
+  # real merge — so it is the only verdict whose false positive is costly; CONTINUE and
+  # SKIP keep the lenient token-plus-explanation grammar below.
+  # Whole-response (not first-line) scope is what makes the case-SENSITIVE ambiguity
+  # guard above safe: a first-line-only match would accept "MERGE\nActually, skip this"
+  # (lowercase second token, invisible to the case-sensitive scan) as a real merge.
+  # `[^[:alnum:]]` matches newlines in bash ERE, so "MERGE\n" and "**MERGE**\n" still parse.
+  local merge_strict_re
+  merge_strict_re='^[^[:alnum:]]*MERGE[^[:alnum:]]*$'
+  shopt -s nocasematch
+  if [[ "$response" =~ $merge_strict_re ]]; then
+    shopt -u nocasematch
+    echo "MERGE"
+    return 0
+  fi
+  shopt -u nocasematch
+
+  # CONTINUE / SKIP: anchored to the start of the raw response only, so a
+  # justification that mentions another verdict word mid-sentence can never flip the
+  # match — the regex never scans past the anchor.
+  local tok_re='^[^[:alnum:]]*(CONTINUE|SKIP)([^[:alnum:]_-]|$)'
+  shopt -s nocasematch
+  if [[ "$response" =~ $tok_re ]]; then
+    local tok="${BASH_REMATCH[1]}"
+    shopt -u nocasematch
+    echo "${tok^^}"
+    return 0
+  fi
+  shopt -u nocasematch
+  return 0
+}
+
 classify_comments() {
   local issue_num="$1"
   local title="$2"
