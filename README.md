@@ -176,6 +176,10 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 
 All keys are optional and deep-merged over the built-in defaults.
 
+See [`docs/factory-target-boundary.md`](docs/factory-target-boundary.md) for the full
+factory/target boundary contract — non-negotiables, side-effect levels, the `loops:`
+schema, the trust model, and known gaps.
+
 ### Hooks
 
 Place executable scripts at `.factory/hooks/<name>` in the target repo.
