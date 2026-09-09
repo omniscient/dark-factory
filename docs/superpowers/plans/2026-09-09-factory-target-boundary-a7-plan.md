@@ -1,5 +1,7 @@
 # Implementation Plan: `docs/factory-target-boundary.md` — the shipped factory/target boundary contract (A7)
 
+**Operator plan gate:** 2026-09-09 — approved with amendments AM-A—AM-J from an independent read-only review that reconstructed the doc and the drift-guard test from this plan's own code blocks and ran them, including mutation tests of the guard.
+
 **Issue:** #201
 
 ## Goal
@@ -152,6 +154,8 @@ def test_non_negotiables_cites_the_deploy_publish_exclusion_mechanism():
 ```markdown
 # Factory / Target Boundary Contract
 
+## Overview
+
 Dark Factory dispatches containerized Claude agents against itself (this repo) and against
 target repos (MarketHawk today, via a separate instance). This document is the durable
 contract for what the factory infrastructure owns versus what a target repo owns or
@@ -164,8 +168,6 @@ checkout, not this doc's prose, when the two seem to disagree. Where a section l
 `docs/adapter-authoring-guide.md` instead of restating a table (A2, A5), the authoring guide
 is authoritative for that table, mirroring its own "if they disagree, the design doc is
 authoritative" convention — this doc does not keep a second copy.
-
-## Overview
 
 This doc supersedes nothing else: `docs/adapter-authoring-guide.md` already documents
 `## Side-effect levels` and `## Handoff manifest (A5)` in full, and this doc is the
@@ -186,8 +188,12 @@ comments already point at (see Trust model, below).
   `scripts/factory_core/breaker.py::evaluate_stop_condition`'s own docstring, this is a
   "cap-class-only stop evaluator ... the external-predicate class lives on #197's
   verifier.py seam, never here."
-- **Side-effect levels 4-5 are factory-owned**, enforced at three independent sites keyed on
-  `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL` (`= 4`):
+- **Side-effect levels 4-5 are factory-owned**, enforced at three independent sites at the
+  threshold `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL` (`= 4`). Only
+  `scripts/factory_core/handoff.py::cross_check` reads that constant;
+  `scripts/factory_core/verifier.py` keeps its own private `_FACTORY_OWNED_MIN_LEVEL = 4`,
+  pinned to it by a test, and `scripts/factory_core/adapter.py` uses a bare literal `4` that
+  no test pins — see Known gaps. The three sites are:
   `scripts/factory_core/adapter.py` requires `budget_caps` and `human_checkpoint` on any
   loop declaring `side_effect_level >= 4`; `scripts/factory_core/verifier.py::resolve_and_run`
   returns `STATUS: BLOCKED` / `REQUIRED_PROFILE: factory-owned` for any such level; and
@@ -196,8 +202,10 @@ comments already point at (see Trust model, below).
   nothing will run it.
 - **Level 6 is human-approved and out of v1** — `scripts/factory_core/side_effect.py`
   defines no profile for level 6, and `scripts/factory_core/adapter.py::AdapterError`
-  is raised when a loop declares `side_effect_level == 6`, citing `#196/D1` and
-  "out of scope for v1" — v1-scoped, not a standing prohibition.
+  is raised when a loop declares `side_effect_level == 6`; the raised message reads "out of
+  scope for v1 (#194)" and the decision it implements, `#196/D1`, is cited in the source
+  comment above it — v1-scoped, not a standing prohibition. (Grep the error text for
+  `#196/D1` and you will not find it; that is why both are named here.)
 - **Live-trading exclusion is a worked example of the level-6 rule, not a separate
   mechanism.** Nothing in this repo enforces a factory-wide "live trading" prohibition; the
   citable rule is the level-6 rejection above. The factory's own shipped
@@ -206,8 +214,13 @@ comments already point at (see Trust model, below).
   own `epic_autopilot.sensitive_keywords` in `config/config.yaml`, matching strings
   including `trading`, `ibkr`, `live order`, `notional`) is target-layer keyword
   defense-in-depth against *proposing* such a change via the epic-autopilot fast path — not
-  a factory-level block, and currently gating nothing at all on this self-target instance,
-  since `config/config.yaml` ships `epic_autopilot.enabled: false` (same caveat as
+  a factory-level block. On this self-target instance it is currently inert, for two
+  reasons rather than one: the epic-autopilot path is off (`config/config.yaml` ships
+  `epic_autopilot.enabled: false`), and its second reader,
+  `scripts/architecture_slice.py::_check_safety_fallback` (reached from
+  `scripts/context_pack.py`, and *not* gated on that flag), never reaches its keyword branch
+  here because `.factory/adapter.yaml` declares `components: {}`, so
+  `scripts/architecture_slice.py::infer_component` resolves nothing (same caveat as
   `hard_exclude_paths` below, Known gaps' OD3). The parallel on this self-target instance is
   `deploy/instances/` and `.github/workflows/publish.yml`, held by two independent
   mechanisms: this repo's own `CLAUDE.md` Hard limits (a policy instruction to the agent),
@@ -288,7 +301,8 @@ def test_a2_section_links_to_authoring_guide_instead_of_restating_table():
 
 Validated by `scripts/factory_core/adapter.py::_validate_loop` and its sub-block
 validators — hand-rolled `isinstance`/`AdapterError` checks, not `jsonschema`
-(dependency-free by design). `schema_version` is inert metadata: a `schema_version: 1`
+(dependency-free by design; the constraint is recorded as an AVOID entry in
+`.archon/memory/architecture.md`). `schema_version` is inert metadata: a `schema_version: 1`
 file containing `loops:` validates identically to a v2 file. This repo's own
 `.factory/adapter.yaml` currently declares no `loops:` entries — there is no self-target
 example yet.
@@ -369,7 +383,10 @@ def test_a3_section_names_verdict_schema_tokens():
 clone-escaping path), and the shared verdict schema
 (`STATUS`/`GATE_TYPE`/`FINDINGS_COUNT`/`SEVERITY`). The full operational contract — env
 vars, output modes, fail-closed defaults, reserved output names — lives in
-`refinement-skills/VERIFIER-CONTRACT.md`, read live by every checker-subagent spawn; this
+`refinement-skills/VERIFIER-CONTRACT.md`, read by each reviewing phase command at phase
+start from the baked `/opt/refinement-skills/` copy (`commands/dark-factory-plan.md`,
+`-conformance.md`, `-code-review.md`), with the inline model pin authoritative if the image
+predates it; this
 doc does not duplicate it.
 
 Design record: `docs/superpowers/specs/2026-08-28-verifier-abstraction-a3-design.md`.
@@ -563,9 +580,11 @@ def test_declared_vs_runs_names_phase_levels_config_key():
 ## Trust model
 
 - **Two independent enforcement layers, both keyed on the run's effective side-effect
-  level.** Per `scripts/factory_core/side_effect.py`'s own module docstring, level
-  semantics are read by three layers that never re-declare each other's table: **Layer
-  A**, which tools the model is offered — each phase node's `denied_tools:` key in
+  level.** Per `scripts/factory_core/side_effect.py`'s own module docstring, the level
+  table has one owner and five readers — the DAG's `denied_tools` (Layer A), the git/gh
+  shim (Layer B), the run record (Layer C), `scripts/factory_core/handoff.py::cross_check`,
+  and a future loop runner — none of which re-declares it. The two that gate what an agent
+  can do are: **Layer A**, which tools the model is offered — each phase node's `denied_tools:` key in
   `workflows/archon-dark-factory.yaml`, pinned to
   `scripts/factory_core/side_effect.py::profile_for(level).denied_tools` by
   `tests/test_side_effect_dag.py::test_phase_node_denied_tools_matches_configured_level`
@@ -661,6 +680,43 @@ def test_known_gaps_names_open_issues_and_ods():
     content = _doc_text()
     for token in ("#374", "#407", "#412", "#411", "OD1", "OD2", "OD3"):
         assert token in content, f"missing known-gap reference: {token}"
+
+
+def test_never_list_verbs_in_doc_match_side_effect_module():
+    """The doc restates level 5's git/gh never-list verbatim -- the one table it
+    duplicates rather than links. Pin it, or a change to _GH_NEVER/_GIT_NEVER leaves the
+    doc silently wrong (operator plan gate, F4)."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from factory_core import side_effect
+
+    content = _normalized(_doc_text())
+    for verb in tuple(side_effect._GH_NEVER) + tuple(side_effect._GIT_NEVER):
+        assert verb in content, f"doc's never-list is missing {verb!r}"
+
+
+def test_every_doc_path_reference_exists():
+    """CITATION_RE pins only .py/.sh symbols. The doc also cites design records and
+    commands by path -- including specs still in the in-flight docs/superpowers/specs/
+    tier, which a later archive step moves. Pin those too (operator plan gate, F5)."""
+    content = _doc_text()
+    refs = set(
+        re.findall(
+            r"`((?:docs|refinement-skills|commands|workflows|config|tests)/[\w./-]+"
+            r"\.(?:md|yaml|yml|sh|py))`",
+            content,
+        )
+    )
+    assert refs, "no path references found -- the regex or the doc changed shape"
+    for rel in sorted(refs):
+        assert (REPO_ROOT / rel).is_file(), f"doc cites a path that does not exist: {rel}"
+
+
+def test_handoff_reason_code_is_real():
+    """`producing_loop_factory_owned` is quoted bare in the doc; tie it to its source."""
+    src = (REPO_ROOT / "scripts" / "factory_core" / "handoff.py").read_text(encoding="utf-8")
+    assert "producing_loop_factory_owned" in src
 ```
 
 2. Verify fail:
@@ -689,7 +745,11 @@ writing:
   current schema, not the schema live at the base commit.
 - **#411** — the conformance agent refuses self-target runs whose subject is the floor's
   own shadowing-path entry (`dark-factory/scripts/**`).
-- **OD1** — `workflows/**` and `commands/**` are visibility-only, never blocking
+- **OD1** — `workflows/**` and `commands/**` are visibility-only — never `HUMAN_REQUIRED`
+  on boundary-floor grounds (the independent hotspot and size triggers in
+  `scripts/gate_blast_radius.py` are unaffected, and today return nothing for these paths
+  only because no hotspot entry lists them and `size_budget_blocks: false` — data, not
+  structure), never blocking
   (`scripts/factory_core/adapter_defaults.py::_VISIBILITY_ONLY`). A PR editing the DAG or
   a phase command reaches Gates 2/3 but never `HUMAN_REQUIRED`.
 - **OD2** — `.factory/adapter.yaml` itself is visibility-only for the same reason; its
@@ -711,7 +771,7 @@ writing:
    ```bash
    cd /workspace/dark-factory && python -m pytest tests/test_factory_target_boundary_doc.py -x -v
    ```
-   Expected: all eleven tests pass.
+   Expected: all fourteen tests pass.
 
 5. Commit:
    ```bash
@@ -764,7 +824,7 @@ schema, the trust model, and known gaps.
    ```bash
    cd /workspace/dark-factory && python -m pytest tests/test_factory_target_boundary_doc.py -x -v
    ```
-   Expected: all twelve tests pass.
+   Expected: all fifteen tests pass.
 
 5. Commit:
    ```bash
@@ -784,7 +844,7 @@ schema, the trust model, and known gaps.
    ```bash
    cd /workspace/dark-factory && python -m pytest tests/test_factory_target_boundary_doc.py -v
    ```
-   Expected: all twelve tests pass.
+   Expected: all fifteen tests pass.
 
 2. Re-verify every `path::symbol` citation manually against the checkout at implement time
    (per the spec's mandatory self-review step — the drift guard only proves the symbol
@@ -832,7 +892,9 @@ schema, the trust model, and known gaps.
    tracked rather than silently dropped:
    ```bash
    cd /workspace/dark-factory
-   FOOTER=$(python3 scripts/factory_core/cli.py marker refinement)
+   # `factory`, not `refinement`: this step runs in the implement phase, matching
+   # dark-factory-validate.md / -conformance.md / -code-review.md.
+   FOOTER=$(python3 scripts/factory_core/cli.py marker factory)
    gh issue create --repo "$FACTORY_REPO_SLUG" \
      --title "F13 follow-up: retarget scripts/shims/git and scripts/shims/gh deny messages to docs/factory-target-boundary.md" \
      --body "docs/factory-target-boundary.md (#201) now exists and carries the full trust-model
@@ -843,7 +905,7 @@ schema, the trust model, and known gaps.
    scope for #201 per that ticket's spec — filed here per its explicit instruction to do so.
 
    $FOOTER" \
-     --label documentation
+     --label "needs-triage,documentation"
    ```
    Expected: a new issue is created; note its number in this plan's implementation commit
    message or the PR description for traceability. If `gh issue create` fails (e.g. no
