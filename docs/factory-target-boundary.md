@@ -26,7 +26,8 @@ comments already point at (see Trust model, below).
   is called from `scripts/factory_core/adapter.py` on every loop at load time; the
   "clean-room grader" principle traces to #189.
 - **Declared stop conditions are validated as present, not as externally checkable.**
-  `verification.stop_condition` is a required field (`scripts/factory_core/adapter.py::required_fields`
+  `verification.stop_condition` is a required field (the `required_fields` argument to
+  `scripts/factory_core/adapter.py::_validate_subblock`
   for the `verification` sub-block) but is validated only as a non-empty string — nothing
   parses its content. The caps actually evaluated are `scheduling.max_iterations`,
   `scheduling.deadline_seconds`, and `budget_caps.max_tokens`, read by
@@ -34,18 +35,28 @@ comments already point at (see Trust model, below).
   `scripts/factory_core/breaker.py::evaluate_stop_condition`'s own docstring, this is a
   "cap-class-only stop evaluator ... the external-predicate class lives on #197's
   verifier.py seam, never here."
-- **Side-effect levels 4-5 are factory-owned**, enforced at three independent sites at the
-  threshold `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL` (`= 4`). Only
-  `scripts/factory_core/handoff.py::cross_check` reads that constant;
+- **Side-effect levels 4-5 are factory-owned**, enforced at four independent sites at the
+  threshold `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL` (`= 4`). Two of
+  the four read that constant — `scripts/factory_core/handoff.py::cross_check` and
+  `scripts/gate_blast_radius.py::_boundary_escalation_findings`. The other two do not:
   `scripts/factory_core/verifier.py` keeps its own private `_FACTORY_OWNED_MIN_LEVEL = 4`,
   pinned to it by a test, and `scripts/factory_core/adapter.py` uses a bare literal `4` that
-  no test pins — see Known gaps. The three sites are:
+  no test pins (see Known gaps). Retuning the constant would therefore retune two sites,
+  fail a test at the third, and silently leave the fourth behind. The four sites are:
   `scripts/factory_core/adapter.py` requires `budget_caps` and `human_checkpoint` on any
   loop declaring `side_effect_level >= 4`; `scripts/factory_core/verifier.py::resolve_and_run`
-  returns `STATUS: BLOCKED` / `REQUIRED_PROFILE: factory-owned` for any such level; and
+  returns `STATUS: BLOCKED` / `REQUIRED_PROFILE: factory-owned` for any such level;
   `scripts/factory_core/handoff.py::cross_check` rejects a handoff manifest from such a loop
-  with reason `producing_loop_factory_owned`. A target may *declare* a level-4/5 loop;
-  nothing will run it.
+  with reason `producing_loop_factory_owned`; and
+  `scripts/gate_blast_radius.py::_boundary_escalation_findings` makes a newly declared
+  level->=4 loop, or any change to an existing one, a boundary-escalation finding that routes
+  the whole PR to `HUMAN_REQUIRED`. The A6 design record names this as "the PR-review-time
+  counterpart to `scripts/factory_core/handoff.py::cross_check`'s runtime rejection, catching the escalation
+  before merge instead of at first handoff attempt"
+  (`docs/superpowers/specs/2026-09-08-boundary-bypass-prevention-a6-design.md`). So: a target may
+  *declare* a level-4/5 loop and nothing will run it — and on this self-target instance the
+  PR that declares one is stopped at validate, which is the only one of the four sites that
+  fires on every PR today.
 - **Level 6 is human-approved and out of v1** — `scripts/factory_core/side_effect.py`
   defines no profile for level 6, and `scripts/factory_core/adapter.py::AdapterError`
   is raised when a loop declares `side_effect_level == 6`; the raised message reads "out of
@@ -64,9 +75,13 @@ comments already point at (see Trust model, below).
   reasons rather than one: the epic-autopilot path is off (`config/config.yaml` ships
   `epic_autopilot.enabled: false`), and its second reader,
   `scripts/architecture_slice.py::_check_safety_fallback` (reached from
-  `scripts/context_pack.py`, and *not* gated on that flag), never reaches its keyword branch
-  here because `.factory/adapter.yaml` declares `components: {}`, so
-  `scripts/architecture_slice.py::infer_component` resolves nothing (same caveat as
+  `scripts/context_pack.py`, and *not* gated on that flag), has no blocking power at all —
+  a fired keyword only widens the `ARCHITECTURE.md` context slice to the full document via
+  `scripts/architecture_slice.py::_full_doc_result`, and this repo ships no `ARCHITECTURE.md`
+  to slice. Note that this branch *is* reached here: `scripts/architecture_slice.py::infer_component`
+  resolves from its own module tables (`_LABEL_COMPONENT_MAP` maps the label "dark factory"),
+  not from the adapter's `components:` key, which is consulted only later when building the
+  section map. The keywords are evaluated; nothing downstream stops a run (same caveat as
   `hard_exclude_paths` below, Known gaps' OD3). The parallel on this self-target instance is
   `deploy/instances/` and `.github/workflows/publish.yml`, held by two independent
   mechanisms: this repo's own `CLAUDE.md` Hard limits (a policy instruction to the agent),
@@ -117,7 +132,8 @@ clone-escaping path), and the shared verdict schema
 (`STATUS`/`GATE_TYPE`/`FINDINGS_COUNT`/`SEVERITY`). The full operational contract — env
 vars, output modes, fail-closed defaults, reserved output names — lives in
 `refinement-skills/VERIFIER-CONTRACT.md`, read by each reviewing phase command at phase
-start from the baked `/opt/refinement-skills/` copy (`commands/dark-factory-plan.md`,
+start from the baked `/opt/refinement-skills/` copy (`commands/dark-factory-refine.md`,
+`commands/dark-factory-plan.md`,
 `-conformance.md`, `-code-review.md`), with the inline model pin authoritative if the image
 predates it; this
 doc does not duplicate it.
@@ -200,7 +216,10 @@ including its **OD1** decision that `workflows/**` and `commands/**` stay visibi
   mode, so both survive under `bypassPermissions`.
 - **What the shims do not claim.** The shim is a `PATH` shim
   (`scripts/shims/git`, `scripts/shims/gh`). A process invoking `/usr/bin/git` by absolute
-  path bypasses it. **v1 is a policy boundary against mistaken or prompt-injected
+  path bypasses it, and so does one that clears `CLAUDECODE` or `FACTORY_SIDE_EFFECT_LEVEL`
+  in its own subprocess — `scripts/shims/git` execs the real binary unshimmed when
+  either is absent. Both are at least as reachable as the absolute path; this section
+  exists to name them, not to imply the shim is airtight. **v1 is a policy boundary against mistaken or prompt-injected
   behaviour, not a security boundary against a deliberately hostile agent.** The boundary
   against a hostile agent is the credential, deferred as `#196/D3`.
 - **Trusted comment channels.** Per this repo's own `CLAUDE.md`: issue comments signed
@@ -247,6 +266,10 @@ alongside this always-on level-5 never-list.
 Named honestly as open items, not resolved history — all confirmed open as of this
 writing:
 
+- **Unpinned threshold literal** — `scripts/factory_core/adapter.py`'s level-4 check uses a
+  bare `4`, not `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL`, and no test
+  pins the two together (`tests/test_side_effect.py` pins only `scripts/factory_core/verifier.py`'s
+  private copy). Retuning the constant would silently leave adapter validation at 4.
 - **#374** — a `HUMAN_REQUIRED` block from `scripts/gate_blast_radius.py` has no approval
   memory; re-running validate after an operator clears `needs-discussion` re-blocks
   identically.
@@ -264,7 +287,9 @@ writing:
   only because no hotspot entry lists them and `size_budget_blocks: false` — data, not
   structure), never blocking
   (`scripts/factory_core/adapter_defaults.py::_VISIBILITY_ONLY`). A PR editing the DAG or
-  a phase command reaches Gates 2/3 but never `HUMAN_REQUIRED`.
+  a phase command reaches Gates 2/3 and is never `HUMAN_REQUIRED` **on boundary-floor
+  grounds** — flipping `size_budget_blocks` to `true` would make a large one blocking
+  again, by a different trigger.
 - **OD2** — `.factory/adapter.yaml` itself is visibility-only for the same reason; its
   escalation risk is caught only by the semantic adapter diff, and only when that file is
   in the changed set.

@@ -80,13 +80,21 @@ def test_doc_citations_resolve_to_real_symbols():
         assert last_component in text, f"symbol {symbol!r} not found in {path_str}"
 
 
-def test_non_negotiables_cite_the_three_factory_owned_enforcement_sites():
+def test_non_negotiables_cite_the_factory_owned_enforcement_sites():
     # Scoped to the Non-negotiables section itself: "adapter.py" appears in nearly every
     # section of this doc, so a doc-wide substring check would pass even if this section
     # never named the three enforcement sites.
     content = _doc_text()
     section = _section(content, "## Non-negotiables")
-    for symbol in ("adapter.py", "resolve_and_run", "producing_loop_factory_owned"):
+    # gate_blast_radius is the fourth site and the one that actually fires on every
+    # self-target PR (operator review of PR #417); the count is pinned here so the doc
+    # cannot quietly drop back to three.
+    for symbol in (
+        "adapter.py",
+        "resolve_and_run",
+        "producing_loop_factory_owned",
+        "_boundary_escalation_findings",
+    ):
         assert symbol in section
 
 
@@ -155,7 +163,8 @@ def test_declared_vs_runs_names_phase_levels_config_key():
 
 def test_known_gaps_names_open_issues_and_ods():
     content = _doc_text()
-    for token in ("#374", "#407", "#412", "#411", "OD1", "OD2", "OD3"):
+    for token in ("#374", "#407", "#412", "#411", "OD1", "OD2", "OD3",
+                  "Unpinned threshold literal"):
         assert token in content, f"missing known-gap reference: {token}"
 
 
@@ -201,11 +210,21 @@ def test_every_doc_path_reference_exists():
     content = _doc_text()
     refs = set(
         re.findall(
-            r"`((?:docs|refinement-skills|commands|workflows|config|tests)/[\w./-]+"
+            r"`((?:docs|refinement-skills|commands|workflows|config|tests|scripts"
+            r"|\.factory|\.archon|\.github)/[\w./-]+"
             r"\.(?:md|yaml|yml|sh|py))`",
             content,
         )
     )
+    # The shims have no extension, so the suffix-anchored regex above never reaches
+    # them; match them by their directory instead, so a mutated `scripts/shims/git-GONE`
+    # is still checked rather than silently skipped. Repo-root docs have no directory
+    # prefix at all and are matched as literals. (Operator review of PR #417: before
+    # this, repointing `scripts/shims/git` at a nonexistent file passed 15/15.)
+    refs.update(re.findall(r"`(scripts/shims/[\w.-]+)`", content))
+    for literal in ("README.md", "CLAUDE.md"):
+        if f"`{literal}`" in content:
+            refs.add(literal)
     assert refs, "no path references found -- the regex or the doc changed shape"
     for rel in sorted(refs):
         assert (REPO_ROOT / rel).is_file(), f"doc cites a path that does not exist: {rel}"
