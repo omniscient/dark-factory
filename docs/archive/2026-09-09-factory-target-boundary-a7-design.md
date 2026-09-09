@@ -8,6 +8,14 @@ closed. #200 (A6 bypass prevention) is also closed and is in scope per the issue
 **Status:** spec-pending-review
 **Operator spec gate:** 2026-09-09 — approved with amendments AM-1—AM-10 from an independent read-only review that re-verified every claim against `origin/main`. Two blocking omissions (committed forward references, and overlap with `docs/adapter-authoring-guide.md`) plus four accuracy corrections are folded in below.
 
+> **Corrected at the code review of PR #417 (2026-09-09):** the factory-owned rule has **four**
+> enforcement sites, not three, and **two** readers of `FACTORY_OWNED_MIN_LEVEL`, not one —
+> `scripts/gate_blast_radius.py::_boundary_escalation_findings` (shipped by #200) is the fourth
+> site and the second reader. The `components: {}` explanation of why `sensitive_keywords`
+> gates nothing is also wrong: `infer_component` never reads that key. See
+> `docs/factory-target-boundary.md` for the corrected text.
+
+
 ---
 
 ## Overview / Problem Statement
