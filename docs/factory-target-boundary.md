@@ -132,3 +132,52 @@ cap-class-only evaluator. The only production caller today is
 `scripts/factory_core/cli.py`.
 
 Design record: `docs/archive/2026-08-29-loop-declarative-stop-conditions-a4-design.md`.
+
+## Handoff manifest (A5)
+
+`scripts/factory_core/handoff.py::cross_check` enforces R3 — a manifest's
+`producing_loop` must resolve to a declared `loops[].name` — and rejects a factory-owned
+producer (see Non-negotiables). `docs/adapter-authoring-guide.md`'s
+`## Handoff manifest (A5)` section already carries the full schema, intake path, reason
+codes, and trust boundary; this doc links to it rather than restating it — see the
+Authority order note above.
+
+Design record: `docs/superpowers/specs/2026-08-30-artifact-handoff-manifest-a5-design.md`.
+
+## Bypass prevention (A6)
+
+Named by mechanism — the string "bypass" does not appear in the enforcement code itself:
+
+- **The floor is unconditional and unsuppressible by the PR under review.**
+  `scripts/factory_core/adapter_defaults.py::FACTORY_OWNED_CRITICAL_DIFF_FLOOR` and
+  `scripts/factory_core/adapter_defaults.py::FACTORY_OWNED_MIGRATION_SEED_FLOOR` are merged
+  into `safety` on every `adapter.load()` return path via
+  `scripts/factory_core/adapter.py::_apply_boundary_floor` (both the no-file and merged
+  branches) — cited here by its two call sites, not by quoting its own docstring as proof.
+  `scripts/gate_blast_radius.py::_migration_seed_auth_patterns` re-unions the
+  migration-seed floor specifically when `adapter.load()` itself raises.
+- **Both sides of the semantic adapter diff come from `git show`, never the working
+  tree.** `scripts/gate_blast_radius.py::_boundary_escalation_findings` and
+  `scripts/gate_blast_radius.py::_adapter_snapshot` read `git show <ref>:<path>` for both
+  the base ref and HEAD. A
+  working-tree read previously let a committed escalation pass when the on-disk copy was
+  reverted; fixed in PR #410.
+- **The `blast_radius.enabled` kill switch cannot flip itself off.**
+  `scripts/gate_blast_radius.py::load_config` reads `blast_radius.*` from the merged base
+  ref (`git show <base-ref>:<path>`) first, falling back to the image-baked config only
+  for keys the base ref doesn't set — never from the branch under review — so a PR cannot
+  disable its own gate. (On this self-target instance, `.claude/skills/refinement/config.yaml`
+  is untracked and git-excluded, so the base-ref read misses and the image-baked block
+  governs here specifically.) Even when `enabled: false`, it never suppresses the floor or
+  the semantic adapter diff — it suppresses only the hotspot and size triggers.
+- **The self-target instance cannot substitute its own gate script.**
+  `commands/dark-factory-validate.md` prefers the image-baked
+  `/opt/dark-factory/scripts/gate_blast_radius.py`, falling back to the clone's own
+  `dark-factory/scripts/gate_blast_radius.py` only if the baked copy is absent — a target
+  that tracks its own `dark-factory/scripts/` is not the copy that decides its own gate.
+
+Design record: `docs/superpowers/specs/2026-09-08-boundary-bypass-prevention-a6-design.md`,
+including its **OD1** decision that `workflows/**` and `commands/**` stay visibility-only
+(see Known gaps) while `.factory/hooks/**`, `.claude/**`, `.archon/commands/**`,
+`.archon/workflows/**`, and `dark-factory/scripts/**` are in the blocking floor, and
+**OD2** (`.factory/adapter.yaml` itself is visibility-only).

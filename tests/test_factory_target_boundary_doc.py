@@ -17,6 +17,8 @@ REQUIRED_SECTIONS = [
     "## Side-effect levels and enforced profiles (A2)",
     "## Verifier contract (A3)",
     "## Stop-condition schema (A4)",
+    "## Handoff manifest (A5)",
+    "## Bypass prevention (A6)",
 ]
 
 
@@ -95,3 +97,15 @@ def test_a3_section_names_verdict_schema_tokens():
     section = _section(content, "## Verifier contract (A3)")
     for token in ("STATUS", "GATE_TYPE", "FINDINGS_COUNT", "SEVERITY"):
         assert token in section, f"A3 section missing verdict-schema token: {token}"
+
+
+def test_a6_names_the_floor_the_semantic_diff_and_the_kill_switch():
+    # Uses _normalized() (collapses line-wrap whitespace) because these are prose
+    # phrases spanning a hard-wrapped markdown paragraph, not single-line tokens.
+    content = _normalized(_doc_text())
+    for phrase in (
+        "FACTORY_OWNED_CRITICAL_DIFF_FLOOR",
+        "_boundary_escalation_findings",
+        "never suppresses the floor or the semantic adapter diff",
+    ):
+        assert phrase in content, f"missing A6 phrase: {phrase}"
