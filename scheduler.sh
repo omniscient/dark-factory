@@ -784,9 +784,20 @@ parse_comment_verdict() {
   # MERGE would be reasonable", "MERGE? No — SKIP"), while a CONTINUE-shaped
   # justification that uses "merge" as an ordinary lowercase verb ("the reviewer wants
   # a merge later") must not be flagged.
+  #
+  # Tokenize with `tr` rather than PCRE lookarounds (operator review of PR #413): the
+  # plan's `grep -oP` degrades SILENTLY where PCRE is unavailable -- `2>/dev/null` plus
+  # `|| true` plus `wc -l` on empty output yields distinct=0, i.e. the guard stops
+  # firing with no log line. A guard that can quietly stop guarding is the wrong shape,
+  # and the runtime (`ubuntu:26.04`) being fine today does not make it right. `tr` +
+  # `grep -x` is POSIX, has no silent-degradation path, and is also strictly more
+  # correct: `-oP` cannot match adjacent tokens ("SKIP MERGE"), because the first match
+  # consumes the separator the second one needs. Keeping `_-` inside the token class is
+  # what makes `skip_this` and `Merge-ready` single non-matching tokens.
   local distinct
   distinct=$(printf '%s' "$response" \
-    | grep -oP '(?<![[:alnum:]_-])(MERGE|CONTINUE|SKIP)(?![[:alnum:]_-])' 2>/dev/null \
+    | tr -c '[:alnum:]_-' '\n' \
+    | grep -xE 'MERGE|CONTINUE|SKIP' \
     | sort -u | wc -l) || true
   if [ "${distinct:-0}" -ge 2 ]; then
     return 0
@@ -800,8 +811,10 @@ parse_comment_verdict() {
   # guard above safe: a first-line-only match would accept "MERGE\nActually, skip this"
   # (lowercase second token, invisible to the case-sensitive scan) as a real merge.
   # `[^[:alnum:]]` matches newlines in bash ERE, so "MERGE\n" and "**MERGE**\n" still parse.
+  # `?` is excluded from both classes (operator review of PR #413): "MERGE?" is a hedge,
+  # and this branch dispatches `Close issue #N`. "MERGE.", "**MERGE**", "MERGE!" still parse.
   local merge_strict_re
-  merge_strict_re='^[^[:alnum:]]*MERGE[^[:alnum:]]*$'
+  merge_strict_re='^[^[:alnum:]?]*MERGE[^[:alnum:]?]*$'
   shopt -s nocasematch
   if [[ "$response" =~ $merge_strict_re ]]; then
     shopt -u nocasematch
@@ -899,11 +912,18 @@ ${verdict_rule}"
   fi
 
   echo "  classify_comments #${issue_num}: verdict=${verdict}" >&2
+  # `|| true` is load-bearing, not defensive noise: the scheduler runs under
+  # `set -euo pipefail`, so an unwritable state file would turn a *successful*
+  # classification into a dead poll loop -- the verdict is computed and logged, then
+  # the function dies before `echo "$verdict"`, the caller's $( ) comes back empty and
+  # the err trap exits the daemon. Caching is best-effort by design; the worst a failed
+  # write can cost is one re-classification next poll. Same rule as breaker.py's
+  # _write_key, which swallows OSError for exactly this reason.
   if [ -n "$latest_id" ]; then
     STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
-      state-set --key "${issue_num}:cverdict" --value "$verdict" >/dev/null
+      state-set --key "${issue_num}:cverdict" --value "$verdict" >/dev/null || true
     STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
-      state-set --key "${issue_num}:cid" --value "$latest_id" >/dev/null
+      state-set --key "${issue_num}:cid" --value "$latest_id" >/dev/null || true
   fi
   echo "$verdict"
 }
@@ -920,9 +940,13 @@ _log_raw_fallback_once() {
   local truncated
   truncated=$(printf '%s' "$raw" | head -c 200) || true
   echo "  classify_comments #${issue_num}: raw response (truncated): '${truncated}' stderr='${err_tail}'" >&2
-  if [ -n "$latest_id" ]; then
+  # Only a non-empty body consumes the dedup slot. The api_error path calls this with an
+  # empty $raw by definition, and burning the marker there would suppress the dump for a
+  # genuinely unparseable response on the same comment set -- the dump this ticket exists
+  # to produce. `|| true` for the same errexit reason as the cache writes above.
+  if [ -n "$latest_id" ] && [ -n "$raw" ]; then
     STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
-      state-set --key "$dedup_key" --value "$latest_id" >/dev/null
+      state-set --key "$dedup_key" --value "$latest_id" >/dev/null || true
   fi
 }
 

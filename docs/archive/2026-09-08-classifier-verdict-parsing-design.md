@@ -1,6 +1,7 @@
 # Fix scheduler comment-classifier verdict parsing, caching, and log noise
 
 **Issue:** #402
+**Operator review of PR #413 (2026-09-09, at merge):** two deviations from the text below, both tightenings, both covered by fixtures. (1) `?` is excluded from MERGE-strict's leading and trailing classes — `MERGE?` is a hedge and this branch dispatches `Close issue #N`; `MERGE.`, `**MERGE**`, `MERGE!` still parse. (2) The ambiguity scan tokenizes with `tr -c '[:alnum:]_-'` + `grep -xE` instead of a PCRE lookaround: the `grep -oP` form degrades silently where PCRE is unavailable (stderr suppressed, `|| true`, `wc -l` on empty output ⇒ the guard stops firing with no log line), and it cannot match adjacent tokens such as `SKIP MERGE` because the first match consumes the separator the second needs.
 **Operator review:** 2026-09-08 (spec gate) — amendments F1—F7 from an independent read-only review, plus the operator's MERGE-strict and ambiguity rules, applied.
 **Surface note:** `scripts/factory_core/breaker.py` is a Blast-Radius hotspot and a CLAUDE.md safety surface; this change is additive (string state helpers, reset hygiene) and touches no retry logic. The PR takes the operator-review path.
 

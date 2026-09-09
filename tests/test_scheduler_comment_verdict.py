@@ -79,6 +79,14 @@ CASES = [
     ("MERGE\nActually, skip this — the tests fail", ""),
     ("MERGE\nAlso CONTINUE maybe", ""),
     ("MERGE\n", "MERGE"),
+    # Operator review of PR #413: a hedged MERGE must not dispatch `Close issue #N`.
+    ("MERGE?", ""),
+    ("MERGE (?!)", ""),
+    ("MERGE!", "MERGE"),
+    # Adjacent tokens: the PCRE form could not match these (the first match consumes the
+    # separator the second needs), so this is new coverage, not a port of an old case.
+    ("SKIP MERGE", ""),
+    ("CONTINUE SKIP", ""),
     ("", ""),
 ]
 
