@@ -81,3 +81,28 @@ comments already point at (see Trust model, below).
   `^\.claude/` and `^\.factory/hooks/` outright (both are also in the sibling
   `FACTORY_OWNED_CRITICAL_DIFF_FLOOR` that ranks a diff Critical, but it is the
   migration-seed floor specifically that routes to `HUMAN_REQUIRED`).
+
+## The `loops:` schema (A1)
+
+Validated by `scripts/factory_core/adapter.py::_validate_loop` and its sub-block
+validators — hand-rolled `isinstance`/`AdapterError` checks, not `jsonschema`
+(dependency-free by design; the constraint is recorded as an AVOID entry in
+`.archon/memory/architecture.md`). `schema_version` is inert metadata: a `schema_version: 1`
+file containing `loops:` validates identically to a v2 file. This repo's own
+`.factory/adapter.yaml` currently declares no `loops:` entries — there is no self-target
+example yet.
+
+Design record: `docs/archive/2026-07-07-adapter-schema-v2-loops-design.md` (original
+schema), `docs/archive/2026-08-28-adapter-schema-v2-loop-metadata-a1-5-design.md` (A1.5,
+the five-move restructuring: `discovery`/`handoff`/`verification`/`persistence`/`scheduling`).
+
+## Side-effect levels and enforced profiles (A2)
+
+Level semantics live in one module — `scripts/factory_core/side_effect.py::LEVELS`, the
+`scripts/factory_core/side_effect.py::Profile` class, and
+`scripts/factory_core/side_effect.py::profile_for`. `docs/adapter-authoring-guide.md`'s
+`## Side-effect levels` section already carries the full level-to-profile table, the
+`effective_level` fail-closed rule, and `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL`;
+this doc links to it rather than restating it — see the Authority order note above.
+
+Design record: `docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md`.

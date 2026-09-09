@@ -13,6 +13,8 @@ CITATION_RE = re.compile(r"`([\w./-]+\.(?:py|sh))::([A-Za-z_][A-Za-z0-9_]*)`")
 REQUIRED_SECTIONS = [
     "## Overview",
     "## Non-negotiables",
+    "## The `loops:` schema (A1)",
+    "## Side-effect levels and enforced profiles (A2)",
 ]
 
 
@@ -74,3 +76,13 @@ def test_non_negotiables_cites_the_deploy_publish_exclusion_mechanism():
     content = _normalized(_doc_text())
     assert "migration_seed_auth_patterns" in content
     assert "^deploy/" in content
+
+
+def test_a2_section_links_to_authoring_guide_instead_of_restating_table():
+    # Scoped to the A2 section body itself, not "anywhere in the doc" — the Overview
+    # section already mentions docs/adapter-authoring-guide.md, so a doc-wide substring
+    # check would pass before this task's own content exists (no red phase).
+    content = _doc_text()
+    section = _section(content, "## Side-effect levels and enforced profiles (A2)")
+    assert "docs/adapter-authoring-guide.md" in section
+    assert "_PROFILES" not in section, "A2 section must link out, not restate the level table"
