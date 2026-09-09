@@ -86,3 +86,51 @@ def test_breaker_evaluate_stop_peek_does_not_increment(monkeypatch, tmp_path, ca
     assert capsys.readouterr().out.strip() == "stopped=false reason=none"
     import json
     assert json.loads(state_file.read_text()) == {}
+
+
+# #402: state-get/state-set expose get_state_str/set_state_str to scheduler.sh, scoped
+# to the three keys the comment classifier needs via a fixed --key shape validator.
+def test_state_set_then_get_round_trip(monkeypatch, tmp_path, capsys):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    monkeypatch.setenv("STATE_FILE", str(state_file))
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "state-set", "--key", "42:cverdict", "--value", "CONTINUE",
+    ])
+    cli_mod.main()
+    monkeypatch.setattr(sys, "argv", ["cli.py", "state-get", "--key", "42:cverdict"])
+    cli_mod.main()
+    assert capsys.readouterr().out.strip() == "CONTINUE"
+
+
+def test_state_get_missing_key_prints_nothing(monkeypatch, tmp_path, capsys):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    monkeypatch.setenv("STATE_FILE", str(state_file))
+    monkeypatch.setattr(sys, "argv", ["cli.py", "state-get", "--key", "42:cid"])
+    cli_mod.main()
+    assert capsys.readouterr().out == ""
+
+
+def test_state_get_rejects_key_outside_allowed_shape(monkeypatch, tmp_path):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    monkeypatch.setenv("STATE_FILE", str(state_file))
+    monkeypatch.setattr(sys, "argv", ["cli.py", "state-get", "--key", "42:refine"])
+    with pytest.raises(SystemExit):
+        cli_mod.main()
+
+
+def test_state_set_rejects_key_outside_allowed_shape(monkeypatch, tmp_path):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{}")
+    monkeypatch.setenv("STATE_FILE", str(state_file))
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "state-set", "--key", "not-an-issue:cverdict", "--value", "SKIP",
+    ])
+    with pytest.raises(SystemExit):
+        cli_mod.main()
