@@ -73,6 +73,12 @@ def reset_retry(key: str, state_file: Path = _DEFAULT_STATE) -> None:
         loop_prefix = f"{key}:loop:"
         for k in [k for k in data if k.startswith(loop_prefix)]:
             data.pop(k, None)
+        # #402: pop the comment-classifier cache (:cverdict/:cid) and raw-response-dump
+        # dedup marker (:crawlog) alongside :sig/:delivery/:loop:* — same rationale: a
+        # resumed episode must not inherit banked classifier state from a prior one.
+        data.pop(f"{key}:cverdict", None)
+        data.pop(f"{key}:cid", None)
+        data.pop(f"{key}:crawlog", None)
         _atomic_write(state_file, data)
     except (json.JSONDecodeError, OSError):
         pass
@@ -258,6 +264,18 @@ def _read_state(state_file: Path) -> dict:
         return json.loads(state_file.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def get_state_str(key: str, state_file: Path = _DEFAULT_STATE) -> Optional[str]:
+    val = _read_state(state_file).get(key)
+    return str(val) if val is not None else None
+
+
+def set_state_str(key: str, value: str, state_file: Path = _DEFAULT_STATE) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_state(state_file)
+    data[key] = value
+    _atomic_write(state_file, data)
 
 
 def _write_signature_key(key: str, value: str, state_file: Path) -> None:

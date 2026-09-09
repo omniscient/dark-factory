@@ -774,17 +774,99 @@ get_new_comments() {
   echo "$comments" | jq --argjson s "$start_idx" '.[$s:]'
 }
 
+parse_comment_verdict() {
+  local response="$1"
+
+  # Ambiguity guard (operator review): a second, literally-capitalized verdict token
+  # anywhere in the body makes the whole reply unparseable. Deliberately case-SENSITIVE
+  # (unlike the primary match below) — the two canonical ambiguous examples both present
+  # the second candidate in the model's instructed all-caps reply form ("SKIP — but
+  # MERGE would be reasonable", "MERGE? No — SKIP"), while a CONTINUE-shaped
+  # justification that uses "merge" as an ordinary lowercase verb ("the reviewer wants
+  # a merge later") must not be flagged.
+  #
+  # Tokenize with `tr` rather than PCRE lookarounds (operator review of PR #413): the
+  # plan's `grep -oP` degrades SILENTLY where PCRE is unavailable -- `2>/dev/null` plus
+  # `|| true` plus `wc -l` on empty output yields distinct=0, i.e. the guard stops
+  # firing with no log line. A guard that can quietly stop guarding is the wrong shape,
+  # and the runtime (`ubuntu:26.04`) being fine today does not make it right. `tr` +
+  # `grep -x` is POSIX, has no silent-degradation path, and is also strictly more
+  # correct: `-oP` cannot match adjacent tokens ("SKIP MERGE"), because the first match
+  # consumes the separator the second one needs. Keeping `_-` inside the token class is
+  # what makes `skip_this` and `Merge-ready` single non-matching tokens.
+  local distinct
+  distinct=$(printf '%s' "$response" \
+    | tr -c '[:alnum:]_-' '\n' \
+    | grep -xE 'MERGE|CONTINUE|SKIP' \
+    | sort -u | wc -l) || true
+  if [ "${distinct:-0}" -ge 2 ]; then
+    return 0
+  fi
+
+  # MERGE is strict (operator review): accepted only when the WHOLE response's
+  # alphanumeric content is exactly the token. MERGE dispatches `Close issue #N` — a
+  # real merge — so it is the only verdict whose false positive is costly; CONTINUE and
+  # SKIP keep the lenient token-plus-explanation grammar below.
+  # Whole-response (not first-line) scope is what makes the case-SENSITIVE ambiguity
+  # guard above safe: a first-line-only match would accept "MERGE\nActually, skip this"
+  # (lowercase second token, invisible to the case-sensitive scan) as a real merge.
+  # `[^[:alnum:]]` matches newlines in bash ERE, so "MERGE\n" and "**MERGE**\n" still parse.
+  # `?` is excluded from both classes (operator review of PR #413): "MERGE?" is a hedge,
+  # and this branch dispatches `Close issue #N`. "MERGE.", "**MERGE**", "MERGE!" still parse.
+  local merge_strict_re
+  merge_strict_re='^[^[:alnum:]?]*MERGE[^[:alnum:]?]*$'
+  shopt -s nocasematch
+  if [[ "$response" =~ $merge_strict_re ]]; then
+    shopt -u nocasematch
+    echo "MERGE"
+    return 0
+  fi
+  shopt -u nocasematch
+
+  # CONTINUE / SKIP: anchored to the start of the raw response only, so a
+  # justification that mentions another verdict word mid-sentence can never flip the
+  # match — the regex never scans past the anchor.
+  local tok_re='^[^[:alnum:]]*(CONTINUE|SKIP)([^[:alnum:]_-]|$)'
+  shopt -s nocasematch
+  if [[ "$response" =~ $tok_re ]]; then
+    local tok="${BASH_REMATCH[1]}"
+    shopt -u nocasematch
+    echo "${tok^^}"
+    return 0
+  fi
+  shopt -u nocasematch
+  return 0
+}
+
 classify_comments() {
   local issue_num="$1"
   local title="$2"
   local comments_json="$3"
 
+  local latest_id
+  latest_id=$(echo "$comments_json" | jq -r '.[-1].id // empty')
+
+  local cached_cid
+  cached_cid=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+    state-get --key "${issue_num}:cid" 2>/dev/null) || true
+  if [ -n "$latest_id" ] && [ "$cached_cid" = "$latest_id" ]; then
+    local cached_verdict
+    cached_verdict=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-get --key "${issue_num}:cverdict" 2>/dev/null) || true
+    if [ -n "$cached_verdict" ]; then
+      echo "  classify_comments #${issue_num}: cache hit verdict=${cached_verdict}" >&2
+      echo "$cached_verdict"
+      return
+    fi
+  fi
+
   local comment_text
   comment_text=$(echo "$comments_json" | jq -r '.[] | "[\(.author.login)] \(.body)"')
 
+  local verdict_rule="Reply with ONLY one word — MERGE, CONTINUE, or SKIP. No explanation, punctuation, markdown, or commentary."
   local prompt
   prompt="You are a PR comment classifier. Read the comments below and decide
-the intent. Reply with exactly one word: MERGE, CONTINUE, or SKIP.
+the intent. ${verdict_rule}
 
 MERGE — the reviewer approves the PR (e.g. \"looks good\", \"ship it\",
 \"approved\", \"LGTM\", thumbs up, ready to merge)
@@ -799,30 +881,73 @@ When in doubt between CONTINUE and SKIP, choose CONTINUE.
 
 PR #${issue_num}: ${title}
 Comments since last factory run:
-${comment_text}"
+${comment_text}
 
-  local result
-  result=$(echo "$prompt" | claude -p --model haiku 2>&1)
-  local exit_code=$?
-  local cleaned
-  cleaned=$(echo "$result" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+${verdict_rule}"
 
-  if [ "$exit_code" -ne 0 ] || [ -z "$cleaned" ]; then
-    echo "  classify_comments #${issue_num}: API error (exit=$exit_code), defaulting to SKIP" >&2
+  local err_tmp result exit_code err_tail
+  err_tmp=$(mktemp)
+  set +e
+  result=$(echo "$prompt" | claude -p --model haiku 2>"$err_tmp")
+  exit_code=$?
+  set -e
+  err_tail=$(tail -c 200 "$err_tmp" 2>/dev/null) || true
+  rm -f "$err_tmp"
+
+  if [ "$exit_code" -ne 0 ] || [ -z "$result" ]; then
+    echo "  classify_comments #${issue_num}: fallback reason=api_error verdict=SKIP cached=no" >&2
+    _log_raw_fallback_once "$issue_num" "$latest_id" "$result" "$err_tail"
     echo "SKIP"
     return
   fi
 
-  case "$cleaned" in
-    MERGE|CONTINUE|SKIP)
-      echo "  classify_comments #${issue_num}: verdict=${cleaned}" >&2
-      echo "$cleaned"
-      ;;
-    *)
-      echo "  classify_comments #${issue_num}: unexpected response '${cleaned}', defaulting to SKIP" >&2
-      echo "SKIP"
-      ;;
-  esac
+  local verdict
+  verdict=$(parse_comment_verdict "$result")
+
+  if [ -z "$verdict" ]; then
+    echo "  classify_comments #${issue_num}: fallback reason=unparsed verdict=SKIP cached=no" >&2
+    _log_raw_fallback_once "$issue_num" "$latest_id" "$result" "$err_tail"
+    echo "SKIP"
+    return
+  fi
+
+  echo "  classify_comments #${issue_num}: verdict=${verdict}" >&2
+  # `|| true` is load-bearing, not defensive noise: the scheduler runs under
+  # `set -euo pipefail`, so an unwritable state file would turn a *successful*
+  # classification into a dead poll loop -- the verdict is computed and logged, then
+  # the function dies before `echo "$verdict"`, the caller's $( ) comes back empty and
+  # the err trap exits the daemon. Caching is best-effort by design; the worst a failed
+  # write can cost is one re-classification next poll. Same rule as breaker.py's
+  # _write_key, which swallows OSError for exactly this reason.
+  if [ -n "$latest_id" ]; then
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "${issue_num}:cverdict" --value "$verdict" >/dev/null || true
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "${issue_num}:cid" --value "$latest_id" >/dev/null || true
+  fi
+  echo "$verdict"
+}
+
+_log_raw_fallback_once() {
+  local issue_num="$1" latest_id="$2" raw="$3" err_tail="$4"
+  local dedup_key="${issue_num}:crawlog"
+  local logged_for
+  logged_for=$(STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+    state-get --key "$dedup_key" 2>/dev/null) || true
+  if [ -n "$latest_id" ] && [ "$logged_for" = "$latest_id" ]; then
+    return
+  fi
+  local truncated
+  truncated=$(printf '%s' "$raw" | head -c 200) || true
+  echo "  classify_comments #${issue_num}: raw response (truncated): '${truncated}' stderr='${err_tail}'" >&2
+  # Only a non-empty body consumes the dedup slot. The api_error path calls this with an
+  # empty $raw by definition, and burning the marker there would suppress the dump for a
+  # genuinely unparseable response on the same comment set -- the dump this ticket exists
+  # to produce. `|| true` for the same errexit reason as the cache writes above.
+  if [ -n "$latest_id" ] && [ -n "$raw" ]; then
+    STATE_FILE="$STATE_FILE" python3 "$FACTORY_CORE_CLI" \
+      state-set --key "$dedup_key" --value "$latest_id" >/dev/null || true
+  fi
 }
 
 # --- Stage functions (poll loop) ---

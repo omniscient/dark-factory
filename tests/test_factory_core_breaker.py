@@ -11,6 +11,7 @@ from factory_core import run_record
 from factory_core.breaker import (
     get_retry_count, increment_retry, reset_retry, set_retry_count, trip_to_blocked,
 )
+from factory_core.breaker import get_state_str, set_state_str
 from factory_core.breaker import StopVerdict, _loop_state_key
 from factory_core.breaker import evaluate_stop_condition
 
@@ -623,3 +624,63 @@ def test_evaluate_stop_condition_parity_table(tmp_path, count, ceiling):
     assert v.stopped == expect_stopped
     expect_count = count if expect_stopped else count + 1
     assert get_retry_count("99:plan", sf) == expect_count
+
+
+# #402: generic string-valued get/set pair for the comment-classifier cache.
+def test_get_state_str_missing_key_returns_none(tmp_path):
+    assert get_state_str("42:cverdict", tmp_path / "state.json") is None
+
+
+def test_set_then_get_state_str_round_trip(tmp_path):
+    sf = tmp_path / "state.json"
+    set_state_str("42:cverdict", "CONTINUE", sf)
+    assert get_state_str("42:cverdict", sf) == "CONTINUE"
+
+
+def test_set_state_str_does_not_disturb_unrelated_keys(tmp_path):
+    sf = tmp_path / "state.json"
+    increment_retry("42:refine", sf)
+    set_state_str("42:cverdict", "SKIP", sf)
+    assert get_retry_count("42:refine", sf) == 1
+    assert get_state_str("42:cverdict", sf) == "SKIP"
+
+
+# #402: a resumed episode (fresh dispatch, blocked-rescue, Continue-dispatch) must
+# not inherit a stale cached classifier verdict, cache-comment-id, or raw-log dedup
+# marker from a prior episode — same rationale as the existing :sig/:delivery pops.
+def test_reset_retry_clears_comment_verdict_cache_suffixes(tmp_path):
+    sf = tmp_path / "state.json"
+    set_state_str("9:cverdict", "CONTINUE", sf)
+    set_state_str("9:cid", "IC_kwDOabc", sf)
+    set_state_str("9:crawlog", "IC_kwDOabc", sf)
+
+    reset_retry("9", sf)
+
+    assert get_state_str("9:cverdict", sf) is None
+    assert get_state_str("9:cid", sf) is None
+    assert get_state_str("9:crawlog", sf) is None
+
+
+# Req 6 / R8b: the new :cverdict/:cid/:crawlog suffixes must be popped in the SAME
+# reset_retry call that still pops the pre-existing :sig/:delivery/:loop:* suffixes
+# — not just alongside them in separate tests — so a regression that scopes the new
+# pops to a different key or short-circuits before reaching the existing ones would
+# be caught here.
+def test_reset_retry_still_clears_existing_suffixes_alongside_new_ones(tmp_path):
+    from factory_core.breaker import _write_signature_key
+    sf = tmp_path / "state.json"
+    increment_retry("9", sf)
+    increment_retry("9:delivery", sf)
+    _write_signature_key("9", "substantive:x", sf)
+    set_state_str("9:cverdict", "SKIP", sf)
+    set_state_str("9:cid", "IC_kwDOabc", sf)
+    set_state_str("9:crawlog", "IC_kwDOabc", sf)
+
+    reset_retry("9", sf)
+
+    assert get_retry_count("9", sf) == 0
+    assert get_retry_count("9:delivery", sf) == 0
+    assert get_state_str("9:sig", sf) is None
+    assert get_state_str("9:cverdict", sf) is None
+    assert get_state_str("9:cid", sf) is None
+    assert get_state_str("9:crawlog", sf) is None

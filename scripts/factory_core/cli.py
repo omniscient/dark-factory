@@ -2,6 +2,7 @@
 """factory_core CLI — thin dispatch layer for shell adapters."""
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -72,6 +73,31 @@ def _breaker_set_retry(args):
     state_file = Path(os.environ.get("STATE_FILE",
                                      "/var/lib/dark-factory/scheduler-state.json"))
     set_retry_count(args.key, args.value, state_file)
+
+
+_STATE_KEY_RE = re.compile(r"^[0-9]+:(cverdict|cid|crawlog)$")
+
+
+def _state_get(args):
+    from factory_core.breaker import get_state_str
+    if not _STATE_KEY_RE.fullmatch(args.key):
+        print(f"state-get: invalid key '{args.key}'", file=sys.stderr)
+        sys.exit(1)
+    state_file = Path(os.environ.get("STATE_FILE",
+                                     "/var/lib/dark-factory/scheduler-state.json"))
+    value = get_state_str(args.key, state_file)
+    if value is not None:
+        print(value)
+
+
+def _state_set(args):
+    from factory_core.breaker import set_state_str
+    if not _STATE_KEY_RE.fullmatch(args.key):
+        print(f"state-set: invalid key '{args.key}'", file=sys.stderr)
+        sys.exit(1)
+    state_file = Path(os.environ.get("STATE_FILE",
+                                     "/var/lib/dark-factory/scheduler-state.json"))
+    set_state_str(args.key, args.value, state_file)
 
 
 def _breaker_evaluate_stop(args):
@@ -294,6 +320,15 @@ def main():
     bsr.add_argument("--key", required=True)
     bsr.add_argument("--value", type=int, required=True)
     bsr.set_defaults(func=_breaker_set_retry)
+
+    sg = sub.add_parser("state-get")
+    sg.add_argument("--key", required=True)
+    sg.set_defaults(func=_state_get)
+
+    ss = sub.add_parser("state-set")
+    ss.add_argument("--key", required=True)
+    ss.add_argument("--value", required=True)
+    ss.set_defaults(func=_state_set)
 
     bes = sub.add_parser("breaker-evaluate-stop")
     bes.add_argument("--issue", type=int, required=True)

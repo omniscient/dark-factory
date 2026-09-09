@@ -1186,6 +1186,91 @@ assert_eq "Q3: get_items_by_status: null status does not raise under set -e" "0"
 assert_eq "Q4: get_items_by_status: null status excluded from bucket" "0" "$(echo "$_Q_NULL_OUT" | jq 'length')"
 
 # ==========================================
+# AA: classify_comments — cache + two-tier fallback logging (#402)
+# ==========================================
+echo ""
+echo "--- AA: classify_comments cache + fallback logging ---"
+echo '{}' > "$STATE_FILE"
+: > "$STUB_LOG"
+
+# Redefine the generic python3 stub (section N's override otherwise survives here —
+# see section Y's identical comment on this hazard).
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+export -f python3
+reset_python3_stub
+
+CLAUDE_REPLY="CONTINUE this needs a rename"
+claude() {
+  echo "claude $*" >> "$STUB_LOG"
+  echo "$CLAUDE_REPLY"
+  return 0
+}
+export -f claude
+export CLAUDE_REPLY
+
+_AA_COMMENTS='[{"id":"IC_1","author":{"login":"human"},"body":"please rename this"}]'
+
+# AA1: a successful classification is cached — a second call with the same latest
+# comment id must not invoke the claude stub again.
+: > "$STUB_LOG"
+V1=$(classify_comments 501 "t" "$_AA_COMMENTS")
+V2=$(classify_comments 501 "t" "$_AA_COMMENTS")
+assert_eq "AA1: first call returns CONTINUE" "CONTINUE" "$V1"
+assert_eq "AA1: second call returns cached CONTINUE" "CONTINUE" "$V2"
+assert_eq "AA1: claude invoked exactly once (second call served from cache)" \
+  "1" "$(grep -c '^claude ' "$STUB_LOG" || true)"
+
+# AA2: a new comment id busts the cache.
+: > "$STUB_LOG"
+_AA_COMMENTS2='[{"id":"IC_1","author":{"login":"human"},"body":"please rename this"},{"id":"IC_2","author":{"login":"human"},"body":"also fix the docs"}]'
+V3=$(classify_comments 501 "t" "$_AA_COMMENTS2")
+assert_eq "AA2: new comment id re-invokes claude" "1" "$(grep -c '^claude ' "$STUB_LOG" || true)"
+assert_eq "AA2: verdict still CONTINUE" "CONTINUE" "$V3"
+
+# AA3: an unparseable response is never cached — two consecutive calls both invoke
+# the claude stub and both fall back to SKIP.
+echo '{}' > "$STATE_FILE"
+: > "$STUB_LOG"
+CLAUDE_REPLY="SKIPBOTHCOMMENTSAREFROMAUTOMATEDSYSTEMS"
+_AA_BLOB='[{"id":"IC_9","author":{"login":"human"},"body":"noise"}]'
+_AA3_ERR=$(mktemp /tmp/aa3-err-XXXXXX.log)
+V4=$(classify_comments 502 "t" "$_AA_BLOB" 2>"$_AA3_ERR")
+V5=$(classify_comments 502 "t" "$_AA_BLOB" 2>>"$_AA3_ERR")
+assert_eq "AA3: unparseable reply falls back to SKIP (1st)" "SKIP" "$V4"
+assert_eq "AA3: unparseable reply falls back to SKIP (2nd)" "SKIP" "$V5"
+assert_eq "AA3: claude invoked twice (fallback SKIP never cached)" \
+  "2" "$(grep -c '^claude ' "$STUB_LOG" || true)"
+assert_eq "AA3: compact fallback line logged on both polls" \
+  "2" "$(grep -c 'fallback reason=unparsed' "$_AA3_ERR" || true)"
+assert_eq "AA3: raw response dumped only once (deduped per comment id)" \
+  "1" "$(grep -c 'raw response' "$_AA3_ERR" || true)"
+rm -f "$_AA3_ERR"
+
+# AA4: a stderr warning from the claude stub does not defeat the parse (F1) — stdout
+# and stderr must be captured separately.
+echo '{}' > "$STATE_FILE"
+claude() {
+  echo "claude $*" >> "$STUB_LOG"
+  echo "warning: proxy retry" >&2
+  echo "MERGE"
+  return 0
+}
+export -f claude
+_AA_MERGE='[{"id":"IC_7","author":{"login":"human"},"body":"ship it"}]'
+V6=$(classify_comments 503 "t" "$_AA_MERGE")
+assert_eq "AA4: stderr noise does not defeat the anchor" "MERGE" "$V6"
+
+echo '{}' > "$STATE_FILE"
+: > "$STUB_LOG"
+unset -f claude
+
+# ==========================================
 # R: Stage guard semantics (#185) — dispatch_stage must preserve per-stage heterogeneity
 # ==========================================
 echo ""
