@@ -1,6 +1,7 @@
 # Implementation Plan: Fix scheduler comment-classifier verdict parsing, caching, and log noise
 
 **Issue:** #402
+**Operator plan gate:** 2026-09-09 — approved with amendments from an independent read-only review. Blocking finding F-1 (first-line-only MERGE-strict let `MERGE\nActually, skip this` through as a real merge, because the ambiguity scan is case-sensitive) is fixed here by scoping MERGE-strict to the whole response, with three regression fixtures. Advisory notes carried into implementation: `grep -oP` needs GNU grep (fine on ubuntu:26.04 and CI, fails on BSD/macOS greps); `set +e — set -e` in `parse_comment_verdict` restores errexit unconditionally (safe today because every call site is a `$( )` subshell); the `state-set` calls have no `|| true`, so an unwritable state file would kill a poll cycle on an optional cache write.
 **Spec:** `docs/superpowers/specs/2026-09-08-classifier-verdict-parsing-design.md`
 **Operator review:** amendments F1-F7 plus the MERGE-strict and ambiguity rules (commit `b94e83c`) are incorporated below.
 
@@ -337,7 +338,7 @@ breaker's state file.
 
    def _state_get(args):
        from factory_core.breaker import get_state_str
-       if not _STATE_KEY_RE.match(args.key):
+       if not _STATE_KEY_RE.fullmatch(args.key):
            print(f"state-get: invalid key '{args.key}'", file=sys.stderr)
            sys.exit(1)
        state_file = Path(os.environ.get("STATE_FILE",
@@ -349,7 +350,7 @@ breaker's state file.
 
    def _state_set(args):
        from factory_core.breaker import set_state_str
-       if not _STATE_KEY_RE.match(args.key):
+       if not _STATE_KEY_RE.fullmatch(args.key):
            print(f"state-set: invalid key '{args.key}'", file=sys.stderr)
            sys.exit(1)
        state_file = Path(os.environ.get("STATE_FILE",
@@ -389,7 +390,7 @@ breaker's state file.
 ## Task 4: `parse_comment_verdict()` in `scheduler.sh`
 
 Standalone, unit-testable extraction function. Anchored to the start of the response;
-MERGE requires a strict first-line-only match (operator review — MERGE dispatches a real
+MERGE requires a strict whole-response match (operator review — MERGE dispatches a real
 merge, so its false positive is the only costly one); two or more distinct, literally
 uppercase verdict tokens anywhere makes the reply unparseable (ambiguity rule). The
 ambiguity scan is deliberately case-**sensitive** (unlike the primary extraction below it,
@@ -482,6 +483,13 @@ mid-sentence mention "cannot flip the verdict."
        ("Skipping this", ""),
        ("skip_this", ""),
        ("Verdict: SKIP", ""),
+       # Operator plan gate (F-1): a bare MERGE on line 1 must not survive a lowercase
+       # contradiction further down — the ambiguity scan is case-sensitive, so
+       # whole-response MERGE-strict is the only thing standing between this reply and
+       # an unguarded `Close issue #N` dispatch.
+       ("MERGE\nActually, skip this — the tests fail", ""),
+       ("MERGE\nAlso CONTINUE maybe", ""),
+       ("MERGE\n", "MERGE"),
        ("", ""),
    ]
 
@@ -496,8 +504,8 @@ mid-sentence mention "cannot flip the verdict."
    ```bash
    PYTHONPATH=scripts python -m pytest tests/test_scheduler_comment_verdict.py -v
    ```
-   Expected: 13 of 23 fail (`parse_comment_verdict: command not found` on stderr, empty
-   stdout, since the function doesn't exist yet) — the 10 cases whose expected output is
+   Expected: 14 of 26 fail (`parse_comment_verdict: command not found` on stderr, empty
+   stdout, since the function doesn't exist yet) — the 12 cases whose expected output is
    already `""` pass vacuously at this red step; they turn into real coverage once the
    function exists in step 4.
 
@@ -524,15 +532,18 @@ mid-sentence mention "cannot flip the verdict."
        return 0
      fi
 
-     # MERGE is strict (operator review): accepted only when the first line's
+     # MERGE is strict (operator review): accepted only when the WHOLE response's
      # alphanumeric content is exactly the token. MERGE dispatches `Close issue #N` — a
      # real merge — so it is the only verdict whose false positive is costly; CONTINUE and
      # SKIP keep the lenient token-plus-explanation grammar below.
-     local first_line merge_strict_re
-     first_line=$(printf '%s\n' "$response" | head -n1) || true
+     # Whole-response (not first-line) scope is what makes the case-SENSITIVE ambiguity
+     # guard above safe: a first-line-only match would accept "MERGE\nActually, skip this"
+     # (lowercase second token, invisible to the case-sensitive scan) as a real merge.
+     # `[^[:alnum:]]` matches newlines in bash ERE, so "MERGE\n" and "**MERGE**\n" still parse.
+     local merge_strict_re
      merge_strict_re='^[^[:alnum:]]*MERGE[^[:alnum:]]*$'
      shopt -s nocasematch
-     if [[ "$first_line" =~ $merge_strict_re ]]; then
+     if [[ "$response" =~ $merge_strict_re ]]; then
        shopt -u nocasematch
        echo "MERGE"
        return 0
@@ -560,7 +571,7 @@ mid-sentence mention "cannot flip the verdict."
    ```bash
    PYTHONPATH=scripts python -m pytest tests/test_scheduler_comment_verdict.py -v
    ```
-   Expected: `23 passed`.
+   Expected: `26 passed`.
 
 5. Commit:
 
@@ -856,7 +867,7 @@ one-word instruction both before and after the interpolated comment text (Requir
 
 4. Confirm acceptance criteria against the spec's Requirements:
    - Req 1 (anchored regex, MERGE-strict, ambiguity) — `tests/test_scheduler_comment_verdict.py`'s
-     23 fixtures, all green.
+     26 fixtures, all green.
    - Req 2 (`parse_comment_verdict()` standalone, not named `parse_verdict`) — confirmed by
      inspection; no collision with `scripts/factory_core/verdict.py:20` or
      `scripts/factory_core/epic_autopilot.py:88`.

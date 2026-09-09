@@ -57,16 +57,23 @@ Distilled from the issue's Fix list and the Q&A below.
    Two further rules, both operator-added at the spec gate because MERGE dispatches
    `Close issue #N` — a merge — and is therefore the only verdict whose false positive is
    costly:
-   - **MERGE is strict.** MERGE is accepted only when the first line's alphanumeric content is
-     exactly the token — `^[^[:alnum:]]*MERGE[^[:alnum:]]*$` against the first line (so `MERGE`,
+   - **MERGE is strict.** MERGE is accepted only when the whole response's alphanumeric content
+     is exactly the token — `^[^[:alnum:]]*MERGE[^[:alnum:]]*$` against the whole response (so `MERGE`,
      `**MERGE**`, `merge.` parse; `MERGE — approved by the reviewer` and `MERGE is not
      appropriate` do **not**). A MERGE followed by any explanation is unparseable — uncached
      fallback SKIP, logged — and simply retries next poll. CONTINUE and SKIP keep the lenient
      token-plus-explanation grammar: their false positives cost a run or a wait, not a merge.
    - **Ambiguity is unparseable.** If the raw response contains two or more *distinct* verdict
-     tokens anywhere (case-insensitive, bounded by non-`[[:alnum:]_-]`), the response is
-     unparseable — uncached fallback SKIP, logged — regardless of which token came first
-     (`SKIP — but MERGE would be reasonable` and `MERGE? No — SKIP` both fall back).
+     tokens anywhere (case-**sensitive** — literal uppercase only — bounded by
+     non-`[[:alnum:]_-]`), the response is unparseable — uncached fallback SKIP, logged —
+     regardless of which token came first (`SKIP — but MERGE would be reasonable` and
+     `MERGE? No — SKIP` both fall back). Case-sensitivity is deliberate and supersedes an
+     earlier "case-insensitive" reading of this rule, which contradicted this spec's own fixture
+     `CONTINUE — the reviewer wants a merge later → CONTINUE` (a case-insensitive scan yields
+     {CONTINUE, MERGE} = 2 distinct) and would have made every token-plus-justification reply
+     unparseable — re-creating the bug this ticket fixes. The MERGE-strict rule above is scoped
+     to the whole response precisely so that the case-sensitive scan cannot leak a lowercase
+     contradiction into a real merge (operator plan gate, 2026-09-09).
 2. **Extraction lives in a standalone, unit-testable function**, `parse_comment_verdict()`, taking
    the raw response string and echoing the matched uppercase token or nothing. This gives fix item
    3's test a target it can drive directly without a paid `claude -p` call, and keeps
@@ -140,7 +147,8 @@ Distilled from the issue's Fix list and the Q&A below.
 ## Architecture / Approach
 
 **Extraction.** `parse_comment_verdict()` is a new bash function near `classify_comments()`:
-matches `^[^[:alnum:]]*(MERGE|CONTINUE|SKIP)\b` case-insensitively against `$1` (e.g. via `grep -Eio`
+matches `^[^[:alnum:]]*(CONTINUE|SKIP)([^[:alnum:]_-]|$)` case-insensitively against `$1` (MERGE is
+handled by the strict whole-response branch above; the tail class replaces `\b` per F2) (e.g. via `grep -Eio`
 or a `[[ =~ ]]` with `shopt -s nocasematch`), echoes the uppercased captured group, or echoes
 nothing on no match. `classify_comments()` calls this on the raw **stdout** only (no `tr -d` step). Today's call
 merges stderr into `$result` (`2>&1`, `scheduler.sh:805`), so any CLI warning printed first would
