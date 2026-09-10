@@ -1,5 +1,10 @@
 # Single-pass placeholder substitution for reviewer/architect prompts
 
+**Operator spec gate:** 2026-09-10 (second pass) — approved with amendments after the first
+version was rejected. The backtick-exclusion design was verified by running its own algorithm
+against all five real templates: every template's bare-slot set is closed and matches its
+`--set` keys exactly. Three amendments below.
+
 **Issue:** #400
 
 ## Overview / problem statement
@@ -236,8 +241,51 @@ def render(template_text: str, values: dict[str, str], delimiter: str = "dollar"
 `render()` scans the *original* `template_text` exactly once per segment; substituted values are
 inserted as literal replacement text and are never re-scanned for further tokens (this is what
 closes the #394 chained-splice hazard — `re.sub` does not rescan its own replacement output).
+Note this depends on passing a **function** to `re.sub`: a function's return value is used
+literally, so a value containing `\1`, `\g<0>` or a stray backslash cannot be reinterpreted as a
+backreference. A plain string replacement would reintroduce a corruption hazard on exactly the
+inputs this ticket handles (diffs, specs). Keep the lambda.
+
 The backtick-exclusion pass is what additionally closes the legend-inflation hazard the first
 spec's design missed.
+
+**Known limitation, and it cuts both ways (operator gate).** `_BACKTICK_SPAN_RE` matches
+**single-line** inline-code spans only; it does *not* protect triple-backtick fenced blocks. That
+is **required**, not incidental: site 5's `{DIFF_CONTENT}` slot lives inside a ```diff fence
+(`commands/dark-factory-revise-advisory.md:76-79`) and must be substituted. Protecting fences
+would break that site outright.
+
+The cost of that choice must be stated rather than discovered later: **a placeholder name
+appearing inside a fenced block in any template will be substituted, and Requirement 4's
+fail-loud check cannot catch it.** A fenced `$SPEC_CONTENT` is a *bare* occurrence whose name
+matches a supplied key, so `missing` and `unused` are both empty and `render()` silently inlines
+the spec twice — this ticket's own bug, returning through a new door, in the one place its
+guard is blind. No template does this today (verified: the bare-slot inventory below is exactly
+the intended slot set for all five).
+
+Requirement 11 adds the guard that makes that verification durable rather than a one-time
+inspection.
+
+11. **Drift guard pinning each template's bare-slot set.** A test enumerates, for each of the five
+    templates, the bare (non-backtick-protected) token names under that template's declared
+    delimiter, and asserts the set equals the expected literal set:
+
+    | Template | Delimiter | Expected bare set |
+    |---|---|---|
+    | `.claude/skills/conformance/RUBRIC.md` | `dollar` | `{ARTIFACT_KIND, SPEC_CONTENT, ARTIFACT_CONTENT}` |
+    | `.claude/skills/code-review/RUBRIC.md` | `dollar` | `{ISSUE_CONTEXT, DIFF_CONTENT}` |
+    | `refinement-skills/architect-prompt.md` | `dollar` | `{SPEC_CONTENT, PLAN_CONTENT}` |
+    | `refinement-skills/product-owner-prompt.md` | `dollar` | `{ISSUE_CONTEXT, QA_HISTORY, QUESTION}` |
+    | site 5's embedded chunk | `brace` | `{FINDINGS_TEXT, DIFF_CONTENT}` |
+
+    (Verified at the gate by executing the spec's own `_segments`/`render` logic against
+    `origin/main`; all five match, and `product-owner-prompt.md` additionally yields `{resource}`
+    under `brace` — inert because that site declares `dollar`, and exactly the collision
+    Requirement 3 cites for refusing auto-detection.)
+
+    This is the only thing that turns "no template does this today" into a property that stays
+    true. Without it, adding a fenced example of a placeholder to a RUBRIC — a natural thing for
+    a future author to do — silently doubles the reviewer's prompt with nothing reporting it.
 
 **2. New `cli.py` subcommand — `render-prompt`** (`scripts/factory_core/cli.py`, following the
 existing `sub.add_parser(...)` pattern):
@@ -293,7 +341,8 @@ fi
 
 printf '%s' "$RUBRIC_CONTENT" > "$ARTIFACTS_DIR/conformance_rubric.md"
 
-python3 dark-factory/scripts/factory_core/cli.py render-prompt \  # TARGET-PATH
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py render-prompt \
   --template "$ARTIFACTS_DIR/conformance_rubric.md" \
   --set ARTIFACT_KIND=IMPLEMENTATION \
   --set SPEC_CONTENT=@"$SPEC_CONTENT_PATH" \
@@ -311,7 +360,14 @@ the shadow spawn (5a) and every reconcile-cycle re-spawn — same command, updat
 currently embedded as a literal fenced block directly in the command file's own prose (Phase 3,
 today's text), the only one of the six sites with no separate template file. Rather than
 extracting it into a new standalone template file, the command file writes that same literal
-boilerplate to an artifacts-dir file via heredoc, then renders it:
+boilerplate to an artifacts-dir file via heredoc, then renders it.
+
+**Two authoring constraints for this site (operator gate).** The heredoc body contains a
+```diff fence, so the surrounding markdown code block in `commands/dark-factory-revise-advisory.md`
+must use a **four-backtick fence or `~~~`** — a three-backtick outer fence is terminated early by
+the inner one, and the rest of the phase instructions would render as prose. And the delimiter
+must stay **quoted** (`<<'PROMPT_EOF'`, as written): an unquoted heredoc would expand `$` and
+backticks in the boilerplate before `render-prompt` ever sees it.
 
 ```bash
 cat > "$ARTIFACTS_DIR/revise_advisory_template.md" <<'PROMPT_EOF'
@@ -343,7 +399,8 @@ PROMPT_EOF
 printf '%s' "$FINDINGS_TEXT" > "$ARTIFACTS_DIR/revise_advisory_findings.md"
 printf '%s' "$DIFF_CONTENT" > "$ARTIFACTS_DIR/revise_advisory_diff.md"
 
-python3 dark-factory/scripts/factory_core/cli.py render-prompt \  # TARGET-PATH
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py render-prompt \
   --template "$ARTIFACTS_DIR/revise_advisory_template.md" \
   --delimiter brace \
   --set FINDINGS_TEXT=@"$ARTIFACTS_DIR/revise_advisory_findings.md" \
@@ -360,7 +417,8 @@ removes.
 render the architect prompt first, then prepend:
 
 ```bash
-python3 dark-factory/scripts/factory_core/cli.py render-prompt \  # TARGET-PATH
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py render-prompt \
   --template /opt/refinement-skills/architect-prompt.md \
   --set SPEC_CONTENT=@"$SPEC_FILE" \
   --set PLAN_CONTENT=@"$ARTIFACTS_DIR/plan_content.md" \
