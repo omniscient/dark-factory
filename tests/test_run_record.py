@@ -1377,3 +1377,25 @@ def test_cli_record_accepts_origin_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     rec = json.loads(jsonl.read_text().strip())
     assert rec["origin"] == "target-loop:x"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl import in the subprocess")
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
+def test_cli_record_exits_nonzero_on_unwritable_ledger(tmp_path):
+    import subprocess
+    jsonl = tmp_path / "runs.jsonl"
+    jsonl.write_text("")
+    jsonl.chmod(0o444)
+    env = {
+        **os.environ, "SCHEDULER_STATE_DIR": str(tmp_path),
+        "SEQ_URL": "http://unreachable-host-99999:5341",
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "factory_core.run_record", "record",
+         "--run-id", "r1", "--issue", "1", "--intent", "intake", "--stage", "manifest_intake",
+         "--verdict", "ACCEPTED"],
+        cwd=str(Path(__file__).parent.parent / "scripts"),
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 4, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "runs.jsonl" in result.stderr

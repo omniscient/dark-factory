@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import sys
+import traceback
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -884,7 +885,11 @@ def main() -> None:
 
     parsed = parser.parse_args()
     if parsed.cmd == "record":
-        cmd_record(parsed)
+        try:
+            cmd_record(parsed)
+        except OSError:
+            traceback.print_exc()   # the CLI path is the interactive/debug one
+            sys.exit(4)
     elif parsed.cmd == "health-event":
         cmd_health_event(parsed)
     elif parsed.cmd == "assemble":
