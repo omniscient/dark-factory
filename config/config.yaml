@@ -68,8 +68,9 @@ dispatch_ceiling:
   enabled: true                # env: DISPATCH_CEILING_ENABLED overrides — kill-switch
   label: above-ceiling         # env: ABOVE_CEILING_LABEL overrides
   keywords: "migration|migrate|performance|perf|architectur|refactor"  # env: ABOVE_CEILING_KEYWORDS overrides
-  # L tickets (and M tickets with a keyword title match) park in Blocked for human pairing;
-  # M tickets lose the plan-pending-review grace-window auto-advance. S is unaffected.
+  # XL tickets always park in Blocked for human pairing; M tickets park only on a
+  # keyword title match; L tickets are never parked. M tickets (whether or not they
+  # park) lose the plan-pending-review grace-window auto-advance. S is unaffected.
   # See docs/superpowers/specs/2026-06-12-size-type-aware-dispatch-ceiling-design.md
   # Revisit: 2026-09-12
 
