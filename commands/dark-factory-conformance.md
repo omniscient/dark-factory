@@ -206,28 +206,68 @@ fi
 1. Get the pre-triaged implementation diff (Step 3.0 above).
    Also read `$ARTIFACTS_DIR/implementation.md` for the implementation summary.
 
-2. Build `$ARTIFACT_CONTENT`:
-   ```
-   ### Implementation Summary
-   <contents of $ARTIFACTS_DIR/implementation.md, or "No implementation summary found.">
+2. Build `$ARTIFACT_CONTENT` and write it to a file. The heredoc below is **intentionally
+   flush-left**, not indented under this list item — a `<<ARTIFACT_EOF` (no `-`) heredoc
+   requires its closing delimiter to have zero leading whitespace to be recognized as the
+   terminator; an indented `   ARTIFACT_EOF` would never match and the heredoc would swallow
+   the rest of the script (the same reason Step 3's heredoc in `dark-factory-revise-advisory.md`
+   Phase 3 is flush-left rather than nested under its surrounding prose):
 
-   ### Out-of-Scope Log (from implement agent)
-   <contents of $ARTIFACTS_DIR/out-of-scope.md, or "None recorded.">
+```bash
+cat > "$ARTIFACTS_DIR/conformance_artifact_content.md" <<ARTIFACT_EOF
+### Implementation Summary
+$(cat "$ARTIFACTS_DIR/implementation.md" 2>/dev/null || echo "No implementation summary found.")
 
-   ### Diff (pre-triaged, ranked by risk tier)
-   $FILTER_ANNOTATION
-   $TRIAGED_DIFF
-   ```
+### Out-of-Scope Log (from implement agent)
+$(cat "$ARTIFACTS_DIR/out-of-scope.md" 2>/dev/null || echo "None recorded.")
+
+### Diff (pre-triaged, ranked by risk tier)
+$FILTER_ANNOTATION
+$TRIAGED_DIFF
+ARTIFACT_EOF
+```
 
 3. Set `CONFORMANCE_CYCLE=0`, `CONFORMANCE_DIALOGUE=""`, and `SHADOW_DIALOGUE=""`
+
+3a. Resolve the spec content path (Requirement 6's `SPEC_CONTENT_PATH` — a path, not the
+    `SPEC_CONTENT` template slot name) and render the conformance prompt. This `if [ -n
+    "$SPEC_FILE" ]` check relies on `$SPEC_FILE` (Phase 2) still being live in this Bash
+    invocation — the same pre-existing assumption every other reference to `$SPEC_FILE`,
+    `$ISSUE_NUM`, and `$ARTIFACTS_DIR` across this command file already makes; this task does
+    not change that assumption, only reuses it. `RUBRIC_CONTENT` (Phase 1 step 3) is prose,
+    not a shell variable, so it is re-resolved here as a real `RUBRIC_FILE` path instead of
+    `printf`'d (which would silently write an empty file — no earlier step assigns
+    `RUBRIC_CONTENT` in bash):
+    ```bash
+    if [ -n "$SPEC_FILE" ]; then
+      SPEC_CONTENT_PATH="$SPEC_FILE"
+    else
+      # NO_SPEC=true: review runs advisory-only against the issue body instead of a spec file.
+      gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json body --jq '.body' \
+        > "$ARTIFACTS_DIR/no_spec_issue_body.md"
+      SPEC_CONTENT_PATH="$ARTIFACTS_DIR/no_spec_issue_body.md"
+    fi
+
+    if [ -f ".claude/skills/conformance/RUBRIC.md" ]; then
+      RUBRIC_FILE=".claude/skills/conformance/RUBRIC.md"
+    else
+      RUBRIC_FILE="/opt/refinement-skills/conformance-reviewer-prompt.md"
+    fi
+
+    # TARGET-PATH
+    python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+      --template "$RUBRIC_FILE" \
+      --set ARTIFACT_KIND=IMPLEMENTATION \
+      --set SPEC_CONTENT=@"$SPEC_CONTENT_PATH" \
+      --set ARTIFACT_CONTENT=@"$ARTIFACTS_DIR/conformance_artifact_content.md" \
+      --out "$ARTIFACTS_DIR/conformance_prompt.md" \
+      || { echo "render-prompt failed — aborting conformance phase (see stderr above)"; exit 1; }
+    ```
 
 4. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: code vs spec"
    - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
-   - `prompt`: `RUBRIC_CONTENT` (resolved in Phase 1 step 3) with:
-     - `$ARTIFACT_KIND` replaced with `IMPLEMENTATION`
-     - `$SPEC_CONTENT` replaced with the spec file contents (or issue body if `NO_SPEC=true`)
-     - `$ARTIFACT_CONTENT` replaced with the artifact content from Step 3.1
+   - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
 
 5. Append the subagent's output to `CONFORMANCE_DIALOGUE`
 
@@ -236,8 +276,7 @@ fi
    - `description`: "Conformance shadow (fable): code vs spec"
    - `model`: `$SHADOW_MODEL_PIN`, passed as the Agent tool's `fable` alias when the pin is
      `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
-   - `prompt`: identical `RUBRIC_CONTENT` with the same `$ARTIFACT_KIND`/`$SPEC_CONTENT`/
-     `$ARTIFACT_CONTENT` substitution used for the Opus call in step 4
+   - `prompt`: the identical verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md` the Opus call just read in step 4
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
    - Any tool error, timeout, or refusal is caught here — it never blocks, delays, or
      retries the Opus verdict handling in step 7, and never feeds Phase 3.6's `[OOS]` scan.
@@ -456,12 +495,19 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
    - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
 5. Re-get the diff:
    ```bash
-   git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000
+   git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000 > "$ARTIFACTS_DIR/conformance_reconcile_diff.txt"
+   TRIAGED_DIFF=$(cat "$ARTIFACTS_DIR/conformance_reconcile_diff.txt")
    ```
-6. Re-spawn the conformance reviewer subagent (same prompt format, updated diff)
+5a. Re-render the conformance prompt: rebuild `$ARTIFACTS_DIR/conformance_artifact_content.md`
+    with the updated `$TRIAGED_DIFF` (same heredoc as Step 3.1 item 2), then re-run Step 3.1's
+    item 3a `render-prompt` invocation unchanged — a failure here is a hard stop for the phase,
+    identically to Step 3.1.
+6. Re-spawn the conformance reviewer subagent with the verbatim contents of
+   `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a
 7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator
 7a. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (mirroring Step
-    3.1's 5a for this cycle, `$ARTIFACT_KIND=IMPLEMENTATION`, updated diff). Prepend
+    3.1's 5a for this cycle — prompt is the verbatim contents of
+    `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a). Prepend
     `Cycle $CONFORMANCE_CYCLE:` and append its response to `SHADOW_DIALOGUE` with a `---`
     separator, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one. Update
     `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY`/
