@@ -9,6 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import run_record as rr
 
 
+def _is_root() -> bool:
+    """os.geteuid() is Unix-only; on Windows report non-root so the chmod-based tests
+    are governed by their own platform skipif instead of failing collection
+    (operator plan gate, #395)."""
+    return getattr(os, "geteuid", lambda: -1)() == 0
+
+
 # ---------------------------------------------------------------------------
 # JSONL_PATH / SCHEDULER_STATE_DIR hermeticity (df#300)
 # ---------------------------------------------------------------------------
@@ -202,6 +209,40 @@ def test_post_seq_is_nonfatal(tmp_path, monkeypatch):
     # Should not raise even when Seq is unreachable
     rr.cmd_record(_RecordArgs())
     assert jsonl.exists()
+
+
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
+def test_record_ledger_write_failure_is_loud(tmp_path, monkeypatch, capsys):
+    jsonl = tmp_path / "runs.jsonl"
+    jsonl.write_text("")
+    jsonl.chmod(0o444)
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+
+    posted = []
+    monkeypatch.setattr(rr, "_post_seq", lambda r: posted.append(r))
+    health_events = []
+    monkeypatch.setattr(
+        rr, "emit_health_event",
+        lambda event, issue, run_id, detail: health_events.append((event, issue, run_id, detail)),
+    )
+
+    with pytest.raises(OSError):
+        rr.cmd_record(_RecordArgs())
+
+    # Seq still gets the verdict -- the only remaining place it can land.
+    assert len(posted) == 1
+    assert posted[0]["stage"] == "conformance"
+
+    assert len(health_events) == 1
+    event, issue, run_id, detail = health_events[0]
+    assert event == "factory.run_record.ledger_write_failed"
+    assert issue == _RecordArgs.issue
+    assert run_id == _RecordArgs.run_id
+    assert detail["stage"] == "conformance"
+    assert detail["path"] == str(jsonl)
+    assert "error" in detail
+
+    assert str(jsonl) in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1336,3 +1377,25 @@ def test_cli_record_accepts_origin_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     rec = json.loads(jsonl.read_text().strip())
     assert rec["origin"] == "target-loop:x"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl import in the subprocess")
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
+def test_cli_record_exits_nonzero_on_unwritable_ledger(tmp_path):
+    import subprocess
+    jsonl = tmp_path / "runs.jsonl"
+    jsonl.write_text("")
+    jsonl.chmod(0o444)
+    env = {
+        **os.environ, "SCHEDULER_STATE_DIR": str(tmp_path),
+        "SEQ_URL": "http://unreachable-host-99999:5341",
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "factory_core.run_record", "record",
+         "--run-id", "r1", "--issue", "1", "--intent", "intake", "--stage", "manifest_intake",
+         "--verdict", "ACCEPTED"],
+        cwd=str(Path(__file__).parent.parent / "scripts"),
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 4, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "runs.jsonl" in result.stderr
