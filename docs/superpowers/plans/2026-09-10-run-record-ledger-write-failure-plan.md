@@ -1,5 +1,9 @@
 # Implementation Plan: run-record — make a silent, unwritable `runs.jsonl` loud
 
+**Operator plan gate:** 2026-09-10 — approved with one blocking amendment (`os.geteuid` is
+Unix-only and would break the whole test module on Windows). Everything else was re-verified
+against `origin/main`; see the disposition comment.
+
 **Issue:** #395
 
 **Spec:** `docs/superpowers/specs/2026-09-10-run-record-ledger-write-failure-design.md`
@@ -56,11 +60,33 @@ scheduler's live poll loop and is out of scope.
 
 ### Step 1.1 — write the failing test
 
-Add to `tests/test_run_record.py`, immediately after `test_post_seq_is_nonfatal` (the
-test at line ~197) and before the `# --- _parse_archon_cost ---` section:
+**Blocking amendment (operator plan gate): do not call `os.geteuid()` directly.** It does not
+exist on Windows, and a `@pytest.mark.skipif(...)` condition is evaluated at **import** time — so
+`os.geteuid() == 0` raises `AttributeError` during collection and takes down all ~40 tests in
+`tests/test_run_record.py`, rather than skipping the one new test. That contradicts
+`tests/conftest.py`, which exists precisely to keep these modules importable "during local
+development on Windows", and `tests/test_run_record.py` already carries a
+`sys.platform == "win32"` skipif, so the file is expected to be collected there. There is no
+existing `geteuid` call anywhere in this repo — this would be the first, and it would be a
+portability regression introduced by a ticket about silent failures, in a file whose collection
+error is easy to mistake for unrelated breakage.
+
+Define one helper near the top of `tests/test_run_record.py` (after the imports) and use it for
+both new tests:
 
 ```python
-@pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0o444 has no effect as root")
+def _is_root() -> bool:
+    """os.geteuid() is Unix-only; on Windows report non-root so the chmod-based tests
+    are governed by their own platform skipif instead of failing collection
+    (operator plan gate, #395)."""
+    return getattr(os, "geteuid", lambda: -1)() == 0
+```
+
+Then add, immediately after `test_post_seq_is_nonfatal` (the test at line ~197) and before the
+`# --- _parse_archon_cost ---` section:
+
+```python
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
 def test_record_ledger_write_failure_is_loud(tmp_path, monkeypatch, capsys):
     jsonl = tmp_path / "runs.jsonl"
     jsonl.write_text("")
@@ -189,7 +215,7 @@ Add to `tests/test_run_record.py`, immediately after `test_cli_record_accepts_or
 
 ```python
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl import in the subprocess")
-@pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0o444 has no effect as root")
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
 def test_cli_record_exits_nonzero_on_unwritable_ledger(tmp_path):
     import subprocess
     jsonl = tmp_path / "runs.jsonl"
@@ -563,6 +589,29 @@ git commit -m "fix(#395): surface the ledger-writability warning in on_failure's
 ```
 
 ---
+
+## Verified at the operator plan gate (2026-09-10)
+
+- **`tests/test_entrypoint_preflight.sh` really is absent from CI.** `.github/workflows/ci.yml`
+  lists every other `tests/test_*.sh` individually (`:15-38`) and omits this one, so Task 5's
+  premise holds. The chosen insertion point — after `sudo install -d -m 777 /var/lib/dark-factory`
+  (`:23`) and before the "assert nothing touched it" check (`:27`) — is correct: the new
+  assertions use `mktemp` scratch dirs and never write to the shared path. Note
+  `.github/workflows/ci.yml` is **not** a hard-excluded path; only
+  `.github/workflows/publish.yml` and `deploy/instances/**` are.
+- **`run_record.py` has an `if __name__ == "__main__": main()` guard (`:888-889`)**, so Task 2's
+  `python -m factory_core.run_record` subprocess actually runs `main()` instead of importing
+  silently and exiting 0.
+- **`JSONL_PATH` is derived from `SCHEDULER_STATE_DIR` at import** (`run_record.py:24-25`), so
+  passing `SCHEDULER_STATE_DIR` in the subprocess env does redirect the ledger as Task 2 assumes.
+- **The `awk` range anchor works:** `${FOOTER}"` sits alone on its own line at the end of both
+  failure-comment bodies (`entrypoint.sh:595`, `:618`), so each range terminates where Task 4
+  expects.
+- **Task 3's subshell avoidance is correct and load-bearing.** Capturing stderr with
+  `ERRF=$(mktemp); _check_ledger_writable 2>"$ERRF"` rather than
+  `$(_check_ledger_writable 2>&1)` is the difference between the test working and silently never
+  observing `LEDGER_WRITE_WARNING` — a command substitution runs the function in a subshell, so
+  the global it sets would never escape. Keep the comment that explains it.
 
 ## Task 5 — wire `tests/test_entrypoint_preflight.sh` into CI
 
