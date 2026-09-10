@@ -47,6 +47,10 @@ Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` bran
    matching this issue's topic, or check the issue comments for a "Refinement Pipeline — Spec
    Generated" report that names the spec path
 6. Read the spec file (fallback branch of step 1, if `## spec` was absent or empty from the pack)
+6a. Bind the discovered spec file's path to `SPEC_FILE` — used by Phase 3's and Phase 3.5's
+    `render-prompt` calls below (`--set SPEC_CONTENT=@"$SPEC_FILE"`). If the context pack's
+    `## spec` section was used instead of a discovered file (step 1), write its text to
+    `$ARTIFACTS_DIR/spec_content.md` and set `SPEC_FILE="$ARTIFACTS_DIR/spec_content.md"`.
 7. Compute the affected file set and load memory context:
 
 ```bash
@@ -67,7 +71,13 @@ MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh"
 ## Phase 2: PLAN WRITING
 
 Write a full implementation plan following these conventions:
-- Save to `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`
+- Save to `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`, and bind that path to `PLAN_FILE`
+  — used by Phase 3's and Phase 3.5's `render-prompt` calls below
+  (`--set PLAN_CONTENT=@"$PLAN_FILE"`). Because `PLAN_FILE` points at the on-disk file rather
+  than a copy, every later revision (an architect "Issues Found" fix, or a conformance
+  reconcile-loop edit) is automatically picked up by the next `render-prompt` call with no
+  separate re-copy step — just re-run the same `render-prompt` invocation after saving the
+  revised plan.
 - A `**Issue:** #<num>` line directly under the title, before the standard plan
   header (Goal, Architecture, Tech Stack) — required (#382) so the content-only
   `grep -rl "#${ISSUE}"` call sites elsewhere in the DAG (budget telemetry, the
@@ -87,24 +97,47 @@ Before spawning the architect subagent, reuse `$MEMORY_CONTEXT` loaded in Phase 
 already populated by `load_memory_context.sh plan` and scoped to the changed file set).
 `[PROVISIONAL]` and `[INVALID]` entries are excluded automatically by the retrieval script.
 
-Prepend `$MEMORY_CONTEXT` to the architect prompt as a "## Memory: Accumulated Patterns" section immediately before the Spec and Plan content. If `$MEMORY_CONTEXT` is empty (no relevant files exist yet), omit the section entirely.
+Render the architect prompt via `render-prompt`, then prepend `$MEMORY_CONTEXT` — never the
+other way around (prepending first could re-inline a memory entry's own mention of
+`$SPEC_CONTENT`/`$PLAN_CONTENT` into the single-pass scan and reproduce this ticket's bug from
+a new direction). `$MEMORY_CONTEXT` itself is prose, not a shell variable that survives into
+this Bash call — `load_memory_context.sh` (Phase 1 step 7) already writes its resolved text to
+`$ARTIFACTS_DIR/memory-context.md`, so read that file rather than the variable (never inline
+memory-entry text into a double-quoted shell string either — memory entries routinely contain
+backticks and `$`, the same command-substitution hazard `render-prompt` exists to avoid).
+`load_memory_context.sh` always writes a trailing newline even when empty, so `[ -s ]` is not a
+valid emptiness test; strip whitespace first:
+
+```bash
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+  --template /opt/refinement-skills/architect-prompt.md \
+  --set SPEC_CONTENT=@"$SPEC_FILE" \
+  --set PLAN_CONTENT=@"$PLAN_FILE" \
+  --out "$ARTIFACTS_DIR/architect_prompt_body.md" \
+  || { echo "render-prompt failed — aborting plan phase (see stderr above)"; exit 1; }
+
+if [ -n "$(tr -d '[:space:]' < "$ARTIFACTS_DIR/memory-context.md")" ]; then
+  { printf '## Memory: Accumulated Patterns\n'; cat "$ARTIFACTS_DIR/memory-context.md"; \
+    printf '\n---\n'; cat "$ARTIFACTS_DIR/architect_prompt_body.md"; } \
+    > "$ARTIFACTS_DIR/architect_prompt.md"
+else
+  cp "$ARTIFACTS_DIR/architect_prompt_body.md" "$ARTIFACTS_DIR/architect_prompt.md"
+fi
+```
 
 Spawn an architect subagent using the Agent tool:
 - `description`: "Architect review: validate plan against spec"
 - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
-- `prompt`: Content of `architect-prompt.md` with `$SPEC_CONTENT` and `$PLAN_CONTENT` replaced with the actual file contents, and with `$MEMORY_CONTEXT` prepended as shown:
-
-  ```
-  ## Memory: Accumulated Patterns
-  $MEMORY_CONTEXT
-
-  ---
-  [architect-prompt.md content with $SPEC_CONTENT and $PLAN_CONTENT filled in]
-  ```
+- `prompt`: the verbatim contents of `$ARTIFACTS_DIR/architect_prompt.md`
 
 ### If architect returns "Issues Found":
-1. Fix each issue in the plan
-2. Re-spawn the architect subagent for re-review
+1. Fix each issue in the plan (edit `$PLAN_FILE` in place)
+1a. Re-run the `render-prompt` block above unchanged — since it reads `$PLAN_FILE` directly,
+    it picks up the revision from step 1 automatically. A `render-prompt` failure here is a
+    hard stop for the phase, identically to the first pass.
+2. Re-spawn the architect subagent for re-review, with the verbatim contents of
+   `$ARTIFACTS_DIR/architect_prompt.md` produced by step 1a
 3. Repeat until approved (max 3 cycles)
 4. If still not approved after 3 cycles:
    - Post the plan + architect feedback as an issue comment
@@ -125,7 +158,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 2. Determine `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
 3. Set `CONFORMANCE_DIALOGUE=""`, `SHADOW_DIALOGUE=""`, and `CONFORMANCE_CYCLE=0`
-4. Build the artifact content: the plan document text is `$PLAN_CONTENT`
+4. The artifact under review is the plan document on disk at `$PLAN_FILE` (bound in Phase 2).
 4a. Resolve the shadow model pin (Requirement 7: env explicitly set, even to empty, wins;
     unset falls back to the config default — `${VAR-default}`, not `${VAR:-default}`, so an
     explicit empty string is preserved rather than replaced):
@@ -133,21 +166,39 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
     SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('.claude/skills/refinement/config.yaml')); print(d.get('conformance',{}).get('shadow_model','claude-fable-5-1'))" 2>/dev/null || echo "claude-fable-5-1")
     SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
     ```
+4b. Render the conformance prompt. `RUBRIC_CONTENT` (step 1) is prose, not a shell variable —
+    no earlier step in this file ever assigns it in bash, and shell state does not persist
+    across separate Bash tool calls, so a `printf '%s' "$RUBRIC_CONTENT"` here would write an
+    empty file. Re-resolve the same clone-live-first *path* as a real variable instead, and
+    pass it straight to `--template` (reads `$PLAN_FILE` directly for the artifact — the
+    on-disk path bound in Phase 2, never a `plan_content.md` copy):
+    ```bash
+    if [ -f ".claude/skills/conformance/RUBRIC.md" ]; then
+      RUBRIC_FILE=".claude/skills/conformance/RUBRIC.md"
+    else
+      RUBRIC_FILE="/opt/refinement-skills/conformance-reviewer-prompt.md"
+    fi
+
+    # TARGET-PATH
+    python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+      --template "$RUBRIC_FILE" \
+      --set ARTIFACT_KIND=PLAN \
+      --set SPEC_CONTENT=@"$SPEC_FILE" \
+      --set ARTIFACT_CONTENT=@"$PLAN_FILE" \
+      --out "$ARTIFACTS_DIR/conformance_prompt.md" \
+      || { echo "render-prompt failed — aborting plan phase (see stderr above)"; exit 1; }
+    ```
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
    - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
-   - `prompt`: `RUBRIC_CONTENT` (resolved in step 1) with:
-     - `$ARTIFACT_KIND` replaced with `PLAN`
-     - `$SPEC_CONTENT` replaced with the spec file contents
-     - `$ARTIFACT_CONTENT` replaced with `$PLAN_CONTENT`
+   - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
 6. Append the subagent's output to `CONFORMANCE_DIALOGUE`
 6a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
     after, with the identical rubric/input the Opus spawn just saw:
    - `description`: "Conformance shadow (fable): plan vs spec (cycle N)"
    - `model`: `$SHADOW_MODEL_PIN`, passed as the Agent tool's `fable` alias when the pin is
      `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
-   - `prompt`: identical `RUBRIC_CONTENT` with the same `$ARTIFACT_KIND`/`$SPEC_CONTENT`/
-     `$ARTIFACT_CONTENT` substitution used for the Opus call this cycle
+   - `prompt`: the identical verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md` the Opus call just read this cycle
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
    - Any tool error, timeout, or refusal is caught here rather than propagated — it never
      blocks or delays the Opus verdict handling in step 7.
@@ -196,12 +247,18 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
       - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
       - Exit cleanly (do not abort — this is a known state)
    c. Read the MATERIAL deviation descriptions from the conformance reviewer output
-   d. Revise the plan to address each MATERIAL deviation (update the plan file, re-read it)
-   e. Re-spawn the conformance reviewer subagent (same prompt format, updated `$PLAN_CONTENT`)
+   d. Revise the plan to address each MATERIAL deviation (edit `$PLAN_FILE` in place, re-read it)
+   d2. Re-render the conformance prompt: re-run step 4b's `render-prompt` invocation
+       unchanged — since it reads `$PLAN_FILE` directly, it picks up step d's revision
+       automatically. A `render-prompt` failure here is a hard stop for the phase, identically
+       to 4b.
+   e. Re-spawn the conformance reviewer subagent with the verbatim contents of
+      `$ARTIFACTS_DIR/conformance_prompt.md` produced by step d2
    f. Append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator and `Cycle N:` header
    f2. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (step 8e's shadow
-       counterpart — same prompt format, updated `$PLAN_CONTENT`, identical to step 6a but for
-       this reconcile cycle). Append its response to `SHADOW_DIALOGUE` with a `---` separator
+       counterpart — prompt is the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
+       produced by step d2, identical to step 6a but for this reconcile cycle). Append its
+       response to `SHADOW_DIALOGUE` with a `---` separator
        and `Cycle N:` header, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one so
        a shadow cycle always pairs with the Opus cycle that produced the same-numbered plan
        revision. Update `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/
