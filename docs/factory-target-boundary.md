@@ -299,7 +299,8 @@ writing:
   `scripts/factory_core/epic_autopilot.py::hard_excluded`, which filters epic-autopilot
   candidate *tickets* — it never inspects a diff or aborts a run, and
   `config/config.yaml` currently ships `epic_autopilot.enabled: false`. `README.md`'s
-  `hard_exclude_paths` row phrasing ("matched diff paths abort the run") does not describe
-  current code; this doc does not repeat that claim.
+  `hard_exclude_paths` row carried the phrasing "matched diff paths abort the run" until
+  #415 corrected it; both files now describe the candidate-ticket filter this key actually
+  implements.
 - **CI coverage** — `tests/test_scheduler.sh` exists but is not in
   `.github/workflows/ci.yml`'s bash-test list.
