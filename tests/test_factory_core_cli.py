@@ -134,3 +134,38 @@ def test_state_set_rejects_key_outside_allowed_shape(monkeypatch, tmp_path):
     ])
     with pytest.raises(SystemExit):
         cli_mod.main()
+
+
+def test_board_add_exits_0_on_success(monkeypatch):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    import factory_core.board as board_mod
+    monkeypatch.setattr(board_mod, "add_to_board", lambda issue, url: True)
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "board-add", "--issue", "42", "--url", "https://github.com/o/r/issues/42",
+    ])
+    cli_mod.main()  # must not raise / must not SystemExit
+
+
+def test_board_add_exits_1_on_failure(monkeypatch):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    import factory_core.board as board_mod
+    monkeypatch.setattr(board_mod, "add_to_board", lambda issue, url: False)
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "board-add", "--issue", "42", "--url", "https://github.com/o/r/issues/42",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+
+
+def test_board_add_passes_issue_and_url(monkeypatch):
+    cli_mod = _cli(monkeypatch, FACTORY_PRODUCT_NAME="Acme")
+    import factory_core.board as board_mod
+    calls = []
+    monkeypatch.setattr(board_mod, "add_to_board",
+        lambda issue, url: calls.append((issue, url)) or True)
+    monkeypatch.setattr(sys, "argv", [
+        "cli.py", "board-add", "--issue", "42", "--url", "https://github.com/o/r/issues/42",
+    ])
+    cli_mod.main()
+    assert calls == [(42, "https://github.com/o/r/issues/42")]

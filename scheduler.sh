@@ -622,6 +622,29 @@ fetch_board_items() {
        status: .fieldValueByName.name}]}'
 }
 
+# Detects issues that carry ready-for-agent but never reached the board (this
+# ticket's root cause, or any future write-path gap). Prints a comma-joined,
+# '#'-prefixed, capped-at-10 issue list (empty string = none found); returns
+# non-zero if the gh issue list lookup itself failed, so the caller can tell
+# "queue is healthy" apart from "couldn't check."
+off_board_ready_issues() {
+  local board_items="$1" ready_json
+  # --limit is REQUIRED: `gh issue list` defaults to 30 results and truncates SILENTLY.
+  # A detector for a silently-truncated queue that is itself silently truncated is this
+  # ticket's own bug class (operator gate; the same defect bit the operator's own monitor
+  # earlier the same day with `--limit 40`). 200 is well clear of any plausible
+  # ready-for-agent population; the guard below turns a future overflow into a loud
+  # failure rather than an under-report.
+  ready_json=$(gh issue list --repo "$FACTORY_REPO_SLUG" --state open \
+    --label ready-for-agent --limit 200 --json number 2>/dev/null) || return 1
+  echo "$ready_json" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  # A full page means the cap may have truncated the result: report "cannot check"
+  # rather than an under-count, per Requirement 7's own principle.
+  [ "$(echo "$ready_json" | jq 'length')" -ge 200 ] && return 1
+  echo "$ready_json" | jq -r --argjson board "$board_items" \
+    '([.[].number] - [$board.items[].content.number]) | sort | .[]'
+}
+
 get_items_by_status() {
   local items="$1"
   local status_name="$2"
@@ -1613,7 +1636,18 @@ while true; do
   if [ -n "$DISPATCHED" ]; then
     echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} dispatched=\"${DISPATCHED}\" main_red=${MAIN_IS_RED} graphql=${BUDGET}"
   else
-    echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} skip=nothing_to_do main_red=${MAIN_IS_RED} graphql=${BUDGET}"
+    # `if VAR=$(cmd); then` keeps a non-zero return non-fatal under `set -e`; a bare
+    # `VAR=$(cmd)` followed by `[ $? -ne 0 ]` would exit the scheduler instead.
+    if ! OFF_BOARD=$(off_board_ready_issues "$BOARD_ITEMS"); then
+      echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} skip=nothing_to_do off_board_check=failed main_red=${MAIN_IS_RED} graphql=${BUDGET}"
+    elif [ -n "$OFF_BOARD" ]; then
+      OFF_BOARD_COUNT=$(echo "$OFF_BOARD" | grep -c .)
+      OFF_BOARD_LIST=$(echo "$OFF_BOARD" | head -10 | sed 's/^/#/' | paste -sd, -)
+      [ "$OFF_BOARD_COUNT" -gt 10 ] && OFF_BOARD_LIST="${OFF_BOARD_LIST},+$((OFF_BOARD_COUNT - 10))more"
+      echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} skip=queue_unreachable off_board=${OFF_BOARD_COUNT} issues=${OFF_BOARD_LIST} main_red=${MAIN_IS_RED} graphql=${BUDGET}"
+    else
+      echo "[$(date -u +%FT%TZ)] backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=${IN_PROGRESS_COUNT}/${MAX_IN_PROGRESS} in_review=${IN_REVIEW_COUNT}/${MAX_IN_REVIEW} factory_running=${FACTORY_RUNNING}/${FACTORY_WIP_LIMIT} refine_running=${REFINE_RUNNING}/${REFINE_WIP_LIMIT} skip=nothing_to_do main_red=${MAIN_IS_RED} graphql=${BUDGET}"
+    fi
   fi
 
   sleep "$POLL_INTERVAL"

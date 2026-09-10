@@ -14,6 +14,13 @@ def _board_move(args):
     set_board_status(args.issue, args.status)
 
 
+def _board_add(args):
+    from factory_core.board import add_to_board
+    ok = add_to_board(args.issue, args.url)
+    if not ok:
+        sys.exit(1)
+
+
 def _deconflict(args):
     from factory_core.deconflict import resolve_merge_conflicts
     from factory_core import identity
@@ -291,6 +298,11 @@ def main():
     bm.add_argument("--issue", type=int, required=True)
     bm.add_argument("--status", required=True)
     bm.set_defaults(func=_board_move)
+
+    ba = sub.add_parser("board-add")
+    ba.add_argument("--issue", type=int, required=True)
+    ba.add_argument("--url", required=True)
+    ba.set_defaults(func=_board_add)
 
     dc = sub.add_parser("deconflict")
     dc.add_argument("--issue", type=int, required=True)

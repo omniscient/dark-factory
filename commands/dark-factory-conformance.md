@@ -401,6 +401,10 @@ ${DEDUP_KEY_COMMENT}
         --body "$SPILLOVER_BODY" \
         --label "needs-triage,${BACKLOG_LABEL}")
       SPILLOVER_NUM=$(basename "$SPILLOVER_URL")
+      # TARGET-PATH
+      python3 dark-factory/scripts/factory_core/cli.py board-add \
+        --issue "$SPILLOVER_NUM" --url "$SPILLOVER_URL" \
+        || echo "scope-enforcement: WARNING board-add failed for spillover #${SPILLOVER_NUM}" >&2
       SPILLOVER_TICKETS="$SPILLOVER_TICKETS $SPILLOVER_NUM"
       echo "scope-enforcement: created new spillover #${SPILLOVER_NUM} (key: $KEY)"
       ;;
