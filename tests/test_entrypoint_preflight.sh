@@ -45,7 +45,7 @@ export -f claude
 CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-preflight-rundir-XXXXXX)
 export CURRENT_RUN_DIR
 
-ENTRYPOINT_SOURCE_ONLY=1 source "$ep"
+ENTRYPOINT_SOURCE_ONLY=1 source "$_REPO_DIR/entrypoint.sh"
 trap - ERR
 set +e; set +u; set +o pipefail
 
@@ -92,5 +92,28 @@ _check_ledger_writable
 [ -z "$LEDGER_WRITE_WARNING" ] \
   || { echo "FAIL: LEDGER_WRITE_WARNING set for a writable ledger"; exit 1; }
 echo "PASS: LEDGER_WRITE_WARNING stays empty when the ledger is writable"
+
+# --- #395 Requirement 5: the warning threads into both existing failure-comment
+# bodies (static text check -- avoids the hermetic-guard/network complexity of
+# actually invoking on_failure(), see tests/test_run_record_hermetic.sh).
+refine_body=$(awk '/post_or_update_comment "\$REFINE_FAILURE_MARKER"/,/^\$\{FOOTER\}"$/' "$ep")
+echo "$refine_body" | grep -q 'LEDGER_NOTE' \
+  || { echo "FAIL: REFINE_FAILURE_MARKER body does not reference LEDGER_NOTE"; exit 1; }
+# Position check, not just presence: LEDGER_NOTE must land after the retry command,
+# not spliced into the middle of the fenced retry block (Requirement 5).
+retry_ln=$(echo "$refine_body" | grep -n 'docker compose --profile factory run --rm dark-factory' | head -1 | cut -d: -f1)
+ledger_ln=$(echo "$refine_body" | grep -n 'LEDGER_NOTE' | head -1 | cut -d: -f1)
+[ -n "$retry_ln" ] && [ -n "$ledger_ln" ] && [ "$ledger_ln" -gt "$retry_ln" ] \
+  || { echo "FAIL: LEDGER_NOTE in REFINE_FAILURE_MARKER body is not after the retry command"; exit 1; }
+echo "PASS: REFINE_FAILURE_MARKER body includes LEDGER_NOTE after the retry block"
+
+factory_body=$(awk '/post_or_update_comment "\$FACTORY_FAILURE_MARKER"/,/^\$\{FOOTER\}"$/' "$ep")
+echo "$factory_body" | grep -q 'LEDGER_NOTE' \
+  || { echo "FAIL: FACTORY_FAILURE_MARKER body does not reference LEDGER_NOTE"; exit 1; }
+retry_ln=$(echo "$factory_body" | grep -n 'docker compose --profile factory run --rm dark-factory' | head -1 | cut -d: -f1)
+ledger_ln=$(echo "$factory_body" | grep -n 'LEDGER_NOTE' | head -1 | cut -d: -f1)
+[ -n "$retry_ln" ] && [ -n "$ledger_ln" ] && [ "$ledger_ln" -gt "$retry_ln" ] \
+  || { echo "FAIL: LEDGER_NOTE in FACTORY_FAILURE_MARKER body is not after the retry command"; exit 1; }
+echo "PASS: FACTORY_FAILURE_MARKER body includes LEDGER_NOTE after the retry block"
 
 echo "PASS"

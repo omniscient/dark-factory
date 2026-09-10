@@ -595,6 +595,13 @@ ${SUMMARY_LINE}"
       --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
     rm -f "$FAIL_COST_JSON" "$FAIL_COST_STDERR"
   fi
+  # #395: thread the ledger-writability warning into whichever failure comment below
+  # actually fires, mirroring _handle_session_window_pause's SESSION_WINDOW_MATCHED_PATTERN
+  # -> SUMMARY_LINE pattern (helper sets a global, the comment builder reads it back).
+  local LEDGER_NOTE=""
+  [ -n "${LEDGER_WRITE_WARNING:-}" ] && LEDGER_NOTE="
+
+> ⚠️ ${LEDGER_WRITE_WARNING}"
   if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
     if [ "$INTENT" = "refine" ] || [ "$INTENT" = "plan" ] || [ "$INTENT" = "deconflict" ]; then
       # No board status change here — the scheduler's trip_to_blocked() handles the
@@ -614,6 +621,7 @@ The refinement pipeline encountered an error (exit code $EXIT_CODE) and could no
 # Retry
 docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
+${LEDGER_NOTE}
 
 ---
 ${FOOTER}"
@@ -637,6 +645,7 @@ ${BOARD_NOTE}
 # Retry
 docker compose --profile factory run --rm dark-factory \"$ARGUMENTS\"
 \`\`\`
+${LEDGER_NOTE}
 
 ---
 ${FOOTER}"
