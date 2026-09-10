@@ -1,5 +1,9 @@
 # Implementation Plan: README `safety.*` adapter-table accuracy fix
 
+**Operator plan gate:** 2026-09-10 — approved with one scope amendment: the cross-reference
+drift this fix creates in `docs/factory-target-boundary.md` is repaired **in this PR**, not
+deferred to a PR note. New Task 3.5 below.
+
 **Issue:** #415
 
 ## Goal
@@ -13,9 +17,20 @@ nonexistent consumer. This plan rewrites all five `safety.*` rows (the sixth,
 `migration_seed_auth_patterns`, is already accurate and is left untouched) so each cell
 describes what the code does today, re-verified against this checkout at plan-writing time.
 
-This is a documentation-only change. No code, config, or test file changes — the spec's
-Requirement 5 states plainly "No other files change," and confirms no existing test pins
-the exact README row wording. Verification below uses `grep` against `README.md` directly
+This is a documentation-only change. No code, config, or test file changes.
+
+**Scope amendment (operator plan gate).** The spec's Requirement 5 said "No other files change."
+That was written before anyone noticed that Task 1 *creates* a false statement in
+`docs/factory-target-boundary.md`, which quotes README's old phrasing as a live description of
+what README says. Shipping a fix that knowingly makes another doc wrong — and filing a note about
+it — is worse than the one-sentence edit that keeps both true. The boundary doc is the #201
+deliverable whose entire purpose is to stop false claims about enforcement propagating; leaving a
+stale quotation in it, filed as a follow-up, is the failure that doc exists to prevent.
+
+Scope is therefore widened *here, at the plan gate*, deliberately and in writing: the plan lists
+the second file, so CLAUDE.md's "touch only what the plan lists" is satisfied and the conformance
+gate will not excise it as spillover. `docs/factory-target-boundary.md` is not a hard-excluded
+path, and no test pins the sentence. Verification below uses `grep` against `README.md` directly
 (read current text before editing, confirm corrected text after) instead of a pytest drift
 guard, since adding one would itself violate the spec's single-file scope.
 
@@ -36,6 +51,7 @@ Markdown (`README.md`) only. `grep`/`sed` for verification — no pytest, no new
 | Path | Change |
 |---|---|
 | `README.md` | Rewrite 5 of 6 `safety.*` table rows (lines 166-169, 171); line 170 (`migration_seed_auth_patterns`) verified unchanged |
+| `docs/factory-target-boundary.md` | One sentence (~`:301-303`) that quotes the README phrasing Task 1 removes — see Task 3.5 (operator plan gate) |
 
 ---
 
@@ -253,6 +269,74 @@ task confirms that instead of skipping it silently.
 
 ---
 
+## Task 3.5: Repair the cross-reference this fix strands in `docs/factory-target-boundary.md`
+
+**Files:** `docs/factory-target-boundary.md`
+
+Task 1 removes the phrase "matched diff paths abort the run" from `README.md`. The boundary doc's
+OD3 entry quotes that phrase as a description of what README currently says, so after Task 1 the
+sentence asserts something untrue about a file in the same commit.
+
+### Steps
+
+1. Confirm the stranding — red phase (run **after** Task 1 has landed):
+   ```bash
+   cd /workspace/dark-factory
+   grep -n "matched diff paths abort the run" README.md docs/factory-target-boundary.md
+   ```
+   Expected: **no** match in `README.md` (Task 1 removed it); one match in
+   `docs/factory-target-boundary.md` — the now-stale quotation.
+
+2. Confirm nothing pins the sentence, so this is a correctness fix and not a CI break either way:
+   ```bash
+   cd /workspace/dark-factory
+   grep -rn "abort the run" tests/
+   ```
+   Expected: only `tests/test_has_new_comment_after_report.sh:23`, an unrelated shell comment.
+
+3. Implement — in `docs/factory-target-boundary.md`'s **OD3** entry, replace:
+
+   ```
+   `config/config.yaml` currently ships `epic_autopilot.enabled: false`. `README.md`'s
+   `hard_exclude_paths` row phrasing ("matched diff paths abort the run") does not describe
+   current code; this doc does not repeat that claim.
+   ```
+
+   with:
+
+   ```
+   `config/config.yaml` currently ships `epic_autopilot.enabled: false`. `README.md`'s
+   `hard_exclude_paths` row carried the phrasing "matched diff paths abort the run" until
+   #415 corrected it; both files now describe the candidate-ticket filter this key actually
+   implements.
+   ```
+
+   (Keep the surrounding OD3 text unchanged — only this trailing sentence moves from "README is
+   wrong" to "README was wrong and was fixed", which is what will be true once this PR merges.)
+
+4. Verify — green phase:
+   ```bash
+   cd /workspace/dark-factory
+   grep -rn "matched diff paths abort the run" README.md docs/factory-target-boundary.md
+   python -m pytest tests/test_factory_target_boundary_doc.py -v
+   ```
+   Expected: the first command finds the phrase only inside the new "carried the phrasing ...
+   until #415 corrected it" sentence in the boundary doc, and nowhere in `README.md`. The #201
+   drift guard passes — it checks citation targets and section presence, and its
+   `test_readme_links_to_boundary_doc_near_loops_row` uses `finditer` over *all* occurrences
+   needing only one pair within 4 lines, so Task 1's additional
+   `docs/factory-target-boundary.md` link in the `hard_exclude_paths` row cannot break it
+   (verified at the plan gate).
+
+5. Commit:
+   ```bash
+   cd /workspace/dark-factory
+   git add docs/factory-target-boundary.md
+   git commit -m "docs(#415): keep factory-target-boundary.md's OD3 note true after the README fix"
+   ```
+
+---
+
 ## Task 4: Final self-review
 
 **Files:** none (verification only; a fixup commit only if drift is found)
@@ -291,7 +375,8 @@ task confirms that instead of skipping it silently.
    cd /workspace/dark-factory
    git diff origin/main HEAD --stat
    ```
-   Expected: `README.md` and `docs/superpowers/plans/2026-09-10-readme-safety-adapter-table-accuracy-plan.md`
+   Expected: `README.md`, `docs/factory-target-boundary.md` (Task 3.5), and
+   `docs/superpowers/plans/2026-09-10-readme-safety-adapter-table-accuracy-plan.md`
    only (plus the spec file already committed during refinement,
    `docs/superpowers/specs/2026-09-10-readme-safety-adapter-table-accuracy-design.md`, which
    is out of this command's own scope boundary but was legitimately committed during the
@@ -312,7 +397,9 @@ task confirms that instead of skipping it silently.
 7. Record two known follow-ups in the PR description (do not act on either — both are out of
    this ticket's docs-only scope per the spec, and this is a headless run with no one to ask,
    so the disposition is: note them for a human/operator, don't leave them silently dropped):
-   - **`docs/factory-target-boundary.md:301-303`** now describes a README phrasing
+   - ~~**`docs/factory-target-boundary.md:301-303`**~~ — **resolved in this PR by Task 3.5**
+     (operator plan gate); no longer a follow-up. Original note retained for context:
+     it described a README phrasing
      ("`hard_exclude_paths` row phrasing (\"matched diff paths abort the run\")") that no
      longer exists in `README.md` after Task 1. Confirm this with:
      ```bash
