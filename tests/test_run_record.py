@@ -9,6 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import run_record as rr
 
 
+def _is_root() -> bool:
+    """os.geteuid() is Unix-only; on Windows report non-root so the chmod-based tests
+    are governed by their own platform skipif instead of failing collection
+    (operator plan gate, #395)."""
+    return getattr(os, "geteuid", lambda: -1)() == 0
+
+
 # ---------------------------------------------------------------------------
 # JSONL_PATH / SCHEDULER_STATE_DIR hermeticity (df#300)
 # ---------------------------------------------------------------------------
@@ -202,6 +209,40 @@ def test_post_seq_is_nonfatal(tmp_path, monkeypatch):
     # Should not raise even when Seq is unreachable
     rr.cmd_record(_RecordArgs())
     assert jsonl.exists()
+
+
+@pytest.mark.skipif(_is_root(), reason="chmod 0o444 has no effect as root")
+def test_record_ledger_write_failure_is_loud(tmp_path, monkeypatch, capsys):
+    jsonl = tmp_path / "runs.jsonl"
+    jsonl.write_text("")
+    jsonl.chmod(0o444)
+    monkeypatch.setattr(rr, "JSONL_PATH", jsonl)
+
+    posted = []
+    monkeypatch.setattr(rr, "_post_seq", lambda r: posted.append(r))
+    health_events = []
+    monkeypatch.setattr(
+        rr, "emit_health_event",
+        lambda event, issue, run_id, detail: health_events.append((event, issue, run_id, detail)),
+    )
+
+    with pytest.raises(OSError):
+        rr.cmd_record(_RecordArgs())
+
+    # Seq still gets the verdict -- the only remaining place it can land.
+    assert len(posted) == 1
+    assert posted[0]["stage"] == "conformance"
+
+    assert len(health_events) == 1
+    event, issue, run_id, detail = health_events[0]
+    assert event == "factory.run_record.ledger_write_failed"
+    assert issue == _RecordArgs.issue
+    assert run_id == _RecordArgs.run_id
+    assert detail["stage"] == "conformance"
+    assert detail["path"] == str(jsonl)
+    assert "error" in detail
+
+    assert str(jsonl) in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

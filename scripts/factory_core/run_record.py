@@ -116,7 +116,7 @@ def _post_seq_raw(payload: dict) -> None:
         with urllib.request.urlopen(req, timeout=5) as resp:
             resp.read()
     except Exception:
-        pass  # non-fatal: local file was already written
+        pass  # non-fatal: Seq is always best-effort, whether or not the local ledger write succeeded
 
 
 def cmd_record(args) -> None:
@@ -154,7 +154,17 @@ def cmd_record(args) -> None:
     if details:
         record["detail"] = details
 
-    _append_jsonl(record)
+    try:
+        _append_jsonl(record)
+    except OSError as exc:
+        print(f"run-record: ledger append failed ({JSONL_PATH}): {exc}", file=sys.stderr)
+        _post_seq(record)  # best-effort — the only remaining place this verdict can land
+        emit_health_event(
+            "factory.run_record.ledger_write_failed",
+            record["issue_number"], record["run_id"],
+            {"stage": record["stage"], "path": str(JSONL_PATH), "error": str(exc)[:500]},
+        )
+        raise
     _post_seq(record)
 
 
