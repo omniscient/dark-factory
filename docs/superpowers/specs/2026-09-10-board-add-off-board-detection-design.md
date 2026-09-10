@@ -1,5 +1,10 @@
 # Close the board write path and detect off-board `ready-for-agent` issues
 
+**Operator spec gate:** 2026-09-10 — approved with amendments. Two blocking defects, both of
+which are this ticket's own bug class reappearing inside the fix: a `set -e` interaction that
+would kill the poll loop instead of reporting, and an unpaginated `gh issue list` that would
+silently under-report. Details in the disposition comment.
+
 **Issue:** #418
 
 ## Overview / Problem statement
@@ -150,10 +155,15 @@ after `SPILLOVER_URL=$(gh issue create ...)` and `SPILLOVER_NUM=$(basename "$SPI
 add:
 
 ```bash
-python3 dark-factory/scripts/factory_core/cli.py board-add \  # TARGET-PATH
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py board-add \
   --issue "$SPILLOVER_NUM" --url "$SPILLOVER_URL" \
   || echo "scope-enforcement: WARNING board-add failed for spillover #${SPILLOVER_NUM}" >&2
 ```
+
+(The `TARGET-PATH` marker moves to its own line: a `\` followed by whitespace and a comment does
+**not** continue the line, so the original form would have broken the command at its first
+argument.)
 
 **`commands/ceiling-revisit.md`** (Phase 4, the `XL_ACTION="file"` branch, ~line 158, and
 Phase 5's unconditional next-revisit issue, ~line 201): capture the `gh issue create` URL into
@@ -174,9 +184,18 @@ New function in `scheduler.sh`, under the existing `# --- Board state ---` heade
 # "queue is healthy" apart from "couldn't check."
 off_board_ready_issues() {
   local board_items="$1" ready_json
+  # --limit is REQUIRED: `gh issue list` defaults to 30 results and truncates SILENTLY.
+  # A detector for a silently-truncated queue that is itself silently truncated is this
+  # ticket's own bug class (operator gate; the same defect bit the operator's own monitor
+  # earlier the same day with `--limit 40`). 200 is well clear of any plausible
+  # ready-for-agent population; the guard below turns a future overflow into a loud
+  # failure rather than an under-report.
   ready_json=$(gh issue list --repo "$FACTORY_REPO_SLUG" --state open \
-    --label ready-for-agent --json number 2>/dev/null) || return 1
+    --label ready-for-agent --limit 200 --json number 2>/dev/null) || return 1
   echo "$ready_json" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  # A full page means the cap may have truncated the result: report "cannot check"
+  # rather than an under-count, per Requirement 7's own principle.
+  [ "$(echo "$ready_json" | jq 'length')" -ge 200 ] && return 1
   echo "$ready_json" | jq -r --argjson board "$board_items" \
     '([.[].number] - [$board.items[].content.number]) | sort | .[]'
 }
@@ -184,12 +203,25 @@ off_board_ready_issues() {
 
 Main-loop integration, replacing the `else` branch at `scheduler.sh:1613-1617`:
 
+**Blocking correction (operator gate).** `scheduler.sh:2` is `set -euo pipefail` and `:3` adds
+`set -E`, which inherits the `ERR` trap into functions. Under those flags,
+`OFF_BOARD=$(off_board_ready_issues "$BOARD_ITEMS")` is a *simple command*: when the substitution
+returns non-zero, the shell **exits immediately**, firing `SCHED_UNHANDLED_ERR`. The following
+`if [ $? -ne 0 ]` is unreachable, and a transient `gh issue list` failure would **kill the poll
+loop** — taking the whole factory down in order to report that it could not check the queue. That
+is a strictly worse outcome than the silent `nothing_to_do` this ticket set out to fix, and it is
+Requirement 7's own hazard turned inside out.
+
+The capture must be the `if` condition itself (or use `|| rc=$?`), so the non-zero path is handled
+rather than fatal:
+
 ```bash
 if [ -n "$DISPATCHED" ]; then
   echo "[$(date -u +%FT%TZ)] backlog=... dispatched=\"${DISPATCHED}\" main_red=${MAIN_IS_RED} graphql=${BUDGET}"
 else
-  OFF_BOARD=$(off_board_ready_issues "$BOARD_ITEMS")
-  if [ $? -ne 0 ]; then
+  # `if VAR=$(cmd); then` keeps a non-zero return non-fatal under `set -e`; a bare
+  # `VAR=$(cmd)` followed by `[ $? -ne 0 ]` exits the scheduler instead (operator gate).
+  if ! OFF_BOARD=$(off_board_ready_issues "$BOARD_ITEMS"); then
     echo "[$(date -u +%FT%TZ)] backlog=... skip=nothing_to_do off_board_check=failed main_red=${MAIN_IS_RED} graphql=${BUDGET}"
   elif [ -n "$OFF_BOARD" ]; then
     OFF_BOARD_COUNT=$(echo "$OFF_BOARD" | grep -c .)
@@ -201,6 +233,10 @@ else
   fi
 fi
 ```
+
+The new scheduler test must cover this directly: with a `gh()` stub that returns non-zero for
+`issue list`, the loop body must still **reach and print** `off_board_check=failed` and continue.
+A test that only asserts the string appears in the source would not catch the `set -e` exit.
 
 (`backlog=...` stands in for the existing unchanged
 `backlog=${BACKLOG_COUNT} refined=${REFINED_COUNT} in_progress=... in_review=... factory_running=... refine_running=...` prefix — every existing field stays byte-identical so operator tooling that greps this line is unaffected.)
@@ -257,6 +293,27 @@ fi
   this refinement pass (no network access) — implementation should smoke-test the exact
   `--format json` output shape (`{"id": ...}` at top level, matching `item-edit`'s existing
   parsing) before relying on it.
+
+## Verified at the operator spec gate (2026-09-10)
+
+- `scripts/factory_core/board.py` really does expose `OWNER` (`:9`), `PROJECT_NUMBER` (`:11`),
+  `STATUS_BACKLOG` (`:19`), `_find_item_by_number_checked` (`:23`) and `_item_edit_status` (`:56`),
+  so the prescribed `add_to_board` composes from real names. Confirmed.
+- `fetch_board_items` (`scheduler.sh:582`) returns
+  `{items: [{content: {number, title, type}, labels, status}]}` and already applies
+  `select(.content.number != null)` (`:619`), so `[$board.items[].content.number]` cannot yield
+  nulls and needs no extra guard. The proposed `jq` array-difference is correct. Confirmed.
+- The `skip=nothing_to_do` line is `scheduler.sh:1616`, and `BOARD_ITEMS` is assigned at `:1525`
+  with its own `|| { ...; continue; }` guard — so the board snapshot is always valid JSON by the
+  time the idle branch runs. Confirmed.
+- `FACTORY_REPO_SLUG` is not assigned inside `scheduler.sh` but is supplied by the environment and
+  used throughout (`:263`, `:299`, `:338`, `:501`, `:562`, `:576`, ...). The flagged assumption
+  holds; no new env plumbing is needed. Confirmed.
+- `scripts/scheduler_lib.sh`'s "pure, side-effect-free item-blob predicates only" contract is real,
+  so placing `off_board_ready_issues` in `scheduler.sh` is right. Confirmed.
+
+Still unverified, and correctly flagged by the spec: `gh project item-add --format json`'s exact
+output shape. Smoke-test it before relying on `.id`.
 
 ## Assumptions (flagged)
 
