@@ -137,3 +137,49 @@ def test_post_or_update_comment_updates_existing(monkeypatch):
     board.post_or_update_comment(42, "<!-- marker -->", "updated body")
     assert any("PATCH" in " ".join(c) for c in calls)
     assert any("12345" in " ".join(c) for c in calls)
+
+
+def test_add_to_board_success(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "item-add" in cmd:
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps({"id": "ITEM42"}), stderr="")
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert board.add_to_board(42, "https://github.com/o/r/issues/42") is True
+    add_call = next(c for c in calls if "item-add" in c)
+    assert "https://github.com/o/r/issues/42" in add_call
+    edit_call = next(c for c in calls if "item-edit" in c)
+    assert "ITEM42" in edit_call
+    assert board.STATUS_BACKLOG in edit_call
+
+
+def test_add_to_board_item_add_fails_falls_back_to_lookup(monkeypatch, capsys):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "item-add" in cmd:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="already exists")
+        if "item-list" in cmd:
+            return _items([{"id": "ITEM42", "content": {"number": 42, "type": "Issue"}}])
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert board.add_to_board(42, "https://github.com/o/r/issues/42") is True
+    assert any("item-edit" in c for c in calls)
+    err = capsys.readouterr().err
+    assert "42" in err
+
+
+def test_add_to_board_item_add_and_fallback_fail(monkeypatch):
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "item-add" in cmd:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
+        if "item-list" in cmd:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="rate limited")
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert board.add_to_board(42, "https://github.com/o/r/issues/42") is False
+    assert not any("item-edit" in c for c in calls)

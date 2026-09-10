@@ -78,6 +78,29 @@ def set_board_status(issue_num: int, option_id: str) -> None:
     _item_edit_status(item_id, option_id)
 
 
+def add_to_board(issue_num: int, issue_url: str) -> bool:
+    r = subprocess.run(
+        ["gh", "project", "item-add", str(PROJECT_NUMBER),
+         "--owner", OWNER, "--url", issue_url, "--format", "json"],
+        capture_output=True, text=True,
+    )
+    item_id = ""
+    if r.returncode == 0:
+        try:
+            item_id = json.loads(r.stdout).get("id", "")
+        except json.JSONDecodeError:
+            item_id = ""
+    if not item_id:
+        print(f"board: item-add failed for #{issue_num}: {r.stderr.strip()}", file=sys.stderr)
+        # item-add is idempotent (re-adding an already-present issue returns the
+        # existing item rather than erroring), but don't trust a missing/unparseable
+        # .id blindly -- fall back to a direct lookup before giving up.
+        item_id, lookup_ok = _find_item_by_number_checked(str(issue_num))
+        if not lookup_ok or not item_id:
+            return False
+    return _item_edit_status(item_id, STATUS_BACKLOG)
+
+
 def post_or_update_comment(issue_num: int, marker: str, body: str) -> None:
     r = subprocess.run(
         ["gh", "api", f"repos/{OWNER}/{REPO}/issues/{issue_num}/comments",
