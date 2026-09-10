@@ -33,9 +33,10 @@ def test_filed_issue_body_cites_scheduler_lib():
 
 def test_target_path_markers_preserved():
     text = _text()
-    assert text.count("# TARGET-PATH") == 2, (
-        "Phase 1's two '# TARGET-PATH' markers on the python3 dark-factory/scripts/... lines "
-        "must survive this text/logic fix untouched (#361 is not a path fix)"
+    assert text.count("# TARGET-PATH") == 4, (
+        "Phase 1's original two '# TARGET-PATH' markers, plus the two added by #418's "
+        "board-add calls (Phase 4's XL-bucket issue, Phase 5's next-weekly-revisit issue), "
+        "must all be present"
     )
 
 

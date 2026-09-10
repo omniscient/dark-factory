@@ -203,7 +203,7 @@ fi
 
 ```bash
 NEXT_TITLE="Revisit dispatch ceiling — re-measure success-by-size/type"
-gh issue create \
+NEXT_URL=$(gh issue create \
   --repo "$REPO" \
   --title "$NEXT_TITLE" \
   --body "## Purpose
@@ -239,5 +239,10 @@ Weekly revisit of the size/type-aware dispatch ceiling policy.
   --label "enhancement" \
   --label "priority: should-have" \
   --label "size: S" \
-  --label "ready-for-agent"
+  --label "ready-for-agent")
+NEXT_NUM=$(basename "$NEXT_URL")
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py board-add \
+  --issue "$NEXT_NUM" --url "$NEXT_URL" \
+  || echo "ceiling-revisit: WARNING board-add failed for next weekly revisit issue #${NEXT_NUM}" >&2
 ```
