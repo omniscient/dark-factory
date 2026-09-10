@@ -58,13 +58,14 @@ source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"
 
 ## Phase 3: SPAWN FIX AGENT
 
-Spawn a subagent using the Agent tool:
+Render the fix-agent prompt from a heredoc-written template, then spawn a subagent using the
+Agent tool. The template's boilerplate is byte-unchanged from before this ticket; only where
+it is assembled from changes. The outer fence below is **four backticks, not three** — the
+heredoc body contains a ` ```diff ` fence, and a three-backtick outer fence would be
+terminated early by it, silently turning the rest of this phase's instructions into prose.
 
-- `description`: "Revise advisory findings: ${ADVISORY_COUNT} item(s)"
-- `model`: inherit (do not override — Sonnet is appropriate for targeted edits)
-- `prompt`:
-
-```
+````bash
+cat > "$ARTIFACTS_DIR/revise_advisory_template.md" <<'PROMPT_EOF'
 You are a software engineer addressing advisory findings from a code review.
 Your task: fix each finding below by editing the relevant source files.
 
@@ -88,9 +89,30 @@ For each finding:
 When done, output a brief summary of what you changed (one line per finding).
 Do NOT commit or push — the workflow handles that.
 Do NOT modify test files unless the finding explicitly targets a test file.
-```
+PROMPT_EOF
 
-Replace `{FINDINGS_TEXT}` with `$FINDINGS_TEXT` and `{DIFF_CONTENT}` with `$DIFF_CONTENT`.
+printf '%s' "$FINDINGS_TEXT" > "$ARTIFACTS_DIR/revise_advisory_findings.md"
+printf '%s' "$DIFF_CONTENT" > "$ARTIFACTS_DIR/revise_advisory_diff.md"
+
+# TARGET-PATH
+python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+  --template "$ARTIFACTS_DIR/revise_advisory_template.md" \
+  --delimiter brace \
+  --set FINDINGS_TEXT=@"$ARTIFACTS_DIR/revise_advisory_findings.md" \
+  --set DIFF_CONTENT=@"$ARTIFACTS_DIR/revise_advisory_diff.md" \
+  --out "$ARTIFACTS_DIR/revise_advisory_prompt.md" \
+  || { echo "render-prompt failed — aborting revise-advisory phase (see stderr above)"; exit 1; }
+````
+
+Spawn a subagent using the Agent tool:
+
+- `description`: "Revise advisory findings: ${ADVISORY_COUNT} item(s)"
+- `model`: inherit (do not override — Sonnet is appropriate for targeted edits)
+- `prompt`: the verbatim contents of `$ARTIFACTS_DIR/revise_advisory_prompt.md`
+
+The quoted heredoc delimiter (`<<'PROMPT_EOF'`) is required, not stylistic — an unquoted
+delimiter would let the shell expand `$` and backticks in the boilerplate before
+`render-prompt` ever sees the template text.
 
 Save the agent's summary output to `$ARTIFACTS_DIR/revise_summary.txt`.
 

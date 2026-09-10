@@ -96,16 +96,36 @@ Follow this process:
    Focus questions on: purpose and success criteria; scope boundaries (what's in, what's out);
    integration points with existing code; data model decisions; UI/UX requirements (if
    applicable); error handling and edge cases.
-2. For each question, spawn a product-owner subagent using the Agent tool:
+2. For each question, render the product-owner prompt, then spawn a subagent using the Agent
+   tool. `$ISSUE_CONTEXT`/`$QA_HISTORY`/`$QUESTION` are values you (the orchestrating agent)
+   are holding, not exported shell variables — Phase 3 built the context summary and this
+   loop builds the running Q&A history and each new question yourself, in your own context,
+   so materialize them with the Write tool before rendering:
+   - Write `$ARTIFACTS_DIR/refine_issue_context.md` — the context summary from Phase 3.
+   - Write `$ARTIFACTS_DIR/refine_qa_history.md` — every prior question/answer pair from this
+     loop so far (empty file on the first question).
+   - Write `$ARTIFACTS_DIR/refine_question.md` — the question you just formulated in step 1.
+   ```bash
+   # TARGET-PATH
+   python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+     --template /opt/refinement-skills/product-owner-prompt.md \
+     --set ISSUE_CONTEXT=@"$ARTIFACTS_DIR/refine_issue_context.md" \
+     --set QA_HISTORY=@"$ARTIFACTS_DIR/refine_qa_history.md" \
+     --set QUESTION=@"$ARTIFACTS_DIR/refine_question.md" \
+     --out "$ARTIFACTS_DIR/refine_product_owner_prompt.md" \
+     || { echo "render-prompt failed — aborting refine phase (see stderr above)"; exit 1; }
+   ```
    - `description`: "Product owner: <short question summary>"
-   - `prompt`: Content of `product-owner-prompt.md` with the $ISSUE_CONTEXT, $QA_HISTORY, and $QUESTION placeholders replaced with actual values
+   - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/refine_product_owner_prompt.md`
    - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (do not let it inherit the orchestrator's model)
 3. If the subagent returns a response starting with `UNCERTAIN:`:
    - Post a comment on the issue explaining the question and context gathered so far
    - Run: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
    - Write a brief summary to `$ARTIFACTS_DIR/refinement-status.md` noting the abort reason
    - Exit cleanly (exit code 0)
-4. Record the answer and continue until you have enough information
+4. Record the answer and continue until you have enough information — repeat step 2 in full
+   for every new question (re-write all three files, since `$QA_HISTORY` grows with each
+   answer, then re-run `render-prompt`; never reuse a prior iteration's rendered prompt)
 
 ## Phase 5: SPEC WRITING
 
