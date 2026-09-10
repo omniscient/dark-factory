@@ -141,6 +141,30 @@ ARTIFACTS_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs/${
 export ARTIFACTS_DIR
 mkdir -p "$ARTIFACTS_DIR"
 
+# --- Ledger-writability preflight (#395): a root-owned runs.jsonl silently drops every
+# per-stage verdict since run containers execute as `factory`. Detect it here, once per
+# run, before anything durable is attempted -- see run_record.py's cmd_record for the
+# loud-failure counterpart on the write side itself.
+LEDGER_WRITE_WARNING=""
+_check_ledger_writable() {
+  local ledger="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/runs.jsonl"
+  [ -e "$ledger" ] || return 0
+  [ -w "$ledger" ] && return 0
+  local owner
+  owner=$(stat -c '%U:%G' "$ledger" 2>/dev/null || echo "unknown")
+  LEDGER_WRITE_WARNING="WARNING: ledger not writable (owner=${owner}, path=${ledger})"
+  echo "$LEDGER_WRITE_WARNING" >&2
+  python3 /opt/dark-factory/scripts/factory_core/cli.py run-record health-event \
+    --run-id "${RUN_ID:-unknown}" --issue "${ISSUE_NUM:-0}" \
+    --event factory.run_record.ledger_not_writable \
+    --detail "owner=${owner}" "path=${ledger}" 2>/dev/null || true
+}
+# Never let a chmod mistake kill the container: this must degrade to a loud warning,
+# not a dead run. entrypoint.sh runs under `set -euo pipefail` and installs its ERR
+# trap (on_failure) after this point, so an unguarded non-zero return here would abort
+# the script before on_failure ever runs.
+_check_ledger_writable || true
+
 # --- Model-proxy correlation pointer (best-effort; consumed by factory-model-proxy
 # when FACTORY_MODEL_PROXY_ENABLED — see model_proxy.py's read_current_run()). Written
 # unconditionally and cheaply; the proxy is a no-op reader when disabled.
