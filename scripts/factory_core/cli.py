@@ -283,6 +283,29 @@ def _markers_regex(args):
     print("|".join(re.escape(p) for p in identity.detection_patterns()))
 
 
+def _render_prompt(args):
+    from factory_core.prompt_render import render, PromptRenderError
+
+    template_text = Path(args.template).read_text(encoding="utf-8")
+    values = {}
+    for item in args.set:
+        name, _, value = item.partition("=")
+        if value.startswith("@"):
+            value = Path(value[1:]).read_text(encoding="utf-8")
+        values[name] = value
+
+    try:
+        rendered = render(template_text, values, delimiter=args.delimiter)
+    except PromptRenderError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+    if args.out:
+        Path(args.out).write_text(rendered, encoding="utf-8")
+    else:
+        print(rendered, end="")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="factory-core")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -431,6 +454,13 @@ def main():
 
     mkr = sub.add_parser("markers-regex")
     mkr.set_defaults(func=_markers_regex)
+
+    rp = sub.add_parser("render-prompt")
+    rp.add_argument("--template", required=True)
+    rp.add_argument("--delimiter", choices=["dollar", "brace"], default="dollar")
+    rp.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
+    rp.add_argument("--out", default="")
+    rp.set_defaults(func=_render_prompt)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
