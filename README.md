@@ -163,8 +163,8 @@ behaviour.  When the file is absent, built-in MarketHawk defaults apply.
 |-----|------|-------------|
 | `schema_version` | `int` | Integer, inert (never gates validation). |
 | `components` | map | Maps component label (`backend`, `frontend`, …) to a list of ARCHITECTURE.md section names used for context slicing. |
-| `safety.sensitive_keywords` | `string` | Pipe-separated regex of sensitive topic keywords; matched tickets skip autopilot and go to human review. |
-| `safety.hard_exclude_paths` | `list[str]` | Path prefixes the factory will never touch; matched diff paths abort the run. |
+| `safety.sensitive_keywords` | `string` | Pipe-separated regex; read by `epic_autopilot.py`'s `_sensitive_keywords()` to skip matching candidate tickets in `hard_excluded()`. Gated by `epic_autopilot.enabled` (ships `false`) — inert while that flag is off. |
+| `safety.hard_exclude_paths` | `list[str]` | Path prefixes that make an epic-autopilot candidate ticket ineligible (`epic_autopilot.py::hard_excluded`) — not a diff check and not a run-abort mechanism. Gated by `epic_autopilot.enabled` (ships `false`). See [`docs/factory-target-boundary.md`](docs/factory-target-boundary.md) (OD3) for what actually holds a path boundary like `deploy/instances/**`. |
 | `safety.dispatch_ceiling_keywords` | `string` | Pipe-separated regex; matching ticket titles trigger the dispatch ceiling (L tickets parked). |
 | `safety.critical_diff_paths` | `list[str]` | Regex patterns; diffs touching these paths are flagged as Critical in the blast-radius gate. |
 | `safety.migration_seed_auth_patterns` | `list[str]` | Regex patterns; diffs matching these require explicit human sign-off. |
