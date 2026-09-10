@@ -82,18 +82,38 @@ rm -f "$RANK_IN"
 
 ## Phase 3: REVIEW
 
-1. Build `$ISSUE_CONTEXT` = issue title + body:
+1. Build the issue context and save it to a file (`render-prompt`'s `@file` values need a
+   path, not an inline shell variable — an issue body can be large):
    ```bash
    gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json title,body \
-     --jq '"Title: \(.title)\n\n\(.body)"'
+     --jq '"Title: \(.title)\n\n\(.body)"' > "$ARTIFACTS_DIR/code_review_issue_context.md"
    ```
 2. Read the code-review rubric, clone-live-first: `.claude/skills/code-review/RUBRIC.md`,
    falling back to `/opt/refinement-skills/code-review-reviewer-prompt.md` if the clone-live
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
+2a. Render the code-review prompt. `RUBRIC_CONTENT` (step 2) is prose, not a shell variable —
+    re-resolve the same clone-live-first path as a real `RUBRIC_FILE` and pass it straight to
+    `--template` (a `printf '%s' "$RUBRIC_CONTENT"` here would silently write an empty file,
+    since no earlier step assigns `RUBRIC_CONTENT` in bash):
+    ```bash
+    if [ -f ".claude/skills/code-review/RUBRIC.md" ]; then
+      RUBRIC_FILE=".claude/skills/code-review/RUBRIC.md"
+    else
+      RUBRIC_FILE="/opt/refinement-skills/code-review-reviewer-prompt.md"
+    fi
+
+    # TARGET-PATH
+    python3 dark-factory/scripts/factory_core/cli.py render-prompt \
+      --template "$RUBRIC_FILE" \
+      --set ISSUE_CONTEXT=@"$ARTIFACTS_DIR/code_review_issue_context.md" \
+      --set DIFF_CONTENT=@"$ARTIFACTS_DIR/review_diff.txt" \
+      --out "$ARTIFACTS_DIR/code_review_prompt.md" \
+      || { echo "render-prompt failed — aborting code-review phase (see stderr above)"; exit 1; }
+    ```
 3. Spawn a code-reviewer subagent using the Agent tool:
    - `description`: "Code review: diff vs correctness/security"
    - `model`: `claude-opus-4-8` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.261 `opus` resolves to `claude-opus-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract
-   - `prompt`: `RUBRIC_CONTENT` (resolved in step 2) with `$ISSUE_CONTEXT` replaced by the issue context from step 1 and `$DIFF_CONTENT` replaced by the contents of `$ARTIFACTS_DIR/review_diff.txt`.
+   - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/code_review_prompt.md`
 4. Save the subagent's full output to `$ARTIFACTS_DIR/review_findings.md`.
    - If the subagent errored, timed out, or returned empty/unparseable output:
      - If `FAIL_OPEN=true` → write `STATUS: ERROR\nBLOCKERS: 0\nADVISORY: 0` to `$ARTIFACTS_DIR/review.md`, skip Phases 4–6, exit `0`.
