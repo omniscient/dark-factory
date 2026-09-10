@@ -1,5 +1,10 @@
 # README `safety.*` adapter-table accuracy fix
 
+**Operator spec gate:** 2026-09-10 — approved with amendments. Every per-row finding below was
+independently re-verified against `origin/main` at the gate (see the disposition comment); all
+six hold. One wording amendment, to keep the fix from introducing a fresh overstatement of its
+own.
+
 **Issue:** #415
 
 ## Overview / Problem statement
@@ -62,7 +67,17 @@ the pipeline comment); the resolutions below are load-bearing.
      `scheduler.sh:1170`) reads `dispatch_ceiling.keywords` from `config/config.yaml` (env
      `ABOVE_CEILING_KEYWORDS`, `scheduler.sh:79`) — never `.factory/adapter.yaml`.
      `architecture_slice.py`'s same-named constant is the same baked-default, non-adapter-reading
-     pattern as the `sensitive_keywords` case above. Separately, "L tickets parked" is also wrong:
+     pattern as the `sensitive_keywords` case above.
+
+     **Precision required in the replacement text (operator amendment).** Write that *the adapter
+     key* is never read — i.e. a target setting `safety.dispatch_ceiling_keywords` in its own
+     `.factory/adapter.yaml` has no effect — **not** that the key has "no consumer at all."
+     `scripts/architecture_slice.py:83` does read
+     `adapter_defaults.DEFAULTS["safety"]["dispatch_ceiling_keywords"]`, and
+     `tests/test_adapter.py:1134` pins that default against `config/config.yaml`. A flat "unused"
+     claim would be a *new* false absolute in the row — which is the exact failure mode this
+     ticket exists to remove, and it would be worse than the drift it replaces because it would
+     read as freshly audited. Separately, "L tickets parked" is also wrong:
      `is_above_ceiling()` parks size XL unconditionally, or size M only when the title matches the
      keyword pattern — L is never parked by this logic. The row must state plainly that this
      adapter key is currently unused and point at `config/config.yaml`'s `dispatch_ceiling.keywords`
@@ -104,9 +119,12 @@ Edit only the six `safety.*`-adjacent table rows in `README.md`'s `### adapter.y
 - `safety.hard_exclude_paths`: describe the candidate-ticket-filter mechanism, name the gating
   flag, and point at `docs/factory-target-boundary.md` for the fuller boundary explanation instead
   of re-deriving it.
-- `safety.dispatch_ceiling_keywords`: state it has no current consumer, point at
-  `config/config.yaml`'s `dispatch_ceiling.keywords` (env `ABOVE_CEILING_KEYWORDS`) as the real
-  knob, and correct the parking rule (XL always; M only on keyword match; L never).
+- `safety.dispatch_ceiling_keywords`: state that **this adapter key is not read** — setting it in
+  a target's `.factory/adapter.yaml` has no effect — and point at `config/config.yaml`'s
+  `dispatch_ceiling.keywords` (env `ABOVE_CEILING_KEYWORDS`) as the real knob. Do not write "unused"
+  or "no consumer": the baked default *is* consumed by `scripts/architecture_slice.py:83`. Correct
+  the parking rule too (XL always; M only on keyword match; **L never** — verified at
+  `scripts/scheduler_lib.sh:44-53`).
 - `safety.critical_diff_paths`: attribute to `scripts/diff_rank.py` (review ordering), not the
   blast-radius gate, and note the non-overridable factory-owned floor it carries.
 - `safety.migration_seed_auth_patterns`: unchanged.
@@ -136,6 +154,27 @@ convention (e.g. the `loops` row's inline references).
   or removed from `adapter_defaults.py`'s schema as dead config? Recommend filing this as a
   separate follow-up ticket; it's a functional/code decision, not something this docs-only pass
   should resolve or implement.
+
+## Verified at the operator spec gate (2026-09-10)
+
+Each per-row finding was re-resolved against `origin/main` rather than accepted from this spec:
+
+- `dispatch_ceiling_keywords` — no code reads the adapter key. The only non-doc, non-test hits are
+  `scripts/architecture_slice.py:83` and `scripts/factory_core/adapter_defaults.py:54`, both the
+  baked default. Confirmed.
+- `critical_diff_paths` — `scripts/diff_rank.py:61,73,78` is the sole adapter-reading consumer.
+  `scripts/gate_blast_radius.py::classify_file` (`:178-191`) iterates only
+  `_migration_seed_auth_patterns()` and never touches `critical_diff_paths`. The README's
+  blast-radius attribution is wrong; the likely source of the confusion is
+  `adapter_defaults.py:3-7`, whose comment names both lists in one breath while describing the
+  shared `SKILL_SECURITY_TOKENS` sub-classifier. Confirmed.
+- Parking rule — `scripts/scheduler_lib.sh:48-52`: `XL) return 0`, `M) grep -qiE keywords`,
+  `*) return 1`. L falls to the wildcard and is never parked. The README row is backwards.
+  Confirmed.
+- Gating flags — `config/config.yaml:77` `epic_autopilot.enabled: false`; `:117`
+  `main_red_autofix.enabled: false`, with `:114-116` documenting that the dispatched container
+  reads `.archon/.env`, so flipping the config value alone does not enable it. Confirmed.
+- README row under repair is `README.md:168`. Confirmed.
 
 ## Assumptions
 
