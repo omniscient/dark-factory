@@ -155,7 +155,7 @@ if [ "$L_NEEDS_ISSUE" = "True" ]; then
   fi
 
   if [ "$XL_ACTION" = "file" ]; then
-    gh issue create \
+    XL_URL=$(gh issue create \
       --repo "$REPO" \
       --title "Revisit XL=always-above-ceiling rule in is_above_ceiling() — scheduler_lib.sh" \
       --body "## Purpose
@@ -178,7 +178,12 @@ in \`scripts/scheduler_lib.sh\` may be overly conservative.
 ---
 *Filed automatically by weekly ceiling revisit*" \
       --label "enhancement" \
-      --label "priority: should-have"
+      --label "priority: should-have")
+    XL_NUM=$(basename "$XL_URL")
+    # TARGET-PATH
+    python3 dark-factory/scripts/factory_core/cli.py board-add \
+      --issue "$XL_NUM" --url "$XL_URL" \
+      || echo "ceiling-revisit: WARNING board-add failed for XL-ceiling issue #${XL_NUM}" >&2
   elif [ "$XL_ACTION" = "skip-lookup-failed" ]; then
     gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "XL-bucket success rate cleared the \
 >70%-at-n>=5 threshold again this cycle, but the duplicate/policy tracker lookup (\`gh issue \
