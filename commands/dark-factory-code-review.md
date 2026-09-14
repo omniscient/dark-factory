@@ -102,7 +102,32 @@ rm -f "$RANK_IN"
 ```
 
 - The `diff-ranking.json` artifact in `$ARTIFACTS_DIR` records the budget allocation and which files were summarized.
-- If `$ARTIFACTS_DIR/review_diff.txt` is empty, write `STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0` to `$ARTIFACTS_DIR/review.md` and exit `0` (nothing to review).
+- Both guards below are real bash file tests (`-s`), not prose. Keep the `--check-nonempty`
+  call on a single line with `# TARGET-PATH` at the end — a `\` before the comment is not a
+  line continuation and would bind `CHECK_RC` to the wrong command.
+  ```bash
+  if [ ! -s "$ARTIFACTS_DIR/review_diff.txt" ]; then
+    printf "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n" > "$ARTIFACTS_DIR/review.md"
+    exit 0
+  fi
+
+  python3 dark-factory/scripts/diff_rank.py --check-nonempty "$ARTIFACTS_DIR/review_diff.txt" 2>/tmp/check_nonempty_err.txt  # TARGET-PATH
+  CHECK_RC=$?
+  if [ "$CHECK_RC" -ne 0 ]; then
+    CHECK_ERR=$(cat /tmp/check_nonempty_err.txt)
+    ZERO_CONTENT=true
+    echo "code-review: review_diff.txt has no reviewable content (helper exit $CHECK_RC) — aborting, see Phase 6"
+  fi
+  ```
+  If the `[ ! -s ... ]` guard fired above (`review_diff.txt` was empty), `review.md` is already
+  written with `STATUS: PASS` — this phase is complete. Do not continue to Phase 3, and do not
+  fall through into the `--check-nonempty` check below it (empty and zero-content are two
+  distinct, mutually exclusive outcomes, both terminal for this run).
+- `diff_rank.py --check-nonempty` treats any non-zero exit (zero-content `1` or a helper
+  error `>= 2`) identically — both route to Phase 6's `### If ZERO_CONTENT=true` branch. It
+  never reads a helper crash as "has content" (fail-closed).
+- If `ZERO_CONTENT=true`, skip Phases 3–5 and go directly to Phase 6's
+  `### If ZERO_CONTENT=true` branch.
 
 ## Phase 3: REVIEW
 
@@ -270,3 +295,54 @@ fi
    `STATUS:` line directly and blocks `status-in-review` on anything other than
    `PASS`/`SKIPPED`/`ERROR` — a `command:` node's internal `exit 1` does not reliably surface
    as node failure to the DAG executor (#212, #271).
+
+### If `ZERO_CONTENT=true` (zero-content abort, R5)
+
+Runs only when Phase 2 set `ZERO_CONTENT=true`. This is input/precondition validation, not
+reviewer-subagent failure — it fires before any subagent is spawned — so it is **exempt from
+`code_review.fail_open`**: fail_open's documented contract
+(`/opt/refinement-skills/VERIFIER-CONTRACT.md`) is scoped to a subagent that errored, timed
+out, or returned unparseable output, and letting this case fall through to `STATUS: ERROR`
+would let `scripts/verdict_gate_check.sh`'s `PASS|SKIPPED|ERROR) exit 0` arm pass a PR with
+zero lines actually reviewed (and auto-merge it under `direct-to-pr`) — exactly the outcome
+this fix exists to prevent. Phases 3–5 were skipped (no subagent ran, no payload to build,
+nothing to post) and the BLOCKED branch's step 5 blocking-findings memory write is skipped
+too (a tooling fault, not a code finding worth recording as a lesson).
+
+1. Post a "Code Review — Blocked" comment on the issue:
+   ```bash
+   FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
+   gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body "## Code Review — Blocked
+
+   \`diff_rank.py\` summarized the entire diff to zero reviewable content — nothing was
+   reviewed. See \`diff-ranking.json\` in this run's artifacts for the per-file breakdown.
+   ${CHECK_ERR:+(helper error: \`${CHECK_ERR}\`)}
+
+   ### Next Steps
+   Re-run: \`docker compose --profile factory run --rm dark-factory \\\"Continue issue #${ISSUE_NUM}\\\"\`, or add \`needs-discussion\` if this is a false positive.
+
+   ---
+   ${FOOTER}"
+   ```
+2. Move the issue to **Blocked** on the project board:
+   ```bash
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
+   ```
+3. Add the `needs-discussion` label:
+   ```bash
+   python3 dark-factory/scripts/factory_core/providers/cli.py \
+     tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
+   ```
+4. Write to `$ARTIFACTS_DIR/review.md` — exactly this shape; no `cat review_findings.md`
+   (no subagent ran, so that file does not exist):
+   ```bash
+   {
+     emit_verdict "code-review" "BLOCKED" "0" "none"
+     printf "BLOCKERS: 0\nADVISORY: 0\n"
+     printf "REASON: diff_rank summarized the entire diff to zero reviewable content\n"
+   } > "$ARTIFACTS_DIR/review.md"
+   ```
+5. Exit non-zero (`exit 1`) — kept for forward-compatibility only, mirroring the BLOCKED
+   branch's step 6 note: the actual enforcement is the `review-gate` DAG node reading this
+   file's `STATUS:` line directly.
