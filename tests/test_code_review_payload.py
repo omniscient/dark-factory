@@ -58,6 +58,26 @@ def test_parse_findings_line_zero_is_not_anchorable():
     assert f[0].path == "foo.py" and f[0].line is None
 
 
+def test_parse_findings_description_with_double_pipe_shell_operator():
+    """Regression (#403): a description containing '|| true' must survive
+    byte-exact, not get corrupted into '|  | true' by an unbounded pipe split."""
+    text = "- [medium] shell | commands/dark-factory-conformance.md:502 | uses `|| true` to absorb SIGPIPE"
+    findings = crp.parse_findings(text)
+    assert len(findings) == 1
+    assert findings[0].description == "uses `|| true` to absorb SIGPIPE"
+
+
+def test_parse_findings_description_with_markdown_table_fragment():
+    """A description containing a markdown-table-like '|' sequence must also
+    survive byte-exact (maxsplit=2 bounds the split to the first two pipes).
+    The fixture deliberately uses non-canonical spacing around the pipes: an
+    unbounded split + strip + ' | '.join silently re-canonicalizes it."""
+    text = "- [low] docs | README.md:10 | table row looks like |col1|col2|"
+    findings = crp.parse_findings(text)
+    assert len(findings) == 1
+    assert findings[0].description == "table row looks like |col1|col2|"
+
+
 DIFF = """diff --git a/backend/app/x.py b/backend/app/x.py
 index 1111111..2222222 100644
 --- a/backend/app/x.py
