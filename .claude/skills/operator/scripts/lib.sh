@@ -38,6 +38,9 @@ log()  { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 need gh; need jq; need docker; need python
+# jq.exe on Windows writes CRLF; a trailing \r makes numbers never match and would smuggle
+# a \r into GraphQL mutation ids. gh --jq (Go) is fine. Strip it once here for every caller.
+jq() { command jq "$@" | tr -d '\r'; }
 
 # ---- project board ---------------------------------------------------------------------
 _fields_json() {
