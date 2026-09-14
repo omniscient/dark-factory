@@ -13,8 +13,14 @@ CLI:
       [--spec-file <path>]     \\
       [--hotspots <path>]
 
+    python3 scripts/diff_rank.py --check-nonempty <ranked-diff-path>
+
 Writes the ranked diff string to stdout. Exits 0 on success; on any error
 exits non-zero so the caller's '&&' falls back to the unranked diff.
+--check-nonempty skips ranking and instead checks an already-ranked diff file
+for reviewable content (see has_reviewable_content()); exit 0 = content present,
+1 = zero content, >=2 = helper error. Consumed by
+commands/dark-factory-code-review.md's zero-content abort.
 """
 import argparse
 import json
@@ -598,13 +604,49 @@ def build_ranked_diff(
 
 
 # ---------------------------------------------------------------------------
+# Zero-content predicate (R5) — used by the code-review command's post-ranking
+# abort check, not by ranking itself.
+# ---------------------------------------------------------------------------
+
+def has_reviewable_content(text: str) -> bool:
+    """Return True if text contains at least one diff payload line.
+
+    A payload line starts with '+' or '-' and is not a '+++'/'---' file header.
+    Neither a '# [SUMMARIZED: ...]' notice nor the '# [diff-rank: ...]' header
+    ever matches this, so a ranked diff that is entirely summarized correctly
+    reports no reviewable content.
+    """
+    for line in text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            return True
+    return False
+
+
+def _check_nonempty_main(path: str) -> int:
+    """Exit-code contract: 0 = content present, 1 = zero content, >=2 = helper error.
+
+    The whole body is guarded so that *any* failure (unreadable file or an unexpected
+    exception) reports as 2 — never as 1. The __main__ wrapper below maps stray
+    exceptions to exit 1, which would mislabel a helper crash as "zero content".
+    """
+    try:
+        text = Path(path).read_text(errors="replace")
+        return 0 if has_reviewable_content(text) else 1
+    except Exception as e:
+        print(f"diff_rank --check-nonempty error: {e}", file=sys.stderr)
+        return 2
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(description="Rank and chunk a unified diff by risk tier.")
-    p.add_argument("--diff", required=True, help="Path to the input diff file")
-    p.add_argument("--artifacts-dir", required=True, help="Directory to write diff-ranking.json")
+    p.add_argument("--diff", default=None, help="Path to the input diff file (required unless --check-nonempty is given)")
+    p.add_argument("--artifacts-dir", default=None, help="Directory to write diff-ranking.json (required unless --check-nonempty is given)")
     p.add_argument(
         "--config",
         default=".claude/skills/refinement/config.yaml",
@@ -621,11 +663,33 @@ def parse_args():
         default=os.environ.get("CLONE_DIR", "."),
         help="Clone root for adapter.yaml lookup (default: $CLONE_DIR or '.')",
     )
+    p.add_argument(
+        "--check-nonempty",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Check whether PATH (a ranked review diff) contains at least one "
+            "reviewable payload line; skips ranking entirely. Exit 0 if content is "
+            "present, 1 if the file is all-[SUMMARIZED], >=2 on a helper error "
+            "(unreadable file, bad arguments)."
+        ),
+    )
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.check_nonempty is not None:
+        sys.exit(_check_nonempty_main(args.check_nonempty))
+
+    if not args.diff or not args.artifacts_dir:
+        print(
+            "diff_rank error: --diff and --artifacts-dir are required unless "
+            "--check-nonempty is given",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     diff_text = Path(args.diff).read_text(errors="replace")
     token_cap, score_floor, diff_enabled = load_config(args.config)

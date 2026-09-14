@@ -652,3 +652,67 @@ def test_classify_file_skill_security_is_critical_tier():
     tier, signals, _ = dr.classify_file(".claude/settings.json", set(), set(), 5.0, total_lines=10)
     assert tier == "critical"
     assert "skill_security_path" in signals
+
+
+# ---------------------------------------------------------------------------
+# R5: zero-content predicate (--check-nonempty)
+# ---------------------------------------------------------------------------
+
+def test_has_reviewable_content_true_for_payload_line():
+    text = "# [diff-rank: 1 files — 0 critical / 1 high / 0 medium / 0 low, est. 5 tokens (cap 6000)]\n+added line\n"
+    assert dr.has_reviewable_content(text) is True
+
+
+def test_has_reviewable_content_false_for_all_summarized():
+    text = (
+        "# [diff-rank: 1 files — 0 critical / 0 high / 0 medium / 1 low, est. 0 tokens (cap 6000)]\n"
+        "# [SUMMARIZED: low-risk] a.py — +1/-1 (1 hunks)\n"
+    )
+    assert dr.has_reviewable_content(text) is False
+
+
+def test_has_reviewable_content_ignores_file_headers():
+    text = "--- a/x.py\n+++ b/x.py\n"
+    assert dr.has_reviewable_content(text) is False
+
+
+def _run_check_nonempty(path):
+    """Run `diff_rank.py --check-nonempty PATH` in-process (same sys.argv patching
+    as run_main()); return the SystemExit code main() raised."""
+    with patch("sys.argv", ["diff_rank.py", "--check-nonempty", str(path)]):
+        with pytest.raises(SystemExit) as exc:
+            dr.main()
+    return exc.value.code
+
+
+def test_check_nonempty_all_summarized_exits_1(tmp_path):
+    review = tmp_path / "review_diff.txt"
+    review.write_text(
+        "# [diff-rank: 1 files — 0 critical / 0 high / 0 medium / 1 low, est. 0 tokens (cap 6000)]\n"
+        "# [SUMMARIZED: low-risk] tests/test_x.py — +5/-2 (1 hunks)\n"
+    )
+    assert _run_check_nonempty(review) == 1
+
+
+def test_check_nonempty_with_payload_line_exits_0(tmp_path):
+    review = tmp_path / "review_diff.txt"
+    review.write_text(
+        "# [diff-rank: 1 files — 0 critical / 1 high / 0 medium / 0 low, est. 5 tokens (cap 6000)]\n"
+        "diff --git a/x.py b/x.py\n"
+        "--- a/x.py\n"
+        "+++ b/x.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert _run_check_nonempty(review) == 0
+
+
+def test_check_nonempty_missing_file_exits_ge_2(tmp_path, capsys):
+    missing = tmp_path / "does_not_exist.txt"
+    code = _run_check_nonempty(missing)
+    assert code >= 2
+    # The helper-error path must announce itself on stderr (the command captures it into
+    # the abort comment). This assertion is also what makes the test red before Task 3
+    # lands: argparse's own missing/unrecognized-argument exit is already 2.
+    assert "diff_rank --check-nonempty error" in capsys.readouterr().err
