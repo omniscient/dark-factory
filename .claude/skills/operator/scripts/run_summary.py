@@ -46,6 +46,10 @@ def nodes() -> None:
     for line in sys.stdin:
         if not wanted.search(line):
             continue
+        # archon logs a rate_limit_event with status "allowed" on every call; only the
+        # rejected/paused ones are events (the "allowed" flood hid the node lines).
+        if "rate_limit_event" in line and '"status":"allowed"' in line.replace(" ", ""):
+            continue
         m = re.search(r"\{.*\}", line)
         d = None
         if m:
