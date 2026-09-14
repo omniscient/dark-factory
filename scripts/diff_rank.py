@@ -388,6 +388,53 @@ def build_ranked_diff(
     medium = [c for c in classified if c["tier"] == "medium"]
     low = [c for c in classified if c["tier"] == "low"]
 
+    # R1: never summarize when the whole diff fits the cap — emit every file in
+    # full, in original file order (not tier-bucketed order). Classification above
+    # still ran unconditionally, so diff-ranking.json stays complete (R2).
+    if raw_diff_tokens <= token_cap:
+        output_parts = []
+        file_records = []
+        critical_tokens = 0
+        residual_tokens = 0
+        for c in classified:
+            text = "".join(c["file"]["lines"])
+            tokens = estimate_tokens(text)
+            if c["tier"] == "critical":
+                critical_tokens += tokens
+            else:
+                residual_tokens += tokens
+            output_parts.append(text)
+            file_records.append({
+                "path": c["file"]["path"],
+                "risk_class": c["tier"],
+                "signals": c["signals"],
+                "blast_score": c["blast_score"],
+                "lines_added": c["file"]["added"],
+                "lines_removed": c["file"]["removed"],
+                "hunk_count": c["file"]["hunks"],
+                "included": "full",
+                "estimated_tokens": tokens,
+            })
+
+        total_tokens = critical_tokens + residual_tokens
+        header = (
+            f"# [diff-rank: {len(files)} files — "
+            f"{len(critical)} critical / {len(high)} high / "
+            f"{len(medium)} medium / {len(low)} low, "
+            f"est. {total_tokens} tokens (cap {token_cap})]\n"
+        )
+        ranked_diff = header + "".join(output_parts)
+        ranking_info = {
+            "token_cap": token_cap,
+            "estimated_tokens_emitted": total_tokens,
+            "critical_tokens": critical_tokens,
+            "residual_tokens": residual_tokens,
+            "raw_diff_tokens": raw_diff_tokens,
+            "under_cap_passthrough": True,
+            "files": file_records,
+        }
+        return ranked_diff, ranking_info
+
     # Sort critical: blast_score desc, then lines desc
     critical.sort(key=lambda c: (-(c["blast_score"] or 0), -(c["file"]["added"] + c["file"]["removed"])))
 

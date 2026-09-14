@@ -294,10 +294,12 @@ def test_high_file_included_when_budget_allows():
     assert entry["included"] == "full"
 
 
-def test_low_files_always_summarized_regardless_of_budget():
-    """Test file should always be summarized even with a huge cap."""
+def test_low_files_summarized_when_diff_exceeds_cap():
+    """A low-tier file is summarized only when the remaining budget can't hold
+    it — a cap smaller than the low file itself (not just smaller than the
+    whole diff) exercises real budget pressure (R1)."""
     diff = make_diff("tests/test_scanner.py", added=42, removed=3, n_hunks=2)
-    _, ranking = run_main(diff, token_cap=100000)
+    _, ranking = run_main(diff, token_cap=5)
     entry = ranking["files"][0]
     assert entry["included"] == "summary"
     assert entry["risk_class"] == "low"
@@ -310,7 +312,7 @@ def test_low_files_always_summarized_regardless_of_budget():
 def test_summary_line_low_risk_format():
     # make_diff with n_hunks=2 creates 42 added lines per hunk (84 total) and 3 removed per hunk (6 total)
     diff = make_diff("tests/test_scanner.py", added=42, removed=3, n_hunks=2)
-    output, _ = run_main(diff)
+    output, _ = run_main(diff, token_cap=5)
     assert "# [SUMMARIZED: low-risk test-only] tests/test_scanner.py — +84/-6 (2 hunks)" in output
 
 
@@ -319,7 +321,7 @@ def test_summary_line_non_test_low_risk_not_labeled_test_only():
     (regression for the #669 code-review finding: non-test low files were being
     misreported as tests, which could reduce reviewer scrutiny)."""
     diff = make_diff("frontend/src/utils/format.ts", added=5, removed=2, n_hunks=1)
-    output, ranking = run_main(diff)
+    output, ranking = run_main(diff, token_cap=5)
     entry = ranking["files"][0]
     assert entry["risk_class"] == "low"
     assert "test_file" not in entry["signals"]
@@ -372,7 +374,7 @@ def test_diff_ranking_json_written_on_run():
 
 def test_diff_ranking_json_file_entry_fields():
     diff = make_diff("tests/test_scanner.py", added=42, removed=3, n_hunks=2)
-    _, ranking = run_main(diff)
+    _, ranking = run_main(diff, token_cap=5)
     f = ranking["files"][0]
     assert f["path"] == "tests/test_scanner.py"
     assert f["risk_class"] == "low"
@@ -396,6 +398,63 @@ def test_diff_ranking_json_critical_token_accounting():
     # scanner.py (high, small) should fit in budget
     scanner_entry = next(f for f in ranking["files"] if "scanner.py" in f["path"])
     assert scanner_entry["included"] == "full"
+
+
+# ---------------------------------------------------------------------------
+# R1/R2: whole-diff-vs-cap passthrough (#403)
+# ---------------------------------------------------------------------------
+
+def test_seven_file_diff_under_cap_not_summarized():
+    """R1 acceptance test (from the issue): PR #398's failure mode was a
+    7-file diff (~2,082 tokens) summarized to zero reviewable content under a
+    6,000-token cap. Reproduce that shape and assert nothing gets summarized."""
+    diff = "".join(
+        make_diff(f"backend/app/services/module_{i}.py", added=30, removed=10, n_hunks=1)
+        for i in range(7)
+    )
+    output, ranking = run_main(diff, token_cap=6000)
+    assert "[SUMMARIZED" not in output
+    assert len(ranking["files"]) == 7
+    assert ranking["raw_diff_tokens"] < 6000
+    assert all(f["included"] == "full" for f in ranking["files"])
+
+
+def test_low_files_verbatim_when_whole_diff_fits_cap():
+    """When the whole diff fits under the cap, a low-tier file passes through
+    in full rather than being summarized (R1)."""
+    diff = make_diff("tests/test_scanner.py", added=5, removed=2, n_hunks=1)
+    output, ranking = run_main(diff, token_cap=6000)
+    entry = ranking["files"][0]
+    assert entry["included"] == "full"
+    assert entry["risk_class"] == "low"
+    assert "[SUMMARIZED" not in output
+
+
+def test_under_cap_passthrough_marker_and_full_records():
+    """R2: the passthrough marks itself in diff-ranking.json and every file
+    record is 'included: full' with its real token count."""
+    diff = (
+        make_diff("tests/test_scanner.py", added=5, removed=2)
+        + make_diff("backend/app/services/utils.py", added=10, removed=5)
+    )
+    _, ranking = run_main(diff, token_cap=6000)
+    assert ranking["under_cap_passthrough"] is True
+    for f in ranking["files"]:
+        assert f["included"] == "full"
+        assert f["estimated_tokens"] > 0
+
+
+def test_passthrough_per_file_with_header_first_drops_pretriage_annotation():
+    """R1/R2: passthrough output is built per-file (not raw diff_text), so a
+    leading [Pre-triage] annotation (already stripped by parse_diff_files) never
+    resurfaces, and the '# [diff-rank: ...]' header is still the first line."""
+    annotation = "[Pre-triage] hunk-filter applied: 1 files / 1 hunks retained\n"
+    diff = annotation + make_diff("backend/app/services/utils.py", added=5, removed=2)
+    output, ranking = run_main(diff, token_cap=6000)
+    lines = output.splitlines()
+    assert lines[0].startswith("# [diff-rank:")
+    assert "[Pre-triage]" not in output
+    assert ranking["under_cap_passthrough"] is True
 
 
 # ---------------------------------------------------------------------------
