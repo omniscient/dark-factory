@@ -55,8 +55,11 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
     already used elsewhere in the DAG for this same purpose:
     ```bash
     SPEC_FILE=$(bash dark-factory/scripts/push_gate_check.sh "docs/superpowers/specs/" "$ISSUE_NUM")  # TARGET-PATH
+    [ -n "$SPEC_FILE" ] || SPEC_FILE=$(bash dark-factory/scripts/push_gate_check.sh "docs/archive/" "$ISSUE_NUM")  # TARGET-PATH
     ```
-    If that prints nothing, fall back to `commands/dark-factory-conformance.md`'s 2a/2b lookups
+    Gate 3 runs after `push-and-pr`, which has already moved the spec to `docs/archive/` on this
+    branch, so the archive prefix is the lookup that normally hits here.
+    If both print nothing, fall back to `commands/dark-factory-conformance.md`'s 2a/2b lookups
     (its 2c sibling-spec scan is deliberately not reused here — #390 removed that same
     first-match scan from the workflow nodes):
     ```bash
@@ -69,6 +72,10 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
     if [ -z "$SPEC_FILE" ]; then
       SPEC_FILE=$(grep '^SPEC_PATH:' "$ARTIFACTS_DIR/refinement-status.md" 2>/dev/null \
         | sed 's/^SPEC_PATH: //' | head -1)
+    fi
+    # 2a/2b name the pre-archive path; re-point it at the archived copy when that is where it is now.
+    if [ -n "$SPEC_FILE" ] && [ ! -f "$SPEC_FILE" ] && [ -f "docs/archive/$(basename "$SPEC_FILE")" ]; then
+      SPEC_FILE="docs/archive/$(basename "$SPEC_FILE")"
     fi
     ```
     `SPEC_FILE` may still be empty after both fallbacks — that is fine and expected: unlike

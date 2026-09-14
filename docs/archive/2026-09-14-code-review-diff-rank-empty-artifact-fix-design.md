@@ -95,6 +95,14 @@ it always exits 0. At Gate 3 the branch is checked out and already pushed (`push
 ran), so the default `HEAD` ref is exactly what this phase has — the same invocation serves
 here without a ref argument.
 
+**Correction (2026-09-14, Gate 3 finding on PR #428):** at Gate 3 the spec is no longer under
+`docs/superpowers/specs/`. `push-and-pr` (the DAG node before `code-review`) has already archived
+it to `docs/archive/` on the branch, so the specs-prefix lookup prints nothing in the real pipeline
+and the 2a/2b fallbacks name a path that no longer exists (`_extract_spec_names` then fail-opens to
+an empty set). The lookup order is therefore specs prefix, then **archive prefix**
+(`push_gate_check.sh "docs/archive/" "$ISSUE_NUM"`), then 2a/2b; and a resolved path that does
+not exist is re-pointed at `docs/archive/$(basename "$SPEC_FILE")` when that file exists.
+
 Fallbacks, only when that prints nothing: reuse `commands/dark-factory-conformance.md`'s 2a
 ("Refinement Pipeline — Plan Generated" comment, :68-72) and 2b (`SPEC_PATH:` line in
 `$ARTIFACTS_DIR/refinement-status.md`, :84-85) as conformance already implements them (no

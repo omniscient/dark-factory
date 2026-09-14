@@ -843,6 +843,10 @@ git commit -m "fix(code_review_payload): bound finding-field split to maxsplit=2
 
 ## Task 5: `commands/dark-factory-code-review.md` — resolve and thread `$SPEC_FILE` (R3)
 
+> **Correction (2026-09-14, Gate 3 finding on PR #428):** the primary lookup must also try the
+> `docs/archive/` prefix and re-point a non-existent 2a/2b path at `docs/archive/$(basename …)`;
+> at Gate 3 the spec has already been archived by `push-and-pr`. Applied as an operator commit.
+
 **Files:** `commands/dark-factory-code-review.md`, `tests/test_code_review_command.py`
 
 ### TDD Steps

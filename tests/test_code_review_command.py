@@ -30,6 +30,10 @@ def test_command_resolves_spec_file_via_push_gate_check():
     assert 'push_gate_check.sh "docs/superpowers/specs/" "$ISSUE_NUM"' in text
     # resolved in Phase 1, before Phase 2 consumes it
     assert text.find("push_gate_check.sh") < text.find("## Phase 2")
+    # Gate 3 runs after push-and-pr archived the spec (Gate 3 finding on PR #428): the
+    # archive prefix must be tried, and a stale 2a/2b path re-pointed at docs/archive/.
+    assert 'push_gate_check.sh "docs/archive/" "$ISSUE_NUM"' in text
+    assert 'docs/archive/$(basename "$SPEC_FILE")' in text
 
 
 def test_command_threads_spec_file_into_diff_rank():
