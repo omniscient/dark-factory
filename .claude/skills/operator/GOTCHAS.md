@@ -54,6 +54,10 @@ learned; verify code citations against `origin/main` before relying on them.
 - **Validate's `exit 1` does not stop the DAG** (workflow yaml says so); the blast-radius block
   is enforced at close/auto-merge. Read the DAG node and its trigger semantics before
   describing what a phase does. Three wrong claims in one session came from grepping one file.
+- **After `push-and-pr`, the spec and plan live under `docs/archive/`.** Conformance (Gate 2)
+  runs before the archive commit; code review (Gate 3), revise-advisory and report run after
+  it. A lookup that only searches `docs/superpowers/specs/` is inert at Gate 3 (#403, caught by
+  Gate 3 itself after the spec reviewer and the operator both missed it).
 - **`recheck` is a real intent** (main-red self-clearing, handled in entrypoint before the DAG).
   Grepping one file and finding nothing proves absence in that file only.
 - **A conformance gate checks fidelity to the spec, not whether the spec is true.** Three
@@ -88,6 +92,12 @@ learned; verify code citations against `origin/main` before relying on them.
   anchor on the wrapped line; normalise CRLF; never blanket-`.replace()` a whole file.
 - The auto-mode classifier has blocked `gh pr merge` in compound commands; run it plain, in a
   turn where Frank asked for the merge, or ask Frank to merge.
+- **Reviewer subagents cannot `git commit`** in the worktree (classifier: "Modify Shared
+  Resources", 2026-09-14). Have them apply and `git add`, write the message to a file, and
+  commit from the operator session with `git commit -F`. Their pushes are out of the question.
+- Ask the plan reviewer to **execute the plan** on a scratch copy (apply every Replace/with
+  block, run the red/green claims). On #403 it caught two vacuously green tests that a read-only
+  review passed.
 - Never `docker rm -v`/prune volumes here: `ncl-tl-node22-vol`/`ncl-tl-node24-vol` hold
   unreplicated work. Never root-shell into the state volume without chowning back to `factory`.
 - Local timezone is UTC-4; Docker only returns after Frank's logon (no auto-logon).
