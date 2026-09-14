@@ -29,19 +29,20 @@ live=$(issue_run_container "$n"); [ -z "$live" ] || die "#$n has a live run cont
 branch=$(git -C "$DF_REPO_DIR" ls-remote --heads origin "refine/issue-$n-*" | awk '{print $2}' | sed 's#refs/heads/##' | head -1)
 [ -n "$branch" ] || die "no refine/issue-$n-* branch on origin; the artifact the gate label claims does not exist"
 echo "refine branch: $branch @ $(git -C "$DF_REPO_DIR" ls-remote origin "refs/heads/$branch" | cut -c1-7)"
+# Explicit remote-tracking refs: FETCH_HEAD is repointed by every fetch and cannot be trusted.
+git -C "$DF_REPO_DIR" fetch -q origin "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/$branch:refs/remotes/origin/$branch" || die "fetch failed"
+REF="origin/$branch"
 if [ -n "$sha" ]; then
-  git -C "$DF_REPO_DIR" fetch -q origin "$branch" || die "fetch failed"
-  git -C "$DF_REPO_DIR" merge-base --is-ancestor "$sha" FETCH_HEAD || die "commit $sha is NOT on origin/$branch; push the amendment first"
-  echo "amendment $sha confirmed on origin/$branch"
+  git -C "$DF_REPO_DIR" merge-base --is-ancestor "$sha" "$REF" || die "commit $sha is NOT on $REF; push the amendment first"
+  echo "amendment $sha confirmed on $REF"
 fi
-if [ "$kind" = spec ]; then
-  files=$(git -C "$DF_REPO_DIR" ls-tree -r --name-only FETCH_HEAD 2>/dev/null || true)
-  if [ -z "$files" ]; then git -C "$DF_REPO_DIR" fetch -q origin "$branch"; files=$(git -C "$DF_REPO_DIR" ls-tree -r --name-only FETCH_HEAD); fi
-  spec=$(echo "$files" | grep -E '^docs/superpowers/specs/.*\.md$' | head -3)
-  [ -n "$spec" ] || die "no docs/superpowers/specs/*.md on $branch"
-  echo "spec file(s): $spec"
-  git -C "$DF_REPO_DIR" show "FETCH_HEAD:$(echo "$spec" | head -1)" | grep -qE "#$n\b" || echo "WARNING: spec does not mention #$n; downstream SPEC_FILE resolution may go blind (see #382)"
-fi
+# Only the artifacts THIS branch added or changed relative to main (not every file on the branch).
+added=$(git -C "$DF_REPO_DIR" diff --name-only "origin/main...$REF" -- "docs/superpowers/${kind}s/" | grep -E '\.md$')
+[ -n "$added" ] || die "the branch adds no docs/superpowers/${kind}s/*.md relative to main; the gate label is stranded"
+echo "$kind file(s) on the branch:"; echo "$added" | sed 's/^/  /'
+for f in $added; do
+  git -C "$DF_REPO_DIR" show "$REF:$f" | grep -qE "#$n\b" || echo "WARNING: $f does not mention #$n; downstream SPEC_FILE/PLAN_FILE resolution may go blind (see #382)"
+done
 
 item=$(set_board_status "$n" "$to") || exit 1
 sleep 2; after=$(issue_board_status "$n"); [ "$after" = "$to" ] || die "board read-back is '$after', not '$to'; label NOT removed"
