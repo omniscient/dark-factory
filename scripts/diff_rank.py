@@ -551,9 +551,17 @@ def build_ranked_diff(
             "estimated_tokens": tokens,
         })
 
-    # Summarize all low-tier files
+    # Fill remaining budget with low-tier files (processed last — first tier
+    # squeezed out under budget pressure, per the issue's "summarize lowest-risk
+    # first"; no longer unconditional — R1)
     for c in low:
-        _summary_low(c)
+        text = "".join(c["file"]["lines"])
+        tokens = estimate_tokens(text)
+        if budget >= tokens:
+            t, included = _full(c, "low")
+        else:
+            t, included = _summary_low(c)
+            tokens = t
         file_records.append({
             "path": c["file"]["path"],
             "risk_class": "low",
@@ -562,8 +570,8 @@ def build_ranked_diff(
             "lines_added": c["file"]["added"],
             "lines_removed": c["file"]["removed"],
             "hunk_count": c["file"]["hunks"],
-            "included": "summary",
-            "estimated_tokens": 0,
+            "included": included,
+            "estimated_tokens": tokens,
         })
 
     total_tokens = critical_tokens + residual_tokens

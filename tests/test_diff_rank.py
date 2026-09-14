@@ -457,6 +457,21 @@ def test_passthrough_per_file_with_header_first_drops_pretriage_annotation():
     assert ranking["under_cap_passthrough"] is True
 
 
+def test_low_file_full_when_budget_remains_over_cap():
+    """R1: above the cap, low is budget-checked like high/medium — a small low
+    file is emitted in full when enough budget remains after larger tiers."""
+    diff = (
+        make_diff("backend/app/routers/scanner.py", added=200, removed=100)
+        + make_diff("tests/test_small.py", added=2, removed=1)
+    )
+    _, ranking = run_main(diff, token_cap=500)
+    high_entry = next(f for f in ranking["files"] if "scanner.py" in f["path"])
+    low_entry = next(f for f in ranking["files"] if "test_small.py" in f["path"])
+    assert high_entry["included"] == "summary"
+    assert low_entry["included"] == "full"
+    assert low_entry["risk_class"] == "low"
+
+
 # ---------------------------------------------------------------------------
 # Fail-open: missing --hotspots file
 # ---------------------------------------------------------------------------
