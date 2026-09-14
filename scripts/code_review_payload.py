@@ -10,6 +10,11 @@ Used by .archon/commands/dark-factory-code-review.md (clone-read; no image rebui
 
 Finding wire format (one bullet per finding):
     - [severity] category | path:line | description
+
+The description field is free text and may itself contain '|' (e.g. a shell
+command like '|| true', or a markdown-table-like fragment) — parsing bounds the
+split to the first two '|' so a literal pipe inside the description is never
+treated as a field separator.
 """
 from __future__ import annotations
 
@@ -52,9 +57,9 @@ def parse_findings(text: str):
         if not m:
             continue
         severity = m.group(1).lower()
-        fields = [p.strip() for p in m.group(2).split("|")]
+        fields = [p.strip() for p in m.group(2).split("|", 2)]
         if len(fields) >= 3:
-            category, loc, description = fields[0], fields[1], " | ".join(fields[2:])
+            category, loc, description = fields[0], fields[1], fields[2]
         elif len(fields) == 2:
             # 2-field is a malformed finding (the prompt mandates 3 fields).
             # Disambiguate: if the first field looks like a path:line location,
