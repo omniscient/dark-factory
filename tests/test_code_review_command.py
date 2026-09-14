@@ -23,3 +23,20 @@ def test_command_wires_the_contract():
     assert "/pulls/" in text and "/reviews" in text
     # writes the artifact the report node reads
     assert "review.md" in text
+
+
+def test_command_resolves_spec_file_via_push_gate_check():
+    text = CMD.read_text(encoding="utf-8")
+    assert 'push_gate_check.sh "docs/superpowers/specs/" "$ISSUE_NUM"' in text
+    # resolved in Phase 1, before Phase 2 consumes it
+    assert text.find("push_gate_check.sh") < text.find("## Phase 2")
+
+
+def test_command_threads_spec_file_into_diff_rank():
+    text = CMD.read_text(encoding="utf-8")
+    assert '${SPEC_FILE:+--spec-file "$SPEC_FILE"}' in text
+    diff_rank_pos = text.find("dark-factory/scripts/diff_rank.py")
+    spec_flag_pos = text.find('${SPEC_FILE:+--spec-file "$SPEC_FILE"}')
+    assert diff_rank_pos != -1 and spec_flag_pos != -1
+    assert 0 < spec_flag_pos - diff_rank_pos < 400, \
+        "the --spec-file flag must be part of the Phase 2 diff_rank.py invocation"

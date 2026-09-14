@@ -51,6 +51,29 @@ ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
    PR_NUM=$(gh pr list --repo "$FACTORY_REPO_SLUG" --head "$BRANCH" --json number --jq '.[0].number // empty')
    ```
    If `PR_NUM` is empty, write `STATUS: ERROR\nREASON: no PR found` to `$ARTIFACTS_DIR/review.md` and exit `0` (fail-open — never block the board on missing PR).
+10. Resolve `$SPEC_FILE` (R3) — primary lookup is the #390-sanctioned branch-scoped check
+    already used elsewhere in the DAG for this same purpose:
+    ```bash
+    SPEC_FILE=$(bash dark-factory/scripts/push_gate_check.sh "docs/superpowers/specs/" "$ISSUE_NUM")  # TARGET-PATH
+    ```
+    If that prints nothing, fall back to `commands/dark-factory-conformance.md`'s 2a/2b lookups
+    (its 2c sibling-spec scan is deliberately not reused here — #390 removed that same
+    first-match scan from the workflow nodes):
+    ```bash
+    if [ -z "$SPEC_FILE" ]; then
+      PLAN_COMMENT=$(gh issue view "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --json comments \
+        | jq -r '[.comments[] | select(.body | test("Refinement Pipeline — Plan Generated"))] | last | .body // ""')
+      SPEC_FILE=$(printf '%s' "$PLAN_COMMENT" \
+        | grep -oP 'docs/superpowers/specs/[^\s\])"]+' | head -1)
+    fi
+    if [ -z "$SPEC_FILE" ]; then
+      SPEC_FILE=$(grep '^SPEC_PATH:' "$ARTIFACTS_DIR/refinement-status.md" 2>/dev/null \
+        | sed 's/^SPEC_PATH: //' | head -1)
+    fi
+    ```
+    `SPEC_FILE` may still be empty after both fallbacks — that is fine and expected: unlike
+    conformance, code-review's spec-file signal is advisory-only (it only promotes a file out
+    of the `low` tier), so no `NO_SPEC` escalation applies here.
 
 ## Phase 2: DIFF
 
@@ -68,6 +91,7 @@ python3 dark-factory/scripts/diff_rank.py \  # TARGET-PATH
   --diff "$RANK_IN" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --config ".claude/skills/refinement/config.yaml" \
+  ${SPEC_FILE:+--spec-file "$SPEC_FILE"} \
   --hotspots "docs/codeindex-hotspots.md" \
   2>/tmp/diff_rank_err.txt > "$ARTIFACTS_DIR/review_diff.txt" \
   || {
