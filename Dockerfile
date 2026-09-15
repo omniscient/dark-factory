@@ -33,6 +33,7 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
 RUN apt-get update && apt-get install -y \
     python3.14 \
     python3.14-venv \
+    python3.14-dev \
     python3-pip \
     && ln -sf /usr/bin/python3.14 /usr/bin/python \
     && ln -sf /usr/bin/python3.14 /usr/bin/python3 \
