@@ -5,6 +5,10 @@ learned; verify code citations against `origin/main` before relying on them.
 
 ## Ordering and races
 
+- **`direct-to-pr` is itself an opt-in.** The refine loop dispatches a Backlog item carrying
+  `ready-for-agent` OR `direct-to-pr`. Filing a ticket with `direct-to-pr` dispatches it on the
+  next poll (MarketHawk #848, 2026-09-14: two refine attempts and a breaker trip before anyone
+  meant to start it). Add `direct-to-pr` at opt-in time, never at filing time.
 - **Board move before label removal.** The REFINED/READY loops dispatch on status alone; the
   gate label is the only skip. Label-first opens a poll window that fires a redundant run
   (#305, 2026-07-20). `approve.sh` enforces this.
