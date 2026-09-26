@@ -454,7 +454,7 @@ Write a summary of what was implemented to `$ARTIFACTS_DIR/implementation.md`:
 
 Keep a green-path report to the 4 bullets above (files, tests, migrations, decisions) — no restated
 issue text, no process narration ("first I explored...", "then I decided..."), and no questions per
-`CLAUDE.md`'s "never end your turn on a question" rule; this run is headless.
+the Headless Execution Contract above ("never end your turn on a question"); this run is headless.
 
 If anything went sideways, surface it prominently at the **top** of `implementation.md`, before the
 4 standard bullets: entries in `$ARTIFACTS_DIR/out-of-scope.md`, unresolved reservations about the
