@@ -44,14 +44,28 @@ handle. This spec covers only the remaining code-level fix in `run_hook`.
    `--gate` — one code path, not a smoke-gate-specific carve-out. (`validate` is in fact
    already gated — `entrypoint.sh:853` calls `run_hook --gate validate` — so a
    smoke-gate-only fix would have left an equally-real bug on `validate`.)
-3. `run_hook` must emit a loud warning to stderr identifying the exact non-executable
-   path and the fix, e.g.:
+   **Spec-review amendment:** a `run_hook`-only change does *not* actually reach the
+   `validate` defect — `entrypoint.sh:851` guards that call with its own
+   `[ -x "$CLONE_DIR/.factory/hooks/validate" ]` test and otherwise runs MarketHawk's
+   inline `npx tsc --noEmit` in `frontend/` (`entrypoint.sh:859-865`), escalating the
+   ticket to Blocked through `_conflict_escalate`. See Requirement 9.
+3. `run_hook` must emit a loud warning to stderr naming the exact non-executable path,
+   and the line must carry a **stable, machine-greppable token** — `hook-not-executable`
+   — so operator tooling and the tests match on the token rather than on prose:
    ```
-   WARNING: [hooks] .factory/hooks/<name> exists but is not executable (mode 100644?) — running via bash; fix with: git update-index --chmod=+x .factory/hooks/<name>
+   WARNING: [hooks] hook-not-executable path=<CLONE_DIR>/.factory/hooks/<name> crlf=<yes|no> — running it with bash (the hook's own shebang is ignored); fix with: git update-index --chmod=+x .factory/hooks/<name>
    ```
+   The line must state that the hook's shebang is being ignored (a non-executable
+   `#!/usr/bin/env python3` hook is now fed to bash and will fail as a syntax error where
+   previously the built-in default ran), and it must report whether the file has CRLF line
+   endings — detection only (`grep -q $'\r' "$hook"`), never normalisation, see
+   Requirement 4 and "Spec-review corrections". Measured in the factory image, a CRLF hook
+   fails under the container's GNU bash with errors that never mention line endings, so
+   this token is the operator's only diagnosis.
    The warning fires every time a non-executable hook is invoked (no dedup/once-only
    state) — `run_hook` has no persistent state today and adding any would be a
-   disproportionate change for a log line.
+   disproportionate change for a log line. It must **not** fire on the executable path:
+   no per-run log noise (asserted by a test, Requirement 12).
 4. The fallback interpreter is `bash` only. No shebang parsing, no interpreter
    detection, no CRLF stripping/normalization. Every shipped hook template
    (`templates/new-target/.factory/hooks/{smoke-gate,validate}`) already declares
@@ -59,14 +73,26 @@ handle. This spec covers only the remaining code-level fix in `run_hook`.
    through its own exit code when run via `bash "$hook"`, which is an acceptable,
    honest failure mode (the operator's script fails on its own merits, not via a
    factory-injected default that was never theirs).
-5. A file that does not exist at all (`[ ! -e "$hook" ]`) keeps today's behavior exactly
-   — fall through to the built-in default. This spec changes only the
-   exists-but-not-executable branch; it does not touch the missing-entirely branch.
+5. The fallback-to-default branch is gated on the hook being a **non-empty regular
+   file** — `[ -f "$hook" ] && [ -s "$hook" ]` — not on `[ -e "$hook" ]`. Everything else
+   (absent, a directory, or a zero-byte placeholder left by `touch
+   .factory/hooks/smoke-gate` during onboarding) keeps today's behavior exactly: fall
+   through to the built-in default. `-e` alone would (a) feed a directory to `bash`
+   ("is a directory", non-zero → a false `main-is-red` on the smoke-gate name) and,
+   worse, (b) turn an empty placeholder into a **silently green** gate, because `bash` on
+   an empty file exits 0 and `_smoke_on_green` (`smoke_gate.sh:127-150`) then clears the
+   sentinel — the exact "a missing hook must never become a silent pass" rule this ticket
+   exists to protect. This spec changes only the present-but-not-executable branch.
+   **Boundary with #436:** #436 owns *what* the absent/empty branch should do (make the
+   built-in default target-neutral instead of MarketHawk-specific). This spec must not
+   change that branch's behavior; the two specs meet at the `-f`/`-s` test and nowhere
+   else, and neither contradicts the other.
 6. Add a `tests/test_hooks.sh` case for a present-but-non-executable hook that asserts,
    for a non-smoke-gate name (`validate`, `chmod -x`):
    - the hook body actually executes (its side effect — e.g. a written marker file —
      is observed),
-   - a warning naming the hook path appears on stderr,
+   - the `hook-not-executable` token and the hook path appear on the stderr warning
+     (match the token, not the prose — Requirement 3),
    - the built-in default does not run (for `validate` this is implicit — no-op vs.
      hook-body-ran is what's being distinguished; for symmetry the smoke-gate path is
      covered by requirement 7 below).
@@ -77,8 +103,75 @@ handle. This spec covers only the remaining code-level fix in `run_hook`.
    exit 0) — proving the non-executable path reuses the exact same
    `_smoke_on_green`/`_smoke_on_red` routing as the executable path, not a parallel
    implementation of it.
-8. No change to `docs/onboarding-new-target.md`, `.gitattributes`, or any template —
-   that half of the issue is already shipped (see Overview).
+8. Do not re-do the already-shipped prevention work (`templates/new-target/**`,
+   `templates/new-target/.gitattributes`, or the chmod instructions themselves — see
+   Overview). Three shipped statements do become **false** with this change and must be
+   corrected in the same PR:
+   - `docs/onboarding-new-target.md:115-117` — "The factory runs a hook only if
+     `[ -x hook ]`. **A non-executable hook is silently ignored, and the MarketHawk
+     default runs instead** (tracked in #438)". Keep the chmod step (still the right thing
+     to do) and restate the behavior as warn-loudly-and-run-via-`bash`.
+   - `scripts/hooks.sh:4-9` header contract — "Falls back to built-in defaults when no
+     target hook is present" must spell out the present-but-non-executable case and the
+     non-empty-regular-file test.
+   - `README.md:224` ("Place executable scripts at `.factory/hooks/<name>`") — note that a
+     non-executable hook still runs, loudly, via `bash`.
+9. `entrypoint.sh:851` must stop pre-empting `run_hook`: replace its own
+   `[ -x "$CLONE_DIR/.factory/hooks/validate" ]` test with the same non-empty
+   regular-file test as Requirement 5, so a present-but-non-executable `validate` hook
+   reaches `run_hook` (which warns and runs it) instead of falling into MarketHawk's
+   inline `npx tsc --noEmit` in `frontend/` (`entrypoint.sh:859-865`) and escalating the
+   ticket to Blocked via `_conflict_escalate`. Without this, the `validate` half of the
+   defect Requirement 2 correctly identifies is not fixed at all. The absent-hook path
+   (inline tsc fallback) stays exactly as it is — that is #436/#222 territory.
+10. The warning must survive the run container. `scheduler.sh:377-378` dispatches with
+    `docker compose run -d --rm`, so nothing a run prints reaches the scheduler log, and
+    the container's own log is destroyed on exit (`docs/onboarding-new-target.md:218`).
+    `run_hook` must therefore also append one durable line —
+    `<UTC timestamp> hook-not-executable <hook path> issue=<ISSUE_NUM> crlf=<yes|no>` —
+    to `${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/hook-warnings.log`, the volume the
+    scheduler and every run container share (`run-compose.yml:55`; `smoke_gate.sh:11`
+    binds the same directory). Guard the append with `[ -d "<dir>" ]` and never `mkdir`
+    it: `.github/workflows/ci.yml:27-28` asserts the suite leaves `/var/lib/dark-factory`
+    empty. This mirrors the codebase's own "a durable trace beyond stderr, so an operator
+    can spot a real bug in the issue history rather than only in run logs" precedent
+    (`workflows/archon-dark-factory.yaml:210-222`).
+11. When a non-executable `smoke-gate` hook drives the gate red, the operator-facing
+    regression ticket must say so: the `hook-not-executable` token and the hook path must
+    appear in the text `_smoke_on_red` posts (`smoke_gate.sh:97-119`) — e.g. a variable
+    `run_hook` sets before invoking the hook, which `_smoke_on_red` appends when
+    non-empty, mirroring the `TEARDOWN_NOTE` pattern at
+    `workflows/archon-dark-factory.yaml:214-222`. Otherwise the operator sees only
+    "main is red: tsc/python import failure" with no hint that what actually ran was their
+    own never-chmod'd hook. This adds text to an existing comment only: no change to when
+    the gate fires, what it returns, or the sentinel/ticket state machine.
+12. Test placement and negative cases (extends Requirements 6-7):
+    - The new cases go **after** the existing assertions at `tests/test_hooks.sh:53-56`:
+      that block asserts *exactly one* stubbed `tracker create` for the whole file, and a
+      second red smoke-gate case makes it two. Each new case must reset the state it
+      depends on (sentinel file, hook mode) explicitly — `tests/test_hooks.sh:48`
+      currently relies on the mode set at `:44` surviving a `printf` overwrite.
+    - **Negative case A (a missing hook must not become a pass):** with no `smoke-gate`
+      hook file, and again with a zero-byte one, the built-in default still runs (assert
+      via a stubbed `_smoke_check_main` counter) and **no** `hook-not-executable` token is
+      emitted.
+    - **Negative case B (no log noise):** the existing executable-hook cases emit no
+      `hook-not-executable` token.
+    - **Exit-code propagation:** a non-executable `validate` hook exiting 3 still makes
+      `run_hook --gate validate` return 3 (same assertion shape as
+      `tests/test_hooks.sh:37-39`).
+13. Verification, and where each check is actually enforced:
+    - `bash tests/test_hooks.sh` — CI runs it on `ubuntu-latest`
+      (`.github/workflows/ci.yml:16`). It is **not** part of `python -m pytest tests/ -v`,
+      and on a Windows host MSYS/Git-Bash silently tolerates the `\r` this ticket is
+      about, so only the Linux CI run (or the same command inside
+      `ghcr.io/omniscient/dark-factory:latest`) proves anything.
+    - `python -m pytest tests/ -v` — the Requirement 9 check belongs here as a static
+      assertion over `entrypoint.sh`'s text in a `tests/*.py` file (the `-x`
+      `.factory/hooks/validate` pre-check is gone), so it is verified off-image too.
+    - `bash tests/test_smoke_gate.sh` — unchanged built-in-default behavior.
+    - No workflow change is involved, so the `check_workflow_*.py` DAG gates are
+      unaffected.
 
 ## Brainstorming Q&A
 
@@ -147,8 +240,9 @@ run_hook() {
 executable-bit check, so the same invocation logic runs for both an executable hook and
 a non-executable-but-present one — only the *interpreter prefix* differs (`"$hook"`
 directly vs. `bash "$hook"`). Concretely: keep `[ -x "$hook" ]` to decide direct-exec vs.
-`bash`-exec, but gate the *fallback-to-default* branch on `[ -e "$hook" ]` instead
-(existence, not executability) — the default only fires when the file is truly absent:
+`bash`-exec, but gate the *fallback-to-default* branch on a non-empty-regular-file test
+(`[ -f "$hook" ] && [ -s "$hook" ]`, Requirement 5) instead of executability — the default
+only fires when the file is absent, a directory, or a zero-byte placeholder:
 
 ```bash
 run_hook() {
@@ -157,12 +251,22 @@ run_hook() {
   local name="$1"; shift || true
   local hook="${CLONE_DIR}/.factory/hooks/${name}"
   local rc=0
-  if [ -e "$hook" ]; then
+  if [ -f "$hook" ] && [ -s "$hook" ]; then
     local -a invoke
     if [ -x "$hook" ]; then
       invoke=("$hook")
     else
-      echo "WARNING: [hooks] ${hook} exists but is not executable (mode 100644?) — running via bash; fix with: git update-index --chmod=+x ${hook}" >&2
+      local crlf="no"; grep -q $'\r' "$hook" && crlf="yes"
+      echo "WARNING: [hooks] hook-not-executable path=${hook} crlf=${crlf} — running it with bash (the hook's own shebang is ignored); fix with: git update-index --chmod=+x .factory/hooks/${name}" >&2
+      # Durable trace beyond stderr (Req 10): dispatch is `run -d --rm`, so the run's
+      # stderr never reaches the scheduler log and dies with the container. Guarded,
+      # never mkdir — CI asserts /var/lib/dark-factory stays empty.
+      local state_dir="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+      [ -d "$state_dir" ] && printf '%s hook-not-executable %s issue=%s crlf=%s\n' \
+        "$(date -u +%FT%TZ)" "$hook" "${ISSUE_NUM:-}" "$crlf" \
+        >> "${state_dir}/hook-warnings.log"
+      # Consumed by _smoke_on_red's ticket text (Req 11).
+      HOOK_NOT_EXECUTABLE_NOTE="hook-not-executable ${hook} (crlf=${crlf})"
       invoke=(bash "$hook")
     fi
     if [ "$name" = "smoke-gate" ]; then
@@ -214,14 +318,42 @@ immediately above them in the same file.
    it directly).** Rejected: mutates a file inside a fresh clone silently, conflates
    "run the hook" with "repair the clone," and still doesn't handle the CRLF/bad-shebang
    half of the issue's root cause (a `chmod`'d CRLF script still fails on `#!/usr/bin/env
-   bash\r`) — `bash "$hook"` sidesteps the shebang entirely and is strictly more robust
-   for the common case (Windows mode-bit loss) without pretending to fix line endings.
+   bash\r`) — `bash "$hook"` sidesteps the shebang entirely, which is more robust for the
+   common case (Windows mode-bit loss) without pretending to fix line endings. It is **not**
+   more robust for CRLF: the container's GNU bash rejects `\r`-suffixed tokens just as
+   surely as the kernel rejects a `\r`-suffixed shebang (see "Spec-review corrections"),
+   which is why Requirement 3 makes the warning *report* CRLF instead.
 4. **Detect CRLF and normalize/strip `\r` before running.** Rejected as disproportionate
    scope per Brainstorming Q&A — the docs-side fix (`.gitattributes` `eol=lf`, already
-   shipped) is the intended prevention for CRLF; `bash "$hook"` already tolerates most
-   CRLF scripts far better than direct shebang execution would, and a script that's
-   still broken by stray `\r`s fails visibly through its own exit code, which is
-   sufficient defense-in-depth for this ticket.
+   shipped) is the intended prevention for CRLF, and a script broken by stray `\r`s fails
+   through its own exit code. Corrected claim: `bash "$hook"` does **not** tolerate CRLF —
+   measured in the factory image, `set -uo pipefail\r` fails with
+   `set: pipefail: invalid option name` and `cd "${CLONE_DIR}"\r` with
+   `No such file or directory`, and because the shipped template uses `set -uo pipefail`
+   with no `-e` a CRLF hook can even run past both and exit 0. Normalisation stays out of
+   scope, but the failure must be *diagnosable*, so Requirement 3 requires CRLF detection
+   in the warning line (one `grep -q`, zero behavior change).
+
+## Spec-review corrections (2026-09-26)
+
+- **CRLF, measured.** Running a `\r`-terminated bash script with
+  `bash <path>` inside `ghcr.io/omniscient/dark-factory:latest` produces
+  `set: pipefail: invalid option name` and `cd: $'/home/factory\r': No such file or
+  directory`, and the script still exited 0 because it used `set -uo pipefail` (no `-e`) —
+  the same option line the shipped templates use
+  (`templates/new-target/.factory/hooks/smoke-gate:7-8`). The CRLF tolerance one sees on a
+  Windows host comes from MSYS bash stripping `\r`; the container's GNU bash does not.
+  Consequence for this ticket: the exec-bit fix alone does not rescue a hook that lost both
+  the mode bit and its line endings, which is the common Windows case — hence the
+  `crlf=<yes|no>` field in Requirement 3's warning.
+- **`VERIFIER-CONTRACT.md` (#301) does the opposite for verifiers, on purpose.**
+  `refinement-skills/VERIFIER-CONTRACT.md:140` lists "a non-executable path" as a
+  fail-closed condition and `scripts/factory_core/verifier.py:49-50` raises
+  `VerifierError` on exactly that. The Brainstorming Q&A's appeal to that contract's
+  "fail-closed spirit" should be read narrowly: a target verifier has **no** built-in
+  default to fall into, so failing closed is its only safe move, whereas `run_hook` does
+  have one whose failure *is* the false `main-is-red` this ticket reports. The divergence is
+  deliberate; do not "harmonise" the two seams without a ticket.
 
 ## Open Questions (Non-blocking)
 
