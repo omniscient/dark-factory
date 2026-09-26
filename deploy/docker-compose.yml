@@ -12,7 +12,13 @@ name: ${FACTORY_INSTANCE:-dark-factory}
 #
 #   PROJECT_DIR=/path/to/your-repo docker compose -f deploy/docker-compose.yml up -d
 #
-# IMAGE_TAG (env var, default: latest) pins the factory image version.
+# IMAGE_TAG (env var, default: latest) selects the factory image tag.
+# IMAGE_REF (env var, optional) overrides the whole image reference, e.g.
+#   IMAGE_REF=ghcr.io/omniscient/dark-factory@sha256:<digest>
+# It is used for the scheduler AND passed as FACTORY_IMAGE to every dispatched run,
+# so an instance pinned by digest is unaffected when another instance on the same
+# host pulls a newer :latest. A digest cannot go in IMAGE_TAG (repo:sha256:… is not
+# a valid reference).
 #
 # FACTORY_INSTANCE (env var, default: dark-factory) scopes the compose project,
 # container names, and the scheduler state volume so several instances (one per
@@ -57,7 +63,7 @@ services:
 
   # Backlog Scheduler — polls the GitHub project board and dispatches factory runs
   backlog-scheduler:
-    image: ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REF:-ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}}
     container_name: ${FACTORY_INSTANCE:-dark-factory}-scheduler
     restart: unless-stopped
     entrypoint: ["/opt/dark-factory/scheduler.sh"]
@@ -69,7 +75,7 @@ services:
       - path: ${FACTORY_INSTANCE_ENV:-instance.env}
         required: true
     environment:
-      FACTORY_IMAGE: "ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}"
+      FACTORY_IMAGE: "${IMAGE_REF:-ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}}"
       DOCKER_HOST: tcp://docker-socket-proxy-scheduler:2375
       # Interpolated at `up` time and passed through so dispatch (docker compose
       # inside this container) names the run project/volume consistently even
@@ -101,7 +107,7 @@ services:
   # operator's running stack, which is why it is NOT the default — see
   # docs/dark-factory-model-proxy-rollout.md.
   # factory-model-proxy:
-  #   image: ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}
+  #   image: ${IMAGE_REF:-ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}}
   #   container_name: ${FACTORY_INSTANCE:-dark-factory}-model-proxy
   #   restart: unless-stopped
   #   entrypoint: ["python3", "-m", "factory_core.model_proxy"]

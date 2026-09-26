@@ -253,9 +253,16 @@ commits and pushes them with a lease. So the comment in step 1 is what keeps you
 ## 9. Operating notes
 
 - **Several instances on one host share the local `:latest` image.** Pulling a new
-  image for one instance changes the image the others' next runs use. Before pulling,
-  make sure no instance has a run in flight, and prefer pinning `IMAGE_TAG`
-  (digest pinning is not possible yet; see #443).
+  image for one instance changes the image the others' next runs use. Pin each
+  instance to a digest in its `instance.env` and upgrade deliberately:
+
+  ```bash
+  docker image inspect ghcr.io/omniscient/dark-factory:latest --format '{{index .RepoDigests 0}}'
+  # -> IMAGE_REF=ghcr.io/omniscient/dark-factory@sha256:…   then up -d --force-recreate
+  ```
+
+  The scheduler log's `probe=image_ok image=…@sha256:…` line confirms the pin. It
+  covers the scheduler and every run it dispatches.
 - **Cost:** plan and implement run on Opus. Budget a few dollars per small ticket; the
   cost report is posted on each issue.
 - **Stopping:** `docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml stop backlog-scheduler`.

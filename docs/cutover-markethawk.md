@@ -23,7 +23,7 @@ All of the following must hold before executing the cutover:
   passing).
 - [ ] Controller sign-off received on issue
   [omniscient/markethawk #738](https://github.com/omniscient/markethawk/issues/738).
-- [ ] `IMAGE_TAG` digest to pin has been copied from the parity-p2.md evidence
+- [ ] `IMAGE_REF` digest to pin has been copied from the parity-p2.md evidence
   record (the specific digest the bench run validated).
 - [ ] Both P3-blocker follow-up tickets are resolved or have a known-safe
   workaround documented:
@@ -76,8 +76,11 @@ digest recorded there):
 
 ```bash
 # IMAGE_TAG=latest
-IMAGE_TAG=sha256:<parity-verified-digest>
+IMAGE_REF=ghcr.io/omniscient/dark-factory@sha256:<parity-verified-digest>
 ```
+
+(`IMAGE_TAG` only takes a tag; `IMAGE_TAG=sha256:…` would produce the invalid
+reference `dark-factory:sha256:…`.)
 
 ### Step 2.3 — Start the standalone scheduler
 
