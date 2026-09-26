@@ -22,8 +22,10 @@ GitHub issue with an acceptance-tested specification, the factory:
 4. Opens a draft PR with full context and waits for human approval.
 
 The factory is **product-agnostic**: all target-specific knowledge lives in a
-`.factory/adapter.yaml` file committed to the target repo (or defaults to
-MarketHawk-parity when the file is absent).
+`.factory/adapter.yaml` file and `.factory/hooks/` committed to the target repo.
+When they are absent the built-in defaults are MarketHawk's, so a new product
+must supply its own — see [`docs/onboarding-new-target.md`](docs/onboarding-new-target.md)
+and the starter files in [`templates/new-target/`](templates/new-target/).
 
 ---
 
@@ -75,34 +77,84 @@ git-excluded); when the target does commit one, it wins byte-identically.
 
 ## Quickstart
 
+This is the short path for an operator who already has a target repo on GitHub.
+Onboarding a brand-new product? Follow
+[`docs/onboarding-new-target.md`](docs/onboarding-new-target.md) instead. It covers
+the target-side files (adapter, hooks, `CLAUDE.md`) that this section assumes exist,
+and it is written so you can hand it to an AI agent.
+
 ### Prerequisites
 
-- Docker with Compose v2
-- A GitHub Projects v2 board with the standard column set
-  (Backlog, Ready, In Progress, In Review, Blocked, Refined, Done)
-- A GitHub token with `repo`, `project`, and `workflow` scope
-- A Claude authentication credential (`CLAUDE_CODE_OAUTH_TOKEN` for Max plan,
-  or `ANTHROPIC_API_KEY` for direct API access)
+- Docker with Compose v2 (Linux, macOS, or Windows with Docker Desktop).
+- `gh` CLI authenticated with `repo`, `project` and `workflow` scope, plus `jq`.
+- A Claude credential: `CLAUDE_CODE_OAUTH_TOKEN` (subscription; create it with
+  `claude setup-token`) or `ANTHROPIC_API_KEY`.
+- The target repo on GitHub. Every run clones its default branch.
 
-### 1. Clone the dark-factory repo
+### 1. Clone dark-factory
 
 ```bash
 git clone https://github.com/omniscient/dark-factory.git
 cd dark-factory
 ```
 
-### 2. Create instance.env
+### 2. Bootstrap the board and labels
+
+```bash
+scripts/bootstrap_target.sh OWNER/REPO
+```
+
+The script is idempotent. It creates (or finds) a Projects v2 board named after the
+repo, sets its Status field to the seven columns the scheduler expects (Backlog,
+Refined, Ready, In Progress, In Review, Blocked, Done), and creates every label the
+factory applies. `gh issue edit --add-label` fails on a missing label, and the factory
+never creates labels itself. Finally it prints the `FACTORY_*` identity block for
+step 3.
+
+### 3. Create the two env files
+
+The scheduler and the per-ticket run containers read **different** files:
+
+| File | Read by | Contents |
+|------|---------|----------|
+| `deploy/instance.env` (in this checkout) | scheduler | secrets, identity block, `FACTORY_INSTANCE`, `PROJECT_DIR` |
+| `<PROJECT_DIR>/.archon/.env` (in the target checkout, gitignored) | every dispatched run | `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (and optional run-time knobs) |
 
 ```bash
 cp deploy/instance.env.example deploy/instance.env
-$EDITOR deploy/instance.env   # fill in GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, identity vars
+$EDITOR deploy/instance.env      # secrets + paste the bootstrap block + FACTORY_INSTANCE + PROJECT_DIR
+
+mkdir -p /path/to/your-repo/.archon
+printf 'GH_TOKEN=%s\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "<gh token>" "<claude token>" \
+  > /path/to/your-repo/.archon/.env
 ```
 
-For a non-MarketHawk target, every `FACTORY_*` identity variable must be
-overridden. Run the GraphQL queries in the example file's comments to retrieve
-your project board IDs.
+Make sure `.archon/.env` is gitignored in the target repo (a bare `.env` pattern
+covers it). The scheduler copies it at startup, so restart the scheduler after editing it.
 
-Per-instance configs live under `deploy/instances/` (markethawk: see [`docs/cutover-markethawk.md`](docs/cutover-markethawk.md)).
+### 4. Start the scheduler
+
+```bash
+docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d
+docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml logs -f backlog-scheduler
+```
+
+`--env-file` is required: without it, compose interpolation never sees
+`FACTORY_INSTANCE` / `PROJECT_DIR` / `IMAGE_TAG`. Container names and the state volume
+then fall back to `dark-factory-*`, and `PROJECT_DIR` falls back to this checkout.
+
+Expected within a few seconds: `providers preflight: OK`, `Provisioned dispatch env
+file ... from bind mount`, then one `backlog=… main_red=false` line per poll. A
+`WARNING: /workspace/project/.archon/.env not found` line means step 3's second file is
+missing, and every dispatch will fail.
+
+### 5. Verify
+
+Add an issue to the board and set it to **Ready**. Within one poll interval
+(`POLL_INTERVAL`, default 60 s) a `<FACTORY_RUN_PREFIX><hash>` container starts
+(`docker ps`) and the ticket moves to In Progress. A Ready ticket goes straight to
+implementation. To have the factory refine a ticket first, leave it in Backlog and add
+the `ready-for-agent` label.
 
 ### Provider selection (optional)
 
@@ -116,39 +168,26 @@ FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | 
 ```
 
 `databricks`/`openai` are recognized but not yet implemented (the model
-gateway is a later step); an unknown value for any of the three, or
-missing provider-specific required env, fails startup loudly via
-`providers preflight` — run it directly to check your configuration:
+gateway is a later step). An unknown value for any of the three, or
+missing provider-specific required env, fails scheduler startup loudly via
+`providers preflight`. To check your configuration without starting anything, run it
+inside the image. This works on every host OS; the host-Python form fails on Windows
+with `No module named 'fcntl'`:
 
 ```bash
-python3 scripts/factory_core/providers/cli.py preflight
+docker run --rm --env-file deploy/instance.env --entrypoint python3 \
+  ghcr.io/omniscient/dark-factory:latest \
+  /opt/dark-factory/scripts/factory_core/providers/cli.py preflight
 ```
 
-### 3. Point PROJECT_DIR at your target repo
+### Windows notes
 
-```bash
-export PROJECT_DIR=/path/to/your-repo   # absolute path on the host
-```
-
-The scheduler bind-mounts this path read-only to `/workspace/project` inside
-the container so it can read `config/config.yaml` and `.factory/adapter.yaml`
-from the current branch without cloning.
-
-### 4. Start the scheduler
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-compose.yml logs -f backlog-scheduler
-```
-
-The scheduler polls the board every `POLL_INTERVAL` seconds (default: 60).
-When a Ready ticket is found, it dispatches an ephemeral factory run container.
-
-### 5. Verify
-
-Move a ticket to the **Ready** column on your GitHub project board.  Within one
-poll interval, you should see a factory run container start (`docker ps`) and
-progress logged to the scheduler stream.
+- Put `PROJECT_DIR` in `deploy/instance.env` with forward slashes (`C:/git/my-repo`)
+  rather than exporting it, so the same command works in PowerShell and Git Bash.
+- In Git Bash, prefix `docker run` commands that pass absolute container paths with
+  `MSYS_NO_PATHCONV=1`, or Git Bash rewrites `/opt/...` into a Windows path.
+- Hooks in the target repo must be committed executable and with LF endings. See the
+  onboarding guide (`git update-index --chmod=+x`, `.gitattributes`).
 
 ---
 
@@ -270,10 +309,11 @@ Two tiers are available. Tier 0 is instant (no git commit); Tier 1 is durable
 and tracked in history.
 
 **Tier 0 — env kill-switch (fastest):** set `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false`
-in `instance.env`, then force-recreate the scheduler:
+in the target's `.archon/.env` (the budget gate runs inside the run containers, which
+never read `instance.env`), then force-recreate the scheduler so it re-copies that file:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
+docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
 ```
 
 Kill-only semantics: `false`/`0`/`no` forces observe mode on subsequent runs;

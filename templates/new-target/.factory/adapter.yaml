@@ -1,0 +1,47 @@
+# Starter .factory/adapter.yaml for a new (non-MarketHawk) Dark Factory target.
+# Copy to <your-repo>/.factory/adapter.yaml and edit the paths marked EDIT.
+#
+# Why every block is here: when a key is absent the factory falls back to
+# scripts/factory_core/adapter_defaults.py, whose values are MarketHawk's paths and
+# section names. List-valued keys REPLACE the defaults (they are not merged), so the
+# factory-self safety paths below must stay in each list.
+schema_version: 1
+
+# Map component labels to ARCHITECTURE.md section names for context slicing.
+# Empty map = no slicing (use this until your repo has an ARCHITECTURE.md).
+components: {}
+
+safety:
+  # EDIT: words in a ticket that should keep epic autopilot away from it.
+  sensitive_keywords: "auth|oauth|token|secret|credential|password|payment"
+  # EDIT: path substrings an autopilot candidate ticket must not target.
+  hard_exclude_paths:
+    - ".claude/skills/"
+    - ".claude/settings.json"
+    - ".claude/settings.local.json"
+    - ".mcp.json"
+    - ".claude/plugins/"
+    - ".claude-plugin/"
+    - ".factory/hooks/"
+  # EDIT: regexes for the highest-risk files, shown first to reviewers.
+  critical_diff_paths:
+    - "^\.factory/hooks/"
+  # EDIT: regexes whose diffs require explicit human sign-off (auth, migrations, seeds).
+  migration_seed_auth_patterns:
+    - "^\.claude/settings\.json$"
+    - "^\.mcp\.json$"
+    - "^\.factory/hooks/"
+  # EDIT: path prefixes the (off-by-default) main-red auto-fixer may touch.
+  main_red_allowed_paths:
+    - "src/"
+    - "tests/"
+
+# EDIT: glob -> memory file the factory appends lessons to.
+memory_routing:
+  "src/*": ".archon/memory/patterns.md"
+
+# EDIT: models index + migrations dir for the deconflict guard. Point at paths that do
+# not exist if your project has neither (the guard then skips).
+deconflict:
+  models_init: "src/models/__init__.py"
+  migrations_dir: "migrations/"
