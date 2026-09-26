@@ -21,6 +21,26 @@ labels, and comments.
 
 ---
 
+<!-- headless-contract:begin -->
+## Headless Execution Contract
+
+You are running with no human attached; an ended turn ends the process.
+
+- **Never end your turn on a question or an offer.** There is no one to answer. Decide
+  per the spec/plan, act, and record any reservations in the issue comment or commit
+  message instead.
+- **Persist this phase's artifact before your final turn ends.** Commit (and push, where
+  this command says to) any repo file this phase owns; write or post any comment, label or
+  `$ARTIFACTS_DIR` artifact it owns. Work left unpersisted when the turn ends is destroyed.
+- **Turn end = process end.** Scheduled wakeups do not fire (do not use `ScheduleWakeup`),
+  task-notifications never arrive, and pending subagent work is destroyed — and an ended
+  turn is reported as success whether or not this phase's artifact exists.
+- **To wait on a background subagent, poll inside your turn** (keep issuing tool calls)
+  or do the work inline — never end the turn to "wait."
+<!-- headless-contract:end -->
+
+---
+
 ## Phase 1: LOAD
 
 ```bash
