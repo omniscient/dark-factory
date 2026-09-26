@@ -441,6 +441,10 @@ nodes:
   - id: plan
     command: dark-factory-plan
     denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.plan) — profile removes no tools
+    # #432: the plan orchestrator writes the plan artifact itself — run it on Opus 5.5.
+    # Opus 5.5 defaults to medium effort; the plan phase asks for high.
+    model: opus
+    effort: high
     depends_on: [enforce-budget-plan, setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'plan'"
     idle_timeout: 600000
@@ -603,6 +607,7 @@ nodes:
   - id: implement
     command: dark-factory-implement
     denied_tools: []  # #196: side_effect_level 5 (config/config.yaml side_effect.phase_levels.implement) — profile removes no tools
+    model: opus  # #432: the implement orchestrator writes the code — run it on Opus 5.5
     depends_on: [enforce-budget-implement, update-codeindex, fetch-issue, digest-comments]
     # OR-join: digest-comments runs only on continue; skipped on new.
     # none_failed_min_one_success ensures this node runs when digest-comments is skipped.
