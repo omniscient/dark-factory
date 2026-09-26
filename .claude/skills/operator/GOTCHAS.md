@@ -62,6 +62,12 @@ learned; verify code citations against `origin/main` before relying on them.
   runs before the archive commit; code review (Gate 3), revise-advisory and report run after
   it. A lookup that only searches `docs/superpowers/specs/` is inert at Gate 3 (#403, caught by
   Gate 3 itself after the spec reviewer and the operator both missed it).
+- **A refine branch older than the target's layout silently kills plan runs.** MarketHawk's
+  June-era branches still tracked the `dark-factory/` tree the July extraction removed; the run
+  entrypoint copies preview files into that path as untracked files, so `setup-refine-branch`'s
+  checkout aborts, the plan agent lands on `main` without its spec and "ends without producing a
+  plan" (three times, breaker trip). Diagnose with an attached run; fix by merging `main` into
+  the refine branch (a force-push rebase is refused by the classifier as destructive).
 - **`recheck` is a real intent** (main-red self-clearing, handled in entrypoint before the DAG).
   Grepping one file and finding nothing proves absence in that file only.
 - **A conformance gate checks fidelity to the spec, not whether the spec is true.** Three
@@ -82,6 +88,25 @@ learned; verify code citations against `origin/main` before relying on them.
 - Agent-tool `model` param in the image CLI is an alias enum (`sonnet|opus|haiku|fable`);
   documentary pins in docs now read `claude-opus-5-5` and are passed as `opus`; aliases resolve per the
   image CLI (2.1.273: opus→Opus 5.5), so the pin fixes the tier, not the snapshot.
+
+- **A target's `CLAUDE.md` is what the phase commands load — it must carry the headless rules.**
+  MarketHawk's did not; six plan runs (#388, #441) "completed" with no plan because the Sonnet 5
+  orchestrator verified the pasted command and then ended its turn asking a human "(a) proceed,
+  (b) dig in, (c) leave paused?". Archon reports any ended turn as node success. Diagnose with an
+  attached run whose container you keep (`docker compose run --name diag-N` without `--rm`), then
+  read the transcript under `/home/factory/.claude/projects/`. Fixed target-side (MarketHawk PR
+  #862) and filed factory-side as #431. A refine branch cut before the fix needs `main` merged in
+  before re-dispatch, or the agent loads the old file.
+- **Archon `idle_timeout` completes the node as *success*** (`dag_node_completed_via_idle_timeout`):
+  10 min of stream silence on plan/implement/conformance kills the subprocess and the DAG moves on.
+  A plan orchestrator waiting on a long architect subagent can die this way and look identical to
+  the ended-turn case; check node `durationMs` in the run record (a 17-min plan with no plan file).
+- **The classifier refuses pushes of agent-loaded instruction files** ("Instruction Poisoning": a
+  CLAUDE.md change) and `gh pr merge` in autonomous turns. Prepare the branch/commit, then hand
+  Frank the exact `! git push …` / `! gh pr merge …` line; do not route it through a subagent.
+- **Scratchpad files do not survive a session restart** (2026-09-25: rescued plan, bundles and
+  transcript copies gone; only directory skeletons remained). Anything rescued gets committed to
+  a branch or attached to the issue in the same session.
 
 ## Host quirks
 
