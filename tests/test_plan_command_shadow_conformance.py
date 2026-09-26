@@ -53,4 +53,4 @@ def test_publish_comment_includes_shadow_subsection():
 
 def test_inline_opus_pin_count_unchanged():
     text = CMD.read_text(encoding="utf-8")
-    assert text.count("claude-opus-4-8") >= 2  # unchanged from test_verifier_contract_doc_referenced.py::test_every_command_file_keeps_inline_model_pin
+    assert text.count("claude-opus-5-5") >= 2  # unchanged from test_verifier_contract_doc_referenced.py::test_every_command_file_keeps_inline_model_pin

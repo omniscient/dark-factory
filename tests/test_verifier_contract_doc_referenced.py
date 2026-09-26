@@ -38,8 +38,8 @@ _INLINE_PIN_COUNTS = {
 def test_every_command_file_keeps_inline_model_pin():
     for rel_path, n in _INLINE_PIN_COUNTS.items():
         content = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-        assert content.count("claude-opus-4-8") >= n, (
-            f"{rel_path} lost its inline claude-opus-4-8 pin (expected >= {n})"
+        assert content.count("claude-opus-5-5") >= n, (
+            f"{rel_path} lost its inline claude-opus-5-5 pin (expected >= {n})"
         )
 
 

@@ -80,7 +80,8 @@ learned; verify code citations against `origin/main` before relying on them.
 - Agents diff the received prompt against canonical `commands/*.md` and refuse mismatches as
   injection (#214): never patch prompts through the workflow mount; canonical-file PRs only.
 - Agent-tool `model` param in the image CLI is an alias enum (`sonnet|opus|haiku|fable`);
-  literal `claude-opus-4-8` pins in docs are stale text and resolve to `opus`.
+  documentary pins in docs now read `claude-opus-5-5` and are passed as `opus`; aliases resolve per the
+  image CLI (2.1.273: opus→Opus 5.5), so the pin fixes the tier, not the snapshot.
 
 ## Host quirks
 

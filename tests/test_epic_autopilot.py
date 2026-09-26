@@ -179,7 +179,7 @@ class FakeIO:
 
 
 CFG = dict(exclude_paths=["app/core/auth", "dark-factory/"], opt_out_label="no-autopilot",
-           ceiling_keywords=CEIL, confidence_floor=0.7, daily_cap=5, model="claude-opus-4-8")
+           ceiling_keywords=CEIL, confidence_floor=0.7, daily_cap=5, model="claude-opus-5-5")
 
 
 def test_run_advances_low_risk():

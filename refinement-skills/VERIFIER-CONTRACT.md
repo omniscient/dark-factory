@@ -12,16 +12,16 @@ read directly.
 
 | Checker pair | Gating model (pin) | Shadow model (advisory, non-gating) |
 |---|---|---|
-| `refine`'s product-owner | `claude-opus-4-8` | — |
-| `plan`'s architect (Phase 3) | `claude-opus-4-8` | — |
-| `plan`'s Phase 3.5 conformance reviewer | `claude-opus-4-8` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
-| `conformance`'s Phase 3 conformance reviewer | `claude-opus-4-8` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
-| `code-review`'s reviewer | `claude-opus-4-8` | — |
+| `refine`'s product-owner | `claude-opus-5-5` | — |
+| `plan`'s architect (Phase 3) | `claude-opus-5-5` | — |
+| `plan`'s Phase 3.5 conformance reviewer | `claude-opus-5-5` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
+| `conformance`'s Phase 3 conformance reviewer | `claude-opus-5-5` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
+| `code-review`'s reviewer | `claude-opus-5-5` | — |
 
 Pin strings are documentary identities. The Agent tool's `model` parameter is an
 alias-only enum (`sonnet|opus|haiku|fable`); call sites pass `opus` for
-`claude-opus-4-8` and `fable` for `claude-fable-5-1`. On the current image (Claude Code
-CLI 2.1.261) `opus` resolves to `claude-opus-5`, not a 4.8 build — the pin fixes the
+`claude-opus-5-5` and `fable` for `claude-fable-5-1`. On the current image (Claude Code
+CLI 2.1.273) `opus` resolves to `claude-opus-5-5` — the pin fixes the
 tier, not the exact snapshot.
 
 - **Model pin (gating):** never let the gating checker subagent inherit the
@@ -64,7 +64,7 @@ tier, not the exact snapshot.
   itself subject to clone-live-first resolution.
 - **Model-value note (Task 0, #394):** Task 0 confirmed the literal `claude-fable-5-1`
   is rejected by the Agent tool and `fable` is accepted; the same is true of every
-  `claude-opus-4-8` pin (→ `opus`). The translation happens only at the call site;
+  `claude-opus-5-5` pin (→ `opus`). The translation happens only at the call site;
   config, prose, and `SHADOW_MODEL:` keep the literal.
 
 ## Shadow verdict mapping (non-gating)
