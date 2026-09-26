@@ -21,7 +21,7 @@ read directly.
 Pin strings are documentary identities. The Agent tool's `model` parameter is an
 alias-only enum (`sonnet|opus|haiku|fable`); call sites pass `opus` for
 `claude-opus-5-5` and `fable` for `claude-fable-5-1`. On the current image (Claude Code
-CLI 2.1.273) `opus` resolves to `claude-opus-5-5` — the pin fixes the
+CLI 2.1.282) `opus` resolves to `claude-opus-5-5` — the pin fixes the
 tier, not the exact snapshot.
 
 - **Model pin (gating):** never let the gating checker subagent inherit the

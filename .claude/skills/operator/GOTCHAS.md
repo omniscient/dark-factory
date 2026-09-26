@@ -87,7 +87,7 @@ learned; verify code citations against `origin/main` before relying on them.
   injection (#214): never patch prompts through the workflow mount; canonical-file PRs only.
 - Agent-tool `model` param in the image CLI is an alias enum (`sonnet|opus|haiku|fable`);
   documentary pins in docs now read `claude-opus-5-5` and are passed as `opus`; aliases resolve per the
-  image CLI (2.1.273: opus→Opus 5.5), so the pin fixes the tier, not the snapshot.
+  image CLI (2.1.282: opus→Opus 5.5), so the pin fixes the tier, not the snapshot.
 
 - **A target's `CLAUDE.md` is what the phase commands load — it must carry the headless rules.**
   MarketHawk's did not; six plan runs (#388, #441) "completed" with no plan because the Sonnet 5
