@@ -118,7 +118,7 @@ class FakeIO:
         self.escalations.append((issue, reason, pr))
 
 
-CFG = dict(max_attempts=3, model="claude-opus-4-8",
+CFG = dict(max_attempts=3, model="claude-opus-5-5",
            allowed_paths=ALLOWED, blocked_paths=BLOCKED)
 
 

@@ -589,7 +589,7 @@ def main_once() -> int:
             "EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT", "false").lower() == "true",
         confidence_floor=float(os.environ.get("EPIC_AUTOPILOT_CONFIDENCE_FLOOR", "0.7")),
         daily_cap=int(os.environ.get("EPIC_AUTOPILOT_DAILY_CAP", "5")),
-        model=os.environ.get("EPIC_AUTOPILOT_MODEL", "claude-opus-4-8"))
+        model=os.environ.get("EPIC_AUTOPILOT_MODEL", "claude-opus-5-5"))
     now_iso = datetime.now(timezone.utc).isoformat()
     out = run_once(cfg, LiveIO(cfg["model"]), state, today, now_iso)
     try:

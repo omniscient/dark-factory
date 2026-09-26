@@ -13,7 +13,7 @@ cap=$(yq '.epic_autopilot.daily_cap' "$cfg")
 [ "$cap" = "5" ] || { echo "FAIL: epic_autopilot.daily_cap should be 5, got '$cap'"; exit 1; }
 
 model=$(yq '.epic_autopilot.model' "$cfg")
-[ "$model" = "claude-opus-4-8" ] || { echo "FAIL: epic_autopilot.model should be claude-opus-4-8, got '$model'"; exit 1; }
+[ "$model" = "claude-opus-5-5" ] || { echo "FAIL: epic_autopilot.model should be claude-opus-5-5, got '$model'"; exit 1; }
 
 floor=$(yq '.epic_autopilot.confidence_floor' "$cfg")
 [ "$floor" = "0.7" ] || { echo "FAIL: epic_autopilot.confidence_floor should be 0.7, got '$floor'"; exit 1; }

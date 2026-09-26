@@ -76,7 +76,7 @@ dispatch_ceiling:
 
 epic_autopilot:
   enabled: false              # kill-switch — ship OFF. env: EPIC_AUTOPILOT_ENABLED overrides
-  model: claude-opus-4-8      # reviewer model. env: EPIC_AUTOPILOT_MODEL overrides
+  model: claude-opus-5-5      # reviewer model. env: EPIC_AUTOPILOT_MODEL overrides
   daily_cap: 5                # max autonomous advances / UTC day. env: EPIC_AUTOPILOT_DAILY_CAP overrides
   confidence_floor: 0.7       # min Opus confidence to ADVANCE. env: EPIC_AUTOPILOT_CONFIDENCE_FLOOR overrides
   hold_ttl_hours: 24          # re-review a cached HOLD after this many hours. env EPIC_AUTOPILOT_HOLD_TTL_HOURS
@@ -116,7 +116,7 @@ main_red_autofix:
   # (like EPIC_AUTOPILOT_ENABLED): the dispatched "Fix main" container reads .archon/.env, NOT this
   # file, so flipping `enabled` here alone does NOT turn the feature on. env MAIN_RED_AUTOFIX_ENABLED
   enabled: false
-  model: claude-opus-4-8      # fix-agent model (container default; env MAIN_RED_AUTOFIX_MODEL)
+  model: claude-opus-5-5      # fix-agent model (container default; env MAIN_RED_AUTOFIX_MODEL)
   max_attempts: 3             # fix→CI cycles per red event (container default; env MAIN_RED_AUTOFIX_MAX_ATTEMPTS)
   throttle_minutes: 15        # min minutes between fixer dispatches (scheduler; env MAIN_RED_AUTOFIX_THROTTLE_MIN)
   ci_wait_minutes: 20         # bounded wait for branch CI (container default; env MAIN_RED_AUTOFIX_CI_WAIT_MINUTES)

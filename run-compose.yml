@@ -45,6 +45,12 @@ services:
       FACTORY_CLONE_DIR: ${FACTORY_CLONE_DIR:-.}
       FACTORY_RUN_PREFIX: ${FACTORY_RUN_PREFIX:-}
       FACTORY_IMAGE: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+      # Model alias pins (#432 model map, 2026-09-26): aliases in commands/*.md and the
+      # workflow resolve to these IDs; bumps are deliberate, not a side effect of a CLI update.
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-5-5}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-claude-haiku-4-5-20251001}
+      ANTHROPIC_DEFAULT_FABLE_MODEL: ${ANTHROPIC_DEFAULT_FABLE_MODEL:-claude-fable-5-1}
     volumes:
       - scheduler_state:/var/lib/dark-factory
     networks:

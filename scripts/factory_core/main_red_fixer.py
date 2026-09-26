@@ -277,7 +277,7 @@ def main_once() -> int:
     clone_dir = os.environ.get("CLONE_DIR", ".")
     cfg = dict(
         max_attempts=int(os.environ.get("MAIN_RED_AUTOFIX_MAX_ATTEMPTS", "3")),
-        model=os.environ.get("MAIN_RED_AUTOFIX_MODEL", "claude-opus-4-8"),
+        model=os.environ.get("MAIN_RED_AUTOFIX_MODEL", "claude-opus-5-5"),
         ci_wait_minutes=int(os.environ.get("MAIN_RED_AUTOFIX_CI_WAIT_MINUTES", "20")),
         agent_timeout=int(os.environ.get("MAIN_RED_AUTOFIX_AGENT_TIMEOUT", "1200")),
         allowed_paths=_main_red_allowed_paths(clone_dir) + ["docker-compose", ".github/", ".env"],

@@ -64,4 +64,4 @@ def test_unparseable_verdict_is_material_never_silent_pass():
 
 def test_inline_opus_pin_count_unchanged():
     text = CMD.read_text(encoding="utf-8")
-    assert text.count("claude-opus-4-8") >= 1
+    assert text.count("claude-opus-5-5") >= 1

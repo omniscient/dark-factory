@@ -68,7 +68,7 @@ def test_run_one_arm_parses_usage_from_output_json(monkeypatch):
 
     monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
 
-    result = sfsc.run_one_arm(prompt="the prompt", gate="conformance", model="claude-opus-4-8")
+    result = sfsc.run_one_arm(prompt="the prompt", gate="conformance", model="claude-opus-5-5")
 
     assert result["verdict"] == "CONFORMS_OR_MINOR"
     assert result["input_tokens"] == 5000
@@ -86,7 +86,7 @@ def test_run_one_arm_records_error_without_raising(monkeypatch):
         }), stderr="")
 
     monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
-    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-4-8")
+    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-5-5")
     assert result["error"] == "Not logged in"
     assert result["verdict"] == "UNPARSEABLE"
 
@@ -96,7 +96,7 @@ def test_run_one_arm_handles_non_json_stdout_without_raising(monkeypatch):
         return subprocess.CompletedProcess(cmd, 1, stdout="not json", stderr="boom")
 
     monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
-    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-4-8")
+    result = sfsc.run_one_arm(prompt="p", gate="conformance", model="claude-opus-5-5")
     assert result["error"] is not None
     assert result["verdict"] == "UNPARSEABLE"
 
@@ -125,7 +125,7 @@ def test_dry_run_prints_plan_without_calling_subprocess(monkeypatch, capsys):
 
     monkeypatch.setattr(sfsc.subprocess, "run", fake_run)
     manifest = {"pairs": [{"issue": 46, "pr": 229, "merge_sha": "abc123", "title": "t"}]}
-    sfsc.run_spotcheck(manifest, dry_run=True, budget_usd=5.00, model="claude-opus-4-8", repo_root=".")
+    sfsc.run_spotcheck(manifest, dry_run=True, budget_usd=5.00, model="claude-opus-5-5", repo_root=".")
     out = capsys.readouterr().out
     assert called["n"] == 0
     assert "#46" in out

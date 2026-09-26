@@ -153,7 +153,7 @@ def build_arg_parser():
     parser.add_argument("--repo", default=None, help="default: `gh repo view` in --repo-root")
     parser.add_argument("--output-dir", default="evals")
     parser.add_argument("--budget-usd", type=float, default=5.00)
-    parser.add_argument("--model", default="claude-opus-4-8")
+    parser.add_argument("--model", default="claude-opus-5-5")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
