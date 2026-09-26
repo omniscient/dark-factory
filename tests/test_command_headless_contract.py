@@ -32,7 +32,7 @@ HEADLESS_CONTRACT_BLOCK = """\
 You are running with no human attached; an ended turn ends the process.
 
 - **Never end your turn on a question or an offer.** There is no one to answer. Decide
-  per the spec/plan, act, and record any reservations in the issue comment or commit
+  per this command's instructions, act, and record any reservations in the issue comment or commit
   message instead.
 - **Persist this phase's artifact before your final turn ends.** Commit (and push, where
   this command says to) any repo file this phase owns; write or post any comment, label or
@@ -83,7 +83,7 @@ def test_every_command_file_carries_the_exact_headless_contract():
     )
 
 
-def test_block_states_the_four_generic_rules_only():
+def test_block_states_generic_rules_and_excludes_claude_md_specifics():
     for rule in (
         "Never end your turn on a question or an offer",
         "Persist this phase's artifact before your final turn ends",

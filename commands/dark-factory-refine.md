@@ -21,13 +21,22 @@ labels, and comments.
 
 ---
 
+## CRITICAL: Skip Guard
+
+If the issue has any of these labels, STOP immediately and exit with code 0 (not an error):
+- `spec-pending-review` — already processed
+- `needs-discussion` — waiting for human input
+- `epic` — needs manual decomposition
+
+---
+
 <!-- headless-contract:begin -->
 ## Headless Execution Contract
 
 You are running with no human attached; an ended turn ends the process.
 
 - **Never end your turn on a question or an offer.** There is no one to answer. Decide
-  per the spec/plan, act, and record any reservations in the issue comment or commit
+  per this command's instructions, act, and record any reservations in the issue comment or commit
   message instead.
 - **Persist this phase's artifact before your final turn ends.** Commit (and push, where
   this command says to) any repo file this phase owns; write or post any comment, label or
@@ -40,13 +49,6 @@ You are running with no human attached; an ended turn ends the process.
 <!-- headless-contract:end -->
 
 ---
-
-## CRITICAL: Skip Guard
-
-If the issue has any of these labels, STOP immediately and exit with code 0 (not an error):
-- `spec-pending-review` — already processed
-- `needs-discussion` — waiting for human input
-- `epic` — needs manual decomposition
 
 ## SCOPE BOUNDARY
 

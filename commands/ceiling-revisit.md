@@ -16,7 +16,7 @@ argument-hint: "ceiling-revisit <issue-number> <since-date> <until-date>"
 You are running with no human attached; an ended turn ends the process.
 
 - **Never end your turn on a question or an offer.** There is no one to answer. Decide
-  per the spec/plan, act, and record any reservations in the issue comment or commit
+  per this command's instructions, act, and record any reservations in the issue comment or commit
   message instead.
 - **Persist this phase's artifact before your final turn ends.** Commit (and push, where
   this command says to) any repo file this phase owns; write or post any comment, label or
