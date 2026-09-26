@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# smoke-gate hook — CHECK ONLY. Exit 0 = origin/main is green, non-zero = red.
+# Runs in the factory image (Ubuntu, Python 3.14, Node 22) with CLONE_DIR set to a fresh
+# clone. Red/green state handling (sentinel, regression ticket) stays factory-side;
+# do not add it here. Without this hook the factory runs MarketHawk's check, which
+# fails on any other layout and halts dispatch.
+set -uo pipefail
+cd "${CLONE_DIR}"
+
+# EDIT: install and test commands for your project.
+pip install --quiet --no-warn-script-location -r requirements.txt pytest
+if ! python -m pytest tests/ -q -p no:cacheprovider; then
+  echo "[smoke-gate hook] tests FAILED — main is red"
+  exit 1
+fi
+echo "[smoke-gate hook] main is green"

@@ -1,0 +1,2 @@
+# Factory hooks run in a Linux container: keep LF endings.
+.factory/hooks/* text eol=lf

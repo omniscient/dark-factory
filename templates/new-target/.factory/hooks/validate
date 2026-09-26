@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# validate hook — post-merge validation in the deconflict flow.
+# Non-zero exit escalates the ticket to Blocked.
+set -uo pipefail
+cd "${CLONE_DIR}"
+
+# EDIT: same commands as smoke-gate (or a faster subset).
+pip install --quiet --no-warn-script-location -r requirements.txt pytest
+python -m pytest tests/ -q -p no:cacheprovider
