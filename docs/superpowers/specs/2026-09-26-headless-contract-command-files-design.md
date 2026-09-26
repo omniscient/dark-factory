@@ -9,8 +9,12 @@
 Dark Factory phase agents run headless — no human is attached, and an ended turn is the
 end of the process. Today the only place this discipline is written down is this repo's
 own `CLAUDE.md` ("You are probably running headless"), and only four of the eight
-`commands/*.md` files (`dark-factory-implement.md`, `dark-factory-validate.md`,
-`dark-factory-plan.md`, `dark-factory-conformance.md`) even read `CLAUDE.md` at all. On
+`commands/*.md` files read `CLAUDE.md` at all: `dark-factory-implement.md` (L37) and
+`dark-factory-validate.md` (L105) directly, `dark-factory-plan.md` (L37-39) and
+`dark-factory-refine.md` (L44-46) through the context-pack fallback. The gate phase
+`dark-factory-conformance.md` never reads it — its only two mentions (L321, L329) are
+doc-exemption path lists — so the phase that owns scope enforcement is one of the
+unprotected ones. On
 the self target that file happens to carry the headless rules, so those four commands are
 protected. On a target repo whose own `CLAUDE.md` doesn't carry them — MarketHawk, before
 its interim fix — a phase orchestrator has no reason to know an ended turn is fatal.
@@ -24,8 +28,9 @@ ended turn as `dag_node_completed` (success), so nothing downstream — not the 
 not the run record — saw a failure. MarketHawk's own `CLAUDE.md` has since been patched
 directly (MarketHawk PR #862, docs-only), but that's a per-target patch that has to be
 independently remembered for every current and future target; nothing here stops the next
-target repo, or a future command that skips reading `CLAUDE.md` altogether (like `refine`
-itself does today), from hitting the same failure mode.
+target repo, or a command that reads no `CLAUDE.md` at all (today:
+`dark-factory-conformance.md`, `dark-factory-code-review.md`,
+`dark-factory-revise-advisory.md`, `ceiling-revisit.md`), from hitting the same failure mode.
 
 This spec covers making the headless rules structurally present in every phase command's
 own text — independent of what any target's `CLAUDE.md` says, and independent of whether
@@ -45,9 +50,15 @@ forward.
   1. Never end your turn on a question or an offer — there is no one to answer. Decide
      per the spec/plan, act, and record any reservations in the issue comment or commit
      message instead.
-  2. Commit and push the phase's artifact before the final turn ends — an ended turn ends
-     the process; uncommitted work is destroyed.
-  3. Turn end is process end: scheduled wakeups do not fire, task-notifications never
+  2. Persist the phase's artifact before the final turn ends — commit (and push where this
+     command says to) any repo file the phase owns, and write or post any comment, label or
+     `$ARTIFACTS_DIR` artifact it owns. An ended turn ends the process; unpersisted work is
+     destroyed. Worded for all 8 phases deliberately: `$ARTIFACTS_DIR` lives outside the clone
+     (`entrypoint.sh:140`), `dark-factory-validate.md` and `dark-factory-code-review.md` commit
+     nothing, and for refine/plan the push belongs to the DAG node rather than the agent
+     (`workflows/archon-dark-factory.yaml:466`, `:529`).
+  3. Turn end is process end: scheduled wakeups do not fire, so the `ScheduleWakeup` tool
+     must not be used (#212 saw a confirmed wakeup die with its node); task-notifications never
      arrive, and pending subagent work is destroyed — and Archon reports an ended turn as
      success regardless of whether the phase's artifact exists.
   4. To wait on a background subagent, poll inside the turn (keep issuing tool calls) or
@@ -107,11 +118,12 @@ You are running with no human attached; an ended turn ends the process.
 - **Never end your turn on a question or an offer.** There is no one to answer. Decide
   per the spec/plan, act, and record any reservations in the issue comment or commit
   message instead.
-- **Commit and push this phase's artifact before your final turn ends.** An ended turn
-  ends the process; uncommitted work is destroyed.
-- **Turn end = process end.** Scheduled wakeups do not fire, task-notifications never
-  arrive, and pending subagent work is destroyed — and an ended turn is reported as
-  success whether or not this phase's artifact exists.
+- **Persist this phase's artifact before your final turn ends.** Commit (and push, where
+  this command says to) any repo file this phase owns; write or post any comment, label or
+  `$ARTIFACTS_DIR` artifact it owns. Work left unpersisted when the turn ends is destroyed.
+- **Turn end = process end.** Scheduled wakeups do not fire (do not use `ScheduleWakeup`),
+  task-notifications never arrive, and pending subagent work is destroyed — and an ended
+  turn is reported as success whether or not this phase's artifact exists.
 - **To wait on a background subagent, poll inside your turn** (keep issuing tool calls)
   or do the work inline — never end the turn to "wait."
 <!-- headless-contract:end -->
@@ -121,9 +133,13 @@ You are running with no human attached; an ended turn ends the process.
 - Defines the exact block text once as a module-level constant (single source of truth;
   no baked file, no runtime dependency — the constant lives in the test itself, the same
   place the block's *presence* is checked).
-- Iterates `sorted(Path("commands").glob("*.md"))` — not `dark-factory-*.md` — so
-  `ceiling-revisit.md` and any future non-`dark-factory-`-prefixed command file are
-  covered, and a new command file with no block at all fails immediately.
+- Iterates `sorted((Path(__file__).resolve().parents[1] / "commands").glob("*.md"))` — the
+  `__file__`-anchored form used by `tests/test_command_issue_context_contract.py:4`, not the
+  cwd-relative `Path("commands")` of `tests/test_command_footer_migration.py:3`, and not
+  `dark-factory-*.md` — so `ceiling-revisit.md` and any future non-`dark-factory-`-prefixed
+  command file are covered, a new command file with no block at all fails immediately, and the
+  glob is asserted non-empty (all 8 files found) so it cannot pass vacuously when pytest runs
+  from another directory.
 - For each file, asserts there is exactly one `<!-- headless-contract:begin -->` /
   `<!-- headless-contract:end -->` pair and that the text between them matches the
   constant byte-for-byte.
@@ -142,6 +158,48 @@ carries. Putting the contract directly in the command text is a smaller, lower-r
 change that reuses the fact — already stated in every command's own "Invocation
 Contract" section — that this pasted text is exactly what reaches the agent's context;
 there's no separate "go read file X" step for an agent to skip.
+
+## Rollout and Residual Gap
+
+The block reaches an agent only through the baked image: `Dockerfile:141` copies `commands/`
+to `/opt/dark-factory/commands`, and `entrypoint.sh:708-713` copies that into the clone as
+`.archon/commands/` **only when the target repo does not already provide one**. Two
+consequences the implementation must carry as operator-facing facts:
+
+- **Not live at merge.** No target picks the block up until the image is rebuilt and published
+  (`.github/workflows/publish.yml`, human-only). Merging this ticket changes no running phase
+  agent, so the closing comment must say so — otherwise the fix is believed active while
+  MarketHawk still runs the previously baked commands.
+- **A target that ships its own `.archon/commands/` opts out silently.** Both current targets
+  are safe today: this repo's `.archon/` holds only `memory/`, MarketHawk's only `config.yaml`
+  and `memory`, so the baked copy wins on both. The mechanism is therefore target-agnostic *for
+  targets that do not fork the command files*, not unconditionally. A future target that forks
+  them gets no headless contract and no warning; that residual gap is accepted here, not
+  solved.
+
+## Acceptance Criteria
+
+1. `python -m pytest tests/ -v` is green, including the new
+   `tests/test_command_headless_contract.py`.
+2. The new test is shown to fail — checked by hand before commit, not assumed — when (a) the
+   block is deleted from any one command file, (b) a single character inside a block is changed,
+   and (c) a ninth command file is added with no block.
+3. The test resolves the command directory from its own location
+   (`Path(__file__).resolve().parents[1] / "commands"`, as
+   `tests/test_command_issue_context_contract.py:4` does, rather than the cwd-relative
+   `Path("commands")` of `tests/test_command_footer_migration.py:3`) and asserts the glob found
+   all 8 files, so an empty glob can never pass vacuously.
+4. `bash smoke_gate.sh` and the workflow-DAG checks still pass — no workflow or config change is
+   part of this ticket.
+5. The implementation diff touches only the 8 `commands/*.md` files and the one new test file:
+   no `workflows/`, `scripts/`, `config/`, `gate_*`, `.factory/adapter.yaml` or `deploy/**`
+   change.
+6. Follow-ups A and B below are filed as separate GitHub issues before this ticket reaches Done
+   (`gh issue create` as the implementing run's last step, or by the operator). Suggested
+   titles: "run record: an ended turn with no phase artifact must not score `produced_ungated`"
+   and "workflow: audit `idle_timeout` against subagent-heavy phases". The Open Questions
+   entries here are not a substitute — this ticket leaves the failure mitigated but still
+   undetectable, and those two tickets are the detection half.
 
 ## Alternatives Considered
 
@@ -183,10 +241,17 @@ there's no separate "go read file X" step for an agent to skip.
   `1.0` — including a run that ended its turn with zero artifact, or one killed by
   `dag_node_completed_via_idle_timeout`. Recommended direction: check for the phase's
   expected artifact (spec/plan file existence) before assigning `produced_ungated`;
-  otherwise classify as `failed`. Needs its own spec given the breaker/scoring
-  sensitivity.
+  otherwise classify as `failed` — while preserving the exemption the DAG already models, where
+  "no artifact + `needs-discussion` label" is a clean abort and only the label-less case is a
+  silent death (`workflows/archon-dark-factory.yaml:479-486` refine-push, `:542-549`
+  plan-push-and-advance). A change that scored every artifact-less completion as failure would
+  make a legitimate needs-discussion halt trip the breaker. Needs its own spec given the
+  breaker/scoring sensitivity.
 - **Follow-up ticket B (recommended, separate, reviewed):** audit the 600000ms
-  `idle_timeout` on refine/plan/implement/conformance DAG nodes — either raise it for
+  `idle_timeout` on every subagent-spawning DAG node — refine (`:406`), plan (`:450`),
+  implement (`:616`), conformance (`:1005`), and also code-review (`:1230`) and
+  revise-advisory (`:1238`), all in `workflows/archon-dark-factory.yaml`; validate is 300000
+  (`:958`) — either raise it for
   subagent-heavy phases, or confirm subagent progress events reset the idle timer so a
   legitimately busy orchestrator waiting on a long architect/reviewer subagent isn't
   killed and reported as success.
