@@ -27,8 +27,8 @@ TARGET/.archon/.env    ──► copied by the scheduler ──► per-ticket ru
 Four things must exist before the first ticket:
 
 1. The repo on GitHub, with a Projects v2 board and the factory's labels (step 2).
-2. Target-side files committed to the default branch: an adapter, a smoke-gate hook
-   and a `CLAUDE.md` section (step 3).
+2. Target-side files committed to the default branch: an adapter and a smoke-gate
+   hook (step 3).
 3. Two env files: one for the scheduler, one for the runs (step 4).
 4. A running scheduler (step 5).
 
@@ -123,18 +123,15 @@ git update-index --chmod=+x .factory/hooks/*
 git ls-files -s .factory/hooks        # expect 100755 on every hook
 ```
 
-### 3d. `CLAUDE.md`: headless rules for phase agents
+### 3d. `CLAUDE.md`: nothing factory-specific required
 
-Phase agents read the target's `CLAUDE.md`. Without the headless rules, an agent may
-end its turn on a question, and that kills the run (tracked in #431). Append the
-scoped section, which your own interactive sessions will ignore:
+Phase agents run headless: no human answers a question, and a turn that ends on one
+kills the run. The factory injects these headless rules into every phase command
+itself (#431). **Do not add a headless section to the target's `CLAUDE.md`.** It would
+duplicate the injected contract, and the two copies would drift apart.
 
-```bash
-cat DF/templates/new-target/CLAUDE.factory-section.md >> TARGET/CLAUDE.md
-```
-
-It is also worth adding one line that tells agents your test command, in the form the
-container can run.
+It is worth adding one line that tells agents your test command, in the form the
+container can run (e.g. which tests to skip because the image has no browser).
 
 ### 3e. Commit and push to the default branch
 
@@ -220,7 +217,24 @@ you need it later. The phases are: smoke-gate, then implement, validate, conform
 and code review. The ticket ends with a draft PR in **In Review**, or in **Blocked**
 with a comment explaining why.
 
-## 7. When a ticket is Blocked
+## 7. Reviewing a factory PR: approve by commenting on the issue
+
+When a ticket reaches **In Review**, review the draft PR, then **reply on the issue**
+(not the PR):
+
+| You comment | The scheduler does |
+|-------------|--------------------|
+| An approval: "looks good", "ship it", "approved", "LGTM", 👍 | dispatches **Close**: merges the PR, moves the ticket to **Done**, and cleans up |
+| A request or question: "rename X", "fix the tests", "why Y?" | dispatches **Continue**: a run addresses the feedback on the same PR |
+
+A classifier reads each new human comment, so plain language works.
+
+**Do not merge the PR yourself in the GitHub UI.** Nothing then moves the ticket: it
+stays **In Review** indefinitely. The board's built-in "Item closed" workflow is off,
+and the factory only closes tickets through its Close run. If you already merged by
+hand, set the ticket's Status to **Done** on the board.
+
+## 8. When a ticket is Blocked
 
 A gate that blocks is working as designed: it posts a "Blocked" comment with its
 findings and adds `needs-discussion`. The run log will still say
@@ -236,7 +250,7 @@ The re-dispatch is classified as a new implementation, and the branch is reset t
 default branch. It is the phase agent that reads your comment, rebases the PR's
 commits and pushes them with a lease. So the comment in step 1 is what keeps your PR.
 
-## 8. Operating notes
+## 9. Operating notes
 
 - **Several instances on one host share the local `:latest` image.** Pulling a new
   image for one instance changes the image the others' next runs use. Before pulling,

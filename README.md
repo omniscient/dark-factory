@@ -80,7 +80,7 @@ git-excluded); when the target does commit one, it wins byte-identically.
 This is the short path for an operator who already has a target repo on GitHub.
 Onboarding a brand-new product? Follow
 [`docs/onboarding-new-target.md`](docs/onboarding-new-target.md) instead. It covers
-the target-side files (adapter, hooks, `CLAUDE.md`) that this section assumes exist,
+the target-side files (adapter, smoke-gate hook) that this section assumes exist,
 and it is written so you can hand it to an AI agent.
 
 ### Prerequisites
