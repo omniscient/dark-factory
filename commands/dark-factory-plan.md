@@ -128,7 +128,7 @@ fi
 
 Spawn an architect subagent using the Agent tool:
 - `description`: "Architect review: validate plan against spec"
-- `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.273 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
+- `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.282 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every re-spawn in the review cycle below too)
 - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/architect_prompt.md`
 
 ### If architect returns "Issues Found":
@@ -190,7 +190,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
     ```
 5. Spawn a conformance reviewer subagent using the Agent tool:
    - `description`: "Conformance review: plan vs spec (cycle N)"
-   - `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.273 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
+   - `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.282 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
    - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
 6. Append the subagent's output to `CONFORMANCE_DIALOGUE`
 6a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately

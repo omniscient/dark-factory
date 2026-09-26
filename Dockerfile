@@ -90,7 +90,7 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
 
 # Claude Code CLI
 # Pinned: Agent-tool alias→model resolution (opus→Opus 5.5 etc.) depends on this CLI version; bumps are deliberate.
-RUN npm install -g @anthropic-ai/claude-code@2.1.273
+RUN npm install -g @anthropic-ai/claude-code@2.1.282
 
 # Archon CLI (from fork — includes workflow cost tracking).
 # Pinned to an immutable commit on feat/workflow-cost-tracking instead of the
