@@ -21,6 +21,26 @@ labels, comments, and PR review fields.
 
 ---
 
+<!-- headless-contract:begin -->
+## Headless Execution Contract
+
+You are running with no human attached; an ended turn ends the process.
+
+- **Never end your turn on a question or an offer.** There is no one to answer. Decide
+  per this command's instructions, act, and record any reservations in the issue comment or commit
+  message instead.
+- **Persist this phase's artifact before your final turn ends.** Commit (and push, where
+  this command says to) any repo file this phase owns; write or post any comment, label or
+  `$ARTIFACTS_DIR` artifact it owns. Work left unpersisted when the turn ends is destroyed.
+- **Turn end = process end.** Scheduled wakeups do not fire (do not use `ScheduleWakeup`),
+  task-notifications never arrive, and pending subagent work is destroyed — and an ended
+  turn is reported as success whether or not this phase's artifact exists.
+- **To wait on a background subagent, poll inside your turn** (keep issuing tool calls)
+  or do the work inline — never end the turn to "wait."
+<!-- headless-contract:end -->
+
+---
+
 ## CRITICAL: Epic Guard
 
 **NEVER implement an epic (issue with the `epic` label) as a monolithic change.** Each sub-issue
@@ -434,7 +454,7 @@ Write a summary of what was implemented to `$ARTIFACTS_DIR/implementation.md`:
 
 Keep a green-path report to the 4 bullets above (files, tests, migrations, decisions) — no restated
 issue text, no process narration ("first I explored...", "then I decided..."), and no questions per
-`CLAUDE.md`'s "never end your turn on a question" rule; this run is headless.
+the Headless Execution Contract above ("never end your turn on a question"); this run is headless.
 
 If anything went sideways, surface it prominently at the **top** of `implementation.md`, before the
 4 standard bullets: entries in `$ARTIFACTS_DIR/out-of-scope.md`, unresolved reservations about the
