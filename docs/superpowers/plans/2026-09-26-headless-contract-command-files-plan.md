@@ -43,6 +43,14 @@ duplication or drift.
     `---` rule ahead of `## Phase 1: LOAD`.
 - **Implement reminder:** `commands/dark-factory-implement.md`'s "Report discipline"
   sentence stops citing `CLAUDE.md` and points at the Headless Execution Contract above.
+- **Prompt cost per phase:** the block is 17 lines / 1,034 bytes (~260 tokens), once per
+  command file, plus 2 lines (a `---` rule) in the 6 Invocation-Contract files. Against
+  the per-scenario budgets in `config/config.yaml` (refine/plan/implement 30000,
+  conformance/code-review 22000) that is ~0.9-1.2%. It is not charged against the enforced
+  budget at all — `scripts/budget_enforce.py` reserves only
+  `claude_md + issue_context + architecture` and `scripts/context_budget.py` has no
+  command-file section — so it consumes unmeasured headroom. Negligible at this size;
+  record it (Task 6.3) so the pattern is not scaled up blindly.
 - **Out of scope (spec):** `CLAUDE.md` (unchanged), `entrypoint.sh`, `workflows/`,
   `scripts/`, `config/`, `gate_*`, `.factory/adapter.yaml`, `deploy/**`,
   `tests/test_command_footer_migration.py`'s glob gap, run-record scoring (follow-up A),
@@ -419,6 +427,12 @@ git commit -m "docs(implement): point the report-discipline reminder at the in-f
 The automated `test_checker_rejects_*` / `test_real_command_dir_fails_*` tests already cover
 these, but AC2 requires seeing the *real* test fail on the *real* tree. Run each block as-is.
 
+**Run this task only after Tasks 2.4 and 3.4 have committed.** Each revert below is
+`git checkout -- <path>`, which restores the file from the index: with the blocks still
+uncommitted it would delete the inserted block instead of undoing the perturbation, and a
+headless run has no second chance at that. If you reach this task with `git status` showing
+the command files as modified, commit first.
+
 - [ ] **Step 4.1 — (a) block deleted from one command file.**
 
 ```bash
@@ -499,13 +513,21 @@ runs the target's own build/typecheck, so its CI-parity form is `bash tests/test
 (`.github/workflows/ci.yml`). Say so in `implementation.md` (Task 6.3) so the conformance
 gate does not read the substitution as a deviation.
 
-- [ ] **Step 5.3 — diff surface.** Use the two-dot form (`origin/main HEAD`), not
-  three-dot, so commits `main` merged independently after this branch forked are not
-  reported as ours; exclude the spec/plan docs the refine phase carried onto the branch.
+- [ ] **Step 5.3 — diff surface.** Use the three-dot form (`origin/main...HEAD`,
+  merge-base semantics) so commits `main` landed independently after this branch forked
+  are not reported as ours; exclude the spec/plan docs the refine phase carried onto the
+  branch. Three-dot is this repo's required form for changed-file-*set* detection
+  (`.archon/memory/codebase-patterns.md:37`, #266 — two-dot set detection is what made
+  `oos_excise.sh` delete `scripts/factory_core/providers/*` on the #251 branch), and it
+  is what `scripts/oos_excise.sh:29` and `commands/dark-factory-validate.md:131` already
+  use. The two-dot entry at `.archon/memory/codebase-patterns.md:16` (#250) is scoped to
+  single-file content-equality checks ("does main already carry this exact content"), not
+  to set detection: two-dot against a `main` that advanced during the run lists *main's*
+  new paths as differences, which reads as a scope violation that this branch never made.
 
 ```bash
 git fetch -q origin main
-git diff --name-only origin/main HEAD -- . ':(exclude)docs/superpowers/'
+git diff --name-only origin/main...HEAD -- . ':(exclude)docs/superpowers/'
 ```
 
 Expected — exactly these 9 paths, nothing else:
@@ -524,7 +546,10 @@ tests/test_command_headless_contract.py
 
 Any other path (in particular `CLAUDE.md`, `entrypoint.sh`, `workflows/`, `scripts/`,
 `config/`, `.factory/`, `deploy/`) is a scope violation: revert it with
-`git checkout origin/main -- <path>` and commit the revert.
+`git checkout origin/main -- <path>`, or, for a path this branch *added* (it does not
+exist on `origin/main`, so the checkout fails), `git rm <path>` — then commit the revert.
+Never `git checkout origin/main -- <path>` a path this branch did not touch: that imports
+main's content onto the branch instead of reverting anything.
 
 ---
 
@@ -611,6 +636,13 @@ anything went sideways" rule) so the operator files it before Done.
     published (human-only `publish.yml`). The closing/PR comment must say so.
   - **Residual gap accepted:** a target that ships its own `.archon/commands/` silently
     opts out (neither current target does).
+  - Prompt cost: +17 lines / ~260 tokens per phase command (~1% of the 22000-30000
+    per-scenario budgets), not charged against `budget_enforce.py`'s reservation.
+  - `commands/` is on the factory-owned critical-diff floor
+    (`scripts/factory_core/adapter_defaults.py:121`), so `diff_rank.py` ranks all 8 files
+    as safety-relevant in review. That is visibility-only: `commands/` is excluded from
+    the hard-blocking migration-seed floor (`_VISIBILITY_ONLY`, same file), so
+    `gate_blast_radius.py` will not mark the PR HUMAN_REQUIRED for these paths.
   - Follow-up issue numbers for A and B (from Step 6.2), or the failure note.
   - Not done, by design: `CLAUDE.md` unchanged; `tests/test_command_footer_migration.py`
     glob gap left as a spillover candidate.
