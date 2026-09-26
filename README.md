@@ -140,7 +140,7 @@ docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml logs 
 ```
 
 `--env-file` is required: without it, compose interpolation never sees
-`FACTORY_INSTANCE` / `PROJECT_DIR` / `IMAGE_TAG`. Container names and the state volume
+`FACTORY_INSTANCE` / `PROJECT_DIR` / `IMAGE_TAG` / `IMAGE_REF`. Container names and the state volume
 then fall back to `dark-factory-*`, and `PROJECT_DIR` falls back to this checkout.
 
 Expected within a few seconds: `providers preflight: OK`, `Provisioned dispatch env
@@ -300,8 +300,10 @@ repo fresh from the default branch.  This means:
 - Hook scripts in `.factory/hooks/` are picked up from the clone; reverting the
   commit reverts the hook.
 - The scheduler itself (`scheduler.sh`) and entrypoint (`entrypoint.sh`) are
-  baked into the image.  Rollback for those requires re-tagging or pinning
-  `IMAGE_TAG` in `instance.env`.
+  baked into the image.  Rollback for those requires pinning the image in
+  `instance.env`: `IMAGE_REF=ghcr.io/omniscient/dark-factory@sha256:<digest>`
+  (digest) or `IMAGE_TAG=<tag>`, then `up -d --force-recreate backlog-scheduler`.
+  The pin covers the scheduler and every run it dispatches.
 
 ### Token budget enforcement rollback (Tier 0 & Tier 1)
 
