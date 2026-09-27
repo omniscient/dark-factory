@@ -311,6 +311,18 @@ class TestExpiryCleanup:
 # ── index.jsonl ─────────────────────────────────────────────────────────────
 
 class TestIndexJsonl:
+    @pytest.fixture(autouse=True)
+    def _no_factory_project_env(self, monkeypatch):
+        """Every test here controls project resolution explicitly.
+
+        Without this, a stray FACTORY_REPO on the CI host — or a git origin
+        picked up because tmp_path happens to sit inside a worktree — would
+        leak into these assertions instead of the deterministic project value
+        each test expects.
+        """
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+
     def test_successful_write_creates_index_next_to_target(self, md_empty):
         run("--target", str(md_empty), "--path-prefix", "backend/app/",
             "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
@@ -564,6 +576,23 @@ class TestProjectResolution:
         result = _write(target)
         assert _project_of(target) == "jobfinder"
         assert secret not in result.stdout + result.stderr
+
+    @requires_git
+    def test_token_in_pathless_origin_url_never_printed(self, tmp_path, monkeypatch):
+        # Malformed/pathless origin (no "/" after the host): naive `[/:]`-splitting
+        # would return "<token>@github.com" as the "name", leaking the token into
+        # stderr and index.jsonl. The token must never appear anywhere in output.
+        secret = "ghp_SECRETTOKEN444"
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", f"https://{secret}@github.com")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+        assert secret not in (target.parent / "index.jsonl").read_text()
+        assert "@" not in _project_of(target)
 
 
 # ── sanitization ────────────────────────────────────────────────────────────

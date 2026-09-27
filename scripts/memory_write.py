@@ -114,6 +114,11 @@ def _git_origin_name(start_dir):
     name = re.split(r"[/:]", url.rstrip("/"))[-1]
     if name.endswith(".git"):
         name = name[: -len(".git")]
+    # Malformed origins with no path (e.g. "https://ghp_x@github.com") leave the
+    # userinfo/token glued to the host in `name`. Strip up to the last '@' so a
+    # token can never end up in stderr or index.jsonl.
+    if "@" in name:
+        name = name.rsplit("@", 1)[-1]
     return name or None
 
 
@@ -181,11 +186,22 @@ def main():
 
     # Create .archon/memory/ on a fresh target (#444). Placed after the empty-text
     # guard so an invalid-input run never creates the directory as a side effect.
-    # OSError also covers FileExistsError when .archon/memory is a file, which
-    # exist_ok=True does not swallow.
-    created = not target.parent.exists()
+    # exist_ok=False + catching FileExistsError (rather than checking .exists() first)
+    # keeps the "created" log line accurate when two writers race to create the
+    # same directory concurrently.
+    created = True
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        if target.parent.is_dir():
+            created = False
+        else:
+            print(
+                f"memory-write: error: cannot create {target.parent}: "
+                f"path exists and is not a directory",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     except OSError as exc:
         print(f"memory-write: error: cannot create {target.parent}: {exc}", file=sys.stderr)
         sys.exit(1)
