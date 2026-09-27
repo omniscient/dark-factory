@@ -132,25 +132,76 @@ grep -q "hook-not-executable $TMP/.factory/hooks/smoke-gate" "$RED_TEXT" \
 grep -q "hook-not-executable $TMP/.factory/hooks/smoke-gate" "$RED_TEXT" \
   || { echo "FAIL: red follow-up comment must name the non-exec hook"; exit 1; }
 [ ! -s "$DEFAULT_CHECKS" ] || { echo "FAIL: built-in default must not run while a non-empty hook file exists"; exit 1; }
-# 9) Negative case A (a missing hook must not become a pass): absent, zero-byte, and
-#    directory smoke-gate "hooks" all still run the built-in default, with no warning.
+# 9) Negative case A (a missing hook must not become a pass), #436: absent, zero-byte,
+#    and directory smoke-gate "hooks" are REFUSED — non-zero rc, the built-in check
+#    never runs, no main-red state or regression ticket, one durable
+#    smoke-gate-hook-missing line each, and no hook-not-executable warning.
+# Clear 8/8b's red state so "nothing written" is observable.
+rm -f "$SCHEDULER_STATE_DIR/main-is-red" "$SCHEDULER_STATE_DIR/main-is-red-issue" \
+      "$SCHEDULER_STATE_DIR/main-red-last-recheck"
+# Keep the refusal's ticket comment + health event offline too (#348): log, never delegate.
+# NOTE: this python3 override persists to the end of the script.
+# shellcheck disable=SC2317
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  if echo "$*" | grep -q "tracker create"; then echo "999"; fi
+  return 0
+}
+CREATES_BEFORE=$(grep -c "python3.*tracker create" "$STUB_LOG" || true)
 WARN_LINES=$(wc -l < "$WARN_LOG")
 rm -f "$TMP/.factory/hooks/smoke-gate"
-run_hook --gate smoke-gate 2> "$TMP/stderr-9a"
+RC=0; run_hook --gate smoke-gate 2> "$TMP/stderr-9a" || RC=$?
+[ "$RC" != "0" ] || { echo "FAIL: absent smoke-gate hook must be refused (non-zero rc)"; exit 1; }
 : > "$TMP/.factory/hooks/smoke-gate"
-run_hook --gate smoke-gate 2> "$TMP/stderr-9b"
+RC=0; run_hook --gate smoke-gate 2> "$TMP/stderr-9b" || RC=$?
+[ "$RC" != "0" ] || { echo "FAIL: zero-byte smoke-gate hook must be refused (non-zero rc)"; exit 1; }
 rm -f "$TMP/.factory/hooks/smoke-gate"; mkdir "$TMP/.factory/hooks/smoke-gate"
-run_hook --gate smoke-gate 2> "$TMP/stderr-9c"
+RC=0; ISSUE_NUM=436 run_hook --gate smoke-gate 2> "$TMP/stderr-9c" || RC=$?
+[ "$RC" != "0" ] || { echo "FAIL: directory smoke-gate hook must be refused (non-zero rc)"; exit 1; }
 rmdir "$TMP/.factory/hooks/smoke-gate"
-[ "$(wc -l < "$DEFAULT_CHECKS")" = "3" ] || { echo "FAIL: absent/empty/dir hook must run the built-in default"; exit 1; }
-if grep -q "hook-not-executable" "$TMP/stderr-9a" "$TMP/stderr-9b" "$TMP/stderr-9c"; then
+# 9d) the smoke-gate arm is --gate-only: without --gate the refusal must STILL be non-zero
+#     (run_hook's non-gate `return 0` would otherwise swallow it and main goes unchecked)
+RC=0; run_hook smoke-gate 2> "$TMP/stderr-9d" || RC=$?
+[ "$RC" != "0" ] || { echo "FAIL: smoke-gate refusal must be non-zero even without --gate"; exit 1; }
+[ ! -s "$DEFAULT_CHECKS" ] || { echo "FAIL: absent/empty/dir hook must never run the built-in check"; exit 1; }
+for F in main-is-red main-is-red-issue main-red-last-recheck; do
+  [ ! -e "$SCHEDULER_STATE_DIR/$F" ] || { echo "FAIL: refusal must not write $F"; exit 1; }
+done
+[ "$(grep -c "python3.*tracker create" "$STUB_LOG" || true)" = "$CREATES_BEFORE" ] \
+  || { echo "FAIL: refusal must not file a regression ticket"; exit 1; }
+for E in 9a 9b 9c 9d; do
+  grep -q "smoke-gate-hook-missing path=$TMP/.factory/hooks/smoke-gate" "$TMP/stderr-$E" \
+    || { echo "FAIL: case $E must emit the smoke-gate-hook-missing message on stderr"; exit 1; }
+done
+if grep -q "hook-not-executable" "$TMP/stderr-9a" "$TMP/stderr-9b" "$TMP/stderr-9c" "$TMP/stderr-9d"; then
   echo "FAIL: absent/empty/dir hook must not emit hook-not-executable"; exit 1
 fi
-[ "$(wc -l < "$WARN_LOG")" = "$WARN_LINES" ] || { echo "FAIL: absent/empty/dir hook must not write $WARN_LOG"; exit 1; }
+[ "$(grep -c "smoke-gate-hook-missing $TMP/.factory/hooks/smoke-gate" "$WARN_LOG")" = "4" ] \
+  || { echo "FAIL: each refusal must append exactly one durable line to $WARN_LOG"; exit 1; }
+[ "$(wc -l < "$WARN_LOG")" = "$((WARN_LINES + 4))" ] || { echo "FAIL: refusal must append only its own lines to $WARN_LOG"; exit 1; }
+[ "$(grep -c "tracker comment --id 436 --marker <!-- df-smoke-hook-missing -->" "$STUB_LOG" || true)" = "1" ] \
+  || { echo "FAIL: only the run with ISSUE_NUM set may post the marker comment"; exit 1; }
+WARN_LINES=$(wc -l < "$WARN_LOG")   # re-baseline for case 10
 # 10) Negative case B (explicit): an executable hook never warns
 printf '#!/bin/sh\nexit 0\n' > "$TMP/.factory/hooks/validate"
 chmod +x "$TMP/.factory/hooks/validate"
 run_hook --gate validate 2> "$TMP/stderr-10"
 if grep -q "hook-not-executable" "$TMP/stderr-10"; then echo "FAIL: executable hook must not warn"; exit 1; fi
 [ "$(wc -l < "$WARN_LOG")" = "$WARN_LINES" ] || { echo "FAIL: executable hook must not write $WARN_LOG"; exit 1; }
+# 11) #436 carve-out: a present-but-non-executable smoke-gate hook is NOT a missing hook —
+#     it still runs via `bash "$hook"` with the #438 hook-not-executable warning.
+MISSING_LINES=$(grep -c "smoke-gate-hook-missing" "$WARN_LOG" || true)
+rm -f "$ARTIFACTS_DIR/smoke-hook-ran"
+printf '#!/usr/bin/env bash\necho ran > "$ARTIFACTS_DIR/smoke-hook-ran"\nexit 0\n' > "$TMP/.factory/hooks/smoke-gate"
+chmod -x "$TMP/.factory/hooks/smoke-gate"
+run_hook --gate smoke-gate 2> "$TMP/stderr-11"
+[ -f "$ARTIFACTS_DIR/smoke-hook-ran" ] || { echo "FAIL: non-exec smoke-gate hook body must still run via bash"; exit 1; }
+grep -q "hook-not-executable path=$TMP/.factory/hooks/smoke-gate" "$TMP/stderr-11" \
+  || { echo "FAIL: non-exec smoke-gate hook must keep the hook-not-executable warning"; exit 1; }
+if grep -q "smoke-gate-hook-missing" "$TMP/stderr-11"; then
+  echo "FAIL: non-exec smoke-gate hook must not be refused as missing"; exit 1
+fi
+[ "$(grep -c "smoke-gate-hook-missing" "$WARN_LOG" || true)" = "$MISSING_LINES" ] \
+  || { echo "FAIL: non-exec smoke-gate hook must not write a smoke-gate-hook-missing line"; exit 1; }
+[ ! -s "$DEFAULT_CHECKS" ] || { echo "FAIL: non-exec smoke-gate hook must not run the built-in check"; exit 1; }
 echo PASS
