@@ -166,6 +166,10 @@ _smoke_on_green() {
 # .factory/hooks/smoke-gate PRESENT (absent, a directory, or zero-byte). A missing hook
 # is a target misconfiguration, not a red main: this never writes the main-red state
 # files, never calls _smoke_on_red/_smoke_on_green, and files no regression ticket.
+# NOTE: this also means a PRE-EXISTING main-is-red sentinel (e.g. latched by the
+# pre-#436 MarketHawk-parity default on a hook-less target) is left untouched — this
+# function never clears it, so recheck dispatch keeps refusing until an operator
+# clears the sentinel by hand after adding the hook. See the refusal text below.
 # Signals: stderr; one durable line in ${SCHEDULER_STATE_DIR}/hook-warnings.log
 # (dispatch is `run -d --rm`, so stderr dies with the container); a marker comment on
 # the ticket when ISSUE_NUM is set; a health event LAST (guarded, never fatal).
@@ -176,7 +180,8 @@ _smoke_hook_missing() {
   local hook="${CLONE_DIR:-}/.factory/hooks/smoke-gate"
   {
     echo "ERROR: [smoke_gate] smoke-gate-hook-missing path=${hook} — the target declares no smoke-gate hook; refusing this run."
-    echo "[smoke_gate] main was NOT checked and has NOT been marked red (no main-is-red sentinel, no regression ticket)."
+    echo "[smoke_gate] main was NOT checked and has NOT been marked red by this refusal (no new main-is-red sentinel, no new regression ticket)."
+    echo "[smoke_gate] NOTE: if a main-is-red sentinel already exists (e.g. latched by the pre-#436 MarketHawk-parity default), this refusal does NOT clear it — recheck dispatch keeps refusing without touching that state. Once the hook is added, clear ${SMOKE_STATE_DIR:-<state-dir>}/main-is-red (and main-is-red-issue) by hand, or close the regression ticket, to resume dispatch."
     echo "[smoke_gate] Fix: commit a non-empty, executable .factory/hooks/smoke-gate to the target repo. Start from templates/new-target/.factory/hooks/smoke-gate; see docs/onboarding-new-target.md step 3b."
   } >&2
   # Durable trace — #438's guards verbatim: only if the state dir exists, never mkdir
@@ -199,7 +204,9 @@ ${SMOKE_HOOK_MISSING_MARKER}
 
 This run was refused before any work started: the target repo has no \`.factory/hooks/smoke-gate\` hook (absent, a directory, or an empty file), so the factory cannot check whether \`main\` is healthy.
 
-\`main\` was **not checked** and has **not** been marked red — no \`main-is-red\` sentinel, no regression ticket, and other tickets are not paused.
+This refusal itself does **not** mark \`main\` red — no new \`main-is-red\` sentinel, no new regression ticket, and other tickets are not paused by it.
+
+**If a \`main-is-red\` sentinel already exists** (for example, latched by the pre-#436 MarketHawk-parity default on a hook-less target), this refusal does **not** clear it: recheck dispatch will keep refusing without touching that state, so dispatch stays halted until the sentinel is cleared by hand. Once the hook below is in place, clear the sentinel (\`main-is-red\` / \`main-is-red-issue\` in the factory state dir) or close the regression ticket to resume dispatch.
 
 **To fix:** commit a non-empty, executable \`.factory/hooks/smoke-gate\` to the target repo (exit 0 = main is green). Start from the factory's \`templates/new-target/.factory/hooks/smoke-gate\` and follow \`docs/onboarding-new-target.md\` step 3b, then re-dispatch this ticket (a Blocked ticket: move it back to Ready).
 EOF

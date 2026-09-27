@@ -140,7 +140,8 @@ grep -q "hook-not-executable $TMP/.factory/hooks/smoke-gate" "$RED_TEXT" \
 rm -f "$SCHEDULER_STATE_DIR/main-is-red" "$SCHEDULER_STATE_DIR/main-is-red-issue" \
       "$SCHEDULER_STATE_DIR/main-red-last-recheck"
 # Keep the refusal's ticket comment + health event offline too (#348): log, never delegate.
-# NOTE: this python3 override persists to the end of the script.
+# NOTE: this python3 override is scoped to cases 9a-9d only; `unset -f python3` below
+# (after the case-9 assertions) restores the real python3 for any later case.
 # shellcheck disable=SC2317
 python3() {
   echo "python3 $*" >> "$STUB_LOG"
@@ -181,6 +182,10 @@ fi
 [ "$(wc -l < "$WARN_LOG")" = "$((WARN_LINES + 4))" ] || { echo "FAIL: refusal must append only its own lines to $WARN_LOG"; exit 1; }
 [ "$(grep -c "tracker comment --id 436 --marker <!-- df-smoke-hook-missing -->" "$STUB_LOG" || true)" = "1" ] \
   || { echo "FAIL: only the run with ISSUE_NUM set may post the marker comment"; exit 1; }
+# Case 9's python3 override (defined above) is scoped to cases 9a-9d; drop it now so
+# any later case that needs python3 gets the real binary instead of silently inheriting
+# this stub (neither case 10 nor 11 calls python3, but a future case might).
+unset -f python3
 WARN_LINES=$(wc -l < "$WARN_LOG")   # re-baseline for case 10
 # 10) Negative case B (explicit): an executable hook never warns
 printf '#!/bin/sh\nexit 0\n' > "$TMP/.factory/hooks/validate"

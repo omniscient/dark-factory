@@ -7,8 +7,7 @@
 # 100644) still runs — via `bash "$hook"`, shebang ignored — with a loud
 # `hook-not-executable` warning on stderr plus a durable line in
 # ${SCHEDULER_STATE_DIR}/hook-warnings.log (#438).
-# Falls back to built-in defaults when no target hook is present (absent, a
-# directory, or a zero-byte placeholder):
+# When no target hook is present (absent, a directory, or a zero-byte placeholder):
 #   smoke-gate  →  _smoke_hook_missing: refuse the run, non-zero even without --gate (#436)
 #   validate    →  no-op exit 0 (P2 moves MarketHawk's real validate into its adapter)
 #   preview-up  →  no-op exit 0
