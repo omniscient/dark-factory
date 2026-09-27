@@ -96,6 +96,10 @@ assert_file_absent() {
   if [ ! -f "$2" ]; then echo "  PASS: $1"; PASSED=$((PASSED+1))
   else echo "  FAIL: $1 — file unexpectedly exists: $2" >&2; FAILED=$((FAILED+1)); fi
 }
+assert_file_contains() {
+  if grep -qF -- "$2" "$3" 2>/dev/null; then echo "  PASS: $1"; PASSED=$((PASSED+1))
+  else echo "  FAIL: $1 — '$2' not found in $3" >&2; FAILED=$((FAILED+1)); fi
+}
 
 echo "=== Smoke Gate Regression Test (#332) ==="
 
@@ -222,6 +226,70 @@ assert_eq "adopted canonical ticket NOT closed" "0" "$CANON_CLOSED"
 assert_eq "state file re-seeded with adopted ticket" "264" "$(cat "${SMOKE_STATE_DIR}/main-is-red-issue" 2>/dev/null)"
 
 GH_LIST_OUTPUT=""; export GH_LIST_OUTPUT
+
+# ---- Phase 7: No hook present (#436) — refuse the run, never latch main-red ----
+echo ""
+echo "--- Phase 7: _smoke_hook_missing refuses without touching main-red state (#436) ---"
+TSC_FAIL=0; PY_FAIL=0; export TSC_FAIL PY_FAIL
+> "$STUB_LOG"
+rm -f "${SMOKE_STATE_DIR}/main-is-red" "${SMOKE_STATE_DIR}/main-is-red-issue" \
+      "${SMOKE_STATE_DIR}/main-red-last-recheck" "${SMOKE_STATE_DIR}/hook-warnings.log"
+# Capture the ticket comment body: _smoke_hook_missing deletes its --body-file after
+# posting, so the stub copies it out. NOTE: this python3 override persists to the end.
+MISSING_BODY=$(mktemp /tmp/smoke-missing-body-XXXXXX)
+MISSING_ERR=$(mktemp /tmp/smoke-missing-err-XXXXXX)
+# shellcheck disable=SC2317
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  local prev="" a
+  for a in "$@"; do
+    if [ "$prev" = "--body-file" ]; then cat "$a" >> "$MISSING_BODY"; fi
+    prev="$a"
+  done
+  if echo "$*" | grep -q "tracker create"; then echo "999"; fi
+  return 0
+}
+# $( ) is a subshell: an `exit` inside the function would skip the echo, so
+# "returned:1" proves it RETURNS non-zero (entrypoint.sh's ERR trap never fires on exit).
+MISSING_OUT=$( { ISSUE_NUM=436 _smoke_hook_missing 2> "$MISSING_ERR"; echo "returned:$?"; } )
+assert_eq "no-hook path returns 1 (return, never exit)" "returned:1" "$(printf '%s\n' "$MISSING_OUT" | tail -1)"
+assert_file_absent "no main-is-red sentinel on missing hook" "${SMOKE_STATE_DIR}/main-is-red"
+assert_file_absent "no main-is-red-issue file on missing hook" "${SMOKE_STATE_DIR}/main-is-red-issue"
+assert_file_absent "no recheck throttle stamp on missing hook" "${SMOKE_STATE_DIR}/main-red-last-recheck"
+assert_eq "no regression ticket created on missing hook" "0" "$(grep -c "tracker create" "$STUB_LOG" 2>/dev/null || true)"
+assert_eq "no gh issue calls on missing hook" "0" "$(grep -c "^gh issue" "$STUB_LOG" 2>/dev/null || true)"
+assert_eq "no per-ticket retry/block/board calls from the hook itself" "0" \
+  "$(grep -cE "increment_retry|trip_to_blocked|set_board_status" "$STUB_LOG" 2>/dev/null || true)"
+for NEEDLE in "$CLONE_DIR/.factory/hooks/smoke-gate" "templates/new-target/.factory/hooks/smoke-gate" \
+              "docs/onboarding-new-target.md step 3b" "NOT checked" "NOT been marked red"; do
+  assert_file_contains "stderr names: $NEEDLE" "$NEEDLE" "$MISSING_ERR"
+done
+assert_eq "one durable hook-warnings.log line" "1" \
+  "$(grep -c "smoke-gate-hook-missing $CLONE_DIR/.factory/hooks/smoke-gate issue=436" "${SMOKE_STATE_DIR}/hook-warnings.log" 2>/dev/null || true)"
+assert_eq "marker comment posted once on the ticket" "1" \
+  "$(grep -cF "tracker comment --id 436 --marker <!-- df-smoke-hook-missing -->" "$STUB_LOG" 2>/dev/null || true)"
+for NEEDLE in "<!-- df-smoke-hook-missing -->" ".factory/hooks/smoke-gate" \
+              "templates/new-target/.factory/hooks/smoke-gate" "docs/onboarding-new-target.md" "step 3b"; do
+  assert_file_contains "comment body names: $NEEDLE" "$NEEDLE" "$MISSING_BODY"
+done
+assert_eq "health event emitted once" "1" \
+  "$(grep -c "run-record health-event .*--event factory.smoke_gate.hook_missing" "$STUB_LOG" 2>/dev/null || true)"
+assert_eq "health event is the LAST external call" "1" \
+  "$(tail -1 "$STUB_LOG" | grep -c "factory.smoke_gate.hook_missing" || true)"
+
+# No ticket context (recheck): log + health event only, no comment.
+> "$STUB_LOG"
+( unset ISSUE_NUM; _smoke_hook_missing ) 2>/dev/null
+assert_eq "no comment without ISSUE_NUM" "0" "$(grep -c "tracker comment" "$STUB_LOG" 2>/dev/null || true)"
+assert_eq "health event still emitted without ISSUE_NUM" "1" "$(grep -c "factory.smoke_gate.hook_missing" "$STUB_LOG" 2>/dev/null || true)"
+
+# Absent state dir: never mkdir it (CI asserts /var/lib/dark-factory stays empty), still refuse.
+NO_STATE="${SMOKE_STATE_DIR}/does-not-exist"
+NS_RC=0
+( SCHEDULER_STATE_DIR="$NO_STATE"; _smoke_hook_missing ) 2>/dev/null || NS_RC=$?
+assert_eq "absent state dir: still returns 1" "1" "$NS_RC"
+assert_eq "absent state dir: never created" "no" "$([ -e "$NO_STATE" ] && echo yes || echo no)"
+rm -f "$MISSING_BODY" "$MISSING_ERR"
 
 # ---- Summary ----
 echo ""
