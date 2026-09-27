@@ -18,7 +18,9 @@ Exit 1: markdown I/O error. index.jsonl failures do NOT set exit 1.
 import argparse
 import calendar
 import json
+import os
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -90,9 +92,61 @@ def _parse_args():
     return p.parse_args()
 
 
-def _write_index(index_path, args, agent_id, scope, today_str, expires_str):
+def _git_origin_name(start_dir):
+    """Bare repo name from origin, or None. Never raises; never echoes the URL.
+
+    In run containers origin embeds the GitHub token (entrypoint.sh clones from
+    https://${GH_TOKEN}@github.com/...), so the URL must never leave this function.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(start_dir), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    url = result.stdout.strip()
+    if not url:
+        return None
+    # Split on ':' too, so scp-style remotes with no path slash still resolve.
+    name = re.split(r"[/:]", url.rstrip("/"))[-1]
+    if name.endswith(".git"):
+        name = name[: -len(".git")]
+    return name or None
+
+
+def _resolve_project(start_dir):
+    """index.jsonl project: FACTORY_REPO -> FACTORY_PRODUCT_NAME -> git origin -> "unknown".
+
+    Every outcome returns a string; unresolved or mismatched values warn on stderr
+    (one line) instead of failing the write — the field is provenance only.
+    """
+    env_name = (os.environ.get("FACTORY_REPO", "").strip()
+                or os.environ.get("FACTORY_PRODUCT_NAME", "").strip())
+    git_name = _git_origin_name(start_dir)
+    if env_name:
+        if git_name and git_name.lower() != env_name.lower():
+            print(
+                f"memory-write: WARNING: project '{env_name}' does not match git origin "
+                f"'{git_name}' (FACTORY_REPO defaulted?)",
+                file=sys.stderr,
+            )
+        return env_name
+    if git_name:
+        return git_name
+    print(
+        "memory-write: WARNING: project unresolved (FACTORY_REPO/FACTORY_PRODUCT_NAME "
+        "unset, no git origin) - writing project:unknown",
+        file=sys.stderr,
+    )
+    return "unknown"
+
+
+def _write_index(index_path, args, agent_id, scope, today_str, expires_str, project):
     record = {
-        "project": "markethawk",
+        "project": project,
         "type": "avoidance",
         "status": "active",
         "source": args.source,
@@ -229,7 +283,10 @@ def main():
 
     # Step 6: Best-effort index.jsonl write (skip when markdown was a no-op)
     if not skip_index:
-        _write_index(target.parent / "index.jsonl", args, agent_id, scope, today_str, expires_str)
+        project = _resolve_project(target.parent)
+        _write_index(
+            target.parent / "index.jsonl", args, agent_id, scope, today_str, expires_str, project
+        )
 
     sys.exit(0)
 
