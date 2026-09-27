@@ -27,7 +27,7 @@ lines 16-17), Markdown docs.
 ## Precondition: branch must contain #454
 
 The spec's line references (`scripts/hooks.sh:31` `[ -f ] && [ -s ]`, `hooks.sh:67`/`:71`,
-`smoke_gate.sh:161-164`, `README.md:232`, `docs/onboarding-new-target.md:87-90`/`:121-122`,
+`smoke_gate.sh:161-164`, `README.md:232`, `docs/onboarding-new-target.md:87-90`/`:120-121`,
 `tests/test_hooks.sh` cases 6-10) all describe `origin/main` at `6672bd5` (PR #454, #438).
 This refine branch forked at `dba2b0c`, *before* #454. The implementation branch
 (`feat/issue-436-*`, forked from `main`) must contain it:
@@ -51,11 +51,11 @@ bash tests/test_smoke_gate.sh 2>/dev/null | tail -1   # → Results: 27 passed, 
 | File | Change | Why |
 |---|---|---|
 | `smoke_gate.sh` | Add `SMOKE_CORE_CLI` + `SMOKE_HOOK_MISSING_MARKER` vars; add `_smoke_hook_missing()`; rewrite the stale doc block above `_default_smoke_gate` (the "Parity invariant: MarketHawk needs zero hooks" sentence). `_smoke_check_main`, `_default_smoke_gate`'s body, `run_smoke_gate`, `_smoke_on_red`, `_smoke_on_green` unchanged. | Req 2-4, Architecture |
-| `scripts/hooks.sh` | No-hook `smoke-gate` arm → `_smoke_hook_missing "$@" \|\| rc=$?; return "$rc"` plus the `--gate`-only comment; header comment lines 12 and 20 updated to match | Architecture "entire behavioral pivot"; test_hooks bullet 4 |
+| `scripts/hooks.sh` | No-hook `smoke-gate` arm → `_smoke_hook_missing "$@" \|\| rc=$?; return "$rc"` plus the `--gate`-only comment; header comment lines 2, 10-11, 12 and 20 updated to match | Architecture "entire behavioral pivot"; test_hooks bullet 4 |
 | `tests/test_smoke_gate.sh` | New `assert_file_contains` helper; new Phase 7 exercising `_smoke_hook_missing` directly | Tests bullet 1 |
 | `tests/test_hooks.sh` | Re-author case 9 (refusal instead of `DEFAULT_CHECKS == 3`), add 9d (no `--gate`), re-baseline `WARN_LINES` for case 10, add case 11 (non-exec carve-out). Cases 1-8 and 8b byte-for-byte unchanged. | Tests bullet 2 |
-| `README.md` | `Hooks` table smoke-gate row (`:232`); drop the "...or the built-in default" clause in the "smoke-gate is check-only" paragraph (`:253-255`) because it becomes false | Architecture doc updates |
-| `docs/onboarding-new-target.md` | Step 3b paragraph (`:87-90`); step 3c sentence (`:121-122`) | Architecture doc updates |
+| `README.md` | Product-agnostic claim (`:26-27`); `Hooks` table smoke-gate row (`:232`); drop the "...or the built-in default" clause in the "smoke-gate is check-only" paragraph (`:253-255`) because it becomes false | Architecture doc updates |
+| `docs/onboarding-new-target.md` | Step 3b paragraph (`:87-90`); step 3c sentence (`:120-121`) | Architecture doc updates |
 
 **Spec reconciliation (state dir):** Requirement 2 says the no-hook path "must not write
 to `SMOKE_STATE_DIR`". Requirement 4 requires a durable line in
@@ -258,7 +258,9 @@ EOF
 # MarketHawk-parity check (tsc + python import) wrapped in the red/green state
 # machinery. No longer the no-hook fallback: since #436, hooks.sh run_hook refuses a
 # target with no smoke-gate hook (_smoke_hook_missing above) instead of running this.
-# Kept for direct callers (run_smoke_gate, tests/test_smoke_gate.sh).
+# Kept for direct callers: run_smoke_gate, tests/test_smoke_gate.sh, and
+# scripts/factory_core/main_red_fixer.py:173-177, which sources this file and calls
+# _smoke_check_main directly so diagnosis cannot drift from the gate.
 # Returns 0 on green (proceed); exits 0 on red (clean halt, no per-ticket failure).
 ```
 
@@ -325,7 +327,9 @@ fi
 rm -f "$SCHEDULER_STATE_DIR/main-is-red" "$SCHEDULER_STATE_DIR/main-is-red-issue" \
       "$SCHEDULER_STATE_DIR/main-red-last-recheck"
 # Keep the refusal's ticket comment + health event offline too (#348): log, never delegate.
-# NOTE: this python3 override persists to the end of the script.
+# NOTE: this python3 override persists to the end of the script and, unlike the stub
+# above, does not fall through to real `python` — any case added below must not depend
+# on python3 actually running.
 # shellcheck disable=SC2317
 python3() {
   echo "python3 $*" >> "$STUB_LOG"
@@ -428,8 +432,38 @@ no-hook arm still calls `_default_smoke_gate`, and the stubbed check returns gre
   form the non-zero status surfaces only as `run_hook`'s own return value at the
   `entrypoint.sh:791` call site, where the top-level ERR trap fires.
 
-- [ ] **Step 5: Update the two header comments in the same file.** In `scripts/hooks.sh`,
-  replace line 12:
+- [ ] **Step 5: Update the four header comments in the same file.** All four are
+  whole-line replacements. In `scripts/hooks.sh`, replace line 2 — both of its clauses
+  become false for the smoke-gate arm, which no longer has a built-in default and now
+  propagates its exit code even without `--gate`:
+
+```bash
+# run_hook [--gate] <name> [args…] — target hook > built-in default. Gate = propagate exit code.
+```
+
+  with:
+
+```bash
+# run_hook [--gate] <name> [args…] — target hook > built-in default; --gate propagates the
+# exit code. Exception: the smoke-gate arm with no hook present always propagates (#436).
+```
+
+  Then replace lines 10-11 — this "falls back to built-in defaults" heading introduces
+  the `smoke-gate` entry directly below it, and contradicts it once that entry becomes a
+  refusal:
+
+```bash
+# Falls back to built-in defaults when no target hook is present (absent, a
+# directory, or a zero-byte placeholder):
+```
+
+  with:
+
+```bash
+# When no target hook is present (absent, a directory, or a zero-byte placeholder):
+```
+
+  Then replace line 12:
 
 ```bash
 #   smoke-gate  →  _default_smoke_gate (MarketHawk tsc + backend-import checks)
@@ -462,9 +496,9 @@ bash tests/test_smoke_gate.sh 2>/dev/null | tail -1
 git diff HEAD -- scripts/hooks.sh | grep -c '^[-+][^-+]'
 ```
 
-Expected: `PASS`, `rc=0`, `Results: 52 passed, 0 failed`, then `10`. The last count covers
-3 removed and 7 added lines in `scripts/hooks.sh`. Nothing outside lines 12, 20 and 67
-changed.
+Expected: `PASS`, `rc=0`, `Results: 52 passed, 0 failed`, then `16`. The last count covers
+6 removed and 10 added lines in `scripts/hooks.sh`. Nothing outside lines 2, 10-11, 12, 20
+and 67 changed.
 
 - [ ] **Step 7: Commit.**
 
@@ -507,6 +541,24 @@ with exit 0 — stays factory-side.  This means you never need to replicate
 sentinel or ticket logic in your hook.
 ```
 
+- [ ] **Step 2b: README product-agnostic claim** (post-#454 lines 26-27). The sentence
+  still promises a MarketHawk built-in default for an absent hook, which Task 2 removes for
+  `smoke-gate`. Whole-line replacement of both lines, moving the link onto its own line so
+  nothing mid-line is disturbed. Replace:
+
+```markdown
+When they are absent the built-in defaults are MarketHawk's, so a new product
+must supply its own — see [`docs/onboarding-new-target.md`](docs/onboarding-new-target.md)
+```
+
+  with:
+
+```markdown
+When the adapter is absent the built-in defaults are MarketHawk's, so a new product
+must supply its own; a missing `smoke-gate` hook refuses the run outright (#436) — see
+[`docs/onboarding-new-target.md`](docs/onboarding-new-target.md)
+```
+
 - [ ] **Step 3: Onboarding step 3b** (`docs/onboarding-new-target.md`, post-#454 lines
   87-90). This is the section the new message points operators to. Replace:
 
@@ -528,7 +580,7 @@ run also moves it to **Blocked**), and a `smoke-gate-hook-missing` line lands in
 paused.
 ```
 
-- [ ] **Step 4: Onboarding step 3c** (post-#454 lines 121-122). Replace:
+- [ ] **Step 4: Onboarding step 3c** (post-#454 lines 120-121). Replace:
 
 ```markdown
 An empty hook file is treated
@@ -542,10 +594,15 @@ An empty hook file is treated
 as absent, so the run is refused (see 3b).
 ```
 
+  **Mid-line replacement — the only one in this plan.** The replaced text ends mid-line:
+  on line 121 the words ` Set the bit anyway. On Windows, ` and the `git add` code span that
+  follows them sit on the same line as `runs.` and must be preserved. Apply this one as a
+  substring replacement; matching it as whole lines finds nothing.
+
 - [ ] **Step 5: Verify no stale claims remain in the edited surfaces.**
 
 ```bash
-grep -nE "MarketHawk needs zero hooks|Built-in default: tsc|it runs MarketHawk's check|so the built-in default runs|or the built-in default" \
+grep -nE "MarketHawk needs zero hooks|Built-in default: tsc|it runs MarketHawk's check|so the built-in default runs|or the built-in default|Gate = propagate exit code" \
   README.md docs/onboarding-new-target.md smoke_gate.sh scripts/hooks.sh; echo "rc=$?"
 grep -c "templates/new-target/.factory/hooks/smoke-gate" README.md
 ```
@@ -586,12 +643,17 @@ names but none of the strings this plan changes. If `pytest` is not installed in
 container, record that in the commit or PR body instead of skipping silently.
 
 - [ ] **Step 3: Other shell tests that read `smoke_gate.sh`/`entrypoint.sh`.** Compare
-  against the pre-change baseline, not an absolute result. In the factory container,
-  `tests/test_identity.sh` and `tests/test_entrypoint_fix_main.sh` already fail on
-  unmodified `main` for environmental reasons, which were observed while this plan was drafted:
+  against the pre-change baseline, not an absolute result. Measured in the factory container
+  on a clean extract of `6672bd5`: `tests/test_identity.sh` **passes** before and after
+  (rc 0 both ways); `tests/test_entrypoint_fix_main.sh` is **not listed in `ci.yml`** and
+  already fails on unmodified `main` (rc 1) for environmental reasons. Compare each result
+  to its own baseline, never to 0:
 
 ```bash
-BASE=$(mktemp -d) && git archive origin/main | tar -x -C "$BASE"
+# The clone is a bind mount owned by another uid; without this git refuses to read it.
+git config --global --add safe.directory "$(pwd)"
+REF=6672bd5; git rev-parse --verify origin/main >/dev/null 2>&1 && REF=origin/main
+BASE=$(mktemp -d) && git archive "$REF" | tar -x -C "$BASE"
 for t in tests/test_identity.sh tests/test_entrypoint_fix_main.sh; do
   bash "$t" >/dev/null 2>&1; echo "$t now=$?"
   (cd "$BASE" && bash "$t" >/dev/null 2>&1; echo "$t baseline=$?")
@@ -599,7 +661,10 @@ done
 rm -rf "$BASE"
 ```
 
-Expected: `now` equals `baseline` for each test.
+Expected: `now` equals `baseline` for each test — `test_identity.sh` `0`/`0` and
+`test_entrypoint_fix_main.sh` `1`/`1`. Without the `safe.directory` line `git archive` dies
+with `fatal: detected dubious ownership`, `tar` then fails, and every `baseline` comes back
+`127`, which looks like a regression but is not one.
 
 - [ ] **Step 4: DAG checks** (CI's `dag-check` job; this change touches no workflow, so they
   must be unchanged):

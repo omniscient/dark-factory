@@ -37,7 +37,7 @@ dialogue in the pipeline comment); the resolutions below are load-bearing.
    present-but-non-executable hook is explicitly **unaffected**: it keeps #438/#454's
    `bash "$hook"` + `hook-not-executable` warning path (`scripts/hooks.sh:36-48`), and
    the implementation must not divert it into the new path. Both
-   `scripts/hooks.sh:10-11` and `docs/onboarding-new-target.md:121-122` state the
+   `scripts/hooks.sh:10-11` and `docs/onboarding-new-target.md:120-121` state the
    post-#454 rule: the built-in default runs only for an absent, directory or
    zero-byte hook.
    No "does this look like MarketHawk" layout heuristic (e.g. sniffing for
@@ -167,7 +167,7 @@ dialogue in the pipeline comment); the resolutions below are load-bearing.
   - `docs/onboarding-new-target.md:87-90` — "**Without this hook it runs MarketHawk's
     check** … latches `main-is-red`, files a regression ticket, and halts all dispatch
     (tracked in #436)".
-  - `docs/onboarding-new-target.md:121-122` — "An empty hook file is treated as
+  - `docs/onboarding-new-target.md:120-121` — "An empty hook file is treated as
     absent, so the built-in default runs."
 - **Out of scope: `templates/new-target/.factory/hooks/smoke-gate`.** Its comment
   (lines 6-7, "Without this hook the factory runs MarketHawk's check…") is stale too,
