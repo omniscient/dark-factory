@@ -637,6 +637,17 @@ FACTORY_REPO=markethawk python3 scripts/memory_write.py \
 
 **Files:** none
 
+- [ ] **Step 5.0: Bring the branch level with `origin/main`.** `origin/main` moved during
+  refinement (#454 landed at `6672bd5` while this branch still forks from `dba2b0c`), so the
+  two-dot scope check in Step 5.2 is only meaningful after this merge. Without it the check
+  reports nine extra files and ~1,300 deletions that are #454's work, not a regression — do
+  NOT "clean them up".
+
+```bash
+git fetch origin && git merge --no-edit origin/main
+PYTHONPATH=scripts python -m pytest tests/ -q   # must still be green after the merge
+```
+
 - [ ] **Step 5.1: Run the full suite, the way CI does.**
 
 ```bash
@@ -647,7 +658,8 @@ PYTHONPATH=scripts python -m pytest tests/ -v
   and `test_memory_retrieve.py` still assert `"markethawk"` for their own out-of-scope
   hardcodes and must stay green untouched.
 
-- [ ] **Step 5.2: Scope check.** Use the two-dot form (see the memory lesson from #250):
+- [ ] **Step 5.2: Scope check.** Use the two-dot form (see the memory lesson from #250);
+  it is correct only after Step 5.0 has brought the branch level with `origin/main`:
 
 ```bash
 git diff origin/main HEAD --stat -- . ':!docs/superpowers/'
