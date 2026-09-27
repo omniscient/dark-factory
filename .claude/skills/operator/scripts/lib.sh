@@ -11,9 +11,23 @@ export MSYS_NO_PATHCONV=1
 
 : "${DF_REPO:=omniscient/dark-factory}"
 : "${DF_PROJECT_OWNER:=omniscient}"
-: "${DF_PROJECT_NUM:=2}"
-: "${DF_SCHEDULER:=dark-factory-self-scheduler}"
-: "${DF_RUN_PREFIX:=dark-factory-self-dark-factory-run-}"
+# Instance defaults derive from DF_REPO so setting only DF_REPO selects the whole instance
+# (2026-09-27: DF_REPO=omniscient/markethawk alone showed MarketHawk's board next to the
+# self scheduler's poll lines). Explicit DF_PROJECT_NUM/DF_SCHEDULER/DF_RUN_PREFIX still win.
+case "$DF_REPO" in
+  omniscient/markethawk)
+    : "${DF_PROJECT_NUM:=1}"
+    : "${DF_SCHEDULER:=dark-factory-scheduler}"
+    : "${DF_RUN_PREFIX:=dark-factory-dark-factory-run-}" ;;
+  omniscient/jobfinder)
+    : "${DF_PROJECT_NUM:=1}"
+    : "${DF_SCHEDULER:=jobfinder-scheduler}"
+    : "${DF_RUN_PREFIX:=jobfinder-dark-factory-run-}" ;;
+  *)
+    : "${DF_PROJECT_NUM:=2}"
+    : "${DF_SCHEDULER:=dark-factory-self-scheduler}"
+    : "${DF_RUN_PREFIX:=dark-factory-self-dark-factory-run-}" ;;
+esac
 : "${DF_IMAGE:=ghcr.io/omniscient/dark-factory:latest}"
 : "${DF_STATE_DIR:=/var/lib/dark-factory}"
 : "${DF_ALL_SCHEDULERS:=dark-factory-self-scheduler dark-factory-scheduler}"

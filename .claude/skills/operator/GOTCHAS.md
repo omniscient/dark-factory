@@ -131,3 +131,29 @@ learned; verify code citations against `origin/main` before relying on them.
 - Never `docker rm -v`/prune volumes here: `ncl-tl-node22-vol`/`ncl-tl-node24-vol` hold
   unreplicated work. Never root-shell into the state volume without chowning back to `factory`.
 - Local timezone is UTC-4; Docker only returns after Frank's logon (no auto-logon).
+
+## Learned 2026-09-27
+
+- **Frank approves gates by comment** ("Plan approved!" on the issue lifts `plan-pending-review`
+  via the approve-by-comment path, PR #451) at any time, including while your executing
+  review is still running (#436: approved 11 min after the plan landed; implement cloned the
+  unamended plan). Post the review verdict to the issue the moment it is in hand, and re-read
+  the gate label before assuming a gate is still yours; land late amendments on the PR branch.
+- **`Depends on:` is same-repo only.** `dependencies_met()` extracts `#\K[0-9]+` and resolves
+  against the instance's own board, so `Depends on: owner/other-repo#N` gates on the WRONG
+  local issue #N. Gate cross-repo dependencies by hand (`needs-discussion` or hold at the gate).
+- **Merged + closed issues stay `In Review` on the board** (#436/#438/#444 sat there for hours
+  and inflated `in_review=` in the poll line). Move them to Done with `board.sh set N Done`
+  once the run container is gone.
+- **Refine branches fork before later merges to `main`.** A plan's two-dot scope check
+  (`git diff origin/main HEAD`) reports every commit main gained since the fork as foreign
+  changes (#444: nine files, ~1,300 deletions from #454). Plans need a "merge origin/main"
+  step before the scope check, or the three-dot form.
+- **Gate 2 can report "no verdict recorded" although both reviewers returned Conforms** (#373
+  recurrence on #436's first Fix run); the scheduler dispatches `Continue` and the second pass
+  usually clears. Do not re-plan; attach the run id to #373.
+- **Session-window pause + container loss orphans a run** (#444 implement at ~17:40Z); the
+  scheduler's orphan recovery moves it to Blocked (~1 h later) and `Continue` re-verifies. Keep
+  bundle snapshots so nothing is lost if recovery ever fails.
+- **`status.sh` for another instance needs the whole DF_* set**, or since today just `DF_REPO`
+  (lib.sh derives project, scheduler and run prefix from it). Explicit values still win.
