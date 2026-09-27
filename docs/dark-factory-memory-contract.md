@@ -31,7 +31,7 @@ maps each field to its current `.archon/memory/*.md` encoding.
 | `updated_at` | ISO-8601 date | *(none — flat-file entries are immutable; use `created_at` as surrogate)* |
 | `expires_at` | ISO-8601 date | `expires:YYYY-MM-DD` inline comment token |
 | `supersedes` | string (id of replaced entry) | *(implicit — dedup/cap-drop in favour of newer entry; no explicit flat-file tag)* |
-| `project` | string | *(implicit — file lives in `omniscient/markethawk` repo; hardcoded by convention)* |
+| `project` | string | *(none in flat-file; `index.jsonl` only — `memory_write.py` resolves `FACTORY_REPO` → `FACTORY_PRODUCT_NAME` → git `origin` repo name → `unknown`, #444)* |
 | `agent_id` | string | *(implicit — phase + `issue_number` identifies the run; no flat-file tag)* |
 | `phase` | enum: `refine`, `implement`, `conformance`, `code-review` | Overlaps with `source:` |
 | `issue_number` | int | `issue:#N` inline comment token |

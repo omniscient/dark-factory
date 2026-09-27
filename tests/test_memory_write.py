@@ -5,6 +5,7 @@ Run from repo root: pytest tests/test_memory_write.py -v
 """
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -22,6 +23,26 @@ def run(*args):
         capture_output=True,
         text=True,
     )
+
+
+requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+
+
+def _git_repo(path, origin=None):
+    """Create a real git repo at *path*, optionally with an origin remote."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    if origin is not None:
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin],
+                       check=True, capture_output=True)
+    return path
+
+
+def _project_of(target):
+    """The project field of the single index.jsonl row next to *target*."""
+    lines = (target.parent / "index.jsonl").read_text().strip().splitlines()
+    assert len(lines) == 1, lines
+    return json.loads(lines[0])["project"]
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -290,13 +311,26 @@ class TestExpiryCleanup:
 # ── index.jsonl ─────────────────────────────────────────────────────────────
 
 class TestIndexJsonl:
+    @pytest.fixture(autouse=True)
+    def _no_factory_project_env(self, monkeypatch):
+        """Every test here controls project resolution explicitly.
+
+        Without this, a stray FACTORY_REPO on the CI host — or a git origin
+        picked up because tmp_path happens to sit inside a worktree — would
+        leak into these assertions instead of the deterministic project value
+        each test expects.
+        """
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+
     def test_successful_write_creates_index_next_to_target(self, md_empty):
         run("--target", str(md_empty), "--path-prefix", "backend/app/",
             "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
         index = md_empty.parent / "index.jsonl"
         assert index.exists(), "index.jsonl should be created on first write"
 
-    def test_index_record_has_required_fields(self, md_empty):
+    def test_index_record_has_required_fields(self, md_empty, monkeypatch):
+        monkeypatch.setenv("FACTORY_REPO", "jobfinder")
         run("--target", str(md_empty), "--path-prefix", "backend/app/",
             "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
         record = json.loads((md_empty.parent / "index.jsonl").read_text().strip())
@@ -305,7 +339,7 @@ class TestIndexJsonl:
         assert record["content"] == "avoid mocks"
         assert record["issue_number"] == 648
         assert record["files"] == ["backend/app/"]
-        assert record["project"] == "markethawk"
+        assert record["project"] == "jobfinder"
         assert record["type"] == "avoidance"
         assert record["status"] == "active"
 
@@ -354,6 +388,211 @@ class TestIndexJsonl:
             assert "index.jsonl" in result.stderr
         finally:
             index.chmod(0o644)
+
+
+# ── first-run directory creation (#444) ─────────────────────────────────────
+
+class TestDirectoryCreation:
+    def test_fresh_target_creates_dir_markdown_and_index(self, tmp_path):
+        mem_dir = tmp_path / "fresh" / ".archon" / "memory"
+        target = mem_dir / "backend-patterns.md"
+        assert not mem_dir.exists()
+        result = run("--target", str(target), "--path-prefix", "backend/app/",
+                     "--text", "avoid mocks", "--source", "refine", "--issue", "444")
+        assert result.returncode == 0, result.stderr
+        assert "[AVOID] avoid mocks" in target.read_text()
+        assert (mem_dir / "index.jsonl").exists()
+        assert f"memory-write: created {mem_dir.resolve()}" in result.stdout
+
+    def test_existing_dir_prints_no_created_line(self, md_empty):
+        result = run("--target", str(md_empty), "--path-prefix", "backend/app/",
+                     "--text", "avoid mocks", "--source", "refine", "--issue", "444")
+        assert result.returncode == 0
+        assert "memory-write: created" not in result.stdout
+
+    def test_empty_text_does_not_create_dir(self, tmp_path):
+        mem_dir = tmp_path / "fresh" / ".archon" / "memory"
+        result = run("--target", str(mem_dir / "backend-patterns.md"),
+                     "--path-prefix", "backend/app/", "--text", "",
+                     "--source", "refine", "--issue", "444")
+        assert result.returncode == 1
+        assert not mem_dir.exists()
+        assert not (tmp_path / "fresh").exists()
+
+    def test_mkdir_failure_is_one_stderr_line_exit_1(self, tmp_path):
+        # .archon/memory exists as a FILE: exist_ok=True does not swallow FileExistsError.
+        archon = tmp_path / ".archon"
+        archon.mkdir()
+        (archon / "memory").write_text("not a directory\n")
+        result = run("--target", str(archon / "memory" / "backend-patterns.md"),
+                     "--path-prefix", "backend/app/", "--text", "avoid mocks",
+                     "--source", "refine", "--issue", "444")
+        assert result.returncode == 1
+        assert "Traceback" not in result.stderr
+        lines = result.stderr.strip().splitlines()
+        assert len(lines) == 1, result.stderr
+        assert lines[0].startswith(f"memory-write: error: cannot create {archon / 'memory'}: ")
+
+
+# ── project resolution (#444) ───────────────────────────────────────────────
+
+MISMATCH = "memory-write: WARNING: project '"
+UNRESOLVED = (
+    "memory-write: WARNING: project unresolved (FACTORY_REPO/FACTORY_PRODUCT_NAME "
+    "unset, no git origin) - writing project:unknown"
+)
+
+
+def _write(target, text="avoid mocks"):
+    return run("--target", str(target), "--path-prefix", "backend/app/",
+               "--text", text, "--source", "refine", "--issue", "444")
+
+
+class TestProjectResolution:
+    # ── env rungs: tmp_path is typically not a git worktree (git lookup → None) ──
+
+    def test_factory_repo_wins(self, md_empty, monkeypatch):
+        monkeypatch.setenv("FACTORY_REPO", "jobfinder")
+        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
+        result = _write(md_empty)
+        assert result.returncode == 0
+        assert _project_of(md_empty) == "jobfinder"
+
+    def test_product_name_used_as_is_when_repo_unset(self, md_empty, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
+        result = _write(md_empty)
+        assert result.returncode == 0
+        assert _project_of(md_empty) == "MarketHawk"
+
+    def test_blank_factory_repo_falls_through(self, md_empty, monkeypatch):
+        monkeypatch.setenv("FACTORY_REPO", "   ")
+        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
+        _write(md_empty)
+        assert _project_of(md_empty) == "MarketHawk"
+
+    # ── git-origin rung ──
+
+    @requires_git
+    def test_git_origin_https(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0, result.stderr
+        assert _project_of(target) == "jobfinder"
+        assert "WARNING" not in result.stderr
+
+    @requires_git
+    def test_git_origin_scp_style_without_path_slash(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", "git@github.com:jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        _write(target)
+        assert _project_of(target) == "jobfinder"
+
+    # ── terminal rung ──
+
+    @requires_git
+    def test_unknown_when_no_env_and_no_origin(self, tmp_path, monkeypatch):
+        # A fresh repo with NO origin: `git remote get-url origin` exits non-zero
+        # regardless of any git ancestry the host has.
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert _project_of(target) == "unknown"
+        assert "Traceback" not in result.stderr
+        assert result.stderr.strip().splitlines() == [UNRESOLVED]
+
+    # ── mismatch warning (Requirement 6) ──
+
+    @requires_git
+    def test_env_vs_origin_mismatch_warns_once_and_env_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTORY_REPO", "markethawk")
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert _project_of(target) == "markethawk"
+        assert result.stderr.strip().splitlines() == [
+            "memory-write: WARNING: project 'markethawk' does not match git origin "
+            "'jobfinder' (FACTORY_REPO defaulted?)"
+        ]
+
+    @requires_git
+    def test_case_only_difference_does_not_warn(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
+        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/markethawk.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert _project_of(target) == "MarketHawk"
+        assert MISMATCH not in result.stderr
+
+    @requires_git
+    def test_no_mismatch_warning_on_dedup_skip(self, tmp_path, monkeypatch):
+        # Resolver runs only when an index row is written; a reinforce is silent.
+        monkeypatch.setenv("FACTORY_REPO", "markethawk")
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        _write(target)
+        result = _write(target, text="AVOID MOCKS.")
+        assert result.returncode == 0
+        assert MISMATCH not in result.stderr
+
+    # ── security rider: never echo the remote URL (token lives in it) ──
+
+    @requires_git
+    def test_token_in_origin_url_never_printed(self, tmp_path, monkeypatch):
+        secret = "ghp_SECRETTOKEN444"
+        monkeypatch.setenv("FACTORY_REPO", "markethawk")  # force the mismatch diagnostic
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo",
+                         f"https://{secret}@github.com/omniscient/jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert "'jobfinder'" in result.stderr
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+        assert secret not in (target.parent / "index.jsonl").read_text()
+
+    @requires_git
+    def test_token_in_origin_url_not_recorded_via_git_rung(self, tmp_path, monkeypatch):
+        secret = "ghp_SECRETTOKEN444"
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo",
+                         f"https://{secret}@github.com/omniscient/jobfinder.git")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert _project_of(target) == "jobfinder"
+        assert secret not in result.stdout + result.stderr
+
+    @requires_git
+    def test_token_in_pathless_origin_url_never_printed(self, tmp_path, monkeypatch):
+        # Malformed/pathless origin (no "/" after the host): naive `[/:]`-splitting
+        # would return "<token>@github.com" as the "name", leaking the token into
+        # stderr and index.jsonl. The token must never appear anywhere in output.
+        secret = "ghp_SECRETTOKEN444"
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
+        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+        repo = _git_repo(tmp_path / "repo", f"https://{secret}@github.com")
+        target = repo / ".archon" / "memory" / "backend-patterns.md"
+        result = _write(target)
+        assert result.returncode == 0
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+        assert secret not in (target.parent / "index.jsonl").read_text()
+        assert "@" not in _project_of(target)
 
 
 # ── sanitization ────────────────────────────────────────────────────────────
