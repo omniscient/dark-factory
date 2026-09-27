@@ -84,10 +84,12 @@ README's *Adapter contract* table.
 
 ### 3b. `.factory/hooks/smoke-gate` (required)
 
-Before each ticket, the factory checks that the default branch is healthy. **Without
-this hook it runs MarketHawk's check** (`tsc` in `frontend/` and a Python import in
-`backend/`). That check fails on any other layout, latches `main-is-red`, files a
-regression ticket, and halts all dispatch (tracked in #436).
+Before each ticket, the factory runs this hook to check that the default branch is
+healthy. **Without it the factory refuses the ticket's run** (#436): the run fails before
+any work starts, the ticket gets a comment naming the missing hook (a `fix` or `continue`
+run also moves it to **Blocked**), and a `smoke-gate-hook-missing` line lands in
+`hook-warnings.log`. `main` is not checked and not marked red, and other tickets are not
+paused.
 
 Replace the `EDIT` commands with your project's install and test commands. The hook
 runs in the factory image (Ubuntu 26.04, Python 3.14, Node 22, **no browsers**) as a
@@ -118,7 +120,7 @@ places: the run's stderr, a line in `hook-warnings.log` in the scheduler state
 directory (`/var/lib/dark-factory` by default), and the main-is-red ticket when a
 smoke-gate hook fails (#438). The warning reports `crlf=yes` if the hook has CRLF line
 endings; the container's bash does not tolerate them. An empty hook file is treated
-as absent, so the built-in default runs. Set the bit anyway. On Windows, `git add`
+as absent, so the run is refused (see 3b). Set the bit anyway. On Windows, `git add`
 records mode 100644, so set it explicitly:
 
 ```bash

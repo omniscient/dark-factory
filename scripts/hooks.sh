@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run_hook [--gate] <name> [args…] — target hook > built-in default. Gate = propagate exit code.
+# run_hook [--gate] <name> [args…] — target hook > built-in default; --gate propagates the
+# exit code. Exception: the smoke-gate arm with no hook present always propagates (#436).
 #
 # Discovers per-repo hooks at ${CLONE_DIR}/.factory/hooks/<name>.
 # A hook counts as present when it is a non-empty regular file ([ -f ] && [ -s ]).
@@ -7,9 +8,8 @@
 # 100644) still runs — via `bash "$hook"`, shebang ignored — with a loud
 # `hook-not-executable` warning on stderr plus a durable line in
 # ${SCHEDULER_STATE_DIR}/hook-warnings.log (#438).
-# Falls back to built-in defaults when no target hook is present (absent, a
-# directory, or a zero-byte placeholder):
-#   smoke-gate  →  _default_smoke_gate (MarketHawk tsc + backend-import checks)
+# When no target hook is present (absent, a directory, or a zero-byte placeholder):
+#   smoke-gate  →  _smoke_hook_missing: refuse the run, non-zero even without --gate (#436)
 #   validate    →  no-op exit 0 (P2 moves MarketHawk's real validate into its adapter)
 #   preview-up  →  no-op exit 0
 #   preview-down → no-op exit 0
@@ -17,7 +17,8 @@
 # Hook env contract (exported to the hook process):
 #   CLONE_DIR, ARTIFACTS_DIR, ISSUE_NUM, FACTORY_REPO_SLUG
 #
-# Source smoke_gate.sh to load _default_smoke_gate (SMOKE_GATE_SOURCE_ONLY suppresses auto-exec).
+# Source smoke_gate.sh to load _smoke_hook_missing and the _smoke_on_red/_smoke_on_green
+# state machinery (SMOKE_GATE_SOURCE_ONLY suppresses auto-exec).
 SMOKE_GATE_SOURCE_ONLY=1 source "$(dirname "${BASH_SOURCE[0]:-$0}")/../smoke_gate.sh"
 
 run_hook() {
@@ -64,7 +65,10 @@ run_hook() {
     fi
   else
     case "$name" in
-      smoke-gate) _default_smoke_gate "$@" || rc=$? ;;   # provided by smoke_gate.sh
+      # No hook present → refuse the run (#436; provided by smoke_gate.sh). The
+      # smoke-gate arm is --gate-only: return non-zero even without --gate, or the
+      # non-gate `return 0` below would swallow the refusal and main goes unchecked.
+      smoke-gate) _smoke_hook_missing "$@" || rc=$?; return "$rc" ;;
       *) rc=0 ;;                                          # no default → no-op
     esac
   fi

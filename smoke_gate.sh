@@ -11,6 +11,10 @@ source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 SMOKE_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
 SMOKE_MARKER="<!-- df-main-red -->"
 PROVIDERS_CLI="$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/factory_core/providers/cli.py"
+SMOKE_CORE_CLI="$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/factory_core/cli.py"
+# Ticket-comment marker for the no-hook refusal (#436) — same style as entrypoint.sh's
+# FACTORY_FAILURE_MARKER; upserted, so repeat dispatches update one comment.
+SMOKE_HOOK_MISSING_MARKER="<!-- df-smoke-hook-missing -->"
 
 # Runs tsc + python import on origin/main. Returns 0 on full pass, non-zero on first failure.
 _smoke_check_main() {
@@ -158,9 +162,70 @@ _smoke_on_green() {
   rm -f "$ISSUE_FILE"
 }
 
-# Built-in default for the smoke-gate hook — called by hooks.sh run_hook when no
-# target repo ships .factory/hooks/smoke-gate. Contains today's MarketHawk checks
-# (tsc + python import). Parity invariant: MarketHawk needs zero hooks.
+# No-hook refusal (#436) — called by hooks.sh run_hook when the target has no
+# .factory/hooks/smoke-gate PRESENT (absent, a directory, or zero-byte). A missing hook
+# is a target misconfiguration, not a red main: this never writes the main-red state
+# files, never calls _smoke_on_red/_smoke_on_green, and files no regression ticket.
+# NOTE: this also means a PRE-EXISTING main-is-red sentinel (e.g. latched by the
+# pre-#436 MarketHawk-parity default on a hook-less target) is left untouched — this
+# function never clears it, so recheck dispatch keeps refusing until an operator
+# clears the sentinel by hand after adding the hook. See the refusal text below.
+# Signals: stderr; one durable line in ${SCHEDULER_STATE_DIR}/hook-warnings.log
+# (dispatch is `run -d --rm`, so stderr dies with the container); a marker comment on
+# the ticket when ISSUE_NUM is set; a health event LAST (guarded, never fatal).
+# Returns 1 so entrypoint.sh's ERR trap (on_failure) fails the run. Must `return`,
+# never `exit`: an ERR trap does not fire on exit, so an exit here would strand the
+# ticket In Progress.
+_smoke_hook_missing() {
+  local hook="${CLONE_DIR:-}/.factory/hooks/smoke-gate"
+  {
+    echo "ERROR: [smoke_gate] smoke-gate-hook-missing path=${hook} — the target declares no smoke-gate hook; refusing this run."
+    echo "[smoke_gate] main was NOT checked and has NOT been marked red by this refusal (no new main-is-red sentinel, no new regression ticket)."
+    echo "[smoke_gate] NOTE: if a main-is-red sentinel already exists (e.g. latched by the pre-#436 MarketHawk-parity default), this refusal does NOT clear it — recheck dispatch keeps refusing without touching that state. Once the hook is added, clear ${SMOKE_STATE_DIR:-<state-dir>}/main-is-red (and main-is-red-issue) by hand, or close the regression ticket, to resume dispatch."
+    echo "[smoke_gate] Fix: commit a non-empty, executable .factory/hooks/smoke-gate to the target repo. Start from templates/new-target/.factory/hooks/smoke-gate; see docs/onboarding-new-target.md step 3b."
+  } >&2
+  # Durable trace — #438's guards verbatim: only if the state dir exists, never mkdir
+  # (CI asserts /var/lib/dark-factory stays empty), never fatal.
+  local state_dir="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+  if [ -d "$state_dir" ]; then
+    printf '%s smoke-gate-hook-missing %s issue=%s\n' \
+      "$(date -u +%FT%TZ)" "$hook" "${ISSUE_NUM:-}" \
+      2>/dev/null >> "${state_dir}/hook-warnings.log" || true
+  fi
+  # on_failure's generic comment says only "exit code N" (no transcript exists this
+  # early), so the actionable text reaches the ticket through its own marker comment.
+  # recheck has no ticket context → no comment.
+  if [ -n "${ISSUE_NUM:-}" ]; then
+    local BODY_FILE
+    if BODY_FILE=$(mktemp /tmp/smoke-hook-missing-XXXXXX.md 2>/dev/null); then
+      cat > "$BODY_FILE" << EOF
+${SMOKE_HOOK_MISSING_MARKER}
+## Dark Factory — Smoke-gate hook missing
+
+This run was refused before any work started: the target repo has no \`.factory/hooks/smoke-gate\` hook (absent, a directory, or an empty file), so the factory cannot check whether \`main\` is healthy.
+
+This refusal itself does **not** mark \`main\` red — no new \`main-is-red\` sentinel, no new regression ticket, and other tickets are not paused by it.
+
+**If a \`main-is-red\` sentinel already exists** (for example, latched by the pre-#436 MarketHawk-parity default on a hook-less target), this refusal does **not** clear it: recheck dispatch will keep refusing without touching that state, so dispatch stays halted until the sentinel is cleared by hand. Once the hook below is in place, clear the sentinel (\`main-is-red\` / \`main-is-red-issue\` in the factory state dir) or close the regression ticket to resume dispatch.
+
+**To fix:** commit a non-empty, executable \`.factory/hooks/smoke-gate\` to the target repo (exit 0 = main is green). Start from the factory's \`templates/new-target/.factory/hooks/smoke-gate\` and follow \`docs/onboarding-new-target.md\` step 3b, then re-dispatch this ticket (a Blocked ticket: move it back to Ready).
+EOF
+      python3 "$PROVIDERS_CLI" tracker comment --id "$ISSUE_NUM" \
+        --marker "$SMOKE_HOOK_MISSING_MARKER" --body-file "$BODY_FILE" >/dev/null 2>&1 || true
+      rm -f "$BODY_FILE"
+    fi
+  fi
+  python3 "$SMOKE_CORE_CLI" run-record health-event \
+    --run-id "${RUN_ID:-unknown}" --issue "${ISSUE_NUM:-0}" \
+    --event factory.smoke_gate.hook_missing \
+    --detail "path=${hook}" >/dev/null 2>&1 || true
+  return 1
+}
+
+# MarketHawk-parity check (tsc + python import) wrapped in the red/green state
+# machinery. No longer the no-hook fallback: since #436, hooks.sh run_hook refuses a
+# target with no smoke-gate hook (_smoke_hook_missing above) instead of running this.
+# Kept for direct callers (run_smoke_gate, tests/test_smoke_gate.sh).
 # Returns 0 on green (proceed); exits 0 on red (clean halt, no per-ticket failure).
 _default_smoke_gate() {
   if _smoke_check_main; then
