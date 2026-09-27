@@ -356,6 +356,50 @@ class TestIndexJsonl:
             index.chmod(0o644)
 
 
+# ── first-run directory creation (#444) ─────────────────────────────────────
+
+class TestDirectoryCreation:
+    def test_fresh_target_creates_dir_markdown_and_index(self, tmp_path):
+        mem_dir = tmp_path / "fresh" / ".archon" / "memory"
+        target = mem_dir / "backend-patterns.md"
+        assert not mem_dir.exists()
+        result = run("--target", str(target), "--path-prefix", "backend/app/",
+                     "--text", "avoid mocks", "--source", "refine", "--issue", "444")
+        assert result.returncode == 0, result.stderr
+        assert "[AVOID] avoid mocks" in target.read_text()
+        assert (mem_dir / "index.jsonl").exists()
+        assert f"memory-write: created {mem_dir.resolve()}" in result.stdout
+
+    def test_existing_dir_prints_no_created_line(self, md_empty):
+        result = run("--target", str(md_empty), "--path-prefix", "backend/app/",
+                     "--text", "avoid mocks", "--source", "refine", "--issue", "444")
+        assert result.returncode == 0
+        assert "memory-write: created" not in result.stdout
+
+    def test_empty_text_does_not_create_dir(self, tmp_path):
+        mem_dir = tmp_path / "fresh" / ".archon" / "memory"
+        result = run("--target", str(mem_dir / "backend-patterns.md"),
+                     "--path-prefix", "backend/app/", "--text", "",
+                     "--source", "refine", "--issue", "444")
+        assert result.returncode == 1
+        assert not mem_dir.exists()
+        assert not (tmp_path / "fresh").exists()
+
+    def test_mkdir_failure_is_one_stderr_line_exit_1(self, tmp_path):
+        # .archon/memory exists as a FILE: exist_ok=True does not swallow FileExistsError.
+        archon = tmp_path / ".archon"
+        archon.mkdir()
+        (archon / "memory").write_text("not a directory\n")
+        result = run("--target", str(archon / "memory" / "backend-patterns.md"),
+                     "--path-prefix", "backend/app/", "--text", "avoid mocks",
+                     "--source", "refine", "--issue", "444")
+        assert result.returncode == 1
+        assert "Traceback" not in result.stderr
+        lines = result.stderr.strip().splitlines()
+        assert len(lines) == 1, result.stderr
+        assert lines[0].startswith(f"memory-write: error: cannot create {archon / 'memory'}: ")
+
+
 # ── sanitization ────────────────────────────────────────────────────────────
 
 class TestSanitization:

@@ -125,6 +125,19 @@ def main():
         print("memory-write: error: --text is empty", file=sys.stderr)
         sys.exit(1)
 
+    # Create .archon/memory/ on a fresh target (#444). Placed after the empty-text
+    # guard so an invalid-input run never creates the directory as a side effect.
+    # OSError also covers FileExistsError when .archon/memory is a file, which
+    # exist_ok=True does not swallow.
+    created = not target.parent.exists()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"memory-write: error: cannot create {target.parent}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if created:
+        print(f"memory-write: created {target.parent.resolve()}")
+
     # Sanitize: collapse whitespace (removes embedded newlines) and strip HTML
     # comment delimiters (same as the prior bash pipeline: tr -d '\n\r' | sed 's/-->//g').
     # Both '<!--' and '-->' are stripped so prose containing either cannot break
