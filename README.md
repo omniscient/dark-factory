@@ -223,6 +223,9 @@ schema, the trust model, and known gaps.
 
 Place executable scripts at `.factory/hooks/<name>` in the target repo.
 The factory discovers and runs them at the appropriate pipeline stage.
+A hook without the executable bit still runs, through `bash` with its shebang ignored,
+and logs a loud `hook-not-executable` warning. Fix it with
+`git update-index --chmod=+x .factory/hooks/<name>`. An empty hook file counts as absent.
 
 | Hook name | Stage | Gate? | Description |
 |-----------|-------|-------|-------------|
