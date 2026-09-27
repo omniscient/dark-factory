@@ -112,9 +112,14 @@ template reuses the same commands.
 
 ### 3c. Make the hooks executable and LF
 
-The factory runs a hook only if `[ -x hook ]`. **A non-executable hook is silently
-ignored, and the MarketHawk default runs instead** (tracked in #438). On Windows,
-`git add` records mode 100644, so set the bit explicitly:
+A hook without the executable bit still runs, but only through `bash hook`, so its
+shebang is ignored. Each run also logs a loud `hook-not-executable` warning in three
+places: the run's stderr, a line in `hook-warnings.log` in the scheduler state
+directory (`/var/lib/dark-factory` by default), and the main-is-red ticket when a
+smoke-gate hook fails (#438). The warning reports `crlf=yes` if the hook has CRLF line
+endings; the container's bash does not tolerate them. An empty hook file is treated
+as absent, so the built-in default runs. Set the bit anyway. On Windows, `git add`
+records mode 100644, so set it explicitly:
 
 ```bash
 cd TARGET

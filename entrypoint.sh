@@ -848,7 +848,9 @@ fi
 if [ "$INTENT" = "deconflict" ]; then
   # --- Validate: target hook if present, else inline tsc (parity fallback) ---
   DECONFLICT_VALIDATION="PASS"
-  if [ -x "$CLONE_DIR/.factory/hooks/validate" ]; then
+  # Same "present" test as run_hook (non-empty regular file), so a non-executable
+  # validate hook reaches run_hook (warn + run via bash) instead of the inline tsc (#438).
+  if [ -f "$CLONE_DIR/.factory/hooks/validate" ] && [ -s "$CLONE_DIR/.factory/hooks/validate" ]; then
     echo "[deconflict] Running .factory/hooks/validate..."
     if ! run_hook --gate validate; then
       DECONFLICT_VALIDATION="FAIL"
