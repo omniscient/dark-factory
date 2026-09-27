@@ -71,6 +71,15 @@ _smoke_on_red() {
   local FILE_NUM=""
   [ -f "$ISSUE_FILE" ] && FILE_NUM=$(cat "$ISSUE_FILE")
 
+  # Set by hooks.sh run_hook when the check that just failed was the target's own
+  # non-executable hook run via bash (#438) — say so in the ticket text.
+  local HOOK_NOTE=""
+  if [ -n "${HOOK_NOT_EXECUTABLE_NOTE:-}" ]; then
+    HOOK_NOTE="
+
+The failing check was the target's own smoke-gate hook, run with bash because it is not executable: ${HOOK_NOT_EXECUTABLE_NOTE}. Fix with \`git update-index --chmod=+x .factory/hooks/smoke-gate\`."
+  fi
+
   local OPEN_NUMS="" LIST_OK=1
   OPEN_NUMS=$(_smoke_list_open_red_issues) && LIST_OK=0
 
@@ -96,7 +105,7 @@ _smoke_on_red() {
     echo "$REGR_NUM" > "$ISSUE_FILE"
     gh issue comment "$REGR_NUM" \
       --repo "$FACTORY_REPO_SLUG" \
-      --body "main still red at $(date -u +%FT%TZ) — factory implementation runs remain paused." \
+      --body "main still red at $(date -u +%FT%TZ) — factory implementation runs remain paused.${HOOK_NOTE}" \
       2>/dev/null || true
   else
     local BODY_FILE
@@ -108,7 +117,7 @@ ${SMOKE_MARKER}
 
 The dark factory is pausing all implementation dispatches (Priority 1.5/2/3) until \`origin/main\` compiles cleanly.
 
-This ticket closes automatically on the next green gate pass.
+This ticket closes automatically on the next green gate pass.${HOOK_NOTE}
 EOF
     REGR_NUM=$(python3 "$PROVIDERS_CLI" tracker create \
       --title "main is red: tsc/python import failure" \
