@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# run_hook [--gate] <name> [args…] — target hook > built-in default. Gate = propagate exit code.
+# run_hook [--gate] <name> [args…] — target hook > built-in default; --gate propagates the
+# exit code. Exception: the smoke-gate arm with no hook present always propagates (#436).
 #
 # Discovers per-repo hooks at ${CLONE_DIR}/.factory/hooks/<name>.
 # A hook counts as present when it is a non-empty regular file ([ -f ] && [ -s ]).
