@@ -45,7 +45,13 @@ RUN apt-get update && apt-get install -y \
 # pyyaml pinned explicitly: effective-config materialization (entrypoint.sh)
 # imports yaml before any target dep install — do not rely on transitive deps.
 # aiohttp: async reverse-proxy stack for scripts/factory_core/model_proxy.py (#208)
-RUN pip install --quiet "git+https://github.com/scheidydude/codeindex.git" pre-commit pyyaml aiohttp
+# packaging: Ubuntu's python3-pip pulls in Debian's `packaging` (26.0) with no RECORD
+# file, and since 2026-10 one of the deps below requires a newer packaging, so pip
+# tries to uninstall the Debian copy and fails with `uninstall-no-record-file`
+# (docker-build red on PR #461, 2026-10-16). Installing a pip-managed packaging first
+# with --ignore-installed sidesteps the uninstall; `pip check` is clean afterwards.
+RUN pip install --quiet --ignore-installed packaging \
+    && pip install --quiet "git+https://github.com/scheidydude/codeindex.git" pre-commit pyyaml aiohttp
 
 # Bun — pinned release artifact verified against a hardcoded sha256 instead of
 # `curl … bun.sh/install | bash`. The expected hash lives in git, so a tampered
