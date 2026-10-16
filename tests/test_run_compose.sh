@@ -34,6 +34,13 @@ DC_VOL=$(grep -oE 'name: \$\{FACTORY_INSTANCE:-dark-factory\}-scheduler-state' "
 grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$RC" || { echo "FAIL: run-compose.yml project name not FACTORY_INSTANCE-scoped"; exit 1; }
 grep -q '^name: ${FACTORY_INSTANCE:-dark-factory}$' "$DC" || { echo "FAIL: deploy compose project name not FACTORY_INSTANCE-scoped"; exit 1; }
 
+# 3c2) Build-network lockstep (#455): build-net's no-op default must be this project's
+# own dark-factory-net, i.e. "<the name: expression pinned by 3c>_dark-factory-net".
+# If the project-name expression changes, this default must change with it, or every
+# dispatch of an instance without FACTORY_BUILD_NETWORK points at a missing network.
+grep -qF 'name: ${FACTORY_BUILD_NETWORK:-${FACTORY_INSTANCE:-dark-factory}_dark-factory-net}' "$RC" \
+  || { echo "FAIL: run-compose.yml build-net default not tied to the FACTORY_INSTANCE project name"; exit 1; }
+
 # 3d) WIP-guard seam: identity.sh's default FACTORY_RUN_PREFIX must match the
 # names `docker compose run` actually produces (<project>-dark-factory-run-…).
 IDS="$REPO_ROOT/scripts/identity.sh"

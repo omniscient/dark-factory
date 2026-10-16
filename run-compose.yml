@@ -51,10 +51,15 @@ services:
       ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}
       ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-claude-haiku-4-5-20251001}
       ANTHROPIC_DEFAULT_FABLE_MODEL: ${ANTHROPIC_DEFAULT_FABLE_MODEL:-claude-fable-5-1}
+      # Target build daemon (#455): preview-up builds via tcp://$BUILDKIT_HOST:$BUILDKIT_PORT.
+      # Defaults equal preview-up's own in-workflow fallbacks, so unset = unchanged.
+      BUILDKIT_HOST: ${BUILDKIT_HOST:-buildkit}
+      BUILDKIT_PORT: ${BUILDKIT_PORT:-1234}
     volumes:
       - scheduler_state:/var/lib/dark-factory
     networks:
       - dark-factory-net
+      - build-net
     profiles:
       - factory
     depends_on:
@@ -87,6 +92,21 @@ services:
 networks:
   dark-factory-net:
     driver: bridge
+  # Optional external network carrying the target's BuildKit daemon (#455), set by
+  # FACTORY_BUILD_NETWORK in the scheduler's instance.env. Unset or empty, it names this
+  # instance's own dark-factory-net (created by deploy/docker-compose.yml under the same
+  # project name), so dispatch needs no extra network. That default holds only while
+  # FACTORY_INSTANCE is a normalized compose project name and no -p/COMPOSE_PROJECT_NAME
+  # override is used (tests/test_run_compose.sh 3c2). Once set, the network must exist
+  # before EVERY dispatch of the instance: a missing one fails compose run with the
+  # socket proxy's "403 ... administrative rules" (compose falls back to GET /info).
+  # The unset default's safety — one network attached under two compose keys
+  # (build-net and dark-factory-net) resolving to a single Docker network — was verified
+  # live against `docker compose` in plan Task 0, not covered by CI. Re-verify by hand
+  # if the Docker/Compose version in use is upgraded.
+  build-net:
+    external: true
+    name: ${FACTORY_BUILD_NETWORK:-${FACTORY_INSTANCE:-dark-factory}_dark-factory-net}
 
 volumes:
   scheduler_state:

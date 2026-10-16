@@ -163,8 +163,9 @@ Fill in:
 - `GH_TOKEN` (e.g. from `gh auth token`) and `CLAUDE_CODE_OAUTH_TOKEN`.
 - The `FACTORY_*` block from step 2.
 - `FACTORY_PRODUCT_NAME`.
-- `FACTORY_INSTANCE=<repo>`. This keeps container names and the state volume separate
-  from any other instance on the host.
+- `FACTORY_INSTANCE=<repo>`, in lowercase letters, digits, `_` and `-` only, starting
+  with a letter or digit (a normalized compose project name). This keeps container
+  names and the state volume separate from any other instance on the host.
 - `PROJECT_DIR=TARGET`. On Windows use forward slashes: `C:/git/my-repo`.
 
 Leave no identity line blank: unset values fall back to MarketHawk's board.
@@ -175,6 +176,26 @@ Leave no identity line blank: unset values fall back to MarketHawk's board.
 mkdir -p TARGET/.archon
 printf 'GH_TOKEN=%s\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "<gh token>" "<claude token>" > TARGET/.archon/.env
 cd TARGET && git check-ignore -v .archon/.env   # must print a matching rule; add ".env" to .gitignore if not
+```
+
+**Optional: target build daemon / preview network.** Skip this unless your target's
+preview builds use its own remote BuildKit daemon. Most targets have none. If yours
+does, add to `DF/deploy/instance.env`:
+
+```bash
+FACTORY_BUILD_NETWORK=<the Docker network your BuildKit daemon is on>
+BUILDKIT_HOST=<the daemon's container name or alias on that network>
+BUILDKIT_PORT=1234
+```
+
+Run containers then join that network as well as their own, and the built-in
+`preview-up` builds through `tcp://$BUILDKIT_HOST:$BUILDKIT_PORT`. The network must
+exist before the scheduler dispatches. Once the variable is set, every dispatch (not
+only previews) fails while the network is missing, with a socket-proxy
+`403 Forbidden … administrative rules` error. Check first:
+
+```bash
+docker network inspect "$FACTORY_BUILD_NETWORK" --format '{{.Name}}'   # must print the name
 ```
 
 ## 5. Start the scheduler
