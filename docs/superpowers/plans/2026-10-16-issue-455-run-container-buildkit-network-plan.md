@@ -68,7 +68,7 @@ probably ran with a project name whose network was missing, so compose hit `/inf
 
 | File | Change | Responsibility |
 |---|---|---|
-| `tests/test_build_network_compose.sh` | **Create** | Regression test: unset, instance-scoped, empty-string and MarketHawk-shaped renders of `build-net` + `BUILDKIT_*` via `docker compose config --format json` |
+| `tests/test_build_network_compose.sh` | **Create** (Task 1; one grep added in Step 5.5) | Regression test: unset, instance-scoped, empty-string and MarketHawk-shaped renders of `build-net` + `BUILDKIT_*` via `docker compose config --format json`; pins the `FACTORY_INSTANCE` normalization constraint (instance values + documented sentence) |
 | `tests/test_run_compose.sh` | Modify (one assertion after check 3c) | Lockstep pin: `build-net` default literal stays tied to the `FACTORY_INSTANCE` project-name expression |
 | `run-compose.yml` | Modify | `build-net` external network (service + top-level) and `BUILDKIT_HOST`/`BUILDKIT_PORT` passthrough |
 | `.github/workflows/ci.yml` | Modify (one `run:` line in `tests` job) | Run the new test in CI |
@@ -182,6 +182,7 @@ Expected: `running | dark-factory-self_dark-factory-net; ` (exactly one network)
 - [ ] **Step 0.5: Clean up and save the transcript**
 
 ```bash
+docker ps -aq --filter name=df-issue-455-task0 | xargs -r docker rm -f
 docker ps -a --filter name=df-issue-455-task0 --format '{{.Names}}'   # expected: no output
 rm -rf "$T"
 ```
@@ -230,6 +231,18 @@ grep -qF 'name: ${FACTORY_BUILD_NETWORK:-${FACTORY_INSTANCE:-dark-factory}_dark-
   || { echo "FAIL: build-net name/default expression missing from run-compose.yml"; exit 1; }
 grep -qF 'BUILDKIT_HOST: ${BUILDKIT_HOST:-buildkit}' "$RC" || { echo "FAIL: BUILDKIT_HOST passthrough missing"; exit 1; }
 grep -qF 'BUILDKIT_PORT: ${BUILDKIT_PORT:-1234}' "$RC" || { echo "FAIL: BUILDKIT_PORT passthrough missing"; exit 1; }
+
+# FACTORY_INSTANCE must be a normalized compose project name ([a-z0-9][a-z0-9_-]*):
+# compose normalizes the project name but not build-net's interpolated name, so e.g.
+# MarketHawk would point build-net at a network that does not exist (spec: "a test
+# pins it"). Reads deploy/instances/** only, never writes it. Silent on success.
+for f in "$REPO_ROOT"/deploy/instances/*/instance.env; do
+  [ -f "$f" ] || continue
+  v=$(sed -n 's/^FACTORY_INSTANCE=//p' "$f")
+  [ -z "$v" ] || [[ "$v" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+    || { echo "FAIL: $f FACTORY_INSTANCE=$v is not a normalized compose project name"; exit 1; }
+done
+# (Step 5.5 adds the instance.env.example constraint grep here, once Task 5 has written it.)
 
 if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null 2>&1; then
   echo "SKIP: docker not available — skipping compose config render checks"
@@ -421,7 +434,8 @@ networks:
 bash tests/test_build_network_compose.sh && bash tests/test_run_compose.sh && bash tests/test_model_proxy_compose.sh
 ```
 
-Expected (in a container with the docker CLI; without it, the `partial — grep checks only` PASS lines):
+Expected (in a container with the docker CLI; without it, the `partial — grep checks only` PASS lines).
+The `FACTORY_INSTANCE` constraint block is silent on success, so it adds no PASS line:
 ```
 PASS: unset: build-net = own dark-factory-net, buildkit:1234
 PASS: FACTORY_INSTANCE=dark-factory-self: both networks follow the instance
@@ -533,7 +547,10 @@ FACTORY_INSTANCE=
 # preview tickets. While it is missing, each dispatch fails with the socket proxy's
 # "403 Forbidden ... Request forbidden by administrative rules" (compose's fallback
 # lookup hits /info, which the proxy denies), a dispatch_error, and repeated failures
-# trip the breaker. That 403 means "create/restore the network", not "widen the proxy".
+# trip the breaker and move tickets to Blocked. That 403 means "create/restore the
+# network", not "widen the proxy". If the network exists but BuildKit is down (or the
+# BUILDKIT_* values are wrong), only preview tickets fail, with a generic preview_fail
+# "buildx build ... failed" comment that names neither the network nor the address.
 #
 # When FACTORY_BUILD_NETWORK is unset, the default is <FACTORY_INSTANCE>_dark-factory-net,
 # so FACTORY_INSTANCE must already be a normalized compose project name
@@ -547,7 +564,16 @@ FACTORY_INSTANCE=
 # BUILDKIT_PORT=1234
 ```
 
-- [ ] **Step 5.3: Verify the example still contains no active (uncommented) new variable**
+- [ ] **Step 5.3: Bootstrap pytest in the run container.** The factory image ships Python
+  without pytest, and `entrypoint.sh` only installs a target's `backend/requirements.txt`,
+  which this repo does not have. Without this step every `python -m pytest` below prints
+  `No module named pytest`.
+
+```bash
+python -m pip install --quiet --user pytest pyyaml aiohttp
+```
+
+- [ ] **Step 5.4: Verify the example still contains no active (uncommented) new variable**
 
 ```bash
 grep -nE '^(FACTORY_BUILD_NETWORK|BUILDKIT_HOST|BUILDKIT_PORT)=' deploy/instance.env.example; echo "matches=$?"
@@ -559,10 +585,24 @@ Expected: `matches=1` (grep found none, so the defaults stay a no-op for anyone 
 the file), then `1`, then the pytest file passes. It pins that
 `deploy/instance.env.example` is referenced, which is unchanged.
 
-- [ ] **Step 5.4: Commit**
+- [ ] **Step 5.5: Pin the documented constraint in the test.** In
+  `tests/test_build_network_compose.sh`, replace the placeholder comment line
+  `# (Step 5.5 adds the instance.env.example constraint grep here, once Task 5 has written it.)`
+  with the lines below. It cannot go in at Task 1: the sentence only exists after Step 5.1/5.2,
+  and Step 3.4 would fail. The final file has the whole constraint block before the docker skip.
 
 ```bash
-git add deploy/instance.env.example
+grep -qF '[a-z0-9][a-z0-9_-]*' "$REPO_ROOT/deploy/instance.env.example" \
+  || { echo "FAIL: FACTORY_INSTANCE normalization constraint undocumented in deploy/instance.env.example"; exit 1; }
+```
+
+Then run `bash tests/test_build_network_compose.sh`. Expected: the same five PASS lines as
+Step 3.4 (the grep is silent on success).
+
+- [ ] **Step 5.6: Commit**
+
+```bash
+git add deploy/instance.env.example tests/test_build_network_compose.sh
 git commit -m "docs(instance.env.example): optional FACTORY_BUILD_NETWORK / BUILDKIT_* block (#455)"
 ```
 
@@ -575,9 +615,9 @@ git commit -m "docs(instance.env.example): optional FACTORY_BUILD_NETWORK / BUIL
 - [ ] **Step 6.1: Tighten the `FACTORY_INSTANCE` bullet in step 4**, currently "`FACTORY_INSTANCE=<repo>`. This keeps container names and the state volume separate from any other instance on the host."
 
 ```markdown
-- `FACTORY_INSTANCE=<repo>`, in lowercase letters, digits, `_` and `-` only (a normalized
-  compose project name). This keeps container names and the state volume separate
-  from any other instance on the host.
+- `FACTORY_INSTANCE=<repo>`, in lowercase letters, digits, `_` and `-` only, starting
+  with a letter or digit (a normalized compose project name). This keeps container
+  names and the state volume separate from any other instance on the host.
 ```
 
 - [ ] **Step 6.2: Add an optional sub-step at the end of step 4**, after the
@@ -658,7 +698,8 @@ git commit -m "docs(readme): mention BuildKit/build-network variables on the pre
 - [ ] **Step 8.1: Full CI-parity run**
 
 ```bash
-python -m pytest tests/ -q
+python -m pip install --quiet --user pytest pyyaml aiohttp   # no-op if Step 5.3 already ran in this container
+PYTHONPATH=scripts python -m pytest tests/ -q
 for t in test_identity test_hooks test_smoke_gate test_run_compose test_model_proxy_compose test_build_network_compose; do
   bash "tests/$t.sh" > /tmp/$t.log 2>&1 && echo "OK $t" || { echo "FAILED $t"; tail -20 /tmp/$t.log; }
 done
@@ -666,13 +707,16 @@ python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
 python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
 ```
 
-Expected: pytest reports all passed with 0 failed, six `OK …` lines and no `FAILED`, and
-both DAG checks pass. Workflows are untouched, so this is a regression guard.
+Expected: pytest shows no failures beyond the two pre-existing environment-dependent ones
+when run as root without an origin (`test_memory_write::test_index_io_error_is_nonfatal`,
+`test_oos_excise` issue_json_fallback). Compare against a baseline run on unmodified main,
+not against 0. Then six `OK …` lines, no `FAILED`, and both DAG checks pass. Workflows are
+untouched, so this is a regression guard.
 
 - [ ] **Step 8.2: Scope check against the spec's Requirement 8 file list**
 
 ```bash
-git diff --name-only origin/main HEAD | sort
+git diff --name-only origin/main...HEAD | sort   # three-dot: branch changes only, even if main moved
 ```
 
 Expected, exactly these seven, plus the refine-branch spec and plan docs that
@@ -725,7 +769,9 @@ git status --short                                               # expected: cle
   - R6 → Task 6
   - R7 → Tasks 1–2
   - R8 → File Structure and Step 8.2
-  - R9 → Step 8.4 and the "Nothing else" line ✅
+  - R9 → Step 8.4 and the "Nothing else" line
+  - Architecture condition 2 ("a test pins it": `FACTORY_INSTANCE` normalization) →
+    Task 1 instance-value loop + Step 5.5 documented-constraint grep ✅
 - Spec Task 0 is kept verbatim in its essentials: `--entrypoint /bin/true`, no `-p`,
   variable unset, existing network, cleanup, results recorded, and stop-and-report on
   failure. This plan adds an explicit **Blocked** row, which also stops, and the
