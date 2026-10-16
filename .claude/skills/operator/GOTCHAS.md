@@ -157,3 +157,5 @@ learned; verify code citations against `origin/main` before relying on them.
   bundle snapshots so nothing is lost if recovery ever fails.
 - **`status.sh` for another instance needs the whole DF_* set**, or since today just `DF_REPO`
   (lib.sh derives project, scheduler and run prefix from it). Explicit values still win.
+- **`gh project item-add` leaves the item with no status.** `optin.sh` applied `ready-for-agent` to #455 on 2026-09-28 but the item had no column, and the refine loop only dispatches from Backlog; it sat 18 days. `optin.sh` now sets Backlog when the status is blank. Any ticket you add to the board by hand needs `board.sh set N Backlog` too.
+- **Digest pins rot.** GHCR garbage-collects untagged manifests; the jobfinder instance pinned a digest that no longer pulled (`unauthorized`) and restart-looped 170 times with no alert (#460). Check `docker inspect --format {{.RestartCount}}` on schedulers in `status.sh` reads.

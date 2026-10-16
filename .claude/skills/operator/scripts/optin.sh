@@ -26,7 +26,16 @@ b=$(git -C "$DF_REPO_DIR" ls-remote --heads origin "refine/issue-$n-*" | awk '{p
 if [ -z "$(item_id_for_issue "$n")" ]; then
   echo "#$n is off-board; adding"; bash "$(dirname "${BASH_SOURCE[0]}")/board.sh" add "$n" || exit 1
 else
-  cur=$(issue_board_status "$n"); [ "$cur" = Backlog ] || echo "NOTE: board status is '$cur' (not Backlog); refine only dispatches from Backlog"
+  cur=$(issue_board_status "$n")
+  if [ -z "$cur" ]; then
+    # An item added with `gh project item-add` has NO status; the refine loop never sees it
+    # (#455 sat 18 days this way, 2026-09-28 → 2026-10-16). Blank is the only state we set
+    # unasked; any other non-Backlog status is a deliberate placement and stays.
+    echo "#$n is on the board with no status; setting Backlog"
+    bash "$(dirname "${BASH_SOURCE[0]}")/board.sh" set "$n" Backlog || exit 1
+  elif [ "$cur" != Backlog ]; then
+    echo "NOTE: board status is '$cur' (not Backlog); refine only dispatches from Backlog"
+  fi
 fi
 add="ready-for-agent"; [ "$d2p" = 1 ] && add="$add,direct-to-pr"; add="$add$extra"
 gh issue edit "$n" --repo "$DF_REPO" --add-label "$add" >/dev/null || die "label add failed"
