@@ -232,7 +232,7 @@ and logs a loud `hook-not-executable` warning. Fix it with
 |-----------|-------|-------|-------------|
 | `smoke-gate` | Pre-dispatch | Yes (check-only) | **Required.** Exit 0 = green, non-zero = red; the factory keeps sentinel + regression-ticket handling. With no hook present (absent, a directory, or empty) the factory refuses the run: it fails with a `smoke-gate-hook-missing` message and ticket comment, and `main` is neither checked nor marked red (#436). This refusal does **not** clear a pre-existing `main-is-red` sentinel (e.g. one latched by the pre-#436 MarketHawk-parity default) — a stale sentinel on a hook-less target must be cleared by hand once the hook is added. Start from `templates/new-target/.factory/hooks/smoke-gate`. |
 | `validate` | Deconflict | No | Post-merge validation (lint, type-check, etc.). Built-in default: no-op (deconflict flow falls back to inline tsc). |
-| `preview-up` | Post-implement | No | Spins up a preview stack for the PR branch. Built-in default: no-op. |
+| `preview-up` | Post-implement | No | Spins up a preview stack for the PR branch. Built-in default: no-op. Separately, the workflow's own `preview-up` node builds through a remote BuildKit daemon at `BUILDKIT_HOST`/`BUILDKIT_PORT` (default `buildkit:1234`; delegating it to this hook is #15); a target with its own daemon sets them plus `FACTORY_BUILD_NETWORK` in `instance.env` (see `deploy/instance.env.example`). |
 | `preview-down` | PR closed | No | Tears down the preview stack. Built-in default: no-op. |
 
 **Hook env contract**: the factory exports these variables to every hook process:
