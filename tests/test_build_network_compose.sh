@@ -24,6 +24,8 @@ for f in "$REPO_ROOT"/deploy/instances/*/instance.env; do
   [ -z "$v" ] || [[ "$v" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
     || { echo "FAIL: $f FACTORY_INSTANCE=$v is not a normalized compose project name"; exit 1; }
 done
+grep -qF '[a-z0-9][a-z0-9_-]*' "$REPO_ROOT/deploy/instance.env.example" \
+  || { echo "FAIL: FACTORY_INSTANCE normalization constraint undocumented in deploy/instance.env.example"; exit 1; }
 
 if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null 2>&1; then
   echo "SKIP: docker not available — skipping compose config render checks"
