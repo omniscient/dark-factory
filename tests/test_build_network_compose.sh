@@ -20,7 +20,7 @@ grep -qF 'BUILDKIT_PORT: ${BUILDKIT_PORT:-1234}' "$RC" || { echo "FAIL: BUILDKIT
 # pins it"). Reads deploy/instances/** only, never writes it. Silent on success.
 for f in "$REPO_ROOT"/deploy/instances/*/instance.env; do
   [ -f "$f" ] || continue
-  v=$(sed -n 's/^FACTORY_INSTANCE=//p' "$f")
+  v=$(sed -n 's/^FACTORY_INSTANCE=//p' "$f" | tail -n1 | sed -e 's/[[:space:]]*#.*$//' -e "s/^[\"']//" -e "s/[\"']$//")
   [ -z "$v" ] || [[ "$v" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
     || { echo "FAIL: $f FACTORY_INSTANCE=$v is not a normalized compose project name"; exit 1; }
 done
@@ -33,23 +33,25 @@ if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null 2>&1;
   exit 0
 fi
 
-# Provision a scratch .archon/.env so the required env_file check passes
-mkdir -p "$REPO_ROOT/.archon"
-SCRATCH_ENV=0
-[ -f "$REPO_ROOT/.archon/.env" ] || { touch "$REPO_ROOT/.archon/.env"; SCRATCH_ENV=1; }
+# Render from a scratch copy in $WORK rather than the real checkout, so the required
+# env_file check never touches $REPO_ROOT/.archon/.env (fragile under overlapping runs
+# or a skipped trap).
 WORK=$(mktemp -d)
 cleanup() {
-  [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+cp "$RC" "$WORK/run-compose.yml"
+mkdir -p "$WORK/.archon"
+touch "$WORK/.archon/.env"
+WORK_RC="$WORK/run-compose.yml"
 
 # render <out.json> [VAR=value ...] — the variables under test start unset; no -p override.
 render() {
   local out="$1"; shift
   env -u FACTORY_BUILD_NETWORK -u BUILDKIT_HOST -u BUILDKIT_PORT \
       -u FACTORY_INSTANCE -u COMPOSE_PROJECT_NAME "$@" \
-    docker compose -f "$RC" --profile factory config --format json > "$out"
+    docker compose -f "$WORK_RC" --profile factory config --format json > "$out"
 }
 
 # assert_shape <label> <json> <build-net name> <dark-factory-net name> <BUILDKIT_HOST> <BUILDKIT_PORT>

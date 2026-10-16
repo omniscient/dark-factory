@@ -100,6 +100,10 @@ networks:
   # override is used (tests/test_run_compose.sh 3c2). Once set, the network must exist
   # before EVERY dispatch of the instance: a missing one fails compose run with the
   # socket proxy's "403 ... administrative rules" (compose falls back to GET /info).
+  # The unset default's safety — one network attached under two compose keys
+  # (build-net and dark-factory-net) resolving to a single Docker network — was verified
+  # live against `docker compose` in plan Task 0, not covered by CI. Re-verify by hand
+  # if the Docker/Compose version in use is upgraded.
   build-net:
     external: true
     name: ${FACTORY_BUILD_NETWORK:-${FACTORY_INSTANCE:-dark-factory}_dark-factory-net}
