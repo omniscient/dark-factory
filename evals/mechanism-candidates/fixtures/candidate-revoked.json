@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "candidate_id": "mc-revoked-001",
+  "candidate_digest": "sha256:b4d08f7e91cffe811571ca4ed5b28cfe95065263dbab788562c39311f0d7dd37",
+  "parent_digest": null,
+  "baseline": {
+    "harness_digest": "sha256:0568e2d33783a0dd2f1844774386e367bf27aae2683f565086285f0c7715d198",
+    "repo_digest": "sha256:1ff5e278c7a6f7e08b9ebe1f2d773b5f1b93dda595945a4874f12c7bf4155295",
+    "task_digest": "sha256:45ea42c15f0aec0515d8daf28415fa9b6bb0ce482c1a48b4050514c3f44f23f4",
+    "model_runtime_digest": "sha256:053e5c761c364631206664bf2f45aac0b25d0eacdb8e772841788f6d1ee61de7",
+    "tool_digest": "sha256:6d2c8e451c1a60d9e2a67a8505caf350eed9627003108231e09b92890915405a",
+    "verifier_digest": "sha256:94b98bd4dc8de99228ffce32535453b1a98129dbe0e0939379292346ceb481df",
+    "policy_digest": "sha256:48642ce030f3d9fdce8cd3eeb4d7f66e9cca012809cd172e5c8e29cb42be20ef",
+    "library_digest": "sha256:348e0c9904d595ff604e9fbb3d0f474865a7a88f35a4349384ff2b76d536dcf4"
+  },
+  "source": {
+    "issue": 464,
+    "run_id": "run-mc-revoked-001"
+  },
+  "observed_failure": {
+    "description": "synthetic observed failure for mc-revoked-001",
+    "evidence_refs": [
+      "artifacts/runs/run-mc-revoked-001/trace.json"
+    ]
+  },
+  "invariant_scope": "plan-phase-retry-discipline",
+  "domain_scope": {
+    "repo": "omniscient/dark-factory",
+    "issue": 464,
+    "pr": null,
+    "agent_role": "implement"
+  },
+  "risk_class": "H0",
+  "editable_path_allowlist": [
+    "docs/superpowers/notes/"
+  ],
+  "diff": "diff --git a/docs/superpowers/notes/revoked-notes.md b/docs/superpowers/notes/revoked-notes.md\n--- a/docs/superpowers/notes/revoked-notes.md\n+++ b/docs/superpowers/notes/revoked-notes.md\n@@ -1,2 +1,2 @@\n # revoked-notes\n-Wait.\n+Wait for the gate.\n",
+  "dependency_closure": [],
+  "expected_behavioral_hypothesis": "Explicit gate waits reduce stranded tickets.",
+  "resource_envelope": {
+    "cpu_limit": "1",
+    "memory_limit_mb": 2048,
+    "max_duration_seconds": 900
+  },
+  "permission_envelope": {
+    "tool_allow": [
+      "Read",
+      "Grep"
+    ],
+    "tool_deny": [
+      "Bash"
+    ]
+  },
+  "network_envelope": {
+    "egress_allowed": false,
+    "allowed_hosts": []
+  },
+  "filesystem_envelope": {
+    "read_paths": [
+      "docs/superpowers/notes/"
+    ],
+    "write_paths": [
+      "docs/superpowers/notes/"
+    ]
+  },
+  "side_effect_envelope": {
+    "side_effect_level": 2
+  },
+  "probe_evidence_refs": [],
+  "contradictions": [],
+  "confidence": 0.5,
+  "reviewer": {
+    "actor": "verifier",
+    "identity": null
+  },
+  "approver": {
+    "actor": "human",
+    "identity": null
+  },
+  "lifecycle_state": "revoked",
+  "supersession": {
+    "superseded_by": null,
+    "supersedes": []
+  },
+  "expiry": {
+    "expires_at": null
+  },
+  "rollback_handle": "rollback:mc-revoked-001"
+}

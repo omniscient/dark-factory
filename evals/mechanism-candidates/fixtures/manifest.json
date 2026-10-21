@@ -1,0 +1,19 @@
+{
+  "candidate-draft.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-quarantined.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-probed.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-composed.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-shadow.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-advisory.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "candidate-revoked.json": {"kind": "candidate", "expected_verdict": "PASS"},
+  "lineage-valid-chain.jsonl": {"kind": "lineage", "expected_verdict": "PASS"},
+  "lineage-illegal-transition.jsonl": {"kind": "lineage", "expected_verdict": "FAIL", "error_match": "illegal transition quarantined -> probed"},
+  "lineage-self-approval.jsonl": {"kind": "lineage", "expected_verdict": "FAIL", "error_match": "self-approval"},
+  "lineage-advisory-nonhuman.jsonl": {"kind": "lineage", "expected_verdict": "FAIL", "error_match": "shadow -> advisory requires a human approver"},
+  "lineage-scope-widening.jsonl": {"kind": "lineage", "expected_verdict": "FAIL", "error_match": "does not equal candidate"},
+  "candidate-forbidden-path.json": {"kind": "candidate", "expected_verdict": "FAIL", "error_match": "derived risk class H3 is forbidden"},
+  "candidate-scope-widening.json": {"kind": "candidate", "expected_verdict": "FAIL", "error_match": "outside editable_path_allowlist"},
+  "candidate-digest-mismatch.json": {"kind": "candidate", "expected_verdict": "FAIL", "error_match": "candidate_digest mismatch"},
+  "candidate-schema-version.json": {"kind": "candidate", "expected_verdict": "FAIL", "error_match": "schema_version must be 1"},
+  "candidate-parent-unresolved.json": {"kind": "candidate", "expected_verdict": "FAIL", "error_match": "parent_digest .* does not resolve"}
+}

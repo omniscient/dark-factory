@@ -52,7 +52,9 @@ _ROLE_CARD_RESERVED_FIELDS = {
 # reserved key is hard-rejected: it has no v1 history, so strictness here is
 # parity-safe, and warn-and-carry would deep-merge unvalidated content into config.
 _RESERVED_TOP_FIELDS = {
-    "mechanism_candidates": "a future Bilevel Autoresearch design ticket",
+    "mechanism_candidates": "the harness candidate contract in "
+                            "scripts/factory_core/mechanism_candidate.py (#464), which "
+                            "has no adapter.yaml consumer yet",
 }
 
 
