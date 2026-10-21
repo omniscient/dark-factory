@@ -585,3 +585,160 @@ def validate_candidate(record, *, safety=None, known_digests=()):
     derived = _validate_standalone(record, _resolved_safety(safety))
     _check_resolution(record, set(known_digests))
     return derived
+
+
+# ── Lineage events and transitions ──────────────────────────────────────────────
+
+# #190 tombstone-class operations and the two tombstone statuses imply each other.
+_TOMBSTONE_STATUS = {"quarantine": "quarantined", "tombstone": "tombstoned"}
+_TOMBSTONE_STATUSES = frozenset(_TOMBSTONE_STATUS.values())
+
+
+def _governed_candidate(event, candidates_by_id):
+    for key in ("entity_id", "subject_entity_id"):
+        cid = event.get(key)
+        if cid in candidates_by_id:
+            return candidates_by_id[cid]
+    _fail(f"lineage event {event.get('event_id')!r} names no known candidate "
+          f"(neither entity_id nor subject_entity_id)")
+
+
+def validate_lineage_event(event, candidates_by_id=None):
+    """Shape-check one #190 envelope as a mechanism_lineage event. state_governance_audit
+    validates no shape itself, so unknown keys/enums are rejected here at every level.
+    With `candidates_by_id`, the event's scope must equal its candidate's domain_scope."""
+    _check_keys(event, "lineage event", _ENVELOPE_REQUIRED, ("subject_entity_id",))
+    label = f"lineage event {event.get('event_id')!r}"
+    for key in ("event_id", "idempotency_key", "entity_id"):
+        _req_str(event[key], f"{label}.{key}")
+    if "subject_entity_id" in event:
+        _req_str(event["subject_entity_id"], f"{label}.subject_entity_id")
+    if event["state_type"] != "mechanism_lineage" or event["state_type"] not in _sga.STATE_TYPES:
+        _fail(f"{label}: state_type must be 'mechanism_lineage', got {event['state_type']!r}")
+    op = event["operation"]
+    if op not in _sga.OPERATIONS or op not in LINEAGE_OPERATIONS:
+        _fail(f"{label}: operation {op!r} is not a mechanism_lineage operation")
+    if event["actionability"] not in _sga.ACTIONABILITIES:
+        _fail(f"{label}: unknown actionability {event['actionability']!r}")
+
+    auth = event["authority"]
+    _check_keys(auth, f"{label}.authority", ("actor", "permission_epoch", "approval_record"))
+    _req_str(auth["actor"], f"{label}.authority.actor")
+    if not _is_int(auth["permission_epoch"]) or auth["permission_epoch"] < 0:
+        _fail(f"{label}.authority.permission_epoch must be an int >= 0")
+    if auth["approval_record"] is not None:
+        _req_str(auth["approval_record"], f"{label}.authority.approval_record")
+
+    _validate_scope(event["scope"], f"{label}.scope")
+
+    prov = event["provenance"]
+    _check_keys(prov, f"{label}.provenance", ("source", "trust_tier", "run_id", "commit"))
+    _req_str(prov["source"], f"{label}.provenance.source")
+    for key in ("trust_tier", "run_id", "commit"):
+        _opt_str(prov[key], f"{label}.provenance.{key}")
+
+    mut = event["mutability"]
+    _check_keys(mut, f"{label}.mutability", ("status", "supersedes", "conflicts_with"))
+    if mut["status"] not in MUTABILITY_STATUSES:
+        _fail(f"{label}: unknown mutability.status {mut['status']!r}")
+    if op in _sga._TOMBSTONE_OPS:
+        want = _TOMBSTONE_STATUS.get(op)
+        if want is None or mut["status"] != want:
+            _fail(f"{label}: operation {op!r} requires mutability.status {want!r}, got {mut['status']!r}")
+    elif mut["status"] in _TOMBSTONE_STATUSES:
+        _fail(f"{label}: mutability.status {mut['status']!r} requires a tombstone-class operation, got {op!r}")
+    _str_list(mut["supersedes"], f"{label}.mutability.supersedes")
+    _str_list(mut["conflicts_with"], f"{label}.mutability.conflicts_with")
+
+    rec = event["recoverability"]
+    _check_keys(rec, f"{label}.recoverability", ("transaction_id", "rollback_handle", "external_effects"))
+    _opt_str(rec["transaction_id"], f"{label}.recoverability.transaction_id")
+    _opt_str(rec["rollback_handle"], f"{label}.recoverability.rollback_handle")
+    _str_list(rec["external_effects"], f"{label}.recoverability.external_effects")
+
+    if candidates_by_id is not None:
+        candidate = _governed_candidate(event, candidates_by_id)
+        if event["scope"] != candidate["domain_scope"]:
+            _fail(f"{label}: scope {event['scope']} does not equal candidate "
+                  f"{candidate['candidate_id']!r} domain_scope {candidate['domain_scope']}")
+
+
+def validate_transition(from_state, to_state, event, *, seen_by_id=None, candidates_by_id=None):
+    """Reject any edge outside TRANSITIONS and any unapproved advancement.
+
+    `from_state` None means the candidate does not exist yet (only `-> draft` is legal).
+    For `-> probed|composed|shadow|advisory` the event's authority.approval_record must
+    resolve per state_governance_audit._resolve_approval() against `seen_by_id` (events
+    seen earlier in file order), must not be one of the candidate's own events, and for
+    `-> shadow|advisory` must be a human approval. A candidate never authorizes itself,
+    and with `candidates_by_id` no candidate record's event authorizes any candidate."""
+    if from_state is not None and from_state not in STATES:
+        _fail(f"unknown lifecycle state {from_state!r}")
+    if to_state not in STATES:
+        _fail(f"unknown lifecycle state {to_state!r}")
+    if from_state is None:
+        if to_state != "draft":
+            _fail(f"illegal transition: a candidate is created at 'draft', not {to_state!r}")
+        return
+    if to_state not in TRANSITIONS[from_state]:
+        _fail(f"illegal transition {from_state} -> {to_state}")
+    if to_state not in _ADVANCING_STATES:
+        return  # anyone may stop a candidate; nobody may advance one unapproved
+    seen = seen_by_id or {}
+    epoch = (event.get("authority") or {}).get("permission_epoch")
+    authorized, why = _sga._resolve_approval(event, seen, epoch)
+    if not authorized:
+        _fail(f"transition {from_state} -> {to_state} is not authorized: {why}")
+    approver = seen[event["authority"]["approval_record"]]
+    if approver.get("entity_id") == event.get("entity_id"):
+        _fail(f"self-approval: approval_record {event['authority']['approval_record']} is one "
+              f"of candidate {event.get('entity_id')!r}'s own events and never authorizes")
+    if candidates_by_id and approver.get("entity_id") in candidates_by_id:
+        _fail(f"approval_record {event['authority']['approval_record']} is candidate "
+              f"{approver.get('entity_id')!r}'s own event; candidate records never authorize each other")
+    if to_state in _HUMAN_APPROVAL_STATES and (approver.get("authority") or {}).get("actor") != "human":
+        _fail(f"transition {from_state} -> {to_state} requires a human approver")
+
+
+def derive_target_state(current, operation):
+    """The lifecycle state a lineage `operation` moves a candidate in `current` to."""
+    targets = _OPERATION_TARGETS.get(operation)
+    if targets is None:
+        _fail(f"operation {operation!r} is not a mechanism_lineage operation")
+    if operation != "act":
+        return targets[0]
+    for t in targets:
+        if current in TRANSITIONS and t in TRANSITIONS[current]:
+            return t
+    _fail(f"illegal transition: operation 'act' has no legal target from {current!r}")
+
+
+def validate_lineage(events, candidates_by_id):
+    """Validate an append-only mechanism_lineage event list (file order); returns each
+    candidate's final lifecycle state. Events whose entity_id is a candidate_id are
+    lifecycle transitions; any other event must be an approval record (`write`) whose
+    subject_entity_id names a candidate; approvers are never candidates. The five #190
+    checks must also all PASS."""
+    seen_by_id = {}
+    state = {}
+    for e in events:
+        validate_lineage_event(e, candidates_by_id)
+        if e["event_id"] in seen_by_id:
+            _fail(f"duplicate event_id {e['event_id']!r}")
+        entity_id = e["entity_id"]
+        if entity_id in candidates_by_id:
+            current = state.get(entity_id)
+            target = derive_target_state(current, e["operation"])
+            validate_transition(current, target, e, seen_by_id=seen_by_id,
+                                candidates_by_id=candidates_by_id)
+            state[entity_id] = target
+        elif e["operation"] != "write":
+            _fail(f"lineage event {e['event_id']!r}: a non-candidate entity may only record "
+                  f"an approval (operation 'write'), got {e['operation']!r}")
+        seen_by_id[e["event_id"]] = e
+    card = _sga.compute_scorecard(events, "", "mechanism-lineage")
+    failed = [c for c in card["checks"] if c["verdict"] == "FAIL"]
+    if failed:
+        first = failed[0]["violations"][0]["reason"]
+        _fail(f"state_governance_audit checks failed: {[c['name'] for c in failed]} ({first})")
+    return state
