@@ -461,3 +461,51 @@ def test_state_governance_compatibility():
     assert "quarantine" in sga._TOMBSTONE_OPS and "tombstone" in sga._TOMBSTONE_OPS
     assert {e["state_type"] for e in events} == {"mechanism_lineage"}
     assert mc._sga is sga  # constants imported from #190, never copied
+
+
+# ── Fixture corpus + CLI ────────────────────────────────────────────────────────
+
+def test_fixture_manifest_expectations():
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    on_disk = {p.name for p in _FIXTURES_DIR.iterdir() if p.name != "manifest.json"}
+    assert set(manifest) == on_disk
+    results = mc.validate_fixture_set(_FIXTURES_DIR, safety=_SELF_SAFETY)
+    assert set(results) == on_disk
+    for name, spec in manifest.items():
+        got = results[name]
+        assert got["kind"] == spec["kind"], name
+        assert got["verdict"] == spec["expected_verdict"], f"{name}: {got['error']}"
+        if spec["expected_verdict"] == "FAIL":
+            assert re.search(spec["error_match"], got["error"]), f"{name}: {got['error']}"
+    states = {_load(n)["lifecycle_state"] for n, s in manifest.items()
+              if s["kind"] == "candidate" and s["expected_verdict"] == "PASS"}
+    assert states == set(mc.STATES)  # one positive candidate per lifecycle state
+
+
+def _run_cli(*args):
+    return subprocess.run(
+        [sys.executable, "-m", "factory_core.mechanism_candidate", *args, "--clone-dir", str(_REPO_ROOT)],
+        cwd=_REPO_ROOT, env={**os.environ, "PYTHONPATH": str(_REPO_ROOT / "scripts")},
+        capture_output=True, text=True,
+    )
+
+
+def test_cli_exit_code(tmp_path):
+    full = _run_cli("--fixtures", str(_FIXTURES_DIR))
+    assert full.returncode == 1, full.stderr
+    assert "STATUS: FAIL" in full.stderr
+    positive = tmp_path / "positive"
+    positive.mkdir()
+    for name, spec in json.loads(_MANIFEST.read_text(encoding="utf-8")).items():
+        if spec["expected_verdict"] == "PASS":
+            shutil.copy(_FIXTURES_DIR / name, positive / name)
+    ok = _run_cli("--fixtures", str(positive))  # --out-dir omitted: optional
+    assert ok.returncode == 0, ok.stderr
+    assert "STATUS: PASS" in ok.stderr
+    out = tmp_path / "out"
+    ok = _run_cli("--fixtures", str(positive), "--out-dir", str(out))
+    report = json.loads((out / "mechanism-candidate-report.json").read_text(encoding="utf-8"))
+    assert ok.returncode == 0 and report["STATUS"] == "PASS"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _run_cli("--fixtures", str(empty)).returncode == 1  # nothing validated: fail closed

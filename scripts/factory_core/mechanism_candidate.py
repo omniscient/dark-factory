@@ -663,6 +663,7 @@ def validate_lineage_event(event, candidates_by_id=None):
                   f"{candidate['candidate_id']!r} domain_scope {candidate['domain_scope']}")
 
 
+
 def validate_transition(from_state, to_state, event, *, seen_by_id=None, candidates_by_id=None):
     """Reject any edge outside TRANSITIONS and any unapproved advancement.
 
@@ -742,3 +743,84 @@ def validate_lineage(events, candidates_by_id):
         first = failed[0]["violations"][0]["reason"]
         _fail(f"state_governance_audit checks failed: {[c['name'] for c in failed]} ({first})")
     return state
+
+
+# ── Fixture sets + CLI ──────────────────────────────────────────────────────────
+
+def validate_fixture_set(path, *, safety=None):
+    """Validate a directory (or single file) of candidate *.json and lineage *.jsonl
+    files. Returns {file name: {"kind", "verdict": PASS|FAIL, "error"}}. Digests resolve
+    only against records that pass every record-local rule; lineage resolves only
+    against fully valid records."""
+    safety = _resolved_safety(safety)
+    p = Path(path)
+    files = sorted(p.iterdir()) if p.is_dir() else [p]
+    candidate_files = [f for f in files if f.suffix == ".json" and f.name != "manifest.json"]
+    lineage_files = [f for f in files if f.suffix == ".jsonl"]
+    results = {}
+    standalone = {}
+    for f in candidate_files:
+        try:
+            record = json.loads(f.read_text(encoding="utf-8"))
+            _validate_standalone(record, safety)
+            standalone[f.name] = record
+        except (MechanismCandidateError, ValueError) as exc:
+            results[f.name] = {"kind": "candidate", "verdict": "FAIL", "error": str(exc)}
+    known = {r["candidate_digest"] for r in standalone.values()}
+    id_counts = {}
+    for r in standalone.values():
+        id_counts[r["candidate_id"]] = id_counts.get(r["candidate_id"], 0) + 1
+    candidates_by_id = {}
+    for name, record in standalone.items():
+        try:
+            if id_counts[record["candidate_id"]] > 1:
+                _fail(f"duplicate candidate_id {record['candidate_id']!r} in the fixture set")
+            _check_resolution(record, known)
+            results[name] = {"kind": "candidate", "verdict": "PASS", "error": None}
+            candidates_by_id[record["candidate_id"]] = record
+        except MechanismCandidateError as exc:
+            results[name] = {"kind": "candidate", "verdict": "FAIL", "error": str(exc)}
+    for f in lineage_files:
+        try:
+            validate_lineage(_sga.load_events(f), candidates_by_id)
+            results[f.name] = {"kind": "lineage", "verdict": "PASS", "error": None}
+        except (MechanismCandidateError, ValueError) as exc:
+            results[f.name] = {"kind": "lineage", "verdict": "FAIL", "error": str(exc)}
+    return dict(sorted(results.items()))
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--fixtures", required=True,
+                   help="Directory of candidate *.json + lineage *.jsonl files, or one file")
+    p.add_argument("--out-dir", default="",
+                   help="Optional directory to write mechanism-candidate-report.json")
+    p.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."),
+                   help="Checkout whose .factory/adapter.yaml supplies the safety lists")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        results = validate_fixture_set(args.fixtures, safety=load_safety(args.clone_dir))
+    except MechanismCandidateError as exc:
+        print(f"mechanism_candidate: {exc}", file=sys.stderr)
+        return 1
+    failed = {n: r for n, r in results.items() if r["verdict"] == "FAIL"}
+    status = "FAIL" if failed or not results else "PASS"
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "mechanism-candidate-report.json").write_text(
+            json.dumps({"STATUS": status, "results": results}, indent=2) + "\n", encoding="utf-8")
+    print(f"STATUS: {status}", file=sys.stderr)
+    if not results:
+        print("no candidate (*.json) or lineage (*.jsonl) files found", file=sys.stderr)
+    for name, r in failed.items():
+        print(f"FAIL {name}: {r['error']}", file=sys.stderr)
+    return 1 if status == "FAIL" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
