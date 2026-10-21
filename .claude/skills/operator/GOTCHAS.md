@@ -194,3 +194,21 @@ learned; verify code citations against `origin/main` before relying on them.
   `needs-discussion` is lifted (scheduler.sh Blocked loop, branch probe). After a blast-radius
   block with no PR yet, review the branch, lift the label, and let Continue produce the PR;
   the stateless gate will re-apply `needs-discussion` on the way (lift it again after the PR).
+
+## Learned 2026-10-21 (evening)
+
+- **Two merges close together race the Publish workflow; `latest` goes to whichever build
+  finishes last, not the newest commit.** #475 and #476 merged 14 s apart; the older commit's
+  image finished second and became `latest`. After every `docker pull`, compare
+  `docker image inspect ghcr.io/omniscient/dark-factory:latest --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
+  with `origin/main`; if it lags, `gh run rerun <newest Publish run id>` and pull again. Merging
+  one PR, waiting for Publish, then merging the next avoids it.
+- **`stage_blocked_retry` can dispatch `Fix` on a Blocked item that carries `needs-discussion`
+  and has no plan** (MarketHawk #441, dark-factory #477). Until fixed, scan both schedulers'
+  logs for `dispatch command="Fix` after any merge or restart and check the target item's
+  labels and plan; a Fix run without a plan burns budget for nothing. Moving the item back to
+  Blocked is safe once its container is gone.
+- **A host reboot kills run containers (`--rm`) and the operator session but not the retry
+  counters.** Each lost attempt still counts toward `max_retries`; after a reboot read
+  `/var/lib/dark-factory/scheduler-state.json` in the scheduler container before deciding
+  whether the next automatic attempt is the breaker-tripping one.
