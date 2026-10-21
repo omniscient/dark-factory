@@ -159,3 +159,26 @@ learned; verify code citations against `origin/main` before relying on them.
   (lib.sh derives project, scheduler and run prefix from it). Explicit values still win.
 - **`gh project item-add` leaves the item with no status.** `optin.sh` applied `ready-for-agent` to #455 on 2026-09-28 but the item had no column, and the refine loop only dispatches from Backlog; it sat 18 days. `optin.sh` now sets Backlog when the status is blank. Any ticket you add to the board by hand needs `board.sh set N Backlog` too.
 - **Digest pins rot.** GHCR garbage-collects untagged manifests; the jobfinder instance pinned a digest that no longer pulled (`unauthorized`) and restart-looped 170 times with no alert (#460). Check `docker inspect --format {{.RestartCount}}` on schedulers in `status.sh` reads.
+
+## Learned 2026-10-21
+
+- **Any comment on a gated issue is "new feedback" and re-runs the phase.** `spec_advance_check`
+  / `plan_advance_check` (scheduler.sh) treat every comment posted after the last
+  "Posted by … Refinement Pipeline" marker as feedback: they drop the gate label, post
+  "🔄 Re-running with new feedback" and dispatch Refine/Plan again. The operator verdict
+  comment on #464 did exactly that, twice in three minutes, while the reviewer was amending
+  the same branch. Post the verdict **after** `approve.sh` (board Refined/Ready + label off),
+  or set `needs-discussion` first if the verdict must land before the amendments do. The
+  Sept-27 "post verdicts immediately" lesson was about plan gates Frank had already approved.
+- **Capture transcripts while a run is alive, every minute.** Three #872 refine attempts on
+  MarketHawk ended in 1–11 minutes; two transcripts were lost with their `--rm` containers.
+  `runs.sh transcript <container>` into the scratchpad on a loop is the only record of why an
+  agent ended its turn.
+- **A gate label is not proof the artifact was pushed.** `refine-push` applies
+  `spec-pending-review` whether or not `git push` succeeded (#473). Always `git ls-remote`
+  the refine branch before starting a gate review; a 404 means the spec died with the
+  container and the ticket must be re-refined (drop the label, keep `ready-for-agent`).
+- **MarketHawk refine agents may end their first turn on injection suspicion** because the
+  harness stages `dark-factory/` untracked into the clone and the target CLAUDE.md says the
+  harness was extracted (#472). Two of three attempts on #872 did. Until #472 lands, expect
+  retries and a breaker trip after `max_retries`; do not re-opt-in blindly.
