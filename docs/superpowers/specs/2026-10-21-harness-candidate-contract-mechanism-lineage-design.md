@@ -1,5 +1,5 @@
 # Harness candidate contract and mechanism lineage — schema and lifecycle
-**Revised:** 2026-10-21 (operator amendment after spec gate — one-way quarantine, default-deny risk classifier, diff containment, lineage-event validator, test inventory, citation fixes)
+**Revised:** 2026-10-21 (operator amendment after spec gate — one-way quarantine, default-deny risk classifier, diff containment, lineage-event validator, test inventory, citation fixes; plan-gate amendments: non-candidate approvers, tombstone op/status consistency)
 
 **Issue:** #464 · **Epic:** #463 (Add a governed recursive harness-improvement capability)
 
@@ -104,7 +104,9 @@ epic #463's later children.
    `_resolve_approval()` **and** the resolved approver event must not belong to the
    candidate's own `entity_id` (its own creation/update events never authorize), **and**
    for `-> shadow` and `-> advisory` the resolved approver's `authority.actor` must be
-   `"human"`.
+   `"human"`. The resolved approver event must belong to a non-candidate entity (an
+   `entity_id` that is not any candidate record's `candidate_id`); candidate records never
+   authorize each other.
 9. Unknown fields at any schema level, and unknown lifecycle states, fail closed
    (hand-rolled unknown-key rejection, mirroring `adapter.py`'s `_validate_subblock`).
    This applies to lineage events too: `validate_lineage_event()` rejects unknown keys at
@@ -362,7 +364,9 @@ event must carry an `authority.approval_record` that:
 2. resolves to an approver event whose own `entity_id` is **not** the candidate's
    `entity_id` — the candidate's own creation/update events never authorize, which
    `_resolve_approval()` alone does not guarantee (it accepts a same-entity, non-human
-   event of sufficient epoch); **and**
+   event of sufficient epoch). The resolved approver event must belong to a non-candidate
+   entity (an `entity_id` that is not any candidate record's `candidate_id`); candidate
+   records never authorize each other; **and**
 3. for `-> shadow` and `-> advisory`, resolves to an approver event whose
    `authority.actor` is `"human"` (the epoch-only branch of `_resolve_approval()` is not
    sufficient for these two edges).
@@ -416,6 +420,10 @@ key, an unknown `state_type`, or a non-enum `operation`. The function enforces:
   `quarantine`, `tombstone`);
 - `actionability in state_governance_audit.ACTIONABILITIES`;
 - `mutability.status` in the closed enum above;
+- tombstone op/status consistency: an event whose `operation` is in
+  `state_governance_audit._TOMBSTONE_OPS` must carry `mutability.status: "quarantined"`
+  (for `quarantine`) or `"tombstoned"` (for `tombstone`), and no other operation may carry
+  either status;
 - `scope` has the #190 shape `{repo, issue, pr, agent_role}` and equals the candidate's
   `domain_scope` for the `entity_id` it names.
 

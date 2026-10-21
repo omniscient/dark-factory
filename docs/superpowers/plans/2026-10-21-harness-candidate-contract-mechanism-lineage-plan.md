@@ -1,4 +1,5 @@
 # Implementation Plan: Harness candidate contract and mechanism lineage (#464)
+**Revised:** 2026-10-21 (operator amendment after plan gate — three-dot scope check, non-candidate approvers, tombstone op/status consistency, wording)
 
 **Issue:** #464
 
@@ -17,7 +18,7 @@ content-addressed, **data-and-lifecycle-only** contract: a hand-rolled validator
 harness-improvement candidate records (`schema_version: 1`), a derived default-deny H0–H3
 risk classifier that rejects every H3 record, exact-diff path extraction and allowlist
 containment, a one-way-quarantine lifecycle state machine whose advancing edges need a
-non-self (and, for `shadow`/`advisory`, human) approval, and append-only lineage validation
+non-candidate (and, for `shadow`/`advisory`, human) approval, and append-only lineage validation
 that reuses #190's envelope and checks verbatim. Committed fixtures (one positive candidate
 per lifecycle state, a valid lineage chain, nine negative cases) and pytest coverage prove it.
 The `.factory/adapter.yaml` `mechanism_candidates` key stays hard-rejected — only its message
@@ -65,8 +66,8 @@ commit anything under it.
 1. **API shapes.** The spec's named functions keep their positional signatures and gain
    keyword-only context with fail-closed defaults: `validate_candidate(record, *, safety=None,
    known_digests=())` (empty `known_digests` ⇒ any non-null parent or dependency is
-   unresolvable), `validate_transition(from_state, to_state, event, *, seen_by_id=None)`
-   (no prior events ⇒ no advancing edge can be approved), `validate_lineage_event(event,
+   unresolvable), `validate_transition(from_state, to_state, event, *, seen_by_id=None,
+   candidates_by_id=None)` (no prior events ⇒ no advancing edge can be approved), `validate_lineage_event(event,
    candidates_by_id=None)`, `classify_risk(touched_paths, safety=None,
    tool_frontmatter_paths=())`, `canonical_digest(obj)`. Helpers: `candidate_digest_of`,
    `extract_diff_paths`, `classify_path`, `load_safety`, `derive_target_state`,
@@ -130,11 +131,14 @@ commit anything under it.
     for its intended reason, not an incidental one.
 13. **CLI.** Writes `mechanism-candidate-report.json` only when `--out-dir` is given; an empty
     fixture directory is `STATUS: FAIL`, exit 1 (nothing validated ⇒ fail closed).
-14. **Deliberately not checked in this ticket** (data-only scope; recorded so a future
-    dispatcher does not assume them): a lineage chain's final derived state is not compared
-    with the candidate record's `lifecycle_state`; and an event on candidate B carrying
-    `subject_entity_id: A` may approve A's non-human edges (spec rule 8 forbids only A's own
-    events; `-> shadow`/`-> advisory` still need a human).
+14. **Approvers are never candidates.** `validate_lineage()` passes `candidates_by_id` into
+    `validate_transition()`, which rejects any resolved approver event whose `entity_id` is a
+    candidate's `candidate_id` — so an event on candidate B carrying `subject_entity_id: A`
+    can never approve A's edges (spec rule 8 as amended at the plan gate: candidate records
+    never authorize each other). Approvals come from non-candidate entities (Decision 4).
+    **Deliberately not checked in this ticket** (data-only scope; recorded so a future
+    dispatcher does not assume it): a lineage chain's final derived state is not compared
+    with the candidate record's `lifecycle_state`.
 15. **Fixture digests are real.** Fixtures are generated once by the one-shot heredocs in
     Tasks 5 and 6 (not committed as a script) so every digest is a true `canonical_digest()`
     output; the eight `baseline.*_digest` values hash labelled synthetic inputs, since real
@@ -621,10 +625,10 @@ def test_diff_paths_match_git_apply(tmp_path):
 PYTHONPATH=scripts python -m pytest tests/test_mechanism_candidate.py -v -k diff_path
 ```
 
-Expected: `19 failed, 1 passed` — every new `test_diff_path_extraction*` /
+Expected: `19 failed, 1 deselected` — every new `test_diff_path_extraction*` /
 `test_diff_paths_match_git_apply` case FAILS with
 `AttributeError: module 'factory_core.mechanism_candidate' has no attribute 'extract_diff_paths'`;
-Task 2's digest test still passes.
+Task 2's digest test is deselected by `-k`.
 
 - [ ] **Step 3: Implement.**
 
@@ -1465,11 +1469,15 @@ git commit -m "feat(factory_core): validate mechanism_candidates records + per-s
 **Files:** `scripts/factory_core/mechanism_candidate.py` (append), `tests/test_mechanism_candidate.py` (append), `evals/mechanism-candidates/fixtures/lineage-*.jsonl` (5 generated files)
 
 `validate_transition()` owns the approval rule (spec Requirement 8): `_resolve_approval()`
-as-is, **then** the resolved approver event must not be one of the candidate's own events,
-**then** `-> shadow`/`-> advisory` need `authority.actor == "human"`. Stopping edges
+as-is, **then** the resolved approver event must not be one of the candidate's own events
+nor any candidate record's event (`entity_id in candidates_by_id`, Decision 14), **then**
+`-> shadow`/`-> advisory` need `authority.actor == "human"`. Stopping edges
 (`-> quarantined`, `-> revoked`) need no approval. `validate_lineage()` replays a file in
 order (Decision 3 derives each target state), keeps `seen_by_id` exactly as #190's checks
 do, and finally requires all five `compute_scorecard()` checks to PASS (Decision 5).
+`validate_lineage_event()` also pins tombstone op/status consistency with #190's
+`_TOMBSTONE_OPS`: `quarantine` ⇒ `mutability.status: quarantined`, `tombstone` ⇒
+`tombstoned`, and neither status on any other operation.
 
 Lineage fixtures: `lineage-valid-chain.jsonl` walks `mc-advisory-001` draft → probed →
 composed → shadow → advisory (separate approval entities; human for shadow/advisory) and
@@ -1549,6 +1557,8 @@ def test_unknown_keys_fail_closed(kind, block):
     (("actionability",), "authority", "unknown actionability"),
     (("mutability", "status"), "actve", "unknown mutability.status"),
     (("authority", "permission_epoch"), True, "permission_epoch"),
+    (("operation",), "quarantine", "requires mutability.status 'quarantined'"),  # tombstone-class op, active status
+    (("mutability", "status"), "tombstoned", "requires a tombstone-class operation"),  # write op, tombstone status
 ])
 def test_lineage_event_validation(path, value, match):
     e = copy.deepcopy(_events("lineage-valid-chain.jsonl")[0])
@@ -1567,6 +1577,18 @@ def test_self_approval_rejected():
     events[1]["authority"]["approval_record"] = events[1]["event_id"]  # own event_id
     with pytest.raises(mc.MechanismCandidateError, match="self-approval never authorizes"):
         mc.validate_lineage(events, _candidates_by_id())
+
+
+def test_candidate_never_approves_another():
+    """A candidate record's event, even one naming another candidate as subject_entity_id,
+    never authorizes that candidate's advancement: approvers are non-candidate entities."""
+    events = _events("lineage-self-approval.jsonl")
+    other = copy.deepcopy(events[0])  # mc-draft-001's own creation event, subject = mc-probed-001
+    other.update({"event_id": "other-1", "idempotency_key": "issue-464:other-1",
+                  "entity_id": "mc-draft-001", "subject_entity_id": "mc-probed-001"})
+    events[1]["authority"]["approval_record"] = "other-1"
+    with pytest.raises(mc.MechanismCandidateError, match="candidate records never authorize each other"):
+        mc.validate_lineage([events[0], other, events[1]], _candidates_by_id())
 
 
 def test_advisory_requires_human():
@@ -1622,7 +1644,7 @@ def test_state_governance_compatibility():
 PYTHONPATH=scripts python -m pytest tests/test_mechanism_candidate.py -v
 ```
 
-Expected: `18 failed, 65 passed` — failures are `AttributeError` (`validate_transition`,
+Expected: `21 failed, 65 passed` — failures are `AttributeError` (`validate_transition`,
 `validate_lineage_event`, `validate_lineage` not defined yet) or `FileNotFoundError` for
 `lineage-*.jsonl`; the 14 `candidate` cases of `test_unknown_keys_fail_closed` already pass on
 Task 5's code.
@@ -1632,6 +1654,11 @@ Task 5's code.
 **Append to** `scripts/factory_core/mechanism_candidate.py`:
 ```python
 # ── Lineage events and transitions ──────────────────────────────────────────────
+
+# #190 tombstone-class operations and the two tombstone statuses imply each other.
+_TOMBSTONE_STATUS = {"quarantine": "quarantined", "tombstone": "tombstoned"}
+_TOMBSTONE_STATUSES = frozenset(_TOMBSTONE_STATUS.values())
+
 
 def _governed_candidate(event, candidates_by_id):
     for key in ("entity_id", "subject_entity_id"):
@@ -1680,6 +1707,12 @@ def validate_lineage_event(event, candidates_by_id=None):
     _check_keys(mut, f"{label}.mutability", ("status", "supersedes", "conflicts_with"))
     if mut["status"] not in MUTABILITY_STATUSES:
         _fail(f"{label}: unknown mutability.status {mut['status']!r}")
+    if op in _sga._TOMBSTONE_OPS:
+        want = _TOMBSTONE_STATUS.get(op)
+        if want is None or mut["status"] != want:
+            _fail(f"{label}: operation {op!r} requires mutability.status {want!r}, got {mut['status']!r}")
+    elif mut["status"] in _TOMBSTONE_STATUSES:
+        _fail(f"{label}: mutability.status {mut['status']!r} requires a tombstone-class operation, got {op!r}")
     _str_list(mut["supersedes"], f"{label}.mutability.supersedes")
     _str_list(mut["conflicts_with"], f"{label}.mutability.conflicts_with")
 
@@ -1697,14 +1730,15 @@ def validate_lineage_event(event, candidates_by_id=None):
 
 
 
-def validate_transition(from_state, to_state, event, *, seen_by_id=None):
+def validate_transition(from_state, to_state, event, *, seen_by_id=None, candidates_by_id=None):
     """Reject any edge outside TRANSITIONS and any unapproved advancement.
 
     `from_state` None means the candidate does not exist yet (only `-> draft` is legal).
     For `-> probed|composed|shadow|advisory` the event's authority.approval_record must
     resolve per state_governance_audit._resolve_approval() against `seen_by_id` (events
     seen earlier in file order), must not be one of the candidate's own events, and for
-    `-> shadow|advisory` must be a human approval. A candidate never authorizes itself."""
+    `-> shadow|advisory` must be a human approval. A candidate never authorizes itself,
+    and with `candidates_by_id` no candidate record's event authorizes any candidate."""
     if from_state is not None and from_state not in STATES:
         _fail(f"unknown lifecycle state {from_state!r}")
     if to_state not in STATES:
@@ -1726,6 +1760,9 @@ def validate_transition(from_state, to_state, event, *, seen_by_id=None):
     if approver.get("entity_id") == event.get("entity_id"):
         _fail(f"self-approval: approval_record {event['authority']['approval_record']} is one "
               f"of candidate {event.get('entity_id')!r}'s own events and never authorizes")
+    if candidates_by_id and approver.get("entity_id") in candidates_by_id:
+        _fail(f"approval_record {event['authority']['approval_record']} is candidate "
+              f"{approver.get('entity_id')!r}'s own event; candidate records never authorize each other")
     if to_state in _HUMAN_APPROVAL_STATES and (approver.get("authority") or {}).get("actor") != "human":
         _fail(f"transition {from_state} -> {to_state} requires a human approver")
 
@@ -1747,7 +1784,8 @@ def validate_lineage(events, candidates_by_id):
     """Validate an append-only mechanism_lineage event list (file order); returns each
     candidate's final lifecycle state. Events whose entity_id is a candidate_id are
     lifecycle transitions; any other event must be an approval record (`write`) whose
-    subject_entity_id names a candidate. The five #190 checks must also all PASS."""
+    subject_entity_id names a candidate; approvers are never candidates. The five #190
+    checks must also all PASS."""
     seen_by_id = {}
     state = {}
     for e in events:
@@ -1758,7 +1796,8 @@ def validate_lineage(events, candidates_by_id):
         if entity_id in candidates_by_id:
             current = state.get(entity_id)
             target = derive_target_state(current, e["operation"])
-            validate_transition(current, target, e, seen_by_id=seen_by_id)
+            validate_transition(current, target, e, seen_by_id=seen_by_id,
+                                candidates_by_id=candidates_by_id)
             state[entity_id] = target
         elif e["operation"] != "write":
             _fail(f"lineage event {e['event_id']!r}: a non-candidate entity may only record "
@@ -1833,7 +1872,7 @@ write_jsonl("lineage-illegal-transition.jsonl", [
     ev("it-1", "write", "mc-quarantined-001", "proposer"),
     ev("it-2", "quarantine", "mc-quarantined-001", "verifier", status="quarantined"),
     approval("it-ap-probe", "mc-quarantined-001", "human"),
-    ev("it-3", "validate", "mc-quarantined-001", "verifier", approval="it-ap-probe", status="quarantined"),
+    ev("it-3", "validate", "mc-quarantined-001", "verifier", approval="it-ap-probe"),
 ])
 write_jsonl("lineage-self-approval.jsonl", [
     ev("sa-1", "write", "mc-probed-001", "proposer"),
@@ -1858,7 +1897,7 @@ PYTHONPATH=scripts python -m pytest tests/test_mechanism_candidate.py -v
 PYTHONPATH=scripts python -m pytest tests/test_state_governance_audit.py tests/test_state_governance_fixtures.py -q
 ```
 
-Expected: `83 passed`; then `53 passed` (unchanged — the new fixtures live
+Expected: `86 passed`; then `53 passed` (unchanged — the new fixtures live
 outside `evals/state-governance/fixtures/`, so its 11-file cap is unaffected).
 
 - [ ] **Step 6: Commit.**
@@ -2053,7 +2092,7 @@ PYTHONPATH=scripts python -m pytest tests/test_mechanism_candidate.py -v
 PYTHONPATH=scripts python3 -m factory_core.mechanism_candidate --fixtures evals/mechanism-candidates/fixtures/; echo "exit=$?"
 ```
 
-Expected: `85 passed`. The CLI prints `STATUS: FAIL`, then exactly nine `FAIL <file>: ...`
+Expected: `88 passed`. The CLI prints `STATUS: FAIL`, then exactly nine `FAIL <file>: ...`
 lines — the 5 negative `candidate-*.json` and 4 negative `lineage-*.jsonl` files, each with the
 reason its manifest `error_match` names — and `exit=1`. No positive fixture appears.
 
@@ -2075,8 +2114,8 @@ git commit -m "feat(factory_core): mechanism_candidate fixture-set validation + 
 PYTHONPATH=scripts python -m pytest tests/ -v 2>&1 | tail -3
 ```
 
-Expected: `0 failed`; the total is the pre-change count + 86 (1 in
-`tests/test_adapter.py`, 85 in `tests/test_mechanism_candidate.py`).
+Expected: `0 failed`; the total is the pre-change count + 89 (1 in
+`tests/test_adapter.py`, 88 in `tests/test_mechanism_candidate.py`).
 
 - [ ] **Step 2: DAG checks CI runs (untouched, must stay green).**
 
@@ -2096,12 +2135,11 @@ PYTHONPATH=scripts python3 -m factory_core.adapter --clone-dir . --validate
 Expected: `adapter OK` (the self-target adapter has no `mechanism_candidates` key, so the
 change is message-only for every existing adapter).
 
-- [ ] **Step 4: Scope check — two-dot diff against main.** Use the two-dot form (the
-  three-dot form reports files main changed independently as false positives):
+- [ ] **Step 4: Scope check — three-dot diff against main.** Use the three-dot form (the
+  two-dot form reports files main changed independently as false positives):
 
 ```bash
-git fetch origin main
-git diff --name-only origin/main HEAD
+git fetch origin main && git diff --name-only origin/main...HEAD
 ```
 
 Expected: exactly `scripts/factory_core/adapter.py`, `scripts/factory_core/mechanism_candidate.py`,
@@ -2148,10 +2186,12 @@ the only write is the optional `--out-dir` report). The second prints only
   `test_diff_path_extraction` (+ `_rename_copy_and_hunks`, `test_diff_paths_match_git_apply`,
   `test_fixture_diffs_match_git_apply`), `test_diff_within_allowlist`,
   `test_no_self_parenting`, `test_parent_and_dependency_resolve`, `test_schema_version`,
-  `test_field_ranges`, `test_self_approval_rejected`, `test_advisory_requires_human`,
+  `test_field_ranges`, `test_self_approval_rejected`, `test_candidate_never_approves_another`,
+  `test_advisory_requires_human`,
   `test_lineage_event_validation`, `test_state_governance_compatibility`,
   `test_adapter_message_cites_module` (in `tests/test_adapter.py`), `test_cli_exit_code`. ✔
 - Security constraints: H3 surfaces schema-forbidden (no valid H3 record exists); payload
   fields are only ever compared/hashed, never executed or interpolated into commands;
-  unknown fields/states fail closed at every level; a candidate's own events never
-  authorize its transitions. ✔
+  unknown fields/states fail closed at every level; no candidate record's events ever
+  authorize a transition (its own or another candidate's); tombstone-class operations and
+  tombstone statuses imply each other. ✔
