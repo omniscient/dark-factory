@@ -108,3 +108,51 @@ def test_diff_paths_match_git_apply(tmp_path):
     tricky = _diff(_DOC, "--- a/tests/x.py", "+++ b/tests/x.py")
     for diff in (two, tricky, _diff(_DOC)):
         assert set(mc.extract_diff_paths(diff)) == _git_apply_paths(diff, tmp_path)
+
+
+# ── Risk classification ─────────────────────────────────────────────────────────
+
+_SELF_SAFETY = mc.load_safety(str(_REPO_ROOT))
+_EMPTY_SAFETY = {"hard_exclude_paths": [], "critical_diff_paths": []}
+
+
+def _h3_probe_path(prefix):
+    return prefix + "x.py" if prefix.endswith(("/", "_")) else prefix
+
+
+@pytest.mark.parametrize("prefix", mc.H3_PREFIXES)
+def test_h3_enumeration_entry(prefix):
+    # Empty safety lists: the committed enumeration alone must force H3.
+    assert mc.classify_path(_h3_probe_path(prefix), _EMPTY_SAFETY) == "H3"
+
+
+def test_classify_path_allowlists_safety_lists_and_default_deny():
+    assert mc.classify_path("docs/superpowers/specs/x.md", _EMPTY_SAFETY) == "H0"
+    assert mc.classify_path("commands/dark-factory-plan.md", _EMPTY_SAFETY) == "H1"
+    assert mc.classify_path("commands/dark-factory-plan.md", _EMPTY_SAFETY, tool_frontmatter=True) == "H3"
+    assert mc.classify_path("scripts/diff_rank.py", _EMPTY_SAFETY) == "H2"
+    assert mc.classify_path("workflows/archon-dark-factory.yaml", _EMPTY_SAFETY) == "H2"
+    # Resolved self-target lists (boundary floor ^workflows/, ^commands/) win over H1/H2.
+    assert mc.classify_path("workflows/archon-dark-factory.yaml", _SELF_SAFETY) == "H3"
+    assert mc.classify_path("commands/dark-factory-plan.md", _SELF_SAFETY) == "H3"
+    assert mc.classify_path("scripts/diff_rank.py", _SELF_SAFETY) == "H2"
+    custom = {"hard_exclude_paths": ["docs/superpowers/secret/"],
+              "critical_diff_paths": [r"^scripts/diff_rank\.py$"]}
+    assert mc.classify_path("docs/superpowers/secret/x.md", custom) == "H3"
+    assert mc.classify_path("scripts/diff_rank.py", custom) == "H3"
+    # Default-deny: nothing in an H0/H1/H2 allowlist.
+    for path in ("README.md", "templates/x.md", "scripts/shims/x.sh", "docs/x.md", "commands/sub/x.md"):
+        assert mc.classify_path(path, _EMPTY_SAFETY) == "H3", path
+    assert mc.classify_risk([], _EMPTY_SAFETY) == "H3"
+    # Case-only variants cannot dodge an H3 prefix.
+    assert mc.classify_path(".Claude/Settings.json", _EMPTY_SAFETY) == "H3"
+    assert mc.classify_path("Tests/test_x.py", _EMPTY_SAFETY) == "H3"
+    assert mc.classify_risk(["docs/superpowers/x.md", "scripts/diff_rank.py"], _EMPTY_SAFETY) == "H2"
+    assert mc.classify_risk(["commands/a.md"], _EMPTY_SAFETY, ["commands/a.md"]) == "H3"
+
+
+def test_safety_lists_fail_closed():
+    with pytest.raises(mc.MechanismCandidateError, match="list of strings"):
+        mc.classify_risk(["docs/superpowers/x.md"], {"hard_exclude_paths": "deploy/", "critical_diff_paths": []})
+    with pytest.raises(mc.MechanismCandidateError, match="invalid regex"):
+        mc.classify_risk(["docs/superpowers/x.md"], {"hard_exclude_paths": [], "critical_diff_paths": ["("]})

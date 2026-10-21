@@ -349,3 +349,67 @@ def extract_diff_paths(diff):
 
 def _contained(path, allowlist):
     return any(path == e or (e.endswith("/") and path.startswith(e)) for e in allowlist)
+
+
+# ── Risk classification ─────────────────────────────────────────────────────────
+
+def load_safety(clone_dir):
+    """safety.hard_exclude_paths / critical_diff_paths from adapter.load() — the merged,
+    boundary-floored lists, never raw adapter_defaults.DEFAULTS (MarketHawk constants)."""
+    try:
+        safety = adapter.load(clone_dir)["safety"]
+    except adapter.AdapterError as exc:
+        _fail(f"cannot resolve safety lists from adapter.load({clone_dir!r}): {exc}")
+    return _resolved_safety({
+        "hard_exclude_paths": safety.get("hard_exclude_paths"),
+        "critical_diff_paths": safety.get("critical_diff_paths"),
+    })
+
+
+def _resolved_safety(safety):
+    if safety is None:
+        return load_safety(os.environ.get("CLONE_DIR", "."))
+    for key in ("hard_exclude_paths", "critical_diff_paths"):
+        v = safety.get(key) if isinstance(safety, dict) else None
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            _fail(f"resolved safety.{key} must be a list of strings (fail closed)")
+    try:
+        for pattern in safety["critical_diff_paths"]:
+            re.compile(pattern)
+    except re.error as exc:
+        _fail(f"resolved safety.critical_diff_paths has an invalid regex: {exc}")
+    return safety
+
+
+def classify_path(path, safety, *, tool_frontmatter=False):
+    """Risk class of one repo-relative path (default-deny). `safety` must already be
+    resolved (load_safety()/an explicit dict)."""
+    p = _normalise(path)
+    folded = p.casefold()
+    if any(folded.startswith(pre.casefold()) for pre in H3_PREFIXES):
+        return "H3"
+    if any(p.startswith(pre) for pre in safety["hard_exclude_paths"]):
+        return "H3"
+    if any(re.search(pat, p) for pat in safety["critical_diff_paths"]):
+        return "H3"
+    if any(p.startswith(pre) for pre in H0_PREFIXES):
+        return "H0"
+    if p.startswith(H1_COMMANDS_DIR) and p.endswith(".md") \
+            and "/" not in p[len(H1_COMMANDS_DIR):]:
+        return "H3" if tool_frontmatter else "H1"
+    if H2_SCRIPT_RE.match(p) or any(p.startswith(pre) for pre in H2_PREFIXES):
+        return "H2"
+    return "H3"
+
+
+def classify_risk(touched_paths, safety=None, tool_frontmatter_paths=()):
+    """Maximum risk class over `touched_paths`; an empty set is H3 (default-deny)."""
+    safety = _resolved_safety(safety)
+    frontmatter = {_normalise(p) for p in tool_frontmatter_paths}
+    classes = [
+        classify_path(p, safety, tool_frontmatter=_normalise(p) in frontmatter)
+        for p in touched_paths
+    ]
+    if not classes:
+        return "H3"
+    return max(classes, key=_RISK_RANK.__getitem__)
