@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "candidate_id": "mc-neg-scope-widening",
+  "candidate_digest": "sha256:f2e79bc04265834d43a61cd5b623fb1fd0843d4155a10ae2669c691d6def323a",
+  "parent_digest": null,
+  "baseline": {
+    "harness_digest": "sha256:0568e2d33783a0dd2f1844774386e367bf27aae2683f565086285f0c7715d198",
+    "repo_digest": "sha256:1ff5e278c7a6f7e08b9ebe1f2d773b5f1b93dda595945a4874f12c7bf4155295",
+    "task_digest": "sha256:45ea42c15f0aec0515d8daf28415fa9b6bb0ce482c1a48b4050514c3f44f23f4",
+    "model_runtime_digest": "sha256:053e5c761c364631206664bf2f45aac0b25d0eacdb8e772841788f6d1ee61de7",
+    "tool_digest": "sha256:6d2c8e451c1a60d9e2a67a8505caf350eed9627003108231e09b92890915405a",
+    "verifier_digest": "sha256:94b98bd4dc8de99228ffce32535453b1a98129dbe0e0939379292346ceb481df",
+    "policy_digest": "sha256:48642ce030f3d9fdce8cd3eeb4d7f66e9cca012809cd172e5c8e29cb42be20ef",
+    "library_digest": "sha256:348e0c9904d595ff604e9fbb3d0f474865a7a88f35a4349384ff2b76d536dcf4"
+  },
+  "source": {
+    "issue": 464,
+    "run_id": "run-mc-neg-scope-widening"
+  },
+  "observed_failure": {
+    "description": "synthetic observed failure for mc-neg-scope-widening",
+    "evidence_refs": [
+      "artifacts/runs/run-mc-neg-scope-widening/trace.json"
+    ]
+  },
+  "invariant_scope": "plan-phase-retry-discipline",
+  "domain_scope": {
+    "repo": "omniscient/dark-factory",
+    "issue": 464,
+    "pr": null,
+    "agent_role": "implement"
+  },
+  "risk_class": "H0",
+  "editable_path_allowlist": [
+    "docs/superpowers/notes/inside.md"
+  ],
+  "diff": "diff --git a/docs/superpowers/notes/outside.md b/docs/superpowers/notes/outside.md\n--- a/docs/superpowers/notes/outside.md\n+++ b/docs/superpowers/notes/outside.md\n@@ -1,2 +1,2 @@\n # outside\n-A.\n+B.\n",
+  "dependency_closure": [],
+  "expected_behavioral_hypothesis": "Edits a file the allowlist does not name.",
+  "resource_envelope": {
+    "cpu_limit": "1",
+    "memory_limit_mb": 2048,
+    "max_duration_seconds": 900
+  },
+  "permission_envelope": {
+    "tool_allow": [
+      "Read",
+      "Grep"
+    ],
+    "tool_deny": [
+      "Bash"
+    ]
+  },
+  "network_envelope": {
+    "egress_allowed": false,
+    "allowed_hosts": []
+  },
+  "filesystem_envelope": {
+    "read_paths": [
+      "docs/superpowers/notes/inside.md"
+    ],
+    "write_paths": [
+      "docs/superpowers/notes/inside.md"
+    ]
+  },
+  "side_effect_envelope": {
+    "side_effect_level": 2
+  },
+  "probe_evidence_refs": [],
+  "contradictions": [],
+  "confidence": 0.5,
+  "reviewer": {
+    "actor": "verifier",
+    "identity": null
+  },
+  "approver": {
+    "actor": "human",
+    "identity": null
+  },
+  "lifecycle_state": "draft",
+  "supersession": {
+    "superseded_by": null,
+    "supersedes": []
+  },
+  "expiry": {
+    "expires_at": null
+  },
+  "rollback_handle": null
+}

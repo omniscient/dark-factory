@@ -413,3 +413,175 @@ def classify_risk(touched_paths, safety=None, tool_frontmatter_paths=()):
     if not classes:
         return "H3"
     return max(classes, key=_RISK_RANK.__getitem__)
+
+
+# ── Per-block validators ────────────────────────────────────────────────────────
+
+def _validate_baseline(b):
+    _check_keys(b, "baseline", _BASELINE_FIELDS)
+    for k in _BASELINE_FIELDS:
+        _digest(b[k], f"baseline.{k}")
+
+
+def _validate_source(s):
+    _check_keys(s, "source", ("issue", "run_id"))
+    _pos_int(s["issue"], "source.issue")
+    _req_str(s["run_id"], "source.run_id")
+
+
+def _validate_observed_failure(o):
+    _check_keys(o, "observed_failure", ("description", "evidence_refs"))
+    _req_str(o["description"], "observed_failure.description")
+    _str_list(o["evidence_refs"], "observed_failure.evidence_refs")
+
+
+def _validate_scope(s, name):
+    """The #190 scope shape — shared by candidate domain_scope and lineage-event scope."""
+    _check_keys(s, name, ("repo", "issue", "pr", "agent_role"))
+    _req_str(s["repo"], f"{name}.repo")
+    _pos_int(s["issue"], f"{name}.issue", nullable=True)
+    _pos_int(s["pr"], f"{name}.pr", nullable=True)
+    _req_str(s["agent_role"], f"{name}.agent_role")
+
+
+def _validate_envelopes(r):
+    res = r["resource_envelope"]
+    _check_keys(res, "resource_envelope", ("cpu_limit", "memory_limit_mb", "max_duration_seconds"))
+    _opt_str(res["cpu_limit"], "resource_envelope.cpu_limit")
+    _pos_int(res["memory_limit_mb"], "resource_envelope.memory_limit_mb", nullable=True)
+    _pos_int(res["max_duration_seconds"], "resource_envelope.max_duration_seconds", nullable=True)
+
+    perm = r["permission_envelope"]  # descriptive only — never read as a grant
+    _check_keys(perm, "permission_envelope", ("tool_allow", "tool_deny"))
+    _str_list(perm["tool_allow"], "permission_envelope.tool_allow")
+    _str_list(perm["tool_deny"], "permission_envelope.tool_deny")
+
+    net = r["network_envelope"]  # descriptive only — never read as a grant
+    _check_keys(net, "network_envelope", ("egress_allowed", "allowed_hosts"))
+    if not isinstance(net["egress_allowed"], bool):
+        _fail("network_envelope.egress_allowed must be a bool")
+    _str_list(net["allowed_hosts"], "network_envelope.allowed_hosts")
+
+    fs = r["filesystem_envelope"]
+    _check_keys(fs, "filesystem_envelope", ("read_paths", "write_paths"))
+    _str_list(fs["read_paths"], "filesystem_envelope.read_paths")
+    _str_list(fs["write_paths"], "filesystem_envelope.write_paths")
+
+    # side_effect.py (#196) defines 1-6 but rejects 6 at validation; 1-5 here too.
+    se = r["side_effect_envelope"]
+    _check_keys(se, "side_effect_envelope", ("side_effect_level",))
+    lvl = se["side_effect_level"]
+    if not _is_int(lvl) or not (1 <= lvl <= 5):
+        _fail("side_effect_envelope.side_effect_level must be an int between 1 and 5")
+
+
+def _validate_evidence_and_review(r):
+    refs = r["probe_evidence_refs"]
+    if not isinstance(refs, list):
+        _fail("probe_evidence_refs must be a list")
+    for i, ref in enumerate(refs):
+        name = f"probe_evidence_refs[{i}]"
+        _check_keys(ref, name, ("type", "ref", "observed_at"))
+        if ref["type"] not in ("probe", "composition"):
+            _fail(f"{name}.type must be 'probe' or 'composition'")
+        _req_str(ref["ref"], f"{name}.ref")
+        _req_str(ref["observed_at"], f"{name}.observed_at")
+    _str_list(r["contradictions"], "contradictions")
+
+    c = r["confidence"]  # bool is an int subclass; NaN compares false everywhere
+    if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) \
+            or not (0.0 <= c <= 1.0):
+        _fail("confidence must be a number between 0.0 and 1.0")
+
+    for party in ("reviewer", "approver"):
+        p = r[party]
+        _check_keys(p, party, ("actor", "identity"))
+        _req_str(p["actor"], f"{party}.actor")
+        _opt_str(p["identity"], f"{party}.identity")
+
+
+def _validate_supersession_expiry(r):
+    s = r["supersession"]
+    _check_keys(s, "supersession", ("superseded_by", "supersedes"))
+    _digest(s["superseded_by"], "supersession.superseded_by", nullable=True)
+    _digest_list(s["supersedes"], "supersession.supersedes")
+    e = r["expiry"]
+    _check_keys(e, "expiry", ("expires_at",))
+    _opt_str(e["expires_at"], "expiry.expires_at")
+    _opt_str(r["rollback_handle"], "rollback_handle")
+
+
+# ── Candidate record validation ─────────────────────────────────────────────────
+
+def _validate_standalone(record, safety):
+    """Every record-local rule; returns the derived risk class. Excludes only the
+    fixture-set rule that parent/dependency digests resolve (see _check_resolution)."""
+    if not isinstance(record, dict):
+        _fail("candidate record must be a mapping")
+    sv = record.get("schema_version")
+    if not _is_int(sv) or sv != SCHEMA_VERSION:
+        _fail(f"schema_version must be {SCHEMA_VERSION}, got {sv!r}")
+    _check_keys(record, "candidate record", _RECORD_FIELDS)
+    _req_str(record["candidate_id"], "candidate_id")
+    _digest(record["candidate_digest"], "candidate_digest")
+    _digest(record["parent_digest"], "parent_digest", nullable=True)
+    _validate_baseline(record["baseline"])
+    _validate_source(record["source"])
+    _validate_observed_failure(record["observed_failure"])
+    _req_str(record["invariant_scope"], "invariant_scope")
+    _validate_scope(record["domain_scope"], "domain_scope")
+    if record["risk_class"] not in RISK_CLASSES:
+        _fail(f"unknown risk_class {record['risk_class']!r}")
+    _validate_allowlist(record["editable_path_allowlist"])
+    if not isinstance(record["diff"], str):
+        _fail("diff must be a string")
+    _digest_list(record["dependency_closure"], "dependency_closure")
+    _req_str(record["expected_behavioral_hypothesis"], "expected_behavioral_hypothesis")
+    _validate_envelopes(record)
+    _validate_evidence_and_review(record)
+    if record["lifecycle_state"] not in STATES:
+        _fail(f"unknown lifecycle_state {record['lifecycle_state']!r}")
+    _validate_supersession_expiry(record)
+
+    expected = candidate_digest_of(record)
+    if record["candidate_digest"] != expected:
+        _fail(f"candidate_digest mismatch: record carries {record['candidate_digest']}, "
+              f"identity-bearing fields hash to {expected}")
+    if record["parent_digest"] == record["candidate_digest"]:
+        _fail("parent_digest equals candidate_digest (self-parenting)")
+
+    changed = extract_diff_paths(record["diff"])
+    allowlist = record["editable_path_allowlist"]
+    outside = sorted(p for p in changed if not _contained(p, allowlist))
+    if outside:
+        _fail(f"diff paths outside editable_path_allowlist (scope widening): {outside}")
+    frontmatter = {p for p, lines in changed.items()
+                   if any(_TOOL_FRONTMATTER_RE.match(ln) for ln in lines)}
+    touched = sorted(set(allowlist) | set(changed))
+    derived = classify_risk(touched, safety, frontmatter)
+    if derived == "H3":
+        h3 = [p for p in touched if classify_path(p, safety, tool_frontmatter=p in frontmatter) == "H3"]
+        _fail(f"derived risk class H3 is forbidden (optimizer-forbidden surface): {h3}")
+    if _RISK_RANK[record["risk_class"]] < _RISK_RANK[derived]:
+        _fail(f"declared risk_class {record['risk_class']} underclaims derived class {derived}")
+    return derived
+
+
+def _check_resolution(record, known_digests):
+    parent = record["parent_digest"]
+    if parent is not None and parent not in known_digests:
+        _fail(f"parent_digest {parent} does not resolve to any candidate_digest in the fixture set")
+    for d in record["dependency_closure"]:
+        if d not in known_digests:
+            _fail(f"dependency_closure entry {d} does not resolve to any candidate_digest in the fixture set")
+
+
+def validate_candidate(record, *, safety=None, known_digests=()):
+    """Validate one candidate record; returns its derived risk class.
+
+    `known_digests` is the set of candidate_digests a non-null parent_digest and every
+    dependency_closure entry must resolve to (default empty: unresolvable, fail closed).
+    `safety` defaults to load_safety($CLONE_DIR or '.')."""
+    derived = _validate_standalone(record, _resolved_safety(safety))
+    _check_resolution(record, set(known_digests))
+    return derived

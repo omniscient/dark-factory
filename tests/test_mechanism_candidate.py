@@ -156,3 +156,161 @@ def test_safety_lists_fail_closed():
         mc.classify_risk(["docs/superpowers/x.md"], {"hard_exclude_paths": "deploy/", "critical_diff_paths": []})
     with pytest.raises(mc.MechanismCandidateError, match="invalid regex"):
         mc.classify_risk(["docs/superpowers/x.md"], {"hard_exclude_paths": [], "critical_diff_paths": ["("]})
+
+
+# ── Candidate records ───────────────────────────────────────────────────────────
+
+def _load(name):
+    return json.loads((_FIXTURES_DIR / name).read_text(encoding="utf-8"))
+
+
+def _rehash(record):
+    record["candidate_digest"] = mc.candidate_digest_of(record)
+    return record
+
+
+def _record(**overrides):
+    """A valid H0 draft record (candidate-probed.json's shape) with overrides applied."""
+    r = _load("candidate-probed.json")
+    r.update({"candidate_id": "mc-test", "lifecycle_state": "draft", "parent_digest": None,
+              "dependency_closure": [], "editable_path_allowlist": [_DOC], "diff": _diff(_DOC),
+              "risk_class": "H0"})
+    r.update(overrides)
+    return _rehash(r)
+
+
+def test_candidate_digest_recomputed():
+    for name in ("candidate-draft.json", "candidate-quarantined.json", "candidate-probed.json",
+                 "candidate-composed.json", "candidate-shadow.json", "candidate-advisory.json",
+                 "candidate-revoked.json"):
+        r = _load(name)
+        assert r["candidate_digest"] == mc.canonical_digest({k: r[k] for k in mc.DIGEST_FIELDS}), name
+    with pytest.raises(mc.MechanismCandidateError, match="candidate_digest mismatch"):
+        mc.validate_candidate(_load("candidate-digest-mismatch.json"), safety=_SELF_SAFETY)
+    r = _record()
+    r["diff"] = r["diff"].replace("+new", "+newer")  # identity-bearing edit, digest not updated
+    with pytest.raises(mc.MechanismCandidateError, match="candidate_digest mismatch"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY)
+    r = _record()
+    r["lifecycle_state"] = "probed"  # bookkeeping edit: digest still valid
+    assert mc.validate_candidate(r, safety=_SELF_SAFETY) == "H0"
+    for bad in ("sha256:" + "A" * 64, "sha256:" + "a" * 63, "md5:" + "a" * 64,
+                "sha256:" + "a" * 64 + "\n"):
+        with pytest.raises(mc.MechanismCandidateError, match="sha256"):
+            mc.validate_candidate(_record(parent_digest=bad), safety=_SELF_SAFETY)
+        with pytest.raises(mc.MechanismCandidateError, match="supersession.superseded_by"):
+            mc.validate_candidate(_record(supersession={"superseded_by": bad, "supersedes": []}),
+                                  safety=_SELF_SAFETY)
+        with pytest.raises(mc.MechanismCandidateError, match=r"supersession.supersedes\[0\]"):
+            mc.validate_candidate(_record(supersession={"superseded_by": None, "supersedes": [bad]}),
+                                  safety=_SELF_SAFETY)
+
+
+def test_fixture_diffs_match_git_apply(tmp_path):
+    for name in sorted(p.name for p in _FIXTURES_DIR.glob("candidate-*.json")):
+        diff = _load(name)["diff"]
+        assert set(mc.extract_diff_paths(diff)) == _git_apply_paths(diff, tmp_path), name
+
+
+def test_unknown_lifecycle_state_and_risk_class():
+    with pytest.raises(mc.MechanismCandidateError, match="unknown lifecycle_state"):
+        mc.validate_candidate(_record(lifecycle_state="promoted"), safety=_SELF_SAFETY)
+    with pytest.raises(mc.MechanismCandidateError, match="unknown risk_class"):
+        mc.validate_candidate(_record(risk_class="H4"), safety=_SELF_SAFETY)
+
+
+def test_risk_class_underclaim_rejected():
+    cmd = "commands/dark-factory-plan.md"
+    with pytest.raises(mc.MechanismCandidateError, match="underclaims derived class H1"):
+        mc.validate_candidate(_record(editable_path_allowlist=[cmd], diff=_diff(cmd), risk_class="H0"),
+                              safety=_EMPTY_SAFETY)
+    assert mc.validate_candidate(
+        _record(editable_path_allowlist=[cmd], diff=_diff(cmd), risk_class="H2"),
+        safety=_EMPTY_SAFETY) == "H1"
+    frontmatter = _diff(cmd, "-allowed-tools: Read", "+allowed-tools: Read, Bash")
+    with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3"):
+        mc.validate_candidate(_record(editable_path_allowlist=[cmd], diff=frontmatter, risk_class="H2"),
+                              safety=_EMPTY_SAFETY)
+
+
+def test_h3_unconditional():
+    with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3 is forbidden"):
+        mc.validate_candidate(_load("candidate-forbidden-path.json"), safety=_SELF_SAFETY)
+    # A declared H3 is still rejected: there is no valid H3 record.
+    r = _record(editable_path_allowlist=["tests/test_x.py"], diff=_diff("tests/test_x.py"), risk_class="H3")
+    with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3 is forbidden"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY)
+    # rename-to target is classified: an H0 file renamed into tests/ is H3.
+    r = _record(editable_path_allowlist=["docs/superpowers/a.md", "tests/a.md"], diff=_RENAME, risk_class="H3")
+    with pytest.raises(mc.MechanismCandidateError, match=r"derived risk class H3 is forbidden.*tests/a\.md"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY)
+    # copy-to target is classified too.
+    copy_ = ("diff --git a/docs/superpowers/a.md b/tests/a.md\nsimilarity index 100%\n"
+             "copy from docs/superpowers/a.md\ncopy to tests/a.md\n")
+    r = _record(editable_path_allowlist=["docs/superpowers/a.md", "tests/a.md"], diff=copy_, risk_class="H3")
+    with pytest.raises(mc.MechanismCandidateError, match=r"derived risk class H3 is forbidden.*tests/a\.md"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY)
+    # A self-target floor match (^workflows/) is H3 even though workflows/ is H2 by allowlist.
+    wf = "workflows/archon-dark-factory.yaml"
+    with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3 is forbidden"):
+        mc.validate_candidate(_record(editable_path_allowlist=[wf], diff=_diff(wf), risk_class="H2"),
+                              safety=_SELF_SAFETY)
+
+
+def test_diff_within_allowlist():
+    with pytest.raises(mc.MechanismCandidateError, match="outside editable_path_allowlist"):
+        mc.validate_candidate(_load("candidate-scope-widening.json"), safety=_SELF_SAFETY)
+    with pytest.raises(mc.MechanismCandidateError, match="outside editable_path_allowlist"):
+        mc.validate_candidate(_record(editable_path_allowlist=[]), safety=_SELF_SAFETY)
+    # A literal file entry is not a prefix.
+    with pytest.raises(mc.MechanismCandidateError, match="outside editable_path_allowlist"):
+        mc.validate_candidate(_record(editable_path_allowlist=["docs/superpowers/notes/t"]), safety=_SELF_SAFETY)
+    assert mc.validate_candidate(_record(editable_path_allowlist=["docs/superpowers/"]), safety=_SELF_SAFETY) == "H0"
+    for bad in ("docs/superpowers/*.md", "docs/**", "docs/superpowers/[ab].md", "docs/?.md"):
+        with pytest.raises(mc.MechanismCandidateError, match="glob"):
+            mc.validate_candidate(_record(editable_path_allowlist=[bad]), safety=_SELF_SAFETY)
+    for bad in ("./docs/superpowers/", "docs//superpowers/", "/docs/superpowers/", "docs/../tests/"):
+        with pytest.raises(mc.MechanismCandidateError, match="editable_path_allowlist entry"):
+            mc.validate_candidate(_record(editable_path_allowlist=[bad]), safety=_SELF_SAFETY)
+    with pytest.raises(mc.MechanismCandidateError, match="diff is empty"):
+        mc.validate_candidate(_record(diff=""), safety=_SELF_SAFETY)
+
+
+def test_no_self_parenting():
+    r = _record()
+    r["parent_digest"] = r["candidate_digest"]  # parent_digest is not identity-bearing
+    with pytest.raises(mc.MechanismCandidateError, match="self-parenting"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY, known_digests={r["candidate_digest"]})
+
+
+def test_parent_and_dependency_resolve():
+    with pytest.raises(mc.MechanismCandidateError, match="parent_digest .* does not resolve"):
+        mc.validate_candidate(_load("candidate-parent-unresolved.json"), safety=_SELF_SAFETY)
+    probed = _load("candidate-probed.json")
+    composed = _load("candidate-composed.json")
+    with pytest.raises(mc.MechanismCandidateError, match="dependency_closure entry .* does not resolve"):
+        mc.validate_candidate(composed, safety=_SELF_SAFETY)
+    assert mc.validate_candidate(composed, safety=_SELF_SAFETY,
+                                 known_digests={probed["candidate_digest"]}) == "H0"
+    draft = _load("candidate-draft.json")  # re-proposal of the quarantined record
+    assert draft["parent_digest"] == _load("candidate-quarantined.json")["candidate_digest"]
+
+
+def test_schema_version():
+    with pytest.raises(mc.MechanismCandidateError, match="schema_version must be 1"):
+        mc.validate_candidate(_load("candidate-schema-version.json"), safety=_SELF_SAFETY)
+    for bad in (True, "1", None):
+        with pytest.raises(mc.MechanismCandidateError, match="schema_version must be 1"):
+            mc.validate_candidate(_record(schema_version=bad), safety=_SELF_SAFETY)
+
+
+def test_field_ranges():
+    for level in (0, 6, True, 2.0):
+        r = _record(side_effect_envelope={"side_effect_level": level})
+        with pytest.raises(mc.MechanismCandidateError, match="side_effect_level"):
+            mc.validate_candidate(r, safety=_SELF_SAFETY)
+    for conf in (-0.1, 1.1, math.nan, math.inf, True, "0.5"):
+        with pytest.raises(mc.MechanismCandidateError, match="confidence"):
+            mc.validate_candidate(_record(confidence=conf), safety=_SELF_SAFETY)
+    for conf in (0, 1, 0.0, 1.0):
+        assert mc.validate_candidate(_record(confidence=conf), safety=_SELF_SAFETY) == "H0"
