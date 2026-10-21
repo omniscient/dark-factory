@@ -741,6 +741,11 @@ _compute_side_effect_level
 mkdir -p "$CLONE_DIR/dark-factory"
 cp /opt/dark-factory/docker-compose.preview.yml "$CLONE_DIR/dark-factory/docker-compose.preview.yml"
 cp -r /opt/dark-factory/seed/ "$CLONE_DIR/dark-factory/seed/"
+# Both are run-time staging, never target content: exclude them like the fallback copies
+# above, or `git status` shows an untracked dark-factory/ that phase agents read as a
+# dropped-in harness and end their turn on (#472).
+_exclude_in_clone "dark-factory/docker-compose.preview.yml"
+_exclude_in_clone "dark-factory/seed/"
 
 # --- Install target project deps for local testing (target-conditional, #23) ---
 # Targets without a Python backend or Node frontend (e.g. this repo as the P4
@@ -778,6 +783,7 @@ else
   printf '{\n  "disableWorkflows": true\n}\n' > "$CLONE_DIR/.claude/settings.local.json"
   echo "WARNING: codeindex not found; MCP server will not be registered (Workflow tool disabled)"
 fi
+_exclude_in_clone ".claude/settings.local.json"   # run-time only, never committed (#472)
 
 # --- Install pre-commit hooks so codeindex-blast warn hook fires in the run log ---
 pre-commit install --allow-missing-config 2>/dev/null || true
