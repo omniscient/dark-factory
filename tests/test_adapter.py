@@ -768,6 +768,25 @@ def test_mechanism_candidates_top_level_reserved_raises(tmp_path):
         adapter.load(str(tmp_path))
 
 
+def test_adapter_message_cites_module(tmp_path):
+    """#464: the reserved-key message names the candidate-contract module, still matches
+    the 'reserved' pin above, and adapter.py does not import that module."""
+    import ast
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("mechanism_candidates: []\n")
+    with pytest.raises(adapter.AdapterError, match=r"mechanism_candidates.*reserved") as exc:
+        adapter.load(str(tmp_path))
+    assert "scripts/factory_core/mechanism_candidate.py" in str(exc.value)
+    tree = ast.parse(open(adapter.__file__, encoding="utf-8").read())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported |= {node.module or ""} | {a.name for a in node.names}
+    assert not any("mechanism_candidate" in name for name in imported), imported
+
+
 # ── Parity tests: pin verbatim copies to their source constants ────────────────
 
 def test_components_parity():
