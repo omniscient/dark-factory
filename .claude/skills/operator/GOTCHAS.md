@@ -182,3 +182,15 @@ learned; verify code citations against `origin/main` before relying on them.
   harness stages `dark-factory/` untracked into the clone and the target CLAUDE.md says the
   harness was extracted (#472). Two of three attempts on #872 did. Until #472 lands, expect
   retries and a breaker trip after `max_retries`; do not re-opt-in blindly.
+- **`approve.sh` for the MarketHawk instance needs `DF_REPO_DIR` pointing at a MarketHawk
+  clone** (e.g. `DF_REPO_DIR="C:/git/wt-872"`, Windows-style path — an MSYS `/c/...` path
+  fails `git -C`). The default is the dark-factory checkout, whose `origin` has no
+  `refine/issue-N-*` branch for MarketHawk tickets, so the script reports "the artifact the
+  gate label claims does not exist" even though the branch is there.
+- **Session-window pause resets the retry counter** (`session_window_gate … action=retry_decrement
+  count=0/3`): an attempt interrupted by the pause is not charged, so no `breaker-reset` is
+  needed after a pause; the classifier denies that state write anyway.
+- **Blocked + feature branch on origin ⇒ the scheduler dispatches `Continue` by itself** once
+  `needs-discussion` is lifted (scheduler.sh Blocked loop, branch probe). After a blast-radius
+  block with no PR yet, review the branch, lift the label, and let Continue produce the PR;
+  the stateless gate will re-apply `needs-discussion` on the way (lift it again after the PR).
