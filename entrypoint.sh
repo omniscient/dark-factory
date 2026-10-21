@@ -10,7 +10,12 @@ FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factor
 python3 "$FACTORY_PROVIDERS_CLI" preflight
 
 # --- Configuration ---
-REPO_URL="https://${GH_TOKEN}@github.com/${FACTORY_REPO_SLUG}.git"
+# Plain URL on purpose: a token embedded as URL userinfo is dropped by git when it
+# rewrites the base URL after the first request ("warning: redirecting to ..."), so
+# pushes fail with "could not read Username" while clone/fetch of a readable repo
+# still succeed (observed 2026-10-21 on both targets; refine/plan artifacts were lost).
+# Credentials come from the gh credential helper installed before the clone below.
+REPO_URL="https://github.com/${FACTORY_REPO_SLUG}.git"
 CLONE_DIR="$FACTORY_CLONE_DIR"
 FACTORY_NAME="${FACTORY_PRODUCT_NAME} Factory"
 FACTORY_EMAIL="factory@${FACTORY_REPO}"
@@ -675,6 +680,11 @@ _resolve_merge_conflicts() {
 # Set ENTRYPOINT_SOURCE_ONLY=1 before sourcing. External commands (git, gh, docker,
 # claude) must be stubbed by the test to prevent real side effects.
 [ "${ENTRYPOINT_SOURCE_ONLY:-0}" = "1" ] && return 0
+
+# --- Git credentials: gh as the credential helper for github.com (reads GH_TOKEN) ---
+# Must precede the clone so every later git push in this container authenticates
+# without a token in the remote URL. Fail loudly: a run that cannot push is worthless.
+gh auth setup-git
 
 # --- Clone the repo ---
 echo "Cloning ${FACTORY_REPO}..."
