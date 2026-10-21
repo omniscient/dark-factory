@@ -201,3 +201,151 @@ def canonical_digest(obj):
 def candidate_digest_of(record):
     """The candidate_digest a record must carry: canonical_digest over DIGEST_FIELDS."""
     return canonical_digest({k: record[k] for k in DIGEST_FIELDS})
+
+
+# ── Paths, diff extraction and containment ──────────────────────────────────────
+
+def _check_path_text(p, name):
+    if not p:
+        _fail(f"{name} is empty")
+    if p.startswith("/"):
+        _fail(f"{name} {p!r} is absolute")
+    if "\\" in p:
+        _fail(f"{name} {p!r} contains a backslash")
+    if '"' in p:
+        _fail(f"{name} {p!r} is C-quoted or escaped")
+    if any(ord(ch) < 32 for ch in p):
+        _fail(f"{name} {p!r} contains a control character")
+    if ".." in p.split("/"):
+        _fail(f"{name} {p!r} contains a '..' segment")
+
+
+def _normalise(p):
+    """posixpath.normpath, keeping a trailing '/' that marks a directory prefix."""
+    core = posixpath.normpath(p)
+    return core + "/" if p.endswith("/") and core != "." else core
+
+
+def _validate_allowlist(entries):
+    _str_list(entries, "editable_path_allowlist")
+    for e in entries:
+        name = "editable_path_allowlist entry"
+        if _GLOB_CHARS & set(e):
+            _fail(f"{name} {e!r} contains a glob character; literal paths or '/'-terminated prefixes only")
+        _check_path_text(e, name)
+        if _normalise(e) != e or e in (".", "./"):
+            _fail(f"{name} {e!r} is not a normalised repo-relative path")
+
+
+def extract_diff_paths(diff):
+    """Parse an exact unified diff into {normalised path: [changed +/- lines]}.
+
+    Every file block must start with `diff --git a/X b/Y`; its `---`/`+++`/`rename`/`copy`
+    header names must agree per side after normalisation (and across sides unless the
+    block is a rename/copy). Hunk bodies are consumed by their `@@ -a,b +c,d @@` counts,
+    exactly as `git apply` reads them, so header-looking lines inside a hunk are content
+    and nothing may follow an exhausted hunk except another `@@`, a `diff --git`, or a
+    `\\ No newline` marker — a smuggled `---`/`+++` triplet is rejected, never skipped.
+    Only git's known extended header lines are accepted; binary patches, absolute,
+    backslash, `..`, C-quoted, and whitespace-bearing names, and an empty diff are
+    rejected. Both sides of a rename/copy are returned.
+    """
+    if not isinstance(diff, str) or not diff.strip():
+        _fail("diff is empty")
+    blocks = []
+    cur = None
+    old_left = new_left = 0  # lines the current hunk still owes, per side
+    in_hunks = False         # past the current block's first @@
+    trailing = False         # a blank line ended the diff; only blank lines may follow
+    for line in diff.splitlines():
+        if trailing:
+            if line.strip():
+                _fail("diff has content after the blank line that ends it")
+            continue
+        if old_left or new_left:
+            tag = line[:1]
+            if tag == "\\":
+                continue
+            if line == "" or tag == " ":
+                old_left, new_left = old_left - 1, new_left - 1
+            elif tag == "-":
+                old_left -= 1
+            elif tag == "+":
+                new_left -= 1
+            else:
+                _fail(f"malformed hunk line {line!r}")
+            if old_left < 0 or new_left < 0:
+                _fail("hunk body does not match its @@ line counts")
+            if tag in ("+", "-"):
+                cur["changes"].append(line)
+            continue
+        if line.startswith("diff --git"):
+            if '"' in line:
+                _fail(f"diff header {line!r} uses a C-quoted path")
+            m = _GIT_HEADER_RE.match(line)
+            if not m:
+                _fail(f"malformed diff --git header {line!r}")
+            cur = {"src": [m.group(1)], "dst": [m.group(2)], "rename_or_copy": False, "changes": []}
+            blocks.append(cur)
+            in_hunks = False
+            continue
+        if cur is None:
+            if line.strip():
+                _fail("diff has content before its first 'diff --git' header")
+            continue
+        if line.startswith("@@"):
+            m = _HUNK_RE.match(line)
+            if not m:
+                _fail(f"malformed hunk header {line!r}")
+            old_left = int(m.group(1) or "1")
+            new_left = int(m.group(2) or "1")
+            in_hunks = True
+            continue
+        if not line.strip():
+            trailing = True
+            continue
+        if in_hunks:
+            if line.startswith("\\"):
+                continue
+            _fail(f"unexpected line {line!r} after a hunk (only @@, diff --git, or the end "
+                  f"of the diff may follow a complete hunk)")
+        if line.startswith("--- ") or line.startswith("+++ "):
+            if '"' in line:
+                _fail(f"diff header {line!r} uses a C-quoted path")
+            is_old = line.startswith("--- ")
+            m = (_OLD_HEADER_RE if is_old else _NEW_HEADER_RE).match(line)
+            if not m:
+                _fail(f"malformed diff file header {line!r}")
+            if m.group(1):
+                cur["src" if is_old else "dst"].append(m.group(1))
+        elif _RENAME_COPY_RE.match(line):
+            m = _RENAME_COPY_RE.match(line)
+            if '"' in m.group(2):
+                _fail(f"diff header {line!r} uses a C-quoted path")
+            cur["src" if m.group(1) == "from" else "dst"].append(m.group(2))
+            cur["rename_or_copy"] = True
+        elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
+            _fail("binary patches are not accepted")
+        elif not _EXTENDED_HEADER_RE.match(line):
+            _fail(f"unrecognised diff header line {line!r}")
+    if old_left or new_left:
+        _fail("diff ends inside a hunk (fewer lines than its @@ counts)")
+    paths = {}
+    for b in blocks:
+        for raw in b["src"] + b["dst"]:
+            _check_path_text(raw, "diff path")
+            if any(ch.isspace() for ch in raw):
+                _fail(f"diff path {raw!r} contains whitespace")
+        srcs = {posixpath.normpath(p) for p in b["src"]}
+        dsts = {posixpath.normpath(p) for p in b["dst"]}
+        if len(srcs) != 1 or len(dsts) != 1 or (not b["rename_or_copy"] and srcs != dsts):
+            _fail(f"diff block header names disagree: {sorted(srcs | dsts)}")
+        for p in srcs | dsts:
+            if p == ".":
+                _fail("diff path normalises to the repository root")
+            paths.setdefault(p, []).extend(b["changes"])
+    return paths
+
+
+def _contained(path, allowlist):
+    return any(path == e or (e.endswith("/") and path.startswith(e)) for e in allowlist)
