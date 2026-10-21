@@ -1,5 +1,5 @@
 # Harness candidate contract and mechanism lineage — schema and lifecycle
-**Revised:** 2026-10-21 (operator amendment after spec gate — one-way quarantine, default-deny risk classifier, diff containment, lineage-event validator, test inventory, citation fixes; plan-gate amendments: non-candidate approvers, tombstone op/status consistency)
+**Revised:** 2026-10-21 (operator amendment after spec gate — one-way quarantine, default-deny risk classifier, diff containment, lineage-event validator, test inventory, citation fixes; plan-gate amendments: non-candidate approvers, tombstone op/status consistency; branch-review amendment: H3 adds scheduler_lib.sh and check_workflow_* verifiers, mode and type hardening)
 
 **Issue:** #464 · **Epic:** #463 (Add a governed recursive harness-improvement capability)
 
@@ -252,7 +252,8 @@ in `mechanism_candidate.py` as repo-relative prefixes: `tests/`, `evals/`, `conf
 `scripts/verdict_gate_check.sh`, `scripts/push_gate_check.sh`,
 `scripts/state_governance_audit.py`, `scheduler.sh`, `entrypoint.sh`, `Dockerfile`,
 `run-compose.yml`, `deploy/`, `.github/`, `.factory/`, `.claude/`, `.archon/`,
-`refinement-skills/`. Rationale per entry: `tests/` and `evals/` (including this ticket's
+`refinement-skills/`, `scripts/scheduler_lib.sh` and `scripts/check_workflow_*`
+(branch-review amendment: scheduler dispatch predicates; CI workflow verifiers). Rationale per entry: `tests/` and `evals/` (including this ticket's
 own `evals/mechanism-candidates/fixtures/` and #190's `evals/state-governance/fixtures/`)
 are candidate-writable test oracles, which epic #463 says never authorize promotion;
 `config/` holds budgets and autopilot policy; `refinement-skills/` holds the reviewer

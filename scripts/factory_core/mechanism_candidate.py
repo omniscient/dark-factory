@@ -116,6 +116,8 @@ H3_PREFIXES = (
     "scripts/state_governance_audit.py", "scheduler.sh", "entrypoint.sh", "Dockerfile",
     "run-compose.yml", "deploy/", ".github/", ".factory/", ".claude/", ".archon/",
     "refinement-skills/",
+    # Branch-review amendment: scheduler dispatch predicates; CI workflow verifiers.
+    "scripts/scheduler_lib.sh", "scripts/check_workflow_",
 )
 # A changed allowed-tools:/disallowed-tools: line in a commands/*.md file forces H3.
 _TOOL_FRONTMATTER_RE = re.compile(r"^[+-]\s*(?:allowed-tools|disallowed-tools)\s*:")
@@ -130,6 +132,11 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 _EXTENDED_HEADER_RE = re.compile(
     r"^(?:old mode|new mode|deleted file mode|new file mode|similarity index|"
     r"dissimilarity index|index) ")
+# Mode-bearing header lines: only regular files. A symlink (120000) created inside an
+# allowlisted directory can point anywhere, and a gitlink (160000) is a submodule pointer,
+# so neither is a contained edit.
+_MODE_HEADER_RE = re.compile(r"^(?:old mode|new mode|deleted file mode|new file mode) (\S+)$")
+_REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 
 
 # ── Generic field helpers ───────────────────────────────────────────────────────
@@ -195,7 +202,11 @@ def _digest_list(v, name):
 def canonical_digest(obj):
     """sha256 over the canonical JSON encoding: sorted keys, no whitespace, UTF-8."""
     data = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(data.encode("utf-8")).hexdigest()
+    try:
+        raw = data.encode("utf-8")
+    except UnicodeEncodeError as exc:  # lone surrogates from JSON "\ud800" escapes
+        _fail(f"canonical JSON is not UTF-8 encodable: {exc}")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def candidate_digest_of(record):
@@ -326,6 +337,11 @@ def extract_diff_paths(diff):
             cur["rename_or_copy"] = True
         elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
             _fail("binary patches are not accepted")
+        elif _MODE_HEADER_RE.match(line):
+            mode = _MODE_HEADER_RE.match(line).group(1)
+            if mode not in _REGULAR_FILE_MODES:
+                _fail(f"diff header {line!r}: only regular file modes 100644/100755 are "
+                      f"accepted (symlinks and gitlinks are not contained edits)")
         elif not _EXTENDED_HEADER_RE.match(line):
             _fail(f"unrecognised diff header line {line!r}")
     if old_left or new_left:
@@ -488,9 +504,10 @@ def _validate_evidence_and_review(r):
         _req_str(ref["observed_at"], f"{name}.observed_at")
     _str_list(r["contradictions"], "contradictions")
 
-    c = r["confidence"]  # bool is an int subclass; NaN compares false everywhere
-    if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) \
-            or not (0.0 <= c <= 1.0):
+    c = r["confidence"]  # bool is an int subclass; NaN/inf fail the range test. The range
+    # test runs first: math.isfinite() raises OverflowError on a huge int (e.g. 10**400).
+    if isinstance(c, bool) or not isinstance(c, (int, float)) or not (0.0 <= c <= 1.0) \
+            or not math.isfinite(c):
         _fail("confidence must be a number between 0.0 and 1.0")
 
     for party in ("reviewer", "approver"):
@@ -613,6 +630,10 @@ def validate_lineage_event(event, candidates_by_id=None):
         _req_str(event[key], f"{label}.{key}")
     if "subject_entity_id" in event:
         _req_str(event["subject_entity_id"], f"{label}.subject_entity_id")
+    # Enum fields are string-checked first: set membership on an unhashable (list/dict)
+    # value would raise TypeError instead of failing closed.
+    for key in ("state_type", "operation", "actionability"):
+        _req_str(event[key], f"{label}.{key}")
     if event["state_type"] != "mechanism_lineage" or event["state_type"] not in _sga.STATE_TYPES:
         _fail(f"{label}: state_type must be 'mechanism_lineage', got {event['state_type']!r}")
     op = event["operation"]
@@ -639,6 +660,7 @@ def validate_lineage_event(event, candidates_by_id=None):
 
     mut = event["mutability"]
     _check_keys(mut, f"{label}.mutability", ("status", "supersedes", "conflicts_with"))
+    _req_str(mut["status"], f"{label}.mutability.status")
     if mut["status"] not in MUTABILITY_STATUSES:
         _fail(f"{label}: unknown mutability.status {mut['status']!r}")
     if op in _sga._TOMBSTONE_OPS:
@@ -664,7 +686,8 @@ def validate_lineage_event(event, candidates_by_id=None):
 
 
 
-def validate_transition(from_state, to_state, event, *, seen_by_id=None, candidates_by_id=None):
+def validate_transition(from_state, to_state, event, *, seen_by_id=None, candidates_by_id=None,
+                        approver_deny=()):
     """Reject any edge outside TRANSITIONS and any unapproved advancement.
 
     `from_state` None means the candidate does not exist yet (only `-> draft` is legal).
@@ -672,7 +695,9 @@ def validate_transition(from_state, to_state, event, *, seen_by_id=None, candida
     resolve per state_governance_audit._resolve_approval() against `seen_by_id` (events
     seen earlier in file order), must not be one of the candidate's own events, and for
     `-> shadow|advisory` must be a human approval. A candidate never authorizes itself,
-    and with `candidates_by_id` no candidate record's event authorizes any candidate."""
+    and with `candidates_by_id` no candidate record's event authorizes any candidate.
+    `approver_deny` adds further entity_ids that never authorize (every candidate_id
+    parsed in the fixture set, including records that failed validation)."""
     if from_state is not None and from_state not in STATES:
         _fail(f"unknown lifecycle state {from_state!r}")
     if to_state not in STATES:
@@ -694,9 +719,10 @@ def validate_transition(from_state, to_state, event, *, seen_by_id=None, candida
     if approver.get("entity_id") == event.get("entity_id"):
         _fail(f"self-approval: approval_record {event['authority']['approval_record']} is one "
               f"of candidate {event.get('entity_id')!r}'s own events and never authorizes")
-    if candidates_by_id and approver.get("entity_id") in candidates_by_id:
+    approver_entity = approver.get("entity_id")
+    if (candidates_by_id and approver_entity in candidates_by_id) or approver_entity in approver_deny:
         _fail(f"approval_record {event['authority']['approval_record']} is candidate "
-              f"{approver.get('entity_id')!r}'s own event; candidate records never authorize each other")
+              f"{approver_entity!r}'s own event; candidate records never authorize each other")
     if to_state in _HUMAN_APPROVAL_STATES and (approver.get("authority") or {}).get("actor") != "human":
         _fail(f"transition {from_state} -> {to_state} requires a human approver")
 
@@ -714,12 +740,13 @@ def derive_target_state(current, operation):
     _fail(f"illegal transition: operation 'act' has no legal target from {current!r}")
 
 
-def validate_lineage(events, candidates_by_id):
+def validate_lineage(events, candidates_by_id, *, approver_deny=()):
     """Validate an append-only mechanism_lineage event list (file order); returns each
     candidate's final lifecycle state. Events whose entity_id is a candidate_id are
     lifecycle transitions; any other event must be an approval record (`write`) whose
-    subject_entity_id names a candidate; approvers are never candidates. The five #190
-    checks must also all PASS."""
+    subject_entity_id names a candidate; approvers are never candidates (nor any id in
+    `approver_deny`). The five #190 checks must also all PASS."""
+    approver_deny = set(approver_deny)
     seen_by_id = {}
     state = {}
     for e in events:
@@ -731,7 +758,7 @@ def validate_lineage(events, candidates_by_id):
             current = state.get(entity_id)
             target = derive_target_state(current, e["operation"])
             validate_transition(current, target, e, seen_by_id=seen_by_id,
-                                candidates_by_id=candidates_by_id)
+                                candidates_by_id=candidates_by_id, approver_deny=approver_deny)
             state[entity_id] = target
         elif e["operation"] != "write":
             _fail(f"lineage event {e['event_id']!r}: a non-candidate entity may only record "
@@ -747,25 +774,41 @@ def validate_lineage(events, candidates_by_id):
 
 # ── Fixture sets + CLI ──────────────────────────────────────────────────────────
 
+def _error_text(exc):
+    """FAIL text for one file: the validator's own message, or `Type: msg` for anything
+    else (a poisoned file must never abort the run — it fails closed and the run goes on)."""
+    if isinstance(exc, MechanismCandidateError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
 def validate_fixture_set(path, *, safety=None):
     """Validate a directory (or single file) of candidate *.json and lineage *.jsonl
-    files. Returns {file name: {"kind", "verdict": PASS|FAIL, "error"}}. Digests resolve
-    only against records that pass every record-local rule; lineage resolves only
-    against fully valid records."""
+    files (suffix matched case-insensitively). Returns {file name: {"kind", "verdict":
+    PASS|FAIL, "error"}}. Digests resolve only against records that pass every
+    record-local rule; lineage resolves only against fully valid records, while the
+    approver deny-set is every parsed record's candidate_id, valid or not. Any exception
+    while parsing or validating one file is that file's FAIL, never a crash."""
     safety = _resolved_safety(safety)
     p = Path(path)
-    files = sorted(p.iterdir()) if p.is_dir() else [p]
-    candidate_files = [f for f in files if f.suffix == ".json" and f.name != "manifest.json"]
-    lineage_files = [f for f in files if f.suffix == ".jsonl"]
+    try:
+        files = sorted(p.iterdir()) if p.is_dir() else [p]
+    except OSError as exc:
+        _fail(f"cannot list fixtures {str(p)!r}: {exc}")
+    candidate_files = [f for f in files if f.suffix.lower() == ".json" and f.name.lower() != "manifest.json"]
+    lineage_files = [f for f in files if f.suffix.lower() == ".jsonl"]
     results = {}
     standalone = {}
+    parsed_ids = set()  # every candidate_id seen in any parsed record, valid or not (N3)
     for f in candidate_files:
         try:
             record = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(record, dict) and isinstance(record.get("candidate_id"), str):
+                parsed_ids.add(record["candidate_id"])
             _validate_standalone(record, safety)
             standalone[f.name] = record
-        except (MechanismCandidateError, ValueError) as exc:
-            results[f.name] = {"kind": "candidate", "verdict": "FAIL", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — fail closed per file, keep going
+            results[f.name] = {"kind": "candidate", "verdict": "FAIL", "error": _error_text(exc)}
     known = {r["candidate_digest"] for r in standalone.values()}
     id_counts = {}
     for r in standalone.values():
@@ -782,10 +825,10 @@ def validate_fixture_set(path, *, safety=None):
             results[name] = {"kind": "candidate", "verdict": "FAIL", "error": str(exc)}
     for f in lineage_files:
         try:
-            validate_lineage(_sga.load_events(f), candidates_by_id)
+            validate_lineage(_sga.load_events(f), candidates_by_id, approver_deny=parsed_ids)
             results[f.name] = {"kind": "lineage", "verdict": "PASS", "error": None}
-        except (MechanismCandidateError, ValueError) as exc:
-            results[f.name] = {"kind": "lineage", "verdict": "FAIL", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — fail closed per file, keep going
+            results[f.name] = {"kind": "lineage", "verdict": "FAIL", "error": _error_text(exc)}
     return dict(sorted(results.items()))
 
 

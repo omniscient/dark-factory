@@ -70,6 +70,13 @@ _RENAME = ("diff --git a/docs/superpowers/a.md b/tests/a.md\nsimilarity index 10
     (f"diff --git a/{_DOC} b/{_DOC}\nfrobnicate yes\n", "unrecognised diff header line"),
     (f"diff --git a/{_DOC} b/{_DOC}\nGIT binary patch\nliteral 5\n", "binary patches"),
     (_diff(_DOC) + "\n" + _diff("tests/x.py"), "after the blank line"),
+    # A symlink created inside an allowlisted directory can point anywhere; a gitlink is a
+    # submodule pointer. Neither is a contained edit (branch-review S1).
+    (f"diff --git a/{_DOC} b/{_DOC}\nnew file mode 120000\n--- /dev/null\n+++ b/{_DOC}\n"
+     "@@ -0,0 +1 @@\n+../../../scripts/gate_x.py\n", "only regular file modes"),
+    (f"diff --git a/{_DOC} b/{_DOC}\nnew file mode 160000\n--- /dev/null\n+++ b/{_DOC}\n"
+     "@@ -0,0 +1 @@\n+Subproject commit 0000000000000000000000000000000000000000\n", "only regular file modes"),
+    (f"diff --git a/{_DOC} b/{_DOC}\nold mode 100644\nnew mode 120000\n", "only regular file modes"),
 ])
 def test_diff_path_extraction(diff, match):
     with pytest.raises(mc.MechanismCandidateError, match=match):
@@ -309,11 +316,24 @@ def test_field_ranges():
         r = _record(side_effect_envelope={"side_effect_level": level})
         with pytest.raises(mc.MechanismCandidateError, match="side_effect_level"):
             mc.validate_candidate(r, safety=_SELF_SAFETY)
-    for conf in (-0.1, 1.1, math.nan, math.inf, True, "0.5"):
+    # 10**400 is a legal JSON int; math.isfinite() on it raises OverflowError, so the range
+    # check must run first (branch-review S2).
+    for conf in (-0.1, 1.1, math.nan, math.inf, True, "0.5", 10 ** 400, [0.5]):
         with pytest.raises(mc.MechanismCandidateError, match="confidence"):
             mc.validate_candidate(_record(confidence=conf), safety=_SELF_SAFETY)
     for conf in (0, 1, 0.0, 1.0):
         assert mc.validate_candidate(_record(confidence=conf), safety=_SELF_SAFETY) == "H0"
+
+
+def test_lone_surrogate_fails_closed():
+    """A JSON "\\ud800" escape decodes to a lone surrogate that UTF-8 cannot encode; the
+    canonical digest must fail closed, not raise UnicodeEncodeError (branch-review S2)."""
+    r = _record()
+    r["expected_behavioral_hypothesis"] = json.loads('"x\\ud800"')
+    with pytest.raises(mc.MechanismCandidateError, match="not UTF-8 encodable"):
+        mc.canonical_digest(r["expected_behavioral_hypothesis"])
+    with pytest.raises(mc.MechanismCandidateError, match="not UTF-8 encodable"):
+        mc.validate_candidate(r, safety=_SELF_SAFETY)
 
 
 # ── Lifecycle and lineage ───────────────────────────────────────────────────────
@@ -384,6 +404,11 @@ def test_unknown_keys_fail_closed(kind, block):
     (("authority", "permission_epoch"), True, "permission_epoch"),
     (("operation",), "quarantine", "requires mutability.status 'quarantined'"),  # tombstone-class op, active status
     (("mutability", "status"), "tombstoned", "requires a tombstone-class operation"),  # write op, tombstone status
+    # Unhashable enum values must fail closed, not raise TypeError (branch-review S2).
+    (("operation",), ["write"], "operation must be a non-empty string"),
+    (("actionability",), {"x": 1}, "actionability must be a non-empty string"),
+    (("mutability", "status"), ["active"], "mutability.status must be a non-empty string"),
+    (("state_type",), ["mechanism_lineage"], "state_type must be a non-empty string"),
 ])
 def test_lineage_event_validation(path, value, match):
     e = copy.deepcopy(_events("lineage-valid-chain.jsonl")[0])
@@ -414,6 +439,29 @@ def test_candidate_never_approves_another():
     events[1]["authority"]["approval_record"] = "other-1"
     with pytest.raises(mc.MechanismCandidateError, match="candidate records never authorize each other"):
         mc.validate_lineage([events[0], other, events[1]], _candidates_by_id())
+
+
+def test_failed_candidate_id_never_approves(tmp_path):
+    """The approver deny-set is every parsed record's candidate_id, not only fully valid
+    records: an approval event whose entity_id is a record that FAILED validation (e.g.
+    the H3 forbidden-path one) never authorizes (branch-review N3)."""
+    failed_id = _load("candidate-forbidden-path.json")["candidate_id"]
+    events = _events("lineage-self-approval.jsonl")
+    approver = copy.deepcopy(events[0])
+    approver.update({"event_id": "ap-1", "idempotency_key": "issue-464:ap-1",
+                     "entity_id": failed_id, "subject_entity_id": "mc-probed-001"})
+    approver["authority"]["actor"] = "human"
+    events[1]["authority"]["approval_record"] = "ap-1"
+    chain = [events[0], approver, events[1]]
+    assert mc.validate_lineage(chain, _candidates_by_id()) == {"mc-probed-001": "probed"}  # API: unknown id
+    with pytest.raises(mc.MechanismCandidateError, match="never authorize each other"):
+        mc.validate_lineage(chain, _candidates_by_id(), approver_deny={failed_id})
+    for name in _POSITIVE_CANDIDATES + ("candidate-forbidden-path.json",):
+        shutil.copy(_FIXTURES_DIR / name, tmp_path / name)
+    (tmp_path / "chain.jsonl").write_text("".join(json.dumps(e) + "\n" for e in chain), encoding="utf-8")
+    results = mc.validate_fixture_set(tmp_path, safety=_SELF_SAFETY)
+    assert results["chain.jsonl"]["verdict"] == "FAIL"
+    assert "never authorize each other" in results["chain.jsonl"]["error"]
 
 
 def test_advisory_requires_human():
@@ -482,6 +530,27 @@ def test_fixture_manifest_expectations():
     assert states == set(mc.STATES)  # one positive candidate per lifecycle state
 
 
+def test_fixture_set_poisoned_file_does_not_abort(tmp_path):
+    """One file that raises something other than MechanismCandidateError (here a
+    RecursionError from a 100k-deep JSON array, and an unreadable file) is reported as
+    that file's FAIL while every other file is still validated (branch-review S2/N5)."""
+    for name in _POSITIVE_CANDIDATES:
+        shutil.copy(_FIXTURES_DIR / name, tmp_path / name)
+    shutil.copy(_FIXTURES_DIR / "lineage-valid-chain.jsonl", tmp_path / "lineage-valid-chain.jsonl")
+    (tmp_path / "poison.json").write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+    (tmp_path / "poison.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
+    (tmp_path / "Upper.JSON").write_text("{}", encoding="utf-8")  # suffix matched case-insensitively
+    results = mc.validate_fixture_set(tmp_path, safety=_SELF_SAFETY)
+    assert results["poison.json"]["verdict"] == "FAIL"
+    assert results["poison.json"]["error"].startswith("RecursionError:")
+    assert results["poison.jsonl"]["verdict"] == "FAIL"
+    assert results["poison.jsonl"]["error"].startswith("UnicodeDecodeError:")
+    assert results["Upper.JSON"]["verdict"] == "FAIL"
+    for name in _POSITIVE_CANDIDATES + ("lineage-valid-chain.jsonl",):
+        assert results[name]["verdict"] == "PASS", results[name]
+    assert set(results) == {p.name for p in tmp_path.iterdir()}
+
+
 def _run_cli(*args):
     return subprocess.run(
         [sys.executable, "-m", "factory_core.mechanism_candidate", *args, "--clone-dir", str(_REPO_ROOT)],
@@ -490,6 +559,7 @@ def _run_cli(*args):
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fcntl import in the CLI subprocess")
 def test_cli_exit_code(tmp_path):
     full = _run_cli("--fixtures", str(_FIXTURES_DIR))
     assert full.returncode == 1, full.stderr
@@ -509,3 +579,7 @@ def test_cli_exit_code(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert _run_cli("--fixtures", str(empty)).returncode == 1  # nothing validated: fail closed
+    missing = _run_cli("--fixtures", str(tmp_path / "missing.json"))  # OSError: FAIL line, no traceback
+    assert missing.returncode == 1
+    assert "STATUS: FAIL" in missing.stderr and "FAIL missing.json: FileNotFoundError" in missing.stderr
+    assert "Traceback" not in missing.stderr
