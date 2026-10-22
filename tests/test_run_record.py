@@ -1399,3 +1399,56 @@ def test_cli_record_exits_nonzero_on_unwritable_ledger(tmp_path):
     )
     assert result.returncode == 4, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     assert "runs.jsonl" in result.stderr
+
+
+# ── push_result: refine-push/plan-push-and-advance outcome (issue #473) ────
+
+def test_assemble_picks_up_push_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    push = {
+        "node": "refine-push",
+        "branch": "refine/issue-473-x",
+        "pushed": False,
+        "local_sha": "a" * 40,
+        "remote_sha": "",
+        "error": "remote: rejected",
+    }
+    (tmp_path / "push-result.json").write_text(json.dumps(push))
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert rec["push_result"] == push
+
+
+def test_assemble_no_push_result_key_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)
+
+    rec = json.loads(out.read_text())
+    assert "push_result" not in rec
+
+
+def test_assemble_tolerates_malformed_push_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+
+    (tmp_path / "push-result.json").write_text("not valid json {{{")
+
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    rr.cmd_assemble(args)  # must not raise
+
+    rec = json.loads(out.read_text())
+    assert "push_result" not in rec
