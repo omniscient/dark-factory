@@ -97,6 +97,39 @@ class TestPushGateNodes:
         assert "|| true" in label_failure_branch[comment_pos:], \
             f"'{node_id}': the gate-label-failure marker comment must be || true-guarded"
 
+    def test_node_posts_exact_push_failure_marker(self, node_id, prefix, label, noun):
+        bash = _workflow_nodes()[node_id]["bash"]
+        # Exact call-site match (#473): the unrelated <!-- df-push-gate-failure --> marker
+        # (scripts/verdict_gate_check.sh, push-and-pr verdict gate) must not satisfy this.
+        marker_call = 'post_marker_comment.sh" "$ISSUE" "<!-- df-push-failure -->"'
+        assert marker_call in bash, \
+            f"'{node_id}' must post the <!-- df-push-failure --> marker when the push is unverified"
+        comment_pos = bash.index(marker_call)
+        assert "|| true" in bash[comment_pos:], \
+            f"'{node_id}': the push-failure marker comment must be || true-guarded"
+
+    def test_node_verifies_remote_sha_before_label(self, node_id, prefix, label, noun):
+        bash = _workflow_nodes()[node_id]["bash"]
+        push_pos = bash.find("timeout 30 git push -u origin")
+        ls_remote_pos = bash.find("timeout 10 git ls-remote --exit-code --heads origin")
+        label_pos = bash.find(f"--add {label}")
+        assert push_pos != -1, f"'{node_id}': git push must be bounded by timeout 30"
+        assert ls_remote_pos != -1, f"'{node_id}': git ls-remote must be bounded by timeout 10"
+        assert push_pos < ls_remote_pos < label_pos, \
+            f"'{node_id}': push, then ls-remote verification, then the gate label"
+        assert "PUSH_RC=$?" in bash, f"'{node_id}': git push's exit status must be captured"
+        assert 'if [ -z "$BRANCH" ]; then' in bash, \
+            f"'{node_id}': an empty BRANCH (detached HEAD) must fail closed"
+
+    def test_node_writes_push_result_before_label_and_marker(self, node_id, prefix, label, noun):
+        bash = _workflow_nodes()[node_id]["bash"]
+        result_pos = bash.find('> "$ARTIFACTS_DIR/push-result.json"')
+        assert result_pos != -1, f"'{node_id}' must write $ARTIFACTS_DIR/push-result.json"
+        assert result_pos < bash.find(f"--add {label}"), \
+            f"'{node_id}': push-result.json must be written before the label call"
+        assert result_pos < bash.find("<!-- df-push-failure -->"), \
+            f"'{node_id}': push-result.json must be written before the push-failure marker"
+
     def test_node_depends_on_and_when_unchanged(self, node_id, prefix, label, noun):
         node = _workflow_nodes()[node_id]
         upstream = "refine" if node_id == "refine-push" else "plan"
