@@ -690,6 +690,16 @@ def cmd_assemble(args) -> None:
         except Exception:
             pass
 
+    # Written by refine-push/plan-push-and-advance (#473): the verified push outcome
+    # (pushed, branch, local/remote sha, captured error). Same optional, schema-free
+    # fold as memory-trace.json — these are plain DAG bash steps, not verdict gates.
+    push_path = artifacts_dir / "push-result.json"
+    if push_path.exists():
+        try:
+            run_record["push_result"] = json.loads(push_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(run_record, indent=2), encoding="utf-8")
 

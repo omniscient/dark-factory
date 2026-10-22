@@ -463,17 +463,71 @@ nodes:
       SPEC_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/specs/" "$ISSUE")  # TARGET-PATH
 
       if [ -n "$SPEC_FILE" ]; then
-        git push -u origin "$BRANCH"
-        if python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review; then
-          echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+        # #473: the gate label follows a *verified* push, not just a committed artifact.
+        # A detached HEAD, a failed/timed-out push, or a remote sha that differs from HEAD
+        # posts df-push-failure instead and leaves spec-pending-review unapplied.
+        LOCAL_SHA=$(git rev-parse HEAD)
+        REMOTE_SHA=""
+        if [ -z "$BRANCH" ]; then
+          PUSH_OK=false
+          PUSH_ERR="detached HEAD: no branch name to push (git branch --show-current returned empty)"
         else
-          echo "WARNING: spec-pending-review failed to apply for #$ISSUE — spec pushed to $BRANCH but gate label missing; check board state manually"
-          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
+          PUSH_ERR=$(timeout 30 git push -u origin "$BRANCH" 2>&1)
+          PUSH_RC=$?
+          if [ "$PUSH_RC" -eq 124 ]; then
+            PUSH_OK=false
+            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+          elif [ "$PUSH_RC" -eq 0 ]; then
+            printf '%s\n' "$PUSH_ERR"
+            REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
+              | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
+            if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
+              PUSH_OK=true
+              PUSH_ERR=""
+            else
+              PUSH_OK=false
+              PUSH_ERR="post-push verification failed: origin/$BRANCH is ${REMOTE_SHA:-<unreachable>}, expected $LOCAL_SHA"
+            fi
+          else
+            PUSH_OK=false
+          fi
+        fi
+        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000)
+        # Persisted before any label/comment call so a comment failure or node timeout
+        # still leaves the outcome for run_record.py's cmd_assemble (run_record["push_result"]).
+        jq -n --arg node "refine-push" --arg branch "$BRANCH" --argjson pushed "$PUSH_OK" \
+          --arg local_sha "$LOCAL_SHA" --arg remote_sha "$REMOTE_SHA" --arg error "$PUSH_ERR" \
+          '{node: $node, branch: $branch, pushed: $pushed, local_sha: $local_sha, remote_sha: $remote_sha, error: $error}' \
+          > "$ARTIFACTS_DIR/push-result.json" || true
+
+        if [ "$PUSH_OK" = true ]; then
+          if python3 "$_PCLI" tracker label --id "$ISSUE" --add spec-pending-review; then
+            echo "Pushed $BRANCH for issue #$ISSUE (spec-pending-review gate applied)"
+          else
+            echo "WARNING: spec-pending-review failed to apply for #$ISSUE — spec pushed to $BRANCH but gate label missing; check board state manually"
+            bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
       "## Refinement Pipeline — Gate Label Missing
 
       The spec was pushed to \`$BRANCH\` but the \`spec-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
 
       **Remediation:** \`gh issue edit $ISSUE --add-label spec-pending-review --repo $FACTORY_REPO_SLUG\`" || true
+          fi
+        else
+          echo "refine-push: push verification failed for #$ISSUE — spec-pending-review NOT applied."
+          printf '%s\n' "$PUSH_ERR"
+          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-push-failure -->" \
+      "## Refinement Pipeline — Push Failed
+
+      The spec was committed locally but could not be verified on the remote (\`${BRANCH:-<detached HEAD>}\`), so the \`spec-pending-review\` label was **not** applied. This item remains eligible for automatic retry.
+
+      ~~~~~~
+      $PUSH_ERR
+      ~~~~~~
+
+      **Remediation:** investigate the push failure above, then retry:
+      \`\`\`bash
+      docker compose --profile factory run --rm dark-factory \"Refine issue #${ISSUE}\"
+      \`\`\`" || true
         fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
@@ -526,17 +580,71 @@ nodes:
       PLAN_FILE=$(bash "${CLONE_DIR:-.}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plans/" "$ISSUE")  # TARGET-PATH
 
       if [ -n "$PLAN_FILE" ]; then
-        git push -u origin "$BRANCH"
-        if python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review; then
-          echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+        # #473: the gate label follows a *verified* push, not just a committed artifact.
+        # A detached HEAD, a failed/timed-out push, or a remote sha that differs from HEAD
+        # posts df-push-failure instead and leaves plan-pending-review unapplied.
+        LOCAL_SHA=$(git rev-parse HEAD)
+        REMOTE_SHA=""
+        if [ -z "$BRANCH" ]; then
+          PUSH_OK=false
+          PUSH_ERR="detached HEAD: no branch name to push (git branch --show-current returned empty)"
         else
-          echo "WARNING: plan-pending-review failed to apply for #$ISSUE — plan pushed to $BRANCH but gate label missing; check board state manually"
-          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
+          PUSH_ERR=$(timeout 30 git push -u origin "$BRANCH" 2>&1)
+          PUSH_RC=$?
+          if [ "$PUSH_RC" -eq 124 ]; then
+            PUSH_OK=false
+            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+          elif [ "$PUSH_RC" -eq 0 ]; then
+            printf '%s\n' "$PUSH_ERR"
+            REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
+              | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
+            if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
+              PUSH_OK=true
+              PUSH_ERR=""
+            else
+              PUSH_OK=false
+              PUSH_ERR="post-push verification failed: origin/$BRANCH is ${REMOTE_SHA:-<unreachable>}, expected $LOCAL_SHA"
+            fi
+          else
+            PUSH_OK=false
+          fi
+        fi
+        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000)
+        # Persisted before any label/comment call so a comment failure or node timeout
+        # still leaves the outcome for run_record.py's cmd_assemble (run_record["push_result"]).
+        jq -n --arg node "plan-push-and-advance" --arg branch "$BRANCH" --argjson pushed "$PUSH_OK" \
+          --arg local_sha "$LOCAL_SHA" --arg remote_sha "$REMOTE_SHA" --arg error "$PUSH_ERR" \
+          '{node: $node, branch: $branch, pushed: $pushed, local_sha: $local_sha, remote_sha: $remote_sha, error: $error}' \
+          > "$ARTIFACTS_DIR/push-result.json" || true
+
+        if [ "$PUSH_OK" = true ]; then
+          if python3 "$_PCLI" tracker label --id "$ISSUE" --add plan-pending-review; then
+            echo "Pushed $BRANCH for issue #$ISSUE (plan-pending-review gate applied)"
+          else
+            echo "WARNING: plan-pending-review failed to apply for #$ISSUE — plan pushed to $BRANCH but gate label missing; check board state manually"
+            bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-gate-label-failure -->" \
       "## Refinement Pipeline — Gate Label Missing
 
       The plan was pushed to \`$BRANCH\` but the \`plan-pending-review\` label failed to apply (likely a transient GitHub API/rate-limit failure). This issue will not auto-advance until the label is applied.
 
       **Remediation:** \`gh issue edit $ISSUE --add-label plan-pending-review --repo $FACTORY_REPO_SLUG\`" || true
+          fi
+        else
+          echo "plan-push-and-advance: push verification failed for #$ISSUE — plan-pending-review NOT applied."
+          printf '%s\n' "$PUSH_ERR"
+          bash "${CLONE_DIR:-.}/dark-factory/scripts/post_marker_comment.sh" "$ISSUE" "<!-- df-push-failure -->" \
+      "## Refinement Pipeline — Push Failed
+
+      The plan was committed locally but could not be verified on the remote (\`${BRANCH:-<detached HEAD>}\`), so the \`plan-pending-review\` label was **not** applied. This item remains eligible for automatic retry.
+
+      ~~~~~~
+      $PUSH_ERR
+      ~~~~~~
+
+      **Remediation:** investigate the push failure above, then retry:
+      \`\`\`bash
+      docker compose --profile factory run --rm dark-factory \"Plan issue #${ISSUE}\"
+      \`\`\`" || true
         fi
       else
         HAS_NEEDS_DISCUSSION=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields labels \
