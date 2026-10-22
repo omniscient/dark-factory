@@ -92,6 +92,25 @@ def format_economics_line(run_record: dict) -> str:
     return f"**Factory CPM:** {cpm_fmt} | **Outcome:** {state} (score {score})"
 
 
+PUSH_ERROR_MAX_CHARS = 200
+
+
+def format_push_line(run_record: dict) -> str:
+    """One-line push outcome for the cost-report comment (#473).
+
+    Absent-tolerant: older run-record.json files predate push_result, and a
+    verified push prints nothing — only a failed/unverified push is surfaced.
+    """
+    push = run_record.get("push_result")
+    if not isinstance(push, dict) or push.get("pushed") is not False:
+        return ""
+    error = str(push.get("error") or "").strip()
+    first = error.splitlines()[0].strip() if error else "no error text captured"
+    if len(first) > PUSH_ERROR_MAX_CHARS:
+        first = first[:PUSH_ERROR_MAX_CHARS] + "…"
+    return f"**Push:** FAILED — {first}"
+
+
 def format_savings_block(budget: "dict | None") -> str:
     """Mirrors the context-budget.json (schema v2) block at entrypoint.sh:501-548."""
     if not budget:
@@ -301,6 +320,8 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 
     economics_line = format_economics_line(run_record)
     economics_segment = f"\n{economics_line}" if economics_line else ""
+    push_line = format_push_line(run_record)
+    push_segment = f"\n\n{push_line}" if push_line else ""
 
     row_lines = []
     for node in run_record.get("nodes") or []:
@@ -338,7 +359,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 |------|-------|-----------|------------|------|----------|
 {run_rows}
 | **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **${total_cost_str}** | |
-{economics_segment}
+{economics_segment}{push_segment}
 
 ---
 *Updated by {product_name} Dark Factory*"""

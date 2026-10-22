@@ -509,3 +509,50 @@ def test_render_matches_golden_e_would_trim():
     body = cr.render(RUN_RECORD_E, prior_comment_body="", timestamp="2026-07-22 13:05 UTC",
                       intent="fix", budget=BUDGET_E)
     assert body == GOLDEN_E_WOULD_TRIM
+
+
+# ---------------------------------------------------------------------------
+# format_push_line / render() push outcome (#473, absent-tolerant)
+# ---------------------------------------------------------------------------
+
+def test_format_push_line_failed_renders_first_error_line():
+    run_record = {"push_result": {
+        "pushed": False,
+        "error": "remote: rejected by test hook\nTo /tmp/bare\n ! [remote rejected] x -> x",
+    }}
+    assert cr.format_push_line(run_record) == "**Push:** FAILED — remote: rejected by test hook"
+
+
+def test_format_push_line_absent_or_pushed_returns_empty_string():
+    assert cr.format_push_line({}) == ""
+    assert cr.format_push_line({"push_result": {"pushed": True, "error": ""}}) == ""
+    assert cr.format_push_line({"push_result": {}}) == ""
+    assert cr.format_push_line({"push_result": "not a dict"}) == ""
+
+
+def test_format_push_line_empty_error_has_placeholder():
+    assert cr.format_push_line({"push_result": {"pushed": False, "error": ""}}) == (
+        "**Push:** FAILED — no error text captured"
+    )
+
+
+def test_format_push_line_caps_long_first_line():
+    line = cr.format_push_line({"push_result": {"pushed": False, "error": "x" * 500}})
+    assert line == "**Push:** FAILED — " + "x" * cr.PUSH_ERROR_MAX_CHARS + "…"
+
+
+def test_render_push_failed_inserts_line_after_economics():
+    record = dict(RUN_RECORD_A, push_result={"pushed": False, "error": "fatal: unable to access"})
+    body = cr.render(record, prior_comment_body="", timestamp="2026-07-22 13:02 UTC",
+                     intent="fix")
+    assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN.replace(
+        "(score 1.0)\n\n---",
+        "(score 1.0)\n\n**Push:** FAILED — fatal: unable to access\n\n---",
+    )
+
+
+def test_render_push_succeeded_matches_golden_unchanged():
+    record = dict(RUN_RECORD_A, push_result={"pushed": True, "error": ""})
+    body = cr.render(record, prior_comment_body="", timestamp="2026-07-22 13:02 UTC",
+                     intent="fix")
+    assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
