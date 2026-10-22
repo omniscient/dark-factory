@@ -520,9 +520,9 @@ nodes:
 
       The spec was committed locally but could not be verified on the remote (\`${BRANCH:-<detached HEAD>}\`), so the \`spec-pending-review\` label was **not** applied. This item remains eligible for automatic retry.
 
-      ~~~
+      ~~~~~~
       $PUSH_ERR
-      ~~~
+      ~~~~~~
 
       **Remediation:** investigate the push failure above, then retry:
       \`\`\`bash
@@ -637,9 +637,9 @@ nodes:
 
       The plan was committed locally but could not be verified on the remote (\`${BRANCH:-<detached HEAD>}\`), so the \`plan-pending-review\` label was **not** applied. This item remains eligible for automatic retry.
 
-      ~~~
+      ~~~~~~
       $PUSH_ERR
-      ~~~
+      ~~~~~~
 
       **Remediation:** investigate the push failure above, then retry:
       \`\`\`bash
