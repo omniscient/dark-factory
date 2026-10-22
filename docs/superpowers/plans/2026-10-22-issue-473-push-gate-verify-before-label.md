@@ -1,6 +1,7 @@
 # Push Gate: Verify the Push Before Applying spec/plan-pending-review — Implementation Plan
 
 **Issue:** #473
+**Revised:** 2026-10-22 (operator amendment after plan gate — POSIX skip guard, push transcript on success, partial output kept on timeout)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans (or
 > superpowers:subagent-driven-development) to work through this plan task by task. Steps use
@@ -58,9 +59,13 @@ Explicitly **not** touched:
 - The node `timeout: 60000`, `depends_on`, `when`: unchanged, and
   `test_node_depends_on_and_when_unchanged` asserts this.
 
-**Environment note:** if `python -m pytest` reports `No module named pytest` (or `aiohttp` while
-collecting `test_cost_report.py`), first run `pip install pytest pyyaml aiohttp`, the same command
-CI uses at `.github/workflows/ci.yml:12`.
+**Environment note:** if `python -m pytest` reports `No module named pytest` (or
+`No module named 'aiohttp'`), first run `pip install pytest pyyaml aiohttp`, the same command CI
+uses at `.github/workflows/ci.yml:12`. `aiohttp` is imported directly only by
+`scripts/factory_core/model_proxy.py` (and `tests/test_factory_model_proxy.py`), but
+`scripts/factory_core/run_record.py:22` does `from . import model_proxy`, so collecting
+`tests/test_run_record.py` (Task 2) needs it too; `tests/test_cost_report.py` does not import
+`run_record` and collects without it.
 
 ---
 
@@ -100,8 +105,9 @@ _WORKFLOW = _REPO_ROOT / "workflows" / "archon-dark-factory.yaml"
 _ISSUE = "473"
 
 pytestmark = pytest.mark.skipif(
-    any(shutil.which(tool) is None for tool in ("bash", "git", "jq", "timeout")),
-    reason="needs bash, git, jq and coreutils timeout (Linux/CI-only harness)",
+    os.name != "posix"
+    or any(shutil.which(tool) is None for tool in ("bash", "git", "jq", "timeout")),
+    reason="needs a POSIX host with bash, git, jq and coreutils timeout (Linux/CI-only harness)",
 )
 
 # Prepended to the node's bash in ONE `bash -c` string: an exported shell function is
@@ -285,8 +291,11 @@ Harness notes (each one comes from spec "Test harness details"):
   is not inherited through `env=`.
 - `CLONE_DIR` is a symlink `tmp/clone/dark-factory → repo root`. The test does not depend on
   the checkout's basename, so it works in worktrees.
-- `issue.json` is written into `ARTIFACTS_DIR`. A module-level `skipif` covers hosts without
-  `bash`/`git`/`jq`/`timeout`.
+- `issue.json` is written into `ARTIFACTS_DIR`. A module-level `skipif` skips on any
+  non-POSIX host (`os.name != "posix"`, i.e. Windows) and on POSIX hosts without
+  `bash`/`git`/`jq`/`timeout`. The tool check alone is not enough: a Windows host with Git
+  for Windows and a winget `jq` resolves all four, and the fixture's `symlink_to` then errors
+  with WinError 1314 instead of skipping (plan-gate review).
 - No `set -u`. A dummy `FACTORY_REPO_SLUG` is exported anyway.
 - The override intercepts every `providers/cli.py` subcommand (`tracker label`/`comment`/`get`).
   `factory_core/cli.py marker scheduler` (the footer, called from `post_marker_comment.sh`) runs
@@ -397,8 +406,9 @@ with this block (YAML indentation preserved: code at 6/8/10/12 spaces, comment-b
           PUSH_RC=$?
           if [ "$PUSH_RC" -eq 124 ]; then
             PUSH_OK=false
-            PUSH_ERR="push timed out after 30s"
+            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
           elif [ "$PUSH_RC" -eq 0 ]; then
+            printf '%s\n' "$PUSH_ERR"
             REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
               | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
             if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
@@ -460,8 +470,17 @@ explain why:
   `timeout` 0.8.0 honors exit 124 (operator note on the issue).
 - The `ls-remote` call queries the exact `refs/heads/$BRANCH`, and awk matches `$2==r` exactly
   (spec F6).
-- On a verified push, `PUSH_ERR=""` is reset, because `git push` writes progress to stderr even
-  on success.
+- On rc 0 the captured transcript is echoed (`printf '%s\n' "$PUSH_ERR"`) before the
+  `ls-remote` check, so the node log keeps the `* [new branch] …` / `set up to track` lines it
+  shows today; `PUSH_ERR=""` is then reset on a verified push, because `git push` writes
+  progress to stderr even on success.
+- On rc 124 the `push timed out after 30s` line is prepended to whatever git printed before the
+  kill rather than replacing it, so a transfer that stalled mid-way still shows how far it got
+  (the `tail -n 20 | tail -c 2000` cap still applies). The join uses `printf '%s\n%s'` rather
+  than bash ANSI-C `$'\n'` quoting so the line is shell-agnostic (the image's `/bin/sh` is
+  dash, where `$'\n'` is a literal). No exec case asserts the timeout text
+  (see "Known coverage gap"); any future one must assert the prefix (`startswith`), not the
+  whole string.
 - `PUSH_ERR` is capped with `tail -n 20 | tail -c 2000` before both the JSON write and the
   comment. In the comment it is fenced with `~~~`, not triple backticks.
 - `push-result.json` is written **before** the `if [ "$PUSH_OK" = true ]` dispatch (Requirement 4).
@@ -513,8 +532,9 @@ with:
           PUSH_RC=$?
           if [ "$PUSH_RC" -eq 124 ]; then
             PUSH_OK=false
-            PUSH_ERR="push timed out after 30s"
+            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
           elif [ "$PUSH_RC" -eq 0 ]; then
+            printf '%s\n' "$PUSH_ERR"
             REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
               | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
             if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
@@ -925,7 +945,9 @@ Nothing under `.claude/skills/`, `deploy/`, or `.github/workflows/`.
 | Node exits 0 on push failure; timeout stays 60000 (R8) | Task 1: exec asserts `returncode == 0` in every case; `test_node_depends_on_and_when_unchanged` |
 
 **Known coverage gap (record it in the PR body):** the `PUSH_RC -eq 124` push-timeout branch,
-and an `ls-remote` that fails outright, have no dedicated exec case. A slow-hook timeout case
+and an `ls-remote` that fails outright, have no dedicated exec case (a future timeout case must
+assert `push_result["error"].startswith("push timed out after 30s")`, since the partial git
+output follows that line). A slow-hook timeout case
 would add 30 s or more to CI. The shared `${REMOTE_SHA:-<unreachable>}` failure wording and the
 `PUSH_OK=false` → no-label dispatch are exercised by the mismatch and rejected cases.
 
