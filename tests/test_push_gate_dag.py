@@ -141,6 +141,26 @@ class TestPushGateNodes:
         # exactly when the GitHub API is slowest (rate exhaustion) — see workflow comment.
         assert node["timeout"] == 60000
 
+    def test_node_captures_the_error_utf8_safely(self, node_id, prefix, label, noun):
+        # tail -c cuts at a byte boundary; without the iconv stage a split
+        # multibyte character makes the comment body unreadable and the
+        # df-push-failure comment is lost (#479).
+        bash = _workflow_nodes()[node_id]["bash"]
+        assert "tail -c 2000 | iconv -c -f UTF-8 -t UTF-8" in bash, \
+            f"'{node_id}': PUSH_ERR capture must drop a byte-split UTF-8 tail"
+
+    def test_node_verifies_the_remote_after_a_push_timeout(self, node_id, prefix, label, noun):
+        # On rc 124 the client gave up but the server may have accepted the
+        # push: the compare must run before failure is declared (#479).
+        bash = _workflow_nodes()[node_id]["bash"]
+        timeout_pos = bash.find('"$PUSH_RC" -eq 124')
+        assert timeout_pos != -1, f"'{node_id}': expected the timeout branch"
+        branch = bash[timeout_pos:timeout_pos + 1500]
+        assert "ls-remote" in branch, \
+            f"'{node_id}': the timeout branch must compare the remote sha"
+        assert "push timed out after 30s" in branch, \
+            f"'{node_id}': the timeout text must be kept for the record"
+
 
 def test_dag_validator_passes():
     sys.path.insert(0, str(_REPO_ROOT / "scripts"))

@@ -249,7 +249,11 @@ def parse_prior_cumulative(prior_comment_body: str) -> dict:
     else:
         prev_cost, prev_in, prev_out = "0", 0, 0
 
-    run_count = prior_comment_body.count("### Run:")
+    # Only header lines count: an error first line mentioning "### Run:" inline
+    # must not inflate the "N run(s)" header (#479).
+    run_count = sum(
+        1 for line in prior_comment_body.splitlines() if line.startswith("### Run:")
+    )
 
     return {
         "prior_runs": prior_runs,
