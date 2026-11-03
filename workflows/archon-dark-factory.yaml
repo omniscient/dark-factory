@@ -475,8 +475,19 @@ nodes:
           PUSH_ERR=$(timeout 30 git push -u origin "$BRANCH" 2>&1)
           PUSH_RC=$?
           if [ "$PUSH_RC" -eq 124 ]; then
-            PUSH_OK=false
-            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+            # The client timed out, but the server may have accepted the push —
+            # verify before declaring failure, or a landed push costs a full
+            # agent re-run (#479). 10 s here keeps the node inside its 60 s budget.
+            _TIMEOUT_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+            REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
+              | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
+            if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
+              PUSH_OK=true
+              PUSH_ERR=""
+            else
+              PUSH_OK=false
+              PUSH_ERR="$_TIMEOUT_ERR"
+            fi
           elif [ "$PUSH_RC" -eq 0 ]; then
             printf '%s\n' "$PUSH_ERR"
             REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
@@ -492,7 +503,10 @@ nodes:
             PUSH_OK=false
           fi
         fi
-        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000)
+        # tail -c cuts at a byte boundary, which can split a multibyte character
+        # (push-protection messages use ━ and —) and leave the comment body
+        # invalid UTF-8, so post_marker_comment.sh fails to read it (#479).
+        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000 | iconv -c -f UTF-8 -t UTF-8)
         # Persisted before any label/comment call so a comment failure or node timeout
         # still leaves the outcome for run_record.py's cmd_assemble (run_record["push_result"]).
         jq -n --arg node "refine-push" --arg branch "$BRANCH" --argjson pushed "$PUSH_OK" \
@@ -592,8 +606,19 @@ nodes:
           PUSH_ERR=$(timeout 30 git push -u origin "$BRANCH" 2>&1)
           PUSH_RC=$?
           if [ "$PUSH_RC" -eq 124 ]; then
-            PUSH_OK=false
-            PUSH_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+            # The client timed out, but the server may have accepted the push —
+            # verify before declaring failure, or a landed push costs a full
+            # agent re-run (#479). 10 s here keeps the node inside its 60 s budget.
+            _TIMEOUT_ERR=$(printf '%s\n%s' "push timed out after 30s" "$PUSH_ERR")
+            REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
+              | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
+            if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
+              PUSH_OK=true
+              PUSH_ERR=""
+            else
+              PUSH_OK=false
+              PUSH_ERR="$_TIMEOUT_ERR"
+            fi
           elif [ "$PUSH_RC" -eq 0 ]; then
             printf '%s\n' "$PUSH_ERR"
             REMOTE_SHA=$(timeout 10 git ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
@@ -609,7 +634,10 @@ nodes:
             PUSH_OK=false
           fi
         fi
-        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000)
+        # tail -c cuts at a byte boundary, which can split a multibyte character
+        # (push-protection messages use ━ and —) and leave the comment body
+        # invalid UTF-8, so post_marker_comment.sh fails to read it (#479).
+        PUSH_ERR=$(printf '%s\n' "$PUSH_ERR" | tail -n 20 | tail -c 2000 | iconv -c -f UTF-8 -t UTF-8)
         # Persisted before any label/comment call so a comment failure or node timeout
         # still leaves the outcome for run_record.py's cmd_assemble (run_record["push_result"]).
         jq -n --arg node "plan-push-and-advance" --arg branch "$BRANCH" --argjson pushed "$PUSH_OK" \
