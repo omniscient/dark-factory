@@ -267,17 +267,33 @@ class TestOpPromote:
 # ---------------------------------------------------------------------------
 
 class TestOpDedup:
-    def test_identical_bodies_marks_older_invalid(self):
+    def test_identical_bodies_drops_older_without_invalid_tag(self):
         older = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-01-01")
         newer = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-06-01")
         result = mm.op_dedup([older, newer])
-        # Both entries share the same body, so use list-based checks instead of dict keying
-        invalid_entries = [e for e in result.entries if e.tag.startswith("INVALID")]
-        assert len(invalid_entries) == 1
-        assert invalid_entries[0].meta.get("date") == "2026-01-01"
-        surviving = [e for e in result.entries if not e.tag.startswith("INVALID")]
-        assert len(surviving) == 1
-        assert surviving[0].meta.get("date") == "2026-06-01"
+        # Supersession is not invalidation (contract section 2): the older entry is
+        # removed, never retagged INVALID.
+        assert not any(e.tag.startswith("INVALID") for e in result.entries)
+        assert len(result.entries) == 1
+        assert result.entries[0].meta.get("date") == "2026-06-01"
+
+    def test_newer_entry_listed_first_still_wins(self):
+        newer = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-06-01")
+        older = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-01-01")
+        result = mm.op_dedup([newer, older])
+        assert [e.meta["date"] for e in result.entries] == ["2026-06-01"]
+
+    def test_apply_ops_removes_superseded_line_and_never_writes_invalid(self):
+        content = (
+            "# H\n"
+            "- [PATTERN] Use the transaction rollback fixture <!-- issue:#1 date:2026-01-01 source:implement -->\n"
+            "- [PATTERN] Use the transaction rollback fixture <!-- issue:#2 date:2026-06-01 source:implement -->\n"
+            "---\n<!-- PROVISIONAL -->\n"
+        )
+        out, summary = mm.apply_ops_to_content(content, _date(2026, 6, 27), None)
+        assert "INVALID" not in out
+        assert out.count("[PATTERN]") == 1 and "issue:#2" in out
+        assert summary["deduped"] == 1
 
     def test_below_threshold_not_deduped(self):
         e1 = _entry("PATTERN", "Use foo for bar operations to get results.")

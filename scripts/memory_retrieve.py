@@ -28,6 +28,13 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     import token_estimate as te  # noqa: E402
 
+def _project():
+    """Target repo name, resolved like scripts/identity.sh (FACTORY_REPO; default
+    markethawk for parity). Imported lazily by name only: factory_core's package
+    import pulls in modules these standalone memory scripts must not depend on."""
+    return os.environ.get("FACTORY_REPO") or "markethawk"
+
+
 # ── Constants ──────────────────────────────────────────────────────────────
 
 GLOBAL_FILES = {"codebase-patterns.md", "architecture.md"}
@@ -609,7 +616,7 @@ def emit_memory_trace(trace_path, phase, files, memory_dir, area_files, allowed_
             "issue": issue or 0,
             "phase": phase,
             "agent_id": agent_id or PHASE_AGENT_ID.get(phase, phase + "-agent"),
-            "project": "markethawk",
+            "project": _project(),
             "affected_files": list(files),
             "files_loaded": files_loaded,
             "fallback_used": fallback_used,

@@ -246,14 +246,74 @@ class TestCapEnforcement:
         assert result.returncode == 0
         assert md_at_cap.read_text().count("[AVOID]") == 30
 
-    def test_31st_entry_skipped(self, md_at_cap):
+    def test_31st_entry_evicts_oldest_and_writes_new(self, md_at_cap):
         run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
             "--text", "entry 30", "--source", "conformance", "--issue", "648")
         result = run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
-                     "--text", "entry 31 — completely unique text here", "--source", "conformance",
+                     "--text", "entry 31 - completely unique text here", "--source", "conformance",
                      "--issue", "648")
         assert result.returncode == 0
-        assert md_at_cap.read_text().count("[AVOID]") == 30
+        text = md_at_cap.read_text()
+        assert text.count("[AVOID]") == 30
+        assert "entry 31 - completely unique text here" in text
+        # All fixture entries share a date; the tie evicts the earliest in the file.
+        assert "[AVOID] Entry 0 " not in text
+        assert "[AVOID] Entry 1 " in text
+
+    def test_evicts_oldest_by_date_not_file_position(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(30):
+            d = "2025-01-01" if i == 17 else "2026-03-01"
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:{d} expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        result = run("--target", str(f), "--path-prefix", "x/", "--text", "brand new lesson",
+                     "--source", "refine", "--issue", "9")
+        assert result.returncode == 0
+        text = f.read_text()
+        assert "[AVOID] Entry 17 " not in text
+        assert "[AVOID] Entry 0 " in text
+        assert "brand new lesson" in text
+
+    def test_undated_entry_is_oldest(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(30):
+            if i == 5:
+                lines.append("- [PATTERN] Entry 5 legacy undated\n")
+            else:
+                lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2020-01-01 expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert "legacy undated" not in text
+        assert "fresh" in text
+
+    def test_overfull_file_is_trimmed_to_cap(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(34):
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2026-01-{i + 1:02d} expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert len(re.findall(r"^- \[(?:PATTERN|AVOID|FIX)\]", text, re.M)) == 30
+        assert "fresh" in text
+        assert "[AVOID] Entry 5 " in text and "[AVOID] Entry 4 " not in text
+
+    def test_provisional_and_invalid_not_evicted(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n- [INVALID: wrong] tombstone <!-- date:2000-01-01 -->\n"]
+        for i in range(30):
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2026-01-01 expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n- [PROVISIONAL] prov <!-- date:2000-01-01 -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert "tombstone" in text and "[PROVISIONAL] prov" in text
 
     def test_pattern_entries_count_toward_cap(self, md_at_cap_mixed):
         # 29 [PATTERN] entries are already at the floor; the 30th write (AVOID) must succeed.
@@ -261,12 +321,14 @@ class TestCapEnforcement:
             "--text", "entry 30", "--source", "conformance", "--issue", "648")
         assert md_at_cap_mixed.read_text().count("[AVOID]") == 1
 
-        # 31st write must be rejected — total authoritative entries ([PATTERN]+[AVOID]) == 30.
+        # 31st write evicts the oldest ([PATTERN]) entry; the total stays at 30.
         result = run("--target", str(md_at_cap_mixed), "--path-prefix", "backend/app/",
                      "--text", "entry 31 — completely unique", "--source", "conformance",
                      "--issue", "648")
         assert result.returncode == 0
-        assert md_at_cap_mixed.read_text().count("[AVOID]") == 1  # still only 1 AVOID written
+        text = md_at_cap_mixed.read_text()
+        assert text.count("[AVOID]") == 2
+        assert text.count("[PATTERN]") == 28
 
 
 # ── expiry cleanup ──────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 """Tests for context_budget.py CLI (build_budget function)."""
 import json
+import pytest
 import sys
 from pathlib import Path
 
@@ -653,8 +654,9 @@ def test_code_review_scenario_labels_skill_prompts_included_on_clone_live(tmp_pa
 # ── #487: savings are counted only for features delivered to the prompt ───────
 
 class TestDeliveredVsMeasuredOnlySavings:
-    """Only the diff cap (conformance / code-review) reaches a prompt today.
-    Architecture slicing and memory caps are measured-only (#487, #486)."""
+    """The diff cap (conformance / code-review) and the memory cap (refine / plan /
+    implement / continue, which load memory through the capped retriever, #486)
+    reach a prompt. Architecture slicing is still measured-only (#487)."""
 
     def test_architecture_only_saving_is_not_realised(self, tmp_path):
         make_arch_file(tmp_path)
@@ -672,18 +674,26 @@ class TestDeliveredVsMeasuredOnlySavings:
             arch["baseline_tokens"] - arch["tokens"])
         assert result["measured_only_sections"] == ["architecture_md"]
 
-    def test_memory_cap_saving_is_measured_only(self, tmp_path):
+    @pytest.mark.parametrize("scenario", ["refine", "plan", "implement", "continue"])
+    def test_memory_cap_saving_is_realised(self, tmp_path, scenario):
         import json as _json
         (tmp_path / "memory-trace.json").write_text(
             _json.dumps({"entries_selected_total": 1, "uncapped_tokens": 9000}))
         mem = make_memory_file(tmp_path)
-        result = run_budget(tmp_path, "plan",
+        result = run_budget(tmp_path, scenario,
                             issue_json=make_issue_json(tmp_path), memory_file=mem)
         mc = result["sections"]["memory_context"]
         assert mc["baseline_tokens"] == 9000
-        assert result["savings_tokens"] == 0
-        assert "memory_context" in result["measured_only_sections"]
-        assert result["measured_only_savings_tokens"] >= 9000 - mc["tokens"]
+        assert result["savings_tokens"] >= 9000 - mc["tokens"] > 0
+        assert "memory_context" not in result["measured_only_sections"]
+
+    def test_phases_without_memory_section_are_unaffected(self):
+        import context_budget as cb
+        for scenario in ("conformance", "code-review"):
+            assert "memory_context" not in cb._SECTION_REGISTRY[scenario]
+            assert "memory_context" not in cb._DELIVERED_SAVINGS[scenario]
+        for scenario in ("refine", "plan", "implement", "continue"):
+            assert "memory_context" in cb._DELIVERED_SAVINGS[scenario]
 
     def test_diff_saving_in_code_review_is_realised(self, tmp_path):
         import json as _json

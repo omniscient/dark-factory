@@ -22,7 +22,7 @@ Paths are relative to this repo. Inside a run, the commands invoke the scripts a
 | Component | File | Role | Used by |
 |---|---|---|---|
 | Retriever | `scripts/memory_retrieve.py` | Reads area memory files for a phase + file set; emits `### Memory:` block | Refine, plan, implement (through `scripts/load_memory_context.sh`); validate (called directly) |
-| Writer | `scripts/memory_write.py` | Writes new `[AVOID]` lessons to the markdown files with dedup/reinforcement, cap check, expiry cleanup; does not write `index.jsonl` | Conformance and code-review via `gate_lib.sh::write_memory_entry()`; refine directly |
+| Writer | `scripts/memory_write.py` | Writes new `[AVOID]` lessons to the markdown files with dedup/reinforcement, expiry cleanup and the 30-entry cap (evicts the oldest entries by `date:` to make room); does not write `index.jsonl` | Conformance and code-review via `gate_lib.sh::write_memory_entry()`; refine directly |
 | Index | `.archon/memory/index.jsonl` | Compact summary of entries; written only by `memory_import.py`; the retriever uses only rows that carry `id` and `source_file` | `memory_retrieve.py` |
 | Records | `.archon/memory/records/<id>.json` | Full entry content; read when an index row refers to a record | `memory_retrieve.py` |
 | Importer | `scripts/memory_import.py` | Builds `records/` and retriever-compatible index rows from the markdown files | Manual operator invocation |
@@ -45,7 +45,7 @@ The retriever also accepts `--phase review`; no command uses it.
 
 ### Index status in this repo
 
-The index is not the effective retrieval path here. Earlier versions of `memory_write.py` appended index rows without `id` or `source_file`; the retriever skips any row lacking them, so every such row in this repo's `index.jsonl` is ignored (the writer no longer appends them) and there is no `records/` directory. Retrieval therefore falls through to the markdown scan. That scan applies the same ranking and top-k / token cap as the index path: entries are ranked by `path:` tag specificity, issue-label boost and `date:` recency, and the block is cut at `token_optimization.memory.max_entries` entries (default 8) or `max_tokens` (default 1 500), whichever comes first. Only `memory_import.py` produces rows the retriever accepts. Part of [#486](https://github.com/omniscient/dark-factory/issues/486).
+The index is not the effective retrieval path here. Earlier versions of `memory_write.py` appended index rows without `id` or `source_file`; the retriever skips any row lacking them, so every such row was ignored (the writer no longer appends them, and this repo's `index.jsonl`, which held only such rows, was deleted) and there is no `records/` directory. Retrieval therefore uses the markdown scan. That scan applies the same ranking and top-k / token cap as the index path: entries are ranked by `path:` tag specificity, issue-label boost and `date:` recency, and the block is cut at `token_optimization.memory.max_entries` entries (default 8) or `max_tokens` (default 1 500), whichever comes first. Only `memory_import.py` produces rows the retriever accepts. Part of [#486](https://github.com/omniscient/dark-factory/issues/486).
 
 ---
 
@@ -73,7 +73,7 @@ Memory v2 is **deployed**: the retriever, writer, importer and maintenance scrip
 |---|---|
 | Retriever / writer scripts and command integration | shipped, in use |
 | Markdown retrieval path | shipped, and the path in use in this repo |
-| Index + records retrieval path | partly done: the code exists, but rows written by `memory_write.py` are not retriever-compatible ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
+| Index + records retrieval path | partly done: the code exists and only `memory_import.py` produces rows the retriever reads; `memory_write.py` no longer writes index rows ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
 | Maintenance CLI | shipped, manual only |
 
 No partial rollout or feature gate exists. Memory v2 cannot be partially enabled per-gate except by editing the command files (see §5 rollback).
@@ -120,18 +120,18 @@ The `.archon/memory/*.md` files themselves do **not** need to be reverted. They 
 | Failure | Behaviour | Recovery |
 |---|---|---|
 | `index.jsonl` absent | Retriever falls through to markdown-file scan | No action needed |
-| `index.jsonl` present but rows lack `id`/`source_file` (the state of this repo) | Rows are skipped; retriever falls through to the capped markdown scan | None needed for correctness; see [#486](https://github.com/omniscient/dark-factory/issues/486) |
+| `index.jsonl` present but rows lack `id`/`source_file` (the former state of this repo) | Rows are skipped; retriever falls through to the capped markdown scan | None needed for correctness; see [#486](https://github.com/omniscient/dark-factory/issues/486) |
 | `.archon/memory/*.md` absent | Retriever returns empty block; writer creates the directory and file on demand | No action needed |
 | `.archon/memory/` directory absent on read | Retriever exits 1; callers mask it with `\|\| true` and proceed with empty context | No action needed |
 | Malformed JSONL line in index | Line is skipped; rest of index proceeds normally | Remove the line by hand. `memory_maintain.py` never touches the index, and `memory_import.py` only appends |
-| Cap reached (30 entries/file) | Writer skips the new entry and logs it; no abort, nothing dropped | Run `memory_maintain.py run --no-dry-run` to expire old entries and free capacity |
+| Cap reached (30 entries/file) | Writer writes the new entry and evicts the oldest authoritative entries by `date:` (logged); no abort | None needed; `memory_maintain.py run --no-dry-run` additionally expires old entries and drops near-duplicates |
 | Dedup match (identical lesson exists) | Writer reinforces the existing entry (`date:`/`expires:` updated in place); no duplicate written | No action needed |
 
 ---
 
 ## §7 — Maintenance
 
-Nothing runs maintenance automatically. Run it monthly, or when cap messages appear in gate logs. Run all commands from the repo root.
+Nothing runs maintenance automatically. Run it monthly. Run all commands from the repo root.
 
 ### Routine maintenance
 
@@ -147,7 +147,7 @@ git add .archon/memory/
 git commit -m "chore: memory maintenance (expire + promote + dedup)"
 ```
 
-`run` without `--no-dry-run` never writes. Review the dedup part of the diff before applying: dedup retags the older of two near-identical entries (similarity ≥ 0.90) as `[INVALID: superseded by identical entry added <date>]`, which the contract treats as a deviation ([#486](https://github.com/omniscient/dark-factory/issues/486)). `run` edits the `.md` files only; it does not read or rewrite `index.jsonl`.
+`run` without `--no-dry-run` never writes. Review the dedup part of the diff before applying: dedup removes the older of two near-identical entries (similarity ≥ 0.90, older by `date:`) and keeps the newer one; it does not retag it `[INVALID]`, because supersession is not invalidation ([#486](https://github.com/omniscient/dark-factory/issues/486)). Note that the file is re-rendered positionally, so section headers can shift relative to the entries after a removal. `run` edits the `.md` files only; it does not read or rewrite `index.jsonl`.
 
 ### Invalidate a wrong entry
 
@@ -183,7 +183,7 @@ Running the import changes retrieval behaviour: once the index holds usable rows
 
 **Memory write overhead:** One file read + one file write per lesson written. Most gate runs write zero lessons — the write bar (defined in the contract doc §3) requires a sufficiently novel finding.
 
-**Storage footprint:** `.archon/memory/*.md` files are committed to git and count against repository size. As of 2026-11-16 this repo's store is about 111 KB: three markdown files of 23–29 KB each plus a 34 KB `index.jsonl` of rows the retriever ignores. The 30-entry cap per file is meant to bound growth but is not hard-enforced; all three files currently exceed it ([#486](https://github.com/omniscient/dark-factory/issues/486)).
+**Storage footprint:** `.archon/memory/*.md` files are committed to git and count against repository size. As of 2026-11-16 this repo's store was about 77 KB: three markdown files of 23–29 KB each (the 34 KB `index.jsonl` of unreadable rows was deleted in [#486](https://github.com/omniscient/dark-factory/issues/486)). The 30-entry cap per file bounds growth; the three files currently exceed it and are trimmed to 30 the next time `memory_write.py` writes to each.
 
 ---
 

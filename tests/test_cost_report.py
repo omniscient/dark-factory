@@ -580,7 +580,7 @@ def test_format_savings_block_realised_and_measured_only_separate():
         "savings_tokens": 3000,
         "savings_pct": 15.5,
         "measured_only_savings_tokens": 1000,
-        "measured_only_sections": ["memory_context"],
+        "measured_only_sections": ["architecture_md"],
         "fallback_events": [],
     }
     block = cr.format_savings_block(budget)

@@ -986,7 +986,15 @@ class TestEmitMemoryTrace:
         data = json.loads(trace_path.read_text())
         assert data["agent_id"] == "implementation-agent"
 
-    def test_emit_project_field(self, tmp_path):
+    def test_emit_project_follows_factory_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FACTORY_REPO", "dark-factory")
+        mem_dir = self._make_mem_dir(tmp_path)
+        trace_path = tmp_path / "memory-trace.json"
+        mr.emit_memory_trace(trace_path, "implement", [], mem_dir, mr.ALL_MEMORY_FILES, {"implement"})
+        assert json.loads(trace_path.read_text())["project"] == "dark-factory"
+
+    def test_emit_project_field(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
         mem_dir = self._make_mem_dir(tmp_path)
         trace_path = tmp_path / "memory-trace.json"
         mr.emit_memory_trace(trace_path, "implement", [], mem_dir, mr.ALL_MEMORY_FILES, {"implement"})
@@ -1000,7 +1008,8 @@ class TestEmitMemoryTrace:
         assert mr.PHASE_AGENT_ID["refine"] == "refine-agent"
         assert mr.PHASE_AGENT_ID["validate"] == "validate-agent"
 
-    def test_cli_includes_issue_agent_project(self, tmp_path):
+    def test_cli_includes_issue_agent_project(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FACTORY_REPO", raising=False)
         mem_dir = self._make_mem_dir(tmp_path)
         trace_path = tmp_path / "trace.json"
         result = subprocess.run(
