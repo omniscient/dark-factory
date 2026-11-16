@@ -147,7 +147,7 @@ git add .archon/memory/
 git commit -m "chore: memory maintenance (expire + promote + dedup)"
 ```
 
-`run` without `--no-dry-run` never writes. Review the dedup part of the diff before applying: dedup removes the older of two near-identical entries (similarity ≥ 0.90, older by `date:`) and keeps the newer one; it does not retag it `[INVALID]`, because supersession is not invalidation ([#486](https://github.com/omniscient/dark-factory/issues/486)). Note that the file is re-rendered positionally, so section headers can shift relative to the entries after a removal. `run` edits the `.md` files only; it does not read or rewrite `index.jsonl`.
+`run` without `--no-dry-run` never writes. Review the dedup part of the diff before applying: dedup removes the older of two near-identical entries (similarity ≥ 0.90, older by `date:`) and keeps the newer one; it does not retag it `[INVALID]`, because supersession is not invalidation ([#486](https://github.com/omniscient/dark-factory/issues/486)). Surviving entries stay under their own section headers; a removed entry's line is simply dropped. `run` edits the `.md` files only; it does not read or rewrite `index.jsonl`.
 
 ### Invalidate a wrong entry
 
