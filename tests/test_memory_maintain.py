@@ -157,6 +157,59 @@ class TestRenderFile:
         assert "Auth entry two." in rendered
 
 
+SECTIONED_FILE = """# Sectioned
+
+## Section A
+
+- [PATTERN] A one. <!-- issue:#1 date:2026-01-01 expires:2020-01-01 source:implement -->
+- [PATTERN] A two. <!-- issue:#2 date:2026-01-02 expires:2099-01-01 source:implement -->
+
+## Section B
+
+- [AVOID] B one. <!-- issue:#3 date:2026-01-03 expires:2099-01-01 source:implement -->
+- [AVOID] B two. <!-- issue:#4 date:2026-01-04 expires:2099-01-01 source:implement -->
+"""
+
+
+class TestRenderKeepsSections:
+    """Removing an entry must not slide later entries under an earlier header."""
+
+    def _section_of(self, rendered, needle):
+        section = None
+        for line in rendered.splitlines():
+            if line.startswith("## "):
+                section = line
+            if needle in line:
+                return section
+        return None
+
+    def test_removed_entry_does_not_shift_later_entries(self):
+        mf = mm.parse_file_content(SECTIONED_FILE)
+        mf.auth_entries = mf.auth_entries[1:]  # drop "A one."
+        rendered = mm.render_file(mf)
+        assert "A one." not in rendered
+        assert self._section_of(rendered, "A two.") == "## Section A"
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+    def test_expiry_through_apply_ops_keeps_sections(self):
+        from datetime import date
+        rendered, summary = mm.apply_ops_to_content(SECTIONED_FILE, date(2026, 6, 1), None)
+        assert summary["expired_auth"] == 1
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+    def test_dedup_through_apply_ops_keeps_sections(self):
+        from datetime import date
+        content = SECTIONED_FILE.replace("expires:2020-01-01", "expires:2099-01-01").replace(
+            "A two.", "A one.")  # A's two entries are now duplicates; older is dropped
+        rendered, summary = mm.apply_ops_to_content(content, date(2026, 6, 1), None)
+        assert summary["deduped"] == 1
+        assert rendered.count("A one.") == 1
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+
 # ---------------------------------------------------------------------------
 # op_expire
 # ---------------------------------------------------------------------------
