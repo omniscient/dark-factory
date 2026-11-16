@@ -88,13 +88,12 @@ Return contracts (`tracker/base.py`):
 - `create_item` returns the new item's opaque id; `upsert_comment` and `resolve_item`
   return nothing.
 
-**The CLI calls a wider signature than the ABC declares.** `providers/cli.py`'s `tracker get`
-calls `get_item(id, fields=...)`. Only `GitHubTracker.get_item` accepts `fields`; the ABC and
-`JiraTracker.get_item(self, id)` do not, so `tracker get` raises `TypeError` under
-`FACTORY_TRACKER=jira` ([#488](https://github.com/omniscient/dark-factory/issues/488)).
-Until that is resolved, a new tracker should accept `fields: tuple | None = None` on
-`get_item` (a tuple of field names such as `("body",)` or `("state",)`; `None` means the
-adapter's default set).
+**`get_item` takes `fields`.** The ABC declares `get_item(id, fields: tuple | None = None)`,
+which is what `providers/cli.py`'s `tracker get` calls. `fields` is a tuple of field names
+such as `("body",)` or `("state",)`; the result contains exactly those keys, and `None` means
+the adapter's default set. `state` is `"OPEN"` or `"CLOSED"` (`scheduler.sh` reads `body` and
+`state` for `Depends on:` gating). `JiraTracker` returns `CLOSED` iff the canonical status is
+`done`, and fetches `comments` only when asked.
 
 ### Canonical vocabulary (frozen contract, design doc §5.2)
 
@@ -168,17 +167,17 @@ env var names boot preflight requires (default `[]`).
 Plain `git` (clone/branch/commit/push/fetch/diff) is host-agnostic and stays **outside** this
 contract (design doc principle 3) — the only git-adjacent method here is `remote_url()`.
 
-**The CLI calls a wider signature than the ABC declares.** `providers/cli.py` passes keyword
-arguments that only `GitHubCodeHost` accepts today: `find_change_for(branch, exact=, repo=)`,
+**The ABC declares every keyword the CLI passes.** `providers/cli.py` calls
+`find_change_for(branch, exact=, repo=)`, `find_change_details(branch, exact=, repo=)`,
 `open_change(..., draft=, repo=)`, `mark_ready(id, repo=)`,
 `merge_change(id, strategy=, delete_branch=, repo=)`, `get_change_checks(id, fields=, repo=)`,
 and `repo=` on `get_change_mergeable`, `get_change_reviews` and
-`get_change_inline_comments`. A code host written to the ABC's signatures alone raises
-`TypeError` when driven through the CLI
-([#488](https://github.com/omniscient/dark-factory/issues/488)). Until the ABC is widened,
-accept those keyword arguments: `repo` is an optional `owner/name` override, `exact` selects
-an exact branch match instead of a prefix match, and `fields` is a comma-separated string of
-check fields (the CLI default is `name,bucket,link`).
+`get_change_inline_comments`, so every implementation must accept them, with the ABC's
+defaults: `repo` is an optional `owner/name` override, `exact` selects an exact branch match
+instead of a prefix match, and `fields` is a comma-separated string of check fields (default
+`name,bucket,link`). Parameter names must match the ABC (the change id parameter is `id`).
+`tests/test_provider_signature_conformance.py` enforces this with `inspect.signature`, and the
+contract suites call each verb through the CLI's argument shape.
 
 ### `remote_url()` — auth-embedded URL requirement
 
@@ -476,12 +475,20 @@ PYTHONPATH=<dark-factory>/scripts python -m factory_core.adapter --clone-dir <ta
 `--format keyvalue` prints a mapping as tab-separated `key<TAB>value` lines. `--clone-dir`
 defaults to `$CLONE_DIR`, then the current directory.
 
-**Run `--validate` yourself before committing.** Neither `scheduler.sh` nor `entrypoint.sh`
-runs it, and the readers of the adapter treat a load failure as "no adapter":
-`factory_core/effective_config.py` logs `adapter invalid — skipping adapter overrides` to the
-run's stderr and continues, and `scripts/gate_lib.sh` discards the error and uses its
-built-in routing table. A file that fails to parse or validate therefore leaves the run on
-the built-in defaults, which are MarketHawk's, with no signal on the ticket
+**Run `--validate` yourself before committing; the factory also checks it for you.**
+`entrypoint.sh` runs the same validation right after cloning the target and **refuses the
+run** if the file is present but invalid: an `adapter-invalid` error on stderr, a line in
+`hook-warnings.log` in the scheduler state dir, a `<!-- df-adapter-invalid -->` comment on the
+ticket, and a failed run. This covers `fix`, `continue`, `refine`, `plan`, `deconflict` and
+`fix-main`; `close` and `recheck` do not read adapter-driven behaviour and are not refused.
+An absent file stays valid (built-in defaults apply). `scheduler.sh` validates the mounted
+checkout once at boot and logs a `WARNING: ADAPTER INVALID` line, but keeps running (the
+mounted copy can be stale; the run-start check is the enforcement point). The individual
+readers (`factory_core/effective_config.py`, `scripts/gate_lib.sh`, ...) still fail open to
+the built-in defaults, which are MarketHawk's, so that a gate never crashes on a bad file;
+the boundary floor on `critical_diff_paths` and `migration_seed_auth_patterns` is unioned on
+those fallback paths as well. Do not rely on the run-start refusal as your first check, since
+it costs a failed ticket attempt
 ([#492](https://github.com/omniscient/dark-factory/issues/492)).
 
 ### Top-level keys

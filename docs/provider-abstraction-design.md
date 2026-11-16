@@ -118,7 +118,7 @@ python3 $CLI preflight   # provider-aware boot validation; prints "providers pre
 
 `tracker label` accepts `--add` and `--remove` more than once. `codehost merge` deletes the branch by default.
 
-> **Known defect:** the CLI passes keyword arguments the contracts do not declare. `tracker get` calls `get_item(id, fields=…)`, but the `Tracker` ABC and `JiraTracker.get_item` take only `id`, so `tracker get` raises `TypeError` under `FACTORY_TRACKER=jira`. The codehost verbs likewise pass `repo=` / `exact=` / `fields=`, which only `GitHubCodeHost` accepts. Tracked in [#488](https://github.com/omniscient/dark-factory/issues/488).
+> **Contract note:** the ABCs declare exactly the keyword arguments the CLI passes: `get_item(id, fields=None)` on the tracker, and `repo=` / `exact=` / `fields=` on the codehost verbs that use them, each with a default. A signature-conformance test (`tests/test_provider_signature_conformance.py`) keeps every implementation in line.
 
 ## 5. Axis 1 — Tracker
 
@@ -182,7 +182,7 @@ Plain git stays inline; the only git-adjacent method is `remote_url()`.
 | `get_change_inline_comments(id)` | review feedback | REST `/pulls/{n}/comments` | discussions API |
 | `close_keyword(issue_id)` → str | close-on-merge snippet **iff tracker==host**, else `""` | `"Closes #N"` | `"Closes #N"` or `""` |
 
-As implemented (`providers/codehost/base.py`), the ABC has 12 abstract methods (the 11 designed here plus `find_change_details`) and a `required_env()` classmethod. `open_change` returns the new id; `update_change_body` and `merge_change` return `bool`. `GitHubCodeHost` accepts extra `repo` / `exact` / `fields` parameters that the ABC does not declare for most methods, and the CLI passes them (see the known defect in §4.2, [#488](https://github.com/omniscient/dark-factory/issues/488)).
+As implemented (`providers/codehost/base.py`), the ABC has 12 abstract methods (the 11 designed here plus `find_change_details`) and a `required_env()` classmethod. `open_change` returns the new id; `update_change_body` and `merge_change` return `bool`. The ABC declares the optional `repo` / `exact` / `fields` parameters the CLI passes (see §4.2); every implementation, including the `GitLabCodeHost` stub, accepts them.
 
 ### 6.2 GitHub reference
 
@@ -295,7 +295,7 @@ Each step is independently shippable; a phased implementation plan will decompos
 | 1. ABCs + GitHub implementations + parity tests | Done | `providers/tracker/{base,github}.py`, `providers/codehost/{base,github}.py`; `tests/test_provider_tracker_parity.py`, `tests/test_provider_codehost_parity.py` |
 | 2. Route hosted calls through the provider CLIs | **Partial** | Some call sites migrated; `board.py`, scheduler board discovery and many inline `gh issue` calls are not (§4.1). [#489](https://github.com/omniscient/dark-factory/issues/489) |
 | 3. Selection + provider-aware boot preflight | Done | `providers/__init__.py`; `cli.py preflight` runs at the top of `scheduler.sh` and `entrypoint.sh`. Selection env is forwarded to run containers by `scheduler.sh` `dispatch()` via `scripts/provider_env.sh` (§4) |
-| 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. `tracker get` fails under Jira ([#488](https://github.com/omniscient/dark-factory/issues/488)) |
+| 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. |
 | 5. Reference model gateway + `databricks` / `openai` | **Not implemented** | `providers/model.py` hard-fails preflight for both. A transparent proxy + ledger shipped instead (§7.4) |
 | 6. Adapter-authoring guide + GitLab sketch | Done | `docs/adapter-authoring-guide.md`; `providers/codehost/gitlab.py` (unregistered stub, §6.3) |
 

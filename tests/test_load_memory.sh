@@ -17,7 +17,7 @@ assert() {
 AFFECTED="backend/app/routers/scanner.py"
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
-source "${REPO_ROOT}/scripts/agent_roles.sh"
+MEMORY_PROJECT="markethawk"  # local to this test; mirrors the project tag in fixtures
 
 load_memory() {
   local MEMFILE="$1"

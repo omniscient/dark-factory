@@ -133,6 +133,17 @@ def format_savings_block(budget: "dict | None") -> str:
             f"tokens ({savings_pct}%)**"
         )
 
+    # Savings that were computed but never reached a prompt (#487): shown separately,
+    # never added to the headline figure above.
+    measured_only = budget.get("measured_only_savings_tokens", 0) or 0
+    if measured_only > 0:
+        names = ", ".join(budget.get("measured_only_sections") or [])
+        suffix = f" ({names})" if names else ""
+        lines.append(
+            f"Measured-only (not delivered to the prompt): "
+            f"{format_tokens_cumulative(measured_only)} tokens{suffix}"
+        )
+
     fallback_events = budget.get("fallback_events") or []
     if fallback_events:
         parts = [f"{ev['section']}: {ev['reason']}" for ev in fallback_events]
