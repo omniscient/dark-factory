@@ -69,7 +69,7 @@ Verified prompt/procedure surface, as of this pass:
 
 This repo has **zero** real Claude Code Skills today (no `.claude/skills/<name>/SKILL.md`
 exists), and no `CLAUDE.md`/`ARCHITECTURE.md` (those are target-repo concerns; Dark Factory is
-product-agnostic post-extraction — see `docs/cutover-markethawk.md`, `README.md`).
+product-agnostic post-extraction — see `docs/archive/2026-07-04-cutover-markethawk.md`, `README.md`).
 
 ---
 
@@ -190,7 +190,7 @@ through Q&A (full log below):
 > `config.yaml`) — no bench run. Structural moves (the A3 consolidation itself) get a targeted
 > smoke check (`smoke_gate.sh` + a refine/plan dry-run on a scratch issue), because the risk is
 > "the harness can't find the skill/config," which a full bench sweep doesn't target and which
-> costs real money per `docs/parity-p2.md`'s cost accounting. A behavior change to a phase
+> costs real money per `docs/archive/2026-07-06-parity-p2.md`'s cost accounting. A behavior change to a phase
 > command, or any new side-effecting reference skill, requires explicit human sign-off, with a
 > bench parity run added only when the change plausibly touches implement-phase DAG behavior
 > (the only population `bench/suite.json`'s oracles actually cover). For review expectations:
@@ -393,7 +393,7 @@ than risking truncation — a visibility measure, distinct from the exclusion ga
 |---|---|---|
 | 0 | Pure doc/prompt reorganization (renames, moves, wording) | Standard `conformance:` + `code_review:` gates only. No bench run. |
 | 1 | Structural/consolidation (e.g. the §2 `refinement` move, an `allowed-tools` retrofit) | Tier 0, plus a targeted smoke check: `smoke_gate.sh` + a refine/plan dry run on a scratch issue. Not a full bench sweep — the risk is "the harness can't find the skill/config," which a targeted smoke check catches directly and cheaply. |
-| 2 | Behavior change to a phase command, or any new side-effecting reference skill | Tier 1, plus explicit human sign-off. Add a `bench/run_suite.sh` parity run only if the change plausibly affects implement-phase DAG behavior — that is the only population `bench/suite.json`'s oracles cover (10 MarketHawk implement-phase golden-PR replays); mandating it for refine/plan-only changes tests the wrong thing at real cost (~$26/run per `docs/parity-p2.md`'s accounting). |
+| 2 | Behavior change to a phase command, or any new side-effecting reference skill | Tier 1, plus explicit human sign-off. Add a `bench/run_suite.sh` parity run only if the change plausibly affects implement-phase DAG behavior — that is the only population `bench/suite.json`'s oracles cover (10 MarketHawk implement-phase golden-PR replays); mandating it for refine/plan-only changes tests the wrong thing at real cost (~$26/run per `docs/archive/2026-07-06-parity-p2.md`'s accounting). |
 
 ---
 
