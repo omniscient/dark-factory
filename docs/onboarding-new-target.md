@@ -65,6 +65,10 @@ columns: Backlog, Refined, Ready, In Progress, In Review, Blocked, Done. A new G
 project only has Todo / In Progress / Done. The factory also adds labels but never
 creates them, and `gh --add-label` fails on a missing label.
 
+Two labels the code uses are not in the script's list: `manifest-intake` (applied by
+handoff-manifest intake, which nothing dispatches yet) and `merged-with-edits` (a manual
+override read by the scorecard). Create them by hand if you use either feature.
+
 ## 3. Target-side files (commit these to the default branch)
 
 Start from the templates:
@@ -79,8 +83,27 @@ cat DF/templates/new-target/.gitattributes >> TARGET/.gitattributes
 Edit every `EDIT` line. **Do not skip this file.** When a key is absent, the factory
 uses MarketHawk's paths (`backend/`, `frontend/`, alembic) and its ARCHITECTURE.md
 section names. List-valued keys replace the defaults rather than merging with them,
-which is why the template repeats the factory-self safety paths. Key reference: the
-README's *Adapter contract* table.
+which is why the template repeats the factory-self safety paths. Two lists are the
+exception: `critical_diff_paths` and `migration_seed_auth_patterns` always get a small
+factory-owned floor added on load (`.factory/hooks/`, `.claude/` and the other
+factory-boundary paths), whatever your file says, so the template's entries for those
+paths are belt and braces. Key reference: the README's *Adapter contract* table; the
+loader's exact rules are in `docs/adapter-authoring-guide.md` (*The adapter file*).
+
+Validate the file **before committing**, using the loader the factory itself uses:
+
+```bash
+# Git Bash on Windows: prefix with MSYS_NO_PATHCONV=1
+docker run --rm -v "TARGET:/src:ro" --entrypoint bash ghcr.io/omniscient/dark-factory:latest \
+  -c 'PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.adapter --clone-dir /src --validate'
+```
+
+Expected: `adapter OK`. Anything else prints `adapter INVALID: <reason>` and exits 1.
+Do not skip this check. The factory does not run it for you: a run that meets an
+adapter it cannot parse or validate logs the error to its own stderr and carries on
+with the built-in MarketHawk defaults, exactly the outcome this file exists to prevent
+([#492](https://github.com/omniscient/dark-factory/issues/492)). A YAML slip such as a
+bad escape inside a double-quoted regex is enough to trigger it.
 
 ### 3b. `.factory/hooks/smoke-gate` (required)
 
@@ -93,7 +116,9 @@ paused.
 
 Replace the `EDIT` commands with your project's install and test commands. The hook
 runs in the factory image (Ubuntu 26.04, Python 3.14, Node 22, **no browsers**) as a
-non-root user, with `CLONE_DIR` pointing at a fresh clone. Exit 0 means green.
+non-root user, with `CLONE_DIR` pointing at a fresh clone. Exit 0 means green. Hooks
+also receive `ARTIFACTS_DIR`, `ISSUE_NUM` and `FACTORY_REPO_SLUG`; any of them can be
+empty, so do not depend on them in a smoke gate.
 
 Test it in the image **before committing**, with the same environment the factory
 uses:
@@ -178,6 +203,10 @@ printf 'GH_TOKEN=%s\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "<gh token>" "<claude token>"
 cd TARGET && git check-ignore -v .archon/.env   # must print a matching rule; add ".env" to .gitignore if not
 ```
 
+The scheduler copies this file into place once, when it starts. After editing it,
+restart the scheduler (`docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml restart backlog-scheduler`)
+or new runs keep the old values.
+
 **Optional: target build daemon / preview network.** Skip this unless your target's
 preview builds use its own remote BuildKit daemon. Most targets have none. If yours
 does, add to `DF/deploy/instance.env`:
@@ -206,19 +235,21 @@ docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d
 docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml logs backlog-scheduler
 ```
 
-Expected lines:
+Expected lines, in this order (other lines appear between them):
 
 ```
 providers preflight: OK
 Provisioned dispatch env file at /opt/dark-factory/.archon/.env from bind mount
+WIP limits: in_progress=… in_review=… factory=…
+[...] probe=image_ok image=…
 Backlog scheduler started (poll every 60s)
-[...] backlog=0 refined=0 ... skip=nothing_to_do main_red=false
+[...] backlog=0 refined=0 in_progress=0/… in_review=0/… factory_running=0/… refine_running=0/… skip=nothing_to_do main_red=false graphql=…
 ```
 
 | You see | Meaning |
 |---------|---------|
 | `WARNING: /workspace/project/.archon/.env not found` | `PROJECT_DIR` is wrong, or step 4's second file is missing |
-| `ERROR: GH_TOKEN is not set` | `instance.env` wasn't passed: check `--env-file` |
+| `ERROR: GH_TOKEN is not set. Add it to .archon/.env` | In the scheduler log: `instance.env` wasn't passed, so check `--env-file`. The message's `.archon/.env` hint is written for run containers; the scheduler reads `instance.env` |
 | Containers named `dark-factory-*` instead of `<repo>-*` | `--env-file` missing or `FACTORY_INSTANCE` blank |
 
 ## 6. First ticket
@@ -269,14 +300,25 @@ findings and adds `needs-discussion`. The run log will still say
 `Dark factory failed (exit 1)` and an extra "Run — Failed" comment appears; that
 reporting is tracked in #443. To resume:
 
-1. Comment on the issue with the human decision, and say explicitly: "Continue on the
-   existing PR #N branch".
+1. Comment on the issue with the human decision.
 2. Remove `needs-discussion`.
-3. Set the ticket back to **Ready**.
+3. Leave the ticket in **Blocked**.
 
-The re-dispatch is classified as a new implementation, and the branch is reset to the
-default branch. It is the phase agent that reads your comment, rebases the PR's
-commits and pushes them with a lease. So the comment in step 1 is what keeps your PR.
+On its next poll the scheduler retries Blocked tickets that no longer carry a skip
+label. If the ticket's `feat/issue-N-…` branch exists on the remote, or a PR is open
+for it, the dispatch is **Continue**: the run checks out the existing branch and keeps
+working on the same PR. If neither exists, the dispatch is **Fix**, a new
+implementation from the default branch.
+
+**Do not move the ticket to Ready** when it already has a branch or PR. Ready always
+dispatches **Fix**, which creates the branch afresh from the default branch; the
+scheduler's Blocked loop exists precisely because that fresh branch collides with the
+already-pushed one at push time (#371).
+
+Retries are limited. Each Blocked retry counts against `scheduler.max_retries` in
+`config/config.yaml` (default 3). At the limit, or when the same failure repeats on two
+consecutive attempts, the circuit breaker comments on the ticket and re-applies
+`needs-discussion`; fix the cause it names before removing the label again.
 
 ## 9. Operating notes
 
@@ -307,5 +349,3 @@ These don't block onboarding, but you should expect them:
   alembic; agents adapt, but the prompts are noisier (#440).
 - **Preview:** it tries to build `backend/Dockerfile` and posts "Preview environment
   failed to start" on layouts without one. This is harmless (#440, #15).
-- **Memory write:** it fails on the first run because `.archon/memory/` does not exist
-  yet (#444).

@@ -295,10 +295,14 @@ writing:
   in the changed set.
 - **OD3** — `safety.hard_exclude_paths` is deliberately outside the floor; a PR can shrink
   it, caught only by the `safety:`-block diff under the same condition. Note also what
-  `hard_exclude_paths` does *not* do: its only consumer is
+  `hard_exclude_paths` does *not* do: its only run-time consumer is
   `scripts/factory_core/epic_autopilot.py::hard_excluded`, which filters epic-autopilot
   candidate *tickets* — it never inspects a diff or aborts a run, and
-  `config/config.yaml` currently ships `epic_autopilot.enabled: false`. `README.md`'s
+  `config/config.yaml` currently ships `epic_autopilot.enabled: false`. The one other
+  reader, `scripts/factory_core/mechanism_candidate.py::load_safety`, uses it (with
+  `critical_diff_paths`) to classify a harness candidate's paths by risk class; nothing in
+  the scheduler, entrypoint, workflow or phase commands calls that module yet, and it does
+  not inspect a run's diff either. `README.md`'s
   `hard_exclude_paths` row carried the phrasing "matched diff paths abort the run" until
   #415 corrected it; both files now describe the candidate-ticket filter this key actually
   implements.
