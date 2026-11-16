@@ -2,68 +2,122 @@
 
 ## Overview
 
-The Dark Factory uses four context-optimization features to reduce input token usage
-per run. As of issue #673, all four features are **active by default** and can be
-independently disabled via config flags or environment variable overrides.
+The Dark Factory has four context-optimization features intended to reduce input token usage
+per run, plus per-scenario budget enforcement on top of them. All are **enabled by default**
+in config and can be independently disabled via config flags or environment variable
+overrides. Enabled is not the same as effective: two of the four features currently change
+telemetry only (see the status column below).
 
 Rollout phases 1–3 (observe, low-risk optimization, implementation/conformance) landed
 via issues #664–#671. Phase 4 (budget enforcement) shipped via #713–#719.
-**As of T3b (#733), enforcement is live for conformance, code-review, refine, and plan.**
+As of T3b (#733), the enforcement flags are on for conformance, code-review, refine, and plan.
 
 ---
 
 ## Active Features
 
-| Feature | Config key | Env override | Effect when enabled |
-|---------|-----------|--------------|---------------------|
-| Architecture slicing | `token_optimization.architecture.enabled` | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` | Emits only component-relevant ARCHITECTURE.md sections instead of the full doc |
-| Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) |
-| Comment digesting | `token_optimization.comments.enabled` | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` | Collapses raw comment history into a single human-feedback digest for `continue` runs |
-| Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap |
-| Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config |
+| Feature | Config key | Env override | Effect when enabled | Status in a run |
+|---------|-----------|--------------|---------------------|-----------------|
+| Architecture slicing | `token_optimization.architecture.enabled` | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` | Computes the component-relevant slice of ARCHITECTURE.md | **Telemetry only.** `context_budget.py` measures the slice, but no DAG node produces the context pack that would deliver it, so phase commands still read the full file ([#487](https://github.com/omniscient/dark-factory/issues/487)) |
+| Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) | **Index path only.** The cap is not applied on the markdown fallback path, which is the path in use for the self-target ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
+| Comment digesting | *(none read in a run — see below)* | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` | Collapses raw comment history into a single human-feedback digest | Active for `continue` runs |
+| Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap | Active in conformance and code-review |
+| Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config | Changes the prompt only through the diff cap in conformance and code-review (see Budget Enforcement) |
 
 ---
 
 ## Configuration
 
-All flags live in `.claude/skills/refinement/config.yaml` under `token_optimization`:
+The defaults live in `config/config.yaml` under `token_optimization`. That file is **baked
+into the image** at `/opt/dark-factory/config/config.yaml`:
 
 ```yaml
 token_optimization:
-  enabled: true
-  enforce_budgets: true    # T6 live — master enforcement gate
-  budgets:                 # per-scenario token budgets (provisional from T5 smoke run)
-    refine: 30000          # enforced — T3b go-live (#733)
-    plan: 30000            # enforced — T3b go-live (#733)
-    implement: 30000       # observe-only — enforce: false
-    conformance: 22000     # enforced — T6 go-live
-    code-review: 22000     # enforced — T6 go-live
+  enabled: true              # not read by any script (see below)
+  enforce_budgets: true      # master enforcement gate
+  default_budget_tokens: 30000
+  budgets:                   # per-scenario token budgets
+    refine: 30000
+    plan: 30000
+    implement: 30000         # observe-only — enforce: false
+    conformance: 22000
+    code-review: 22000
   enforce:
-    refine: true           # T3b live — #731 scorecard: 0% section_at_risk
-    plan: true             # T3b live — #731 scorecard: 0% section_at_risk
-    implement: false       # deferred; see Follow-up Path below
-    conformance: true      # T6 live
-    code-review: true      # T6 live
+    refine: true
+    plan: true
+    implement: false         # deferred; see Follow-up Path below
+    conformance: true
+    code-review: true
+  issue_context:
+    reserve_tokens: 2000
   architecture:
-    enabled: true          # disable → full ARCHITECTURE.md loaded
+    enabled: true
+    max_tokens: 5000
+    min_tokens: 2500
   memory:
-    enabled: true          # disable → all matching memory entries emitted
+    enabled: true
+    max_entries: 8           # not read by any script; top-k is a constant in memory_retrieve.py
+    max_tokens: 1500
+    min_tokens: 750
   comments:
-    enabled: true          # disable → raw comment history used
+    enabled: true            # not read inside a run; use the env override
+    max_tokens: 2000
+    min_tokens: 1000
   diff:
-    enabled: true          # disable → full diff passed to code-review
+    enabled: true
+    max_review_tokens: 6000
+    min_review_tokens: 3000
 ```
 
-> **Deploy nuance:** `config.yaml`, workflow files, and command files are **clone-read** —
-> every factory run clones the repo fresh, so a commit to `main` takes effect on the
-> **next factory run** with no restart or image rebuild required.
-> In contrast, `entrypoint.sh` (T4 cost-report line) is **baked into the Docker image**
-> and requires an image rebuild to change.
+`config/config.yaml` holds further keys (for example `escalation`); it is the reference for
+the full block.
 
-Environment variables for the per-feature `enabled` flags override config values.
-Set them in `.archon/.env` before the scheduler container starts; `_set_cfg` wires
-them at startup. `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` is a kill-only override for
-the budget enforcement gates (see Rollback — Tier 0 below).
+### How a run resolves its config
+
+Scripts inside a run read `<clone>/.claude/skills/refinement/config.yaml`. `entrypoint.sh`
+prepares that path through `factory_core.effective_config`:
+
+1. If the target repo **commits** `.claude/skills/refinement/config.yaml`, that file is used
+   as is. A `token_optimization` block in the adapter that disagrees with it only produces a
+   drift warning.
+2. Otherwise the file is materialized (and git-excluded) from the baked defaults, overlaid
+   with the `token_optimization` block of the target's `.factory/adapter.yaml`, if it has one.
+
+The self-target commits no such config file and its adapter omits `token_optimization`, so it
+runs on the baked defaults.
+
+> **Deploy nuance:** `config/config.yaml`, `workflows/`, `commands/`, `scripts/` and
+> `entrypoint.sh` are all **baked into the Docker image**. A commit that changes them on
+> `main` has no effect until a new image is published and the scheduler runs it. The
+> no-rebuild route for token-optimization settings is the `token_optimization` block in the
+> target's `.factory/adapter.yaml`, which is read from the fresh clone on every run.
+> Nothing reads `<clone>/config/config.yaml`.
+
+### Keys that are not read
+
+- `token_optimization.enabled` (top level): no script reads it, and there is no
+  `TOKEN_OPTIMIZATION_ENABLED` variable. There is no single switch for all features; use the
+  per-feature switches.
+- `token_optimization.comments.enabled`: the comment-digest gate reads only the
+  `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` environment variable.
+- `token_optimization.memory.max_entries`: top-k is the constant `TOP_K_DEFAULT = 8` in
+  `scripts/memory_retrieve.py`.
+
+Removing or implementing these keys is tracked in
+[#487](https://github.com/omniscient/dark-factory/issues/487).
+
+### Environment overrides
+
+The per-feature `TOKEN_OPTIMIZATION_*_ENABLED` variables override config values, and
+`TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` is a kill-only override for the budget gates. They are
+read **inside run containers**, which load `<PROJECT_DIR>/.archon/.env` and never read the
+scheduler's `deploy/instance.env`. The scheduler copies `<PROJECT_DIR>/.archon/.env` to the
+path the run compose file loads **once, at startup**, so an edit to that file reaches runs
+only after the scheduler is restarted.
+
+`scheduler.sh` also exports the four per-feature flags from config into its own process
+(`_set_cfg`), but dispatch does not pass them to run containers; that export has no effect on
+a run.
 
 ---
 
@@ -71,71 +125,80 @@ the budget enforcement gates (see Rollback — Tier 0 below).
 
 ### Per-feature bypass (architecture, memory, comments, diff)
 
-These features have env overrides wired via `_set_cfg` — hot-changeable without a
-config edit:
-
-1. Edit `.archon/.env`:
+1. Edit the target's `.archon/.env` (the file under `PROJECT_DIR`):
    ```bash
    TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED=false
    ```
-2. Restart the scheduler so `_set_cfg` picks up the new value:
+2. Restart the scheduler so it re-copies the file for dispatched runs:
    ```bash
-   docker compose --profile scheduler restart backlog-scheduler
+   docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
    ```
-3. Next factory run will load full ARCHITECTURE.md (fail-safe: content is wider, never dropped).
+3. Runs dispatched after the restart see the new value. In-flight runs keep their spawn-time
+   environment.
 
-To disable **all features** at once, set `token_optimization.enabled: false` in config.yaml.
+Diff ranking and architecture slicing read the run's resolved config, so they can also be
+disabled durably through the adapter (`token_optimization.diff.enabled: false` or
+`token_optimization.architecture.enabled: false` in `.factory/adapter.yaml`). Memory and
+comments cannot: the memory retriever, as `load_memory_context.sh` calls it, is not given the
+clone path and reads the baked config, and the comments config key is not read. Use the env
+override for those two.
 
 **Fail-safe semantics:** Every disabled path widens context to the full/original baseline.
 Disabling a feature never silently drops content.
 
 ### Budget enforcement rollback (Tier 0, Tier 1, Tier 2)
 
-Three tiers are available. Tier 0 is instant (no git commit); Tier 1 and Tier 2 are git
-commits to `config.yaml` on `main` and take effect on the **next factory run** (no
-scheduler restart or image rebuild needed).
+Three tiers are available. Tier 0 needs no git commit. Tier 1 and Tier 2 are git commits to
+the **target repo's `.factory/adapter.yaml`** and take effect on the next factory run with no
+scheduler restart or image rebuild. A commit to `config/config.yaml` in this repo is not a
+rollback: it changes the baked defaults only after the next image publish.
 
 **Tier 0 — env kill (fastest, no git commit required):**
 
-Sets `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false` in `.archon/.env` so all five
-`enforce-budget-*` nodes immediately switch to observe mode on the next factory run.
-The env var can only force observe — it cannot force enforcement on.
+Set `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false` in the target's `.archon/.env` so all five
+`enforce-budget-*` nodes switch to observe mode. The env var can only force observe — it
+cannot force enforcement on.
 
 ```bash
-# 1. Set the kill switch in the Archon env file
+# 1. Set the kill switch in the target's Archon env file
 echo "TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false" >> .archon/.env
 
-# 2. Force-recreate the scheduler so the new env var is injected
-docker compose --profile scheduler up -d --force-recreate backlog-scheduler
+# 2. Recreate the scheduler so it re-copies that file for dispatched runs
+docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
 ```
 
-> **Note:** In-flight factory containers are unaffected — the kill-switch only takes effect
-> on the **next** factory run. `docker compose restart` does NOT re-read `env_file`, so
-> `up -d --force-recreate` is required.
+> **Note:** In-flight factory containers are unaffected — the kill switch takes effect on
+> runs dispatched after the scheduler restarts. The restart is needed because the scheduler
+> copies `.archon/.env` for run containers only at startup; the variable is not part of the
+> scheduler's own `env_file`.
 
-To restore enforcement: remove the line from `.archon/.env` and run `up -d --force-recreate` again.
+To restore enforcement: remove the line from `.archon/.env` and recreate the scheduler again.
 
-**Tier 1 — master kill (reverts all enforcement immediately via config):**
+**Tier 1 — master kill (reverts all enforcement via the adapter):**
+```yaml
+# .factory/adapter.yaml in the target repo
+token_optimization:
+  enforce_budgets: false
+```
 ```bash
-# Option A: direct commit
-# In config.yaml, set:   enforce_budgets: false
 git commit -am "revert(enforce): disable budget enforcement master gate"
-git push origin main
-
-# Option B: git revert the T6 config commit (SHA from git log)
-git revert <t6-config-commit-sha>
 git push origin main
 ```
 
 **Tier 2 — targeted (disable a single scenario):**
+```yaml
+# .factory/adapter.yaml in the target repo
+token_optimization:
+  enforce:
+    code-review: false
+```
 ```bash
-# In config.yaml, set:   enforce.<scenario>: false
-# e.g. for code-review:
-#   enforce:
-#     code-review: false
 git commit -am "revert(enforce): disable code-review budget enforcement"
 git push origin main
 ```
+
+If the target commits its own `.claude/skills/refinement/config.yaml`, that file wins over the
+adapter (see "How a run resolves its config"); make the Tier 1 / Tier 2 change there instead.
 
 ---
 
@@ -152,8 +215,13 @@ artifacts are present, the comment includes a savings line:
 - **Context savings** = total tokens saved across all optimized sections vs. the unoptimized baseline.
 - **Fallbacks** = sections where a safety trigger fired and the full baseline was loaded instead of the optimized version. These are expected and correct behavior (not errors).
 
-If no savings line appears, the `context-budget.json` artifact was absent, or `schema_version` < 2
-(older run artifact).
+The figure is computed from what `context_budget.py` measures, not from what reached the
+prompt. It includes the architecture slice saving even though the slice is not delivered to
+the phase commands, so it currently overstates real savings
+([#487](https://github.com/omniscient/dark-factory/issues/487)).
+
+If no savings line appears, the `context-budget.json` artifact was absent, `schema_version` < 2
+(older run artifact), or the computed saving was zero.
 
 ---
 
@@ -191,17 +259,24 @@ The `context-budget.json` artifact (in `$ARTIFACTS_DIR`) includes per-section sa
 
 ---
 
-## Budget Enforcement (Phase 4 — Live)
+## Budget Enforcement (Phase 4)
 
-As of T3b (#733), budget enforcement is **active** for `conformance`, `code-review`, `refine`, and `plan`.
+As of T3b (#733), the enforcement flags are on for `conformance`, `code-review`, `refine`, and `plan`.
 
-| Scenario | Enforce | Budget | Status |
-|----------|---------|--------|--------|
-| refine | **true** | **30 000** | **enforced (T3b)** |
-| plan | **true** | **30 000** | **enforced (T3b)** |
-| implement | false | 30 000 | observe-only |
-| conformance | **true** | **22 000** | **enforced (T6)** |
-| code-review | **true** | **22 000** | **enforced (T6)** |
+| Scenario | Enforce | Budget | Effect on the prompt |
+|----------|---------|--------|----------------------|
+| refine | **true** | **30 000** | None today: caps are exported but nothing in the refine prompt path consumes them |
+| plan | **true** | **30 000** | None today, for the same reason |
+| implement | false | 30 000 | Observe-only |
+| conformance | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
+| code-review | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
+
+Why refine and plan see no effect: the caps file is sourced only by
+`scripts/load_memory_context.sh` and by the conformance and code-review commands. For refine
+and plan that leaves the memory cap, which is inert on the markdown retrieval path; the
+architecture cap has no consumer in the prompt path; and the comments cap has none, because
+the comment digest runs only for `continue` and does not source the file. Tracked in
+[#487](https://github.com/omniscient/dark-factory/issues/487).
 
 Budgets for refine and plan were validated by the full-corpus calibration in #731 (Phase 4b T2)
 with 0% `section_at_risk_rate` at the 30k budget. Budgets for conformance and code-review were
@@ -210,8 +285,9 @@ accumulating ≥ 10 bench issues to confirm or adjust.
 
 ### How enforcement works
 
-A pre-phase `enforce-budget-<scenario>` DAG node runs `budget_enforce.py` before each
-scenario's command node. It:
+A pre-phase `enforce-budget-<scenario>` DAG node runs `scripts/budget_gate.sh <scenario>`,
+which reads the run's config, applies the kill switch, and calls `budget_enforce.py` before
+each scenario's command node. It:
 
 1. Estimates un-trimmable reserved tokens (CLAUDE.md + safety full-doc fallback if active
    + `issue_context` floor).
@@ -221,8 +297,8 @@ scenario's command node. It:
    (`TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS`, `TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS`,
    `TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS`, `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS`),
    via `$ARTIFACTS_DIR/token-opt-caps.env`.
-4. If the un-trimmable core exceeds the budget, records `over_budget: true` in telemetry
-   and proceeds — enforcement **never blocks a run**.
+4. If the un-trimmable core reaches or exceeds the budget, records `over_budget: true` in
+   telemetry and proceeds — enforcement **never blocks a run**.
 
 The whole node is fail-open (`|| true`): on any error, no caps are exported and optimizers
 use their config defaults.
@@ -230,7 +306,7 @@ use their config defaults.
 ### Telemetry signals
 
 In `context-budget.json` (`$ARTIFACTS_DIR`):
-- `over_budget` — `true` if the un-trimmable reserved context exceeds the scenario budget
+- `over_budget` — `true` if the un-trimmable reserved context is at or above the scenario budget
 - `would_trim` — `true` in observe mode when enforce mode would have tightened caps
 - `derived_caps` — computed cap values (enforced or hypothetical)
 
@@ -247,11 +323,14 @@ Use this procedure when promoting a scenario from observe-only to enforced.
 - `section_at_risk_rate == 0%` (enforcement would not trim any required-by-calibration
   ARCHITECTURE.md section)
 
-Run the calibration eval to check:
+Run the calibration eval to check. Both list flags are plural and comma-separated, and
+`--clone-dir` defaults to `/workspace/markethawk`, so pass it explicitly for any other target:
 ```bash
 # Inside the factory container
 python3 evals/token_opt_eval.py --calibrate \
-  --budget <candidate_tokens> --scenario <scenario_name>
+  --budgets <candidate_tokens>[,<candidate_tokens>...] \
+  --scenarios <scenario_name>[,<scenario_name>...] \
+  --clone-dir <path to the target clone>
 ```
 
 Per-run `context-budget.json` artifacts hold `sections.architecture_md.tokens` —
@@ -259,29 +338,35 @@ collect these to compute the p90 architecture slice size and verify it fits with
 planned `architecture.max_tokens` cap before flipping.
 
 **Flip procedure (when gates pass):**
-1. In `config.yaml`, set `budgets.<scenario>: <calibrated_value>` and `enforce.<scenario>: true`.
-2. Commit to `main` and push — takes effect on the next factory run.
-3. Monitor the next 5 runs for `over_budget` or unexpected `section_at_risk` signals.
-4. If issues arise, use the Tier 1 or Tier 2 rollback (see Rollback section).
+1. Set `budgets.<scenario>: <calibrated_value>` and `enforce.<scenario>: true`. For one
+   target, put them in the `token_optimization` block of its `.factory/adapter.yaml`
+   (effective on the next run). To change the default for every target, edit
+   `config/config.yaml` here and publish a new image.
+2. Monitor the next 5 runs for `over_budget` or unexpected `section_at_risk` signals.
+3. If issues arise, use the Tier 1 or Tier 2 rollback (see Rollback section).
 
 ---
 
 ## Path to Phase 4 — Current Status
 
-Phase 4 (budget enforcement) is **mostly live** as of T3b (#733):
-- **Conformance and code-review**: enforcement active since T6 (#719).
-- **Refine and plan**: enforcement active since T3b (#733) — #731 scorecard gated go-live.
+- **Conformance and code-review**: enforcement active since T6 (#719); effective through the diff cap.
+- **Refine and plan**: enforcement flags on since T3b (#733) — #731 scorecard gated go-live.
+  No effect on the prompt yet ([#487](https://github.com/omniscient/dark-factory/issues/487)).
 - **Implement**: observe-only — deferred pending calibration.
 
 ### Follow-up Path for deferred scenario (implement)
 
 **Why deferred:** T5 calibration showed `section_at_risk_rate == 50%` at ALL tested
-budgets (22k–40k) for implement. Root cause: `architecture.max_tokens: 3000`
-is below real arch slice sizes (3–4k+ tokens), so enforcement trims architecture context
-on every issue regardless of budget size. Flipping enforce would silently drop required
-ARCHITECTURE.md sections — violating the "Never drop safety-critical content" goal.
+budgets (22k–40k) for implement. Root cause at the time: `architecture.max_tokens` was 3000,
+below real arch slice sizes (3–4k+ tokens), so enforcement would have trimmed architecture
+context on every issue regardless of budget size — violating the "Never drop safety-critical
+content" goal.
 
-**Required unlock steps:**
+`architecture.max_tokens` has since been raised to **5000** (step 2 below). Implement is
+still `enforce: false`; the most recent calibration scorecard in `evals/reports/` is dated
+2026-07-03, so re-calibration against the new cap is the remaining work.
+
+**Unlock steps:**
 
 1. **Measure real arch slice sizes** — collect `sections.architecture_md.tokens` from
    per-run `context-budget.json` artifacts across ≥ 10 full-corpus bench issues:
@@ -300,14 +385,16 @@ ARCHITECTURE.md sections — violating the "Never drop safety-critical content" 
    "
    ```
 
-2. **Raise `architecture.max_tokens`** above the p90 arch slice size (currently 3000;
-   likely needs to be 4000–5000). This is a separate config-only change requiring a
-   re-calibration pass to confirm `section_at_risk_rate` drops to 0%.
+2. **Raise `architecture.max_tokens`** above the p90 arch slice size. Done: the value is
+   now 5000. Confirm against step 1 that it is high enough.
 
-3. **Re-run calibration** with the new `architecture.max_tokens` and a candidate budget.
+3. **Re-run calibration** with the current `architecture.max_tokens` and a candidate budget.
    Gates: `over_budget_rate ≤ 10%` + `section_at_risk_rate == 0%`.
 
 4. **Flip** implement using the Observe → Enforce Procedure above.
+
+Flipping implement will have no prompt effect until architecture slicing is delivered to the
+implement command ([#487](https://github.com/omniscient/dark-factory/issues/487)).
 
 ---
 
@@ -315,10 +402,12 @@ ARCHITECTURE.md sections — violating the "Never drop safety-critical content" 
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Cost report shows no savings line | `context-budget.json` absent or schema v1 | Upgrade to schema v2 by running a new factory run; check for `context_budget.py` errors in logs |
+| Cost report shows no savings line | `context-budget.json` absent, schema v1, or zero computed saving | Check for `context_budget.py` errors in the run log |
 | Architecture slice always falls back | Safety keyword in labels or changed files | Expected behavior; check `fallback_reason` in `context-budget.json` |
-| Memory returns all entries (ignores top-k) | `TOKEN_OPTIMIZATION_MEMORY_ENABLED=false` | Check `.archon/.env` and restart scheduler |
-| Comment digest skipped | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED=false` | Set to `true` in `.archon/.env` and restart |
-| Full diff passed to code-review | `TOKEN_OPTIMIZATION_DIFF_ENABLED=false` | Set to `true` in `.archon/.env` and restart |
-| `over_budget` fires on conformance / code-review | Reserved context (CLAUDE.md + safety fallback) exceeds 22k budget | Raise `budgets.<scenario>` in config.yaml or use Tier 2 rollback to disable enforcement for that scenario |
-| Enforcement seems to have no effect | Per-scenario `enforce` flag is `false`, or `enforce_budgets: false` | Verify config.yaml matches intended state; changes take effect on next factory run (clone-read) |
+| Agent still reads the full ARCHITECTURE.md | Slicing is telemetry-only | Expected today; see [#487](https://github.com/omniscient/dark-factory/issues/487) |
+| Memory returns all entries (ignores top-k) | Retrieval fell back to the markdown scan (no usable index rows), or `TOKEN_OPTIMIZATION_MEMORY_ENABLED=false` | Check `fallback_used` in `memory-trace.json`; see [#486](https://github.com/omniscient/dark-factory/issues/486) |
+| Comment digest skipped | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED=false`, or the run is not a `continue` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
+| Full diff passed to code-review | `TOKEN_OPTIMIZATION_DIFF_ENABLED=false` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
+| `over_budget` fires on conformance / code-review | Reserved context (CLAUDE.md + safety fallback) reaches the 22k budget | Raise `budgets.<scenario>` in the adapter's `token_optimization` block, or use Tier 2 rollback to disable enforcement for that scenario |
+| Enforcement seems to have no effect | Scenario is refine or plan; per-scenario `enforce` flag is `false`; `enforce_budgets: false`; or the kill switch is set | Check the run's `.claude/skills/refinement/config.yaml` and `.archon/.env`; a change to `config/config.yaml` needs an image publish |
+| An env change in `.archon/.env` is ignored | Scheduler was not restarted, so run containers still load the old copy | Recreate the scheduler (see Tier 0) |
