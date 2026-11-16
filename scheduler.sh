@@ -13,6 +13,7 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/scheduler_lib.sh"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/provider_env.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
@@ -374,8 +375,11 @@ dispatch() {
     profile_flags+=(--profile factory-model-proxy)
   fi
   echo "[$(date -u +%FT%TZ)] dispatch command=\"${command}\""
+  # Forward provider selection/env set in the scheduler's env (#489); see scripts/provider_env.sh.
+  local -a env_flags=()
+  mapfile -t env_flags < <(provider_env_flags)
   docker compose -f /opt/dark-factory/docker-compose.yml "${profile_flags[@]}" run \
-    -d --rm dark-factory "$command" || exit_code=$?
+    "${env_flags[@]}" -d --rm dark-factory "$command" || exit_code=$?
   if [ "$exit_code" -ne 0 ]; then
     echo "[$(date -u +%FT%TZ)] dispatch_error command=\"${command}\" exit=${exit_code}" >&2
   fi
