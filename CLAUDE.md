@@ -43,8 +43,8 @@ each destroyed real runs when violated (see #212, #214):
 | Path | What it is |
 |---|---|
 | `scheduler.sh` | Poll loop: board → dispatch decisions (labels, WIP, deps, ceilings) |
-| `entrypoint.sh` | Per-run container entry: clone, budgets, run workflow, reports |
-| `workflows/archon-dark-factory.yaml` | The DAG every run executes |
+| `entrypoint.sh` | Per-run container entry: clone, smoke gate, deconflict/recheck/fix-main, run workflow, reports |
+| `workflows/archon-dark-factory.yaml` | The DAG every other run executes (incl. token-budget nodes) |
 | `commands/*.md` | Phase agent instructions (refine/plan/implement/conformance/…) |
 | `refinement-skills/` | Reviewer/architect/product-owner prompts (baked to `/opt/refinement-skills/`) |
 | `scripts/` + `scripts/factory_core/` | Deterministic gates, context artifacts, board/breaker/autopilot |
@@ -75,5 +75,5 @@ each destroyed real runs when violated (see #212, #214):
   `hard_exclude_paths` — human-in-the-loop surface).
 - Never weaken safety gates (`gate_*`, breaker, budgets) as a side effect of another
   change; gate changes get their own reviewed ticket.
-- Claude Skills policy (naming, `allowed-tools` limits, side-effect rules): see the #42
-  policy spec under `docs/superpowers/specs/` once merged.
+- Claude Skills policy (naming, `allowed-tools` limits, side-effect rules): see
+  `docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md` (#42).
