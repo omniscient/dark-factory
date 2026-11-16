@@ -29,7 +29,9 @@ GitHub issue with an acceptance-tested specification, the factory:
 The factory is **product-agnostic**: all target-specific knowledge lives in a
 `.factory/adapter.yaml` file and `.factory/hooks/` committed to the target repo.
 When the adapter is absent the built-in defaults are MarketHawk's, so a new product
-must supply its own; a missing `smoke-gate` hook refuses the run outright (#436) —
+must supply its own; an adapter that fails to parse or validate refuses the run
+([#492](https://github.com/omniscient/dark-factory/issues/492)) and a missing `smoke-gate`
+hook refuses it too (#436) —
 see [`docs/onboarding-new-target.md`](docs/onboarding-new-target.md)
 and the starter files in [`templates/new-target/`](templates/new-target/).
 

@@ -470,12 +470,20 @@ PYTHONPATH=<dark-factory>/scripts python -m factory_core.adapter --clone-dir <ta
 `--format keyvalue` prints a mapping as tab-separated `key<TAB>value` lines. `--clone-dir`
 defaults to `$CLONE_DIR`, then the current directory.
 
-**Run `--validate` yourself before committing.** Neither `scheduler.sh` nor `entrypoint.sh`
-runs it, and the readers of the adapter treat a load failure as "no adapter":
-`factory_core/effective_config.py` logs `adapter invalid — skipping adapter overrides` to the
-run's stderr and continues, and `scripts/gate_lib.sh` discards the error and uses its
-built-in routing table. A file that fails to parse or validate therefore leaves the run on
-the built-in defaults, which are MarketHawk's, with no signal on the ticket
+**Run `--validate` yourself before committing; the factory also checks it for you.**
+`entrypoint.sh` runs the same validation right after cloning the target and **refuses the
+run** if the file is present but invalid: an `adapter-invalid` error on stderr, a line in
+`hook-warnings.log` in the scheduler state dir, a `<!-- df-adapter-invalid -->` comment on the
+ticket, and a failed run. This covers `fix`, `continue`, `refine`, `plan`, `deconflict` and
+`fix-main`; `close` and `recheck` do not read adapter-driven behaviour and are not refused.
+An absent file stays valid (built-in defaults apply). `scheduler.sh` validates the mounted
+checkout once at boot and logs a `WARNING: ADAPTER INVALID` line, but keeps running (the
+mounted copy can be stale; the run-start check is the enforcement point). The individual
+readers (`factory_core/effective_config.py`, `scripts/gate_lib.sh`, ...) still fail open to
+the built-in defaults, which are MarketHawk's, so that a gate never crashes on a bad file;
+the boundary floor on `critical_diff_paths` and `migration_seed_auth_patterns` is unioned on
+those fallback paths as well. Do not rely on the run-start refusal as your first check, since
+it costs a failed ticket attempt
 ([#492](https://github.com/omniscient/dark-factory/issues/492)).
 
 ### Top-level keys
