@@ -5,8 +5,8 @@
 The Dark Factory has four context-optimization features intended to reduce input token usage
 per run, plus per-scenario budget enforcement on top of them. All are **enabled by default**
 in config and can be independently disabled via config flags or environment variable
-overrides. Enabled is not the same as effective: two of the four features currently change
-telemetry only (see the status column below).
+overrides. Enabled is not the same as effective: architecture slicing currently changes
+telemetry only (see "What changes a phase's prompt" below) (see the status column below).
 
 Rollout phases 1–3 (observe, low-risk optimization, implementation/conformance) landed
 via issues #664–#671. Phase 4 (budget enforcement) shipped via #713–#719.
@@ -33,7 +33,6 @@ into the image** at `/opt/dark-factory/config/config.yaml`:
 
 ```yaml
 token_optimization:
-  enabled: true              # not read by any script (see below)
   enforce_budgets: true      # master enforcement gate
   default_budget_tokens: 30000
   budgets:                   # per-scenario token budgets
@@ -60,7 +59,7 @@ token_optimization:
     max_tokens: 1500
     min_tokens: 750
   comments:
-    enabled: true            # not read inside a run; use the env override
+    enabled: true            # not consulted in a run (the gate reads only the env override)
     max_tokens: 2000
     min_tokens: 1000
   diff:
@@ -95,14 +94,35 @@ runs on the baked defaults.
 
 ### Keys that are not read
 
-- `token_optimization.enabled` (top level): no script reads it, and there is no
-  `TOKEN_OPTIMIZATION_ENABLED` variable. There is no single switch for all features; use the
-  per-feature switches.
 - `token_optimization.comments.enabled`: the comment-digest gate reads only the
-  `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` environment variable.
+  `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` environment variable. `scheduler.sh` copies the config
+  value into its own process, but dispatch does not pass it to run containers.
+- `token_optimization.escalation.opus_only_for`: nothing reads it.
 
-Removing or implementing these keys is tracked in
-[#487](https://github.com/omniscient/dark-factory/issues/487).
+There is no master switch (`token_optimization.enabled` and `TOKEN_OPTIMIZATION_ENABLED` do
+not exist) and no cheap-model routing switch (`escalation.cheap_model_first` and
+`TOKEN_OPTIMIZATION_CHEAP_MODEL_FIRST` do not exist); both were removed under
+[#487](https://github.com/omniscient/dark-factory/issues/487). A target adapter that still
+sets `token_optimization.enabled` is accepted and the key is ignored. Use the per-feature
+switches.
+
+### What changes a phase's prompt, and what is only measured
+
+Only these change what a phase sees:
+
+- **Diff cap** (`diff.*`): conformance and code-review receive the ranked, truncated diff.
+- **Memory cap** (`memory.*`): memory retrieval is cut to the top entries / token cap.
+- **Comment digest**: `continue` runs get a digest instead of raw comments.
+
+These are **measured only**; they do not shrink any prompt:
+
+- **Architecture slicing** (`architecture.*`): no DAG node produces the context pack, so
+  `context_pack.py` is never run and phase commands read the full `ARCHITECTURE.md`. Delivery
+  was deliberately not wired (the telemetry-only path was chosen for
+  [#487](https://github.com/omniscient/dark-factory/issues/487)). `context_budget.py` still
+  computes the slice, and the cost report lists those savings separately as "measured-only".
+- **Budget enforcement** for refine and plan: the caps it exports have no consumer there. It
+  changes behaviour only through the diff cap in conformance and code-review.
 
 ### Environment overrides
 

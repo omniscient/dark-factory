@@ -139,7 +139,6 @@ side_effect:
     fix_main: 5  # entrypoint.sh's $INTENT=fix-main -- a standalone `claude -p` session (main_red_fixer.py), not a DAG node
 
 token_optimization:
-  enabled: true               # NOT READ by any script (no master switch; there is no TOKEN_OPTIMIZATION_ENABLED env var) — use the per-feature enabled keys below
   enforce_budgets: true       # true = enforce budgets for per-scenario enforce: true scenarios; env: TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false|0|no is a kill-only override read by scripts/budget_gate.sh (forces observe; can never force enforce on); other rollback is a git commit to main (see runbook)
   default_budget_tokens: 30000  # per-scenario budget when budgets.<scenario> is absent (read by budget_gate.sh); no env override
   budgets:
@@ -168,7 +167,7 @@ token_optimization:
     max_tokens: 1500          # token ceiling for memory context per phase (baked — no env override)
     min_tokens: 750           # floor for budget_enforce.py proportional distribution (50% of max_tokens)
   comments:
-    enabled: true             # NOT READ by any script — the comment-digest gate reads only env TOKEN_OPTIMIZATION_COMMENTS_ENABLED (false = use raw comments)
+    enabled: true             # NOT consulted by the comment-digest gate in a run (it reads only env TOKEN_OPTIMIZATION_COMMENTS_ENABLED); scheduler.sh exports this value into its own process, which does not reach run containers
     digest_after_factory_marker: true  # collapse comment blocks below the factory marker into a one-line digest
     max_tokens: 2000          # token ceiling for comment context per scenario (baked — no env override)
     min_tokens: 1000          # floor for budget_enforce.py proportional distribution (50% of max_tokens)
@@ -177,8 +176,7 @@ token_optimization:
     max_review_tokens: 6000   # token ceiling for diff context fed to the code-review sub-stage (baked — no env override)
     min_review_tokens: 3000   # floor for budget_enforce.py proportional distribution (50% of max_review_tokens)
   escalation:
-    cheap_model_first: true   # route to haiku/sonnet before opus for non-sensitive scenarios; env: TOKEN_OPTIMIZATION_CHEAP_MODEL_FIRST overrides
-    opus_only_for:            # scenario tags matched by factory command files (dark-factory-implement.md, etc.); always escalate to opus regardless of cheap_model_first
+    opus_only_for:            # scenario tags matched by factory command files (dark-factory-implement.md, etc.); reserved — nothing reads it today
       - security
       - trading
       - auth
