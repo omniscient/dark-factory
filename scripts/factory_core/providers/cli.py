@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thin CLI entry points for the Tracker/CodeHost providers (parent spec §4.2,
-illustrative surface). New, additive surface — nothing existing calls into it yet
-(bash/YAML call sites are rewired in a later, separate ticket).
+illustrative surface). scheduler.sh, entrypoint.sh, the smoke gate and the run DAG call
+it for some verbs; the remaining direct `gh` call sites are tracked in #507.
 
 Invocation mirrors this repo's existing scripts/factory_core/cli.py convention
 (direct script path + subcommands), not `-m factory_core.tracker` — see this

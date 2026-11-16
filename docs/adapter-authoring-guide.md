@@ -33,8 +33,9 @@ registry in `providers/__init__.py` (`_TRACKERS` holds `github` and `jira`; `_CO
 `github`); any other value fails boot preflight as unknown.
 
 Every adapter's own connection config and secrets live in gitignored env files — **never**
-in the committed adapter module. There are two such files, and a non-default provider needs
-its selection variable and its provider env in **both**:
+in the committed adapter module. There are two such files. A non-default provider's selection
+variable and provider env only need to be in `deploy/instance.env`, because the scheduler
+forwards them to run containers; they do not need duplicating in `.archon/.env`:
 
 - `deploy/instance.env` configures the scheduler container only.
 - `<PROJECT_DIR>/.archon/.env` is the `env_file` of every dispatched run container
@@ -113,9 +114,10 @@ the adapter's default set. `state` is `"OPEN"` or `"CLOSED"` (`scheduler.sh` rea
   `priority: must-have|should-have|could-have`. Not every label is hyphen-only: the
   scheduler reads the size label with a colon and an optional space
   (`scripts/scheduler_lib.sh`, pattern `size: ?(xl|[sml])`), so a tracker has to round-trip
-  label names containing `:` and a space, or map them. Two labels the code uses are in
-  neither list and are not created by the bootstrap script: `manifest-intake` (applied by
-  handoff intake, below) and `merged-with-edits` (read by `scripts/fetch_scorecard.py`).
+  label names containing `:` and a space, or map them. Two labels the code uses are not
+  created by the bootstrap script: `manifest-intake` (applied by handoff intake, below; in
+  neither list) and `merged-with-edits` (read by `scripts/fetch_scorecard.py`; in the frozen
+  vocabulary above but missing from the bootstrap `LABELS` array).
 
 ### Required env (per-adapter example: Jira, design doc §5.4)
 
@@ -181,9 +183,16 @@ contract suites call each verb through the CLI's argument shape.
 
 ### `remote_url()` — auth-embedded URL requirement
 
-Must embed the token directly in the URL so plain `git push`/`fetch` authenticate without any
-credential helper. GitHub's form: `https://$TOKEN@github.com/<slug>.git`. GitLab's form:
-`https://oauth2:$TOKEN@gitlab.com/<slug>.git` (see `GitLabCodeHost.remote_url()` below).
+The contract is a URL with the token embedded, so plain `git push`/`fetch` could authenticate
+without a credential helper. GitHub's form: `https://$TOKEN@github.com/<slug>.git`. GitLab's
+form: `https://oauth2:$TOKEN@gitlab.com/<slug>.git` (see `GitLabCodeHost.remote_url()` below).
+
+Run containers do not use this URL today. `entrypoint.sh` clones and pushes with a hardcoded
+`https://github.com/<slug>.git` and authenticates through `gh auth setup-git` (a credential
+helper). The only caller of `remote_url()` is the scheduler's branch probe (`scheduler.sh`),
+which strips the userinfo before use, and the CLI masks the token when printing. A
+non-GitHub code host's `remote_url()` would therefore not be used for clone or push
+([#507](https://github.com/omniscient/dark-factory/issues/507)).
 
 ### Draft / ready / merge / checks / reviews mapping expectations
 
@@ -276,10 +285,11 @@ container, each against its own environment (see Overview).
   `deploy/instance.env` for the scheduler and `<PROJECT_DIR>/.archon/.env` for run
   containers (see Overview) — never committed, never hardcoded in an adapter module.
 - **Rollback.** Reverting a bad adapter is reverting its selection env var
-  (`FACTORY_TRACKER` / `FACTORY_CODEHOST` / `FACTORY_MODEL_PROVIDER`) back to its default in
-  both env files — no code rollback required if the adapter module itself is otherwise inert
-  when unselected. The scheduler copies `<PROJECT_DIR>/.archon/.env` into place once, at
-  startup, so restart it after editing either file.
+  (`FACTORY_TRACKER` / `FACTORY_CODEHOST` / `FACTORY_MODEL_PROVIDER`) back to its default
+  wherever it was set (normally `deploy/instance.env` only; also `.archon/.env` if it was
+  duplicated there) — no code rollback required if the adapter module itself is otherwise
+  inert when unselected. The scheduler copies `<PROJECT_DIR>/.archon/.env` into place once,
+  at startup, so restart it after editing either file.
 - **Mixed-provider close flow (design doc §6.4).** When tracker and code host are the *same*
   provider (e.g. both GitHub), `close_keyword()` in the PR/MR body auto-closes the issue for
   free. When they differ (e.g. Jira tracker + GitHub host), there is no such automatic link, so
@@ -296,7 +306,7 @@ container, each against its own environment (see Overview).
   `resolve_item` (the `tracker resolve` CLI verb exists but is unused) or `close_keyword`,
   and the workflow hardcodes `Closes #N` in the PR body, so a tracker other than the code
   host is not resolved on merge today
-  ([#489](https://github.com/omniscient/dark-factory/issues/489) lists this among the
+  ([#507](https://github.com/omniscient/dark-factory/issues/507) tracks this with the other
   provider-wiring gaps).
 
 ## Worked example: GitLab CodeHost seam proof
@@ -395,7 +405,7 @@ nothing and writes no `runs.jsonl` row.
 | `body_contains_fence` | `proposed_ticket.body` contains a fence line or the provenance closing marker |
 | `unknown_producing_loop` | `producing_loop` matches no `loops[].name` in the adapter; also raised when `.factory/adapter.yaml` itself fails to load |
 | `side_effect_level_mismatch` | Manifest's declared level != the loop's declared level |
-| `producing_loop_factory_owned` | Loop's declared level >= 4 (factory-owned until #196) |
+| `producing_loop_factory_owned` | Loop's declared level >= 4 (factory-owned; #196 shipped the level profiles but the rejection is still unconditional) |
 | `verifier_undeclared` | Loop entry has no `verification.verifier` to run |
 | `verdict_not_passing` | Intake-produced verdict `STATUS` != `PASS` |
 | `body_too_large` | Rendered issue body would exceed 60,000 chars |
@@ -438,7 +448,8 @@ persistent flags (`-R`/`--repo`) before reading the verb, expand clustered short
 out-of-1–5-range level resolves to **1** (the most restrictive profile), never to an open
 default. `FACTORY_OWNED_MIN_LEVEL = 4` — a loop declaring level ≥ 4 is factory-owned and is
 rejected by the manifest-handoff path (`handoff.py::cross_check`) until a real loop runner
-applies `side_effect.profile_for()` itself (tracked as #196's F3 follow-up).
+applies `side_effect.profile_for()` itself. #196 is closed and did not lift this; the
+rejection in `handoff.py` is unconditional today.
 
 The factory's own phases get their level from `side_effect.phase_levels` in
 `config/config.yaml` (all `5` today), each overridable by a `SIDE_EFFECT_LEVEL_<PHASE>` env
@@ -468,6 +479,15 @@ validator enforces.
 ```bash
 PYTHONPATH=<dark-factory>/scripts python -m factory_core.adapter --clone-dir <target> --validate
 PYTHONPATH=<dark-factory>/scripts python -m factory_core.adapter --clone-dir <target> --get safety.critical_diff_paths
+```
+
+These need a Linux Python: importing `factory_core` pulls in `fcntl`, so on a Windows host
+the command fails with `ModuleNotFoundError: No module named 'fcntl'` before it validates
+anything. Run it in the factory image instead (prefix with `MSYS_NO_PATHCONV=1` in Git Bash):
+
+```bash
+docker run --rm -v "<target>:/src:ro" --entrypoint bash ghcr.io/omniscient/dark-factory:latest \
+  -c 'PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.adapter --clone-dir /src --validate'
 ```
 
 `--validate` prints `adapter OK`, or `adapter INVALID: <reason>` on stderr with exit code 1.

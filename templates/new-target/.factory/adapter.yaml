@@ -8,11 +8,17 @@
 schema_version: 1
 
 # Map component labels to ARCHITECTURE.md section names for context slicing.
-# Empty map = no slicing (use this until your repo has an ARCHITECTURE.md).
+# An empty map does NOT clear the built-in map: mappings are merged key by key, so the
+# default (MarketHawk) component entries stay in effect. You get the full document only
+# while none of their section names ("Frontend Architecture", "Service Topology", ...)
+# match a heading in your ARCHITECTURE.md (dark-factory #513).
 components: {}
 
 safety:
   # EDIT: words in a ticket that should keep epic autopilot away from it.
+  # Not consulted in scheduler-driven runs today: the scheduler exports
+  # EPIC_AUTOPILOT_SENSITIVE_KEYWORDS from the baked config.yaml, and that env value
+  # wins over this one (dark-factory #513).
   sensitive_keywords: "auth|oauth|token|secret|credential|password|payment"
   # EDIT: path substrings an autopilot candidate ticket must not target.
   hard_exclude_paths:

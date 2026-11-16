@@ -177,9 +177,9 @@ FACTORY_CODEHOST=github         # code host (only "github" implemented today)
 FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | openai
 ```
 
-`jira` is registered but not yet usable end to end: `tracker get` fails under it
-([#488](https://github.com/omniscient/dark-factory/issues/488)), and the scheduler poll
-loop still shells `gh` directly ([#489](https://github.com/omniscient/dark-factory/issues/489)).
+`jira` is registered but not yet usable end to end: the scheduler poll loop, the
+board code and several run-container call sites still shell `gh` directly
+([#507](https://github.com/omniscient/dark-factory/issues/507)).
 A selection (and the provider's variables) made in `instance.env` is forwarded to run
 containers by `dispatch()`.
 `databricks`/`openai` are recognized but not yet implemented (the model
@@ -246,7 +246,7 @@ and logs a loud `hook-not-executable` warning. Fix it with
 | Hook name | Stage | Gate? | Description |
 |-----------|-------|-------|-------------|
 | `smoke-gate` | In-run, after clone (fix / continue / deconflict / recheck) | Yes (check-only) | **Required.** Exit 0 = green, non-zero = red; the factory keeps sentinel + regression-ticket handling. With no hook present (absent, a directory, or empty) the factory refuses the run: it fails with a `smoke-gate-hook-missing` message and ticket comment, and `main` is neither checked nor marked red (#436). This refusal does **not** clear a pre-existing `main-is-red` sentinel (e.g. one latched by the pre-#436 MarketHawk-parity default) — a stale sentinel on a hook-less target must be cleared by hand once the hook is added. Start from `templates/new-target/.factory/hooks/smoke-gate`. |
-| `validate` | Deconflict | Yes | Post-merge validation (lint, type-check, etc.). A failure stops the deconflict run before the push. When the hook is absent the deconflict flow falls back to inline tsc. |
+| `validate` | Deconflict | Yes | Post-merge validation (lint, type-check, etc.). A failure stops the deconflict run before the push, moves the ticket to Blocked and posts an escalation comment. When the hook is absent the deconflict flow falls back to inline tsc. |
 | `preview-up` | Reserved (not invoked) | No | Intended to spin up a preview stack for the PR branch. Nothing calls it today: the workflow's own `preview-up` node builds through a remote BuildKit daemon at `BUILDKIT_HOST`/`BUILDKIT_PORT` (default `buildkit:1234`; delegating it to this hook is #15); a target with its own daemon sets them plus `FACTORY_BUILD_NETWORK` in `instance.env` (see `deploy/instance.env.example`). |
 | `preview-down` | Reserved (not invoked) | No | Intended to tear down the preview stack. Nothing calls it today: the workflow's `close-preview` node runs `docker compose down` directly. |
 
@@ -262,9 +262,9 @@ and logs a loud `hook-not-executable` warning. Fix it with
 **Gate semantics**: `--gate` propagates the hook's exit code to the caller; what
 happens next is per hook. A red `smoke-gate` halts the run cleanly with exit 0 —
 no per-ticket failure, and the ticket is not moved to Blocked. A failing
-`validate` stops the deconflict run before the push; the escalation comment it is
-meant to post never appears, because `_conflict_escalate` is undefined
-([#485](https://github.com/omniscient/dark-factory/issues/485)).
+`validate` stops the deconflict run before the push: the ticket is moved to
+Blocked and a "Conflict Resolution Escalated" comment is posted
+(`_conflict_escalate` in `entrypoint.sh`).
 Non-gate hooks always return success to the pipeline.
 
 **smoke-gate is check-only**: the hook supplies only the pass/fail signal

@@ -91,7 +91,7 @@ Does **not** imply there is a replacement entry.
 **3. Supersession** — `active` → `status=superseded`. The newer entry (B) has broader or
 more accurate scope; entry A was once correct but is now outdated. In the flat-file,
 supersession is expressed **implicitly**: B is appended, A is removed by the R4 cap-drop
-(with a `scope covered by newer entry` comment) or R3 dedup. In the structured backend, B
+or R3 dedup; the line is simply deleted, with no comment left behind. In the structured backend, B
 carries `supersedes: A.id` and A transitions to `status=superseded`.
 **Supersession is not invalidation** — A was never wrong; it is merely outdated. Conflating
 the two destroys the "was this ever right?" signal agents use when weighting historical context.
@@ -138,7 +138,7 @@ An entry may only become durable memory if it passes this bar:
 
 | Memory file | Authorised writers | Trigger condition |
 |---|---|---|
-| `architecture.md` | **refine only**; bootstrap (seed) | Trade-off explicitly weighed in Phase 4 Q&A |
+| `architecture.md` | refine; bootstrap (seed); conformance and code-review for a finding on `ARCHITECTURE.md` (`route_memory_file` in `scripts/gate_lib.sh` routes that path here) | Trade-off explicitly weighed in Phase 4 Q&A; material finding on `ARCHITECTURE.md` |
 | `backend-patterns.md` | implement, conformance, code-review; refine (conventions) | Runtime-proven pattern / material AVOID finding in backend code |
 | `frontend-patterns.md` | implement, conformance, code-review; refine (conventions) | Runtime-proven pattern / material AVOID finding in frontend code |
 | `dark-factory-ops.md` | implement, conformance, code-review; refine (conventions) | Runtime-proven pattern / material AVOID finding in factory scripts/config |
@@ -206,7 +206,8 @@ write to them, not before: the script never rewrites a file it is not writing to
 
 Where the implement agent does drop an entry under the cap, that is the flat-file
 implementation of supersession: the older entry is `status=superseded` even though no explicit
-tag is added. The drop comment `scope covered by newer entry` records the reason.
+tag is added. No drop comment is written; "scope covered by a newer/broader entry" is only
+the second drop priority named in `commands/dark-factory-implement.md`.
 
 ---
 
