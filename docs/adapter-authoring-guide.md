@@ -38,16 +38,21 @@ its selection variable and its provider env in **both**:
 
 - `deploy/instance.env` configures the scheduler container only.
 - `<PROJECT_DIR>/.archon/.env` is the `env_file` of every dispatched run container
-  (`run-compose.yml`). Run containers do not read `deploy/instance.env`, and
-  `run-compose.yml`'s `environment:` block passes the identity and `FACTORY_STATUS_*`
-  variables through from the scheduler but not `FACTORY_TRACKER`, `FACTORY_CODEHOST`,
-  `FACTORY_MODEL_PROVIDER` or any provider-specific variable such as `JIRA_*`.
+  (`run-compose.yml`). Run containers do not read `deploy/instance.env`. `run-compose.yml`'s
+  `environment:` block passes the identity and `FACTORY_STATUS_*` variables through, and
+  `scheduler.sh` `dispatch()` forwards the provider selection (`FACTORY_TRACKER`,
+  `FACTORY_CODEHOST`, `FACTORY_MODEL_PROVIDER`) and every provider variable listed in
+  `scripts/provider_env.sh` (`JIRA_*`, `GITLAB_*`, the Bedrock/Vertex variables) as
+  `docker compose run -e NAME` when it is set and non-empty in the scheduler's environment
+  ([#489](https://github.com/omniscient/dark-factory/issues/489)). A forwarded value beats the
+  same name in `.archon/.env`; unset leaves `.archon/.env` in control. `GH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are not forwarded and come from
+  `.archon/.env` only.
 
 Both the scheduler (`scheduler.sh`) and every run container (`entrypoint.sh`) run the same
-boot preflight against their own environment. A provider selected only in
-`deploy/instance.env` therefore drives the scheduler while run containers stay on the
-`github`/`anthropic` defaults, and nothing reports the mismatch when the default credentials
-are present ([#489](https://github.com/omniscient/dark-factory/issues/489)).
+boot preflight against their own environment, so a new provider's `required_env()` names must
+be added to `PROVIDER_PASSTHROUGH_VARS` in `scripts/provider_env.sh`;
+`tests/test_provider_env_passthrough.py` fails until they are.
 
 ## Tracker adapter
 

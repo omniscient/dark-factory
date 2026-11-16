@@ -176,9 +176,10 @@ FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | 
 ```
 
 `jira` is registered but not yet usable end to end: `tracker get` fails under it
-([#488](https://github.com/omniscient/dark-factory/issues/488)), and a selection made
-in `instance.env` is not passed to run containers
-([#489](https://github.com/omniscient/dark-factory/issues/489)).
+([#488](https://github.com/omniscient/dark-factory/issues/488)), and the scheduler poll
+loop still shells `gh` directly ([#489](https://github.com/omniscient/dark-factory/issues/489)).
+A selection (and the provider's variables) made in `instance.env` is forwarded to run
+containers by `dispatch()`.
 `databricks`/`openai` are recognized but not yet implemented (the model
 gateway is a later step). An unknown value for any of the three, or
 missing provider-specific required env, fails scheduler startup loudly via
