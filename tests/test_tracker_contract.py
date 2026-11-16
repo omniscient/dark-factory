@@ -56,6 +56,17 @@ class _GitHubFixtureController:
             if "--remove-label" in cmd:
                 self.items[key]["labels"].discard(cmd[cmd.index("--remove-label") + 1])
             return self._ok()
+        if cmd[:3] == ["gh", "issue", "view"] and "--json" in cmd and "-q" not in cmd:
+            key = cmd[3]
+            if key not in self.items:
+                return subprocess.CompletedProcess([], 1, stdout="", stderr="not found")
+            it = self.items[key]
+            full = {
+                "title": it["title"], "body": "the body", "labels": sorted(it["labels"]),
+                "comments": [], "state": "CLOSED" if it["status"] == "done" else "OPEN",
+            }
+            wanted = cmd[cmd.index("--json") + 1].split(",")
+            return self._ok(stdout=json.dumps({k: full[k] for k in wanted}))
         if cmd[:3] == ["gh", "issue", "create"]:
             new_id = str(self._next_issue_id)
             self._next_issue_id += 1
@@ -309,3 +320,52 @@ def test_get_children_returns_list_of_actual_children_and_empty_when_none(tracke
         assert {c["id"] for c in children} == {"PROJ-10", "PROJ-11"}
 
     assert tracker.get_children("no-such-epic" if not is_github else "999") == []
+
+
+def _cli_args(**kw):
+    import argparse
+    return argparse.Namespace(**kw)
+
+
+def test_get_item_fields_filter_is_honoured_by_every_provider(tracker_and_controller):
+    """`scheduler.sh` runs `tracker get --fields body` and `--fields state` (dependency
+    gating); the result must contain exactly the requested keys on every provider."""
+    tracker, controller = tracker_and_controller
+    gh = isinstance(tracker, GitHubTracker)
+    id1, id2 = ("1", "2") if gh else ("PROJ-1", "PROJ-2")
+    controller.seed_item(id1, title="t", labels=["x"], status="ready")
+    controller.seed_item(id2, status="done")
+
+    assert set(tracker.get_item(id1, fields=("body",))) == {"body"}
+    assert set(tracker.get_item(id1, fields=("title", "labels"))) == {"title", "labels"}
+    assert tracker.get_item(id1, fields=("state",)) == {"state": "OPEN"}
+    assert tracker.get_item(id2, fields=("state",)) == {"state": "CLOSED"}
+    default = tracker.get_item(id1)
+    assert {"title", "body", "labels"} <= set(default)
+
+
+def test_every_tracker_verb_works_through_the_cli_argument_shape(
+        tracker_and_controller, monkeypatch, tmp_path):
+    """Drive each `providers/cli.py` tracker verb exactly as argparse would, so a provider
+    that lacks a keyword the CLI passes fails here (#488)."""
+    from factory_core.providers import cli
+    tracker, controller = tracker_and_controller
+    monkeypatch.setattr(cli, "get_tracker", lambda: tracker)
+    gh = isinstance(tracker, GitHubTracker)
+    id1 = "1" if gh else "PROJ-1"
+    controller.seed_item(id1, status="ready")
+    body_file = tmp_path / "body.md"
+    body_file.write_text("hello")
+
+    cli._tracker_list(_cli_args(statuses="ready,done", labels=""))
+    cli._tracker_get(_cli_args(id=id1, fields=""))
+    cli._tracker_get(_cli_args(id=id1, fields="body"))
+    cli._tracker_get(_cli_args(id=id1, fields="state"))
+    cli._tracker_get_comments(_cli_args(id=id1))
+    cli._tracker_get_status_limits(_cli_args())
+    cli._tracker_set_status(_cli_args(id=id1, status="in_review"))
+    cli._tracker_label(_cli_args(id=id1, add=["a"], remove=["a"]))
+    cli._tracker_comment(_cli_args(id=id1, marker="<!-- m -->", body_file=str(body_file)))
+    cli._tracker_create(_cli_args(title="t", body_file=str(body_file), labels="a,b"))
+    cli._tracker_children(_cli_args(epic=id1))
+    cli._tracker_resolve(_cli_args(id=id1))

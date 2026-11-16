@@ -54,7 +54,8 @@ class GitLabCodeHost(CodeHost):
             return ""
         return f"Closes #{issue_id}"
 
-    def find_change_for(self, branch: str) -> str | None:
+    def find_change_for(self, branch: str, exact: bool = False,
+                         repo: str | None = None) -> str | None:
         raise NotImplementedError(
             "live GitLab MR list API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
@@ -67,57 +68,59 @@ class GitLabCodeHost(CodeHost):
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def open_change(self, source: str, target: str, title: str, body: str,
-                     draft: bool = False) -> str:
+    def open_change(self, source: str | None, target: str | None, title: str, body: str,
+                     draft: bool = False, repo: str | None = None) -> str:
         raise NotImplementedError(
             "live GitLab MR create API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def update_change_body(self, change_id: str, body: str) -> bool:
-        _validate_change_id(change_id)
+    def update_change_body(self, id: str, body: str) -> bool:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab MR update API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def mark_ready(self, change_id: str) -> None:
-        _validate_change_id(change_id)
+    def mark_ready(self, id: str, repo: str | None = None) -> None:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab MR Draft-prefix removal API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def merge_change(self, change_id: str, strategy: str = "merge", delete_branch: bool = True) -> bool:
-        _validate_change_id(change_id)
+    def merge_change(self, id: str, strategy: str = "merge", delete_branch: bool = True,
+                      repo: str | None = None) -> bool:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab MR merge API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def get_change_checks(self, change_id: str) -> list:
-        _validate_change_id(change_id)
+    def get_change_checks(self, id: str, fields: str = "name,bucket,link",
+                           repo: str | None = None) -> list:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab pipelines API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def get_change_mergeable(self, change_id: str) -> str:
-        _validate_change_id(change_id)
+    def get_change_mergeable(self, id: str, repo: str | None = None) -> str:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab merge_status/has_conflicts API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def get_change_reviews(self, change_id: str) -> str:
-        _validate_change_id(change_id)
+    def get_change_reviews(self, id: str, repo: str | None = None) -> str:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab approvals API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
         )
 
-    def get_change_inline_comments(self, change_id: str) -> list:
-        _validate_change_id(change_id)
+    def get_change_inline_comments(self, id: str, repo: str | None = None) -> list:
+        _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab discussions API — deferred; see "
             "docs/adapter-authoring-guide.md#worked-example-gitlab-codehost-seam-proof"
