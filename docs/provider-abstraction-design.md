@@ -1,7 +1,7 @@
 # Provider Abstraction — Pluggable Tracker, Code Host, and Model Endpoint
 
-- **Status:** Design (approved for planning)
-- **Date:** 2026-07-07
+- **Status:** Partially implemented. Steps 1, 3, 4 and 6 of §11 shipped, step 2 is partial, step 5 was not built. The design text below is kept as written; **Implementation status** notes mark where the code differs. See the status table in §11.
+- **Date:** 2026-07-07 (design); implementation status reconciled against the code 2026-11-16
 - **Scope:** dark-factory (`omniscient/dark-factory`)
 - **Related:** builds on the extraction identity/adapter contract (`scripts/identity.sh`, `scripts/factory_core/{identity,adapter,adapter_defaults}.py`); feeds the token-optimization / context-budget work.
 
@@ -48,6 +48,7 @@ Identical across all three axes:
   - `FACTORY_CODEHOST` (default `github`)
   - `FACTORY_MODEL_PROVIDER` (default `anthropic`)
 - **Config + secrets** — provider-specific connection config and secrets live in the gitignored instance env (`deploy/instance.env`), never in the committed adapter. Examples: `JIRA_BASE_URL`, `JIRA_PROJECT_KEY`, `JIRA_TOKEN`, `JIRA_EPIC_LINK_FIELD`; `GITLAB_BASE_URL`, `GITLAB_TOKEN`; gateway URL + key.
+  > **Implementation status:** `deploy/instance.env` is read only by the scheduler container (`deploy/docker-compose.yml` `env_file`). Dispatched run containers read `<PROJECT_DIR>/.archon/.env` instead (`run-compose.yml` `env_file`), run the same preflight (`entrypoint.sh`), and `run-compose.yml` does not pass `FACTORY_TRACKER`, `FACTORY_CODEHOST`, `FACTORY_MODEL_PROVIDER` or `JIRA_*` through from the scheduler. A selection made only in `instance.env` therefore reaches the scheduler but not the runs; today both files must carry the provider selection and the provider's env. Tracked in [#489](https://github.com/omniscient/dark-factory/issues/489).
 - **Status representation reuses `FACTORY_STATUS_*`.** The existing seven env vars already carry the per-instance status representation — GitHub single-select option IDs today, Jira status *names* under the Jira adapter. The provider interprets them. No new mapping surface.
 - **Optional target-level overrides** — the already-reserved `adapter.yaml` keys `board:` / `repo:` / `labels:` (deep-merged, fail-open via `factory_core/adapter.py`) hold optional per-target tweaks (custom WIP limits, label-vocabulary overrides). Absent by default; not required for any adapter to function.
 - **Boot preflight** — a provider-aware validator replaces today's single `CLAUDE_CODE_OAUTH_TOKEN || ANTHROPIC_API_KEY` check. Each provider declares its required env; a misconfigured instance dies loudly at startup, matching the current `GH_TOKEN` check.
@@ -58,7 +59,7 @@ A new `scripts/factory_core/providers/` package:
 
 ```
 providers/
-  __init__.py          # get_tracker(), get_codehost(), get_model(), preflight()
+  __init__.py          # get_tracker(), get_codehost(), preflight()
   tracker/
     base.py            # Tracker ABC (§5.1)
     github.py          # GitHubTracker — wraps today's gh calls verbatim (parity)
@@ -66,37 +67,58 @@ providers/
   codehost/
     base.py            # CodeHost ABC (§6.1)
     github.py          # GitHubCodeHost — wraps today's gh pr calls verbatim (parity)
-    gitlab.py          # GitLabCodeHost — sketch/stub (follow-up)
-  model.py             # model-endpoint resolution, alias map, gateway preflight
-  cli.py               # thin CLI: python -m factory_core.tracker / .codehost / .providers
+    gitlab.py          # GitLabCodeHost — sketch/stub (follow-up); not registered in _CODEHOSTS
+  model.py             # per-provider preflight checks only (no get_model(), no alias map)
+  cli.py               # thin CLI: one script, subcommands tracker / codehost / preflight
 ```
 
 - `board.py` is refactored to **delegate** to `get_tracker()` (its current `gh`-driven body becomes `GitHubTracker`). `identity.py`'s 7-key `STATUS` dict remains the canonical vocabulary.
-- Bash (`scheduler.sh`, `entrypoint.sh`, `smoke_gate.sh`) and the run DAG (`workflows/archon-dark-factory.yaml`) replace inline *hosted* `gh`/`git` calls with thin CLI calls (`python -m factory_core.tracker …`, `… codehost …`). Plain `git` stays inline. This mirrors the pattern `board.py` already established (Python module + CLI, called from bash).
+- Bash (`scheduler.sh`, `entrypoint.sh`, `smoke_gate.sh`) and the run DAG (`workflows/archon-dark-factory.yaml`) replace inline *hosted* `gh`/`git` calls with thin CLI calls. Plain `git` stays inline. This mirrors the pattern `board.py` already established (Python module + CLI, called from bash).
 
-### 4.2 CLI surface (illustrative)
+> **Implementation status (step 2 is partial):**
+>
+> - `board.py` does **not** delegate to `get_tracker()`. It still shells `gh project item-list` / `item-edit` / `item-add`, `gh api` and `gh issue comment` directly. Scheduler status moves go through `scripts/factory_core/cli.py board-move` → `board.py`; only the run container's status moves (`entrypoint.sh` `set_board_status`) go through `tracker set-status`.
+> - Scheduler board discovery (`fetch_board_items`) is still an inline `gh api graphql` query, and the off-board `ready-for-agent` detector is an inline `gh issue list`.
+> - Inline `gh issue comment` / `gh issue list` / `gh issue close` / `gh api …/comments` calls remain in `scheduler.sh`, `entrypoint.sh`, `smoke_gate.sh` and the run DAG.
+> - Routed through the provider CLI today: in the scheduler, label add/remove, `tracker get` (dependency gating), `get-comments`, `get-status-limits` and `get-rate-budget`; entrypoint status moves; and the smoke gate's `tracker create` / `tracker comment`.
+>
+> Net effect: `FACTORY_TRACKER=jira` passes preflight and the `JiraTracker` verbs work, but it cannot drive the scheduler poll loop yet. Tracked in [#489](https://github.com/omniscient/dark-factory/issues/489).
+
+### 4.2 CLI surface
+
+The CLI is one script with subcommands, not `python -m` modules (`scripts/factory_core/providers/cli.py`; baked at `/opt/dark-factory/scripts/factory_core/providers/cli.py`, which `scheduler.sh` and `entrypoint.sh` reference as `$FACTORY_PROVIDERS_CLI`). The examples below use `CLI=scripts/factory_core/providers/cli.py`.
 
 ```
-python -m factory_core.tracker list --statuses ready,in_progress [--labels ready-for-agent]
-python -m factory_core.tracker get --id PROJ-123 --fields title,body,labels,status
-python -m factory_core.tracker set-status --id PROJ-123 --status in_review
-python -m factory_core.tracker label --id PROJ-123 --add ready-for-agent --remove needs-discussion
-python -m factory_core.tracker comment --id PROJ-123 --marker "<marker>" --body-file c.md
-python -m factory_core.tracker create --title "…" --body-file b.md --labels regression
-python -m factory_core.tracker resolve --id PROJ-123
-python -m factory_core.tracker children --epic PROJ-1
+python3 $CLI tracker list --statuses ready,in_progress [--labels ready-for-agent]
+python3 $CLI tracker get --id PROJ-123 [--fields title,body,labels]
+python3 $CLI tracker get-comments --id PROJ-123
+python3 $CLI tracker get-status-limits
+python3 $CLI tracker get-rate-budget
+python3 $CLI tracker set-status --id PROJ-123 --status in_review
+python3 $CLI tracker label --id PROJ-123 --add ready-for-agent --remove needs-discussion
+python3 $CLI tracker comment --id PROJ-123 --marker "<marker>" --body-file c.md
+python3 $CLI tracker create --title "…" --body-file b.md [--labels regression]
+python3 $CLI tracker resolve --id PROJ-123
+python3 $CLI tracker children --epic PROJ-1
 
-python -m factory_core.codehost remote-url
-python -m factory_core.codehost find-change --branch feat/issue-PROJ-123-...
-python -m factory_core.codehost open-change --source <b> --target main --title "…" --body-file b.md --draft
-python -m factory_core.codehost mark-ready --id 42
-python -m factory_core.codehost merge --id 42 --strategy merge --delete-branch
-python -m factory_core.codehost checks --id 42
-python -m factory_core.codehost mergeable --id 42
-python -m factory_core.codehost reviews --id 42
+python3 $CLI codehost remote-url                       # token is masked in the output
+python3 $CLI codehost find-change --branch feat/issue-PROJ-123-... [--exact] [--repo owner/name]
+python3 $CLI codehost find-change-details --branch <b> [--exact] [--repo owner/name]
+python3 $CLI codehost open-change --source <b> --target main --title "…" --body-file b.md [--draft] [--repo owner/name]
+python3 $CLI codehost update-body --id 42 --body-file b.md
+python3 $CLI codehost mark-ready --id 42 [--repo owner/name]
+python3 $CLI codehost merge --id 42 [--strategy merge] [--no-delete-branch] [--repo owner/name]
+python3 $CLI codehost checks --id 42 [--fields name,bucket,link] [--repo owner/name]
+python3 $CLI codehost mergeable --id 42 [--repo owner/name]
+python3 $CLI codehost reviews --id 42 [--repo owner/name]
+python3 $CLI codehost inline-comments --id 42 [--repo owner/name]
 
-python -m factory_core.providers preflight   # provider-aware boot validation
+python3 $CLI preflight   # provider-aware boot validation; prints "providers preflight: OK"
 ```
+
+`tracker label` accepts `--add` and `--remove` more than once. `codehost merge` deletes the branch by default.
+
+> **Known defect:** the CLI passes keyword arguments the contracts do not declare. `tracker get` calls `get_item(id, fields=…)`, but the `Tracker` ABC and `JiraTracker.get_item` take only `id`, so `tracker get` raises `TypeError` under `FACTORY_TRACKER=jira`. The codehost verbs likewise pass `repo=` / `exact=` / `fields=`, which only `GitHubCodeHost` accepts. Tracked in [#488](https://github.com/omniscient/dark-factory/issues/488).
 
 ## 5. Axis 1 — Tracker
 
@@ -118,6 +140,8 @@ IDs are opaque strings. This operation set is the entire contract an adapter imp
 | `get_status_limits()` → `{status:n}` | WIP limits (**degradable**) | status-option descriptions | adapter config / unlimited |
 | `get_rate_budget()` | throttle poll loop (**degradable**) | `gh api rate_limit` | no-op |
 
+As implemented (`providers/tracker/base.py`), the ten operations above `get_status_limits` are abstract; `get_status_limits()` and `get_rate_budget()` are concrete methods with safe defaults, and a `required_env()` classmethod (default `[]`) declares the env vars boot preflight checks. `set_status`, `add_label` and `remove_label` return `bool`; see §9 for how failure is signaled per provider.
+
 ### 5.2 Canonical vocabulary (frozen contract)
 
 1. **Seven canonical statuses** — `ready, in_progress, in_review, blocked, done, backlog, refined` (already the `STATUS` dict keys). Each adapter owns the mapping to its representation, supplied via `FACTORY_STATUS_*`.
@@ -130,11 +154,12 @@ IDs are opaque strings. This operation set is the entire contract an adapter imp
 ### 5.4 Jira Server / Data Center adapter
 
 - **Discovery** via JQL (`GET /rest/api/2/search`, `project=KEY AND status IN(…) ORDER BY updated`) rather than the Agile board API — no board ID needed. WIP limits come from config, not Jira columns.
-- **Status moves are transition-ID-based.** `set_status(id, canonical)`: (1) map canonical → status name via `FACTORY_STATUS_*`; (2) `GET /issue/{key}/transitions`; (3) find the transition whose target is that name; (4) `POST /issue/{key}/transitions` with its id. **Prerequisite on the Jira project:** the workflow must allow the transition edges the factory needs between those states — Jira workflows are directed graphs, not free movement. Required edges are documented as a setup step; a missing edge fails soft (logs, leaves status), same posture as a failed GitHub board-move today.
+- **Status moves are transition-ID-based.** `set_status(id, canonical)`: (1) map canonical → status name via `FACTORY_STATUS_*`; (2) `GET /issue/{key}/transitions`; (3) find the transition whose target is that name; (4) `POST /issue/{key}/transitions` with its id. **Prerequisite on the Jira project:** the workflow must allow the transition edges the factory needs between those states — Jira workflows are directed graphs, not free movement. Required edges are documented as a setup step; a missing edge fails soft (logs to stderr, returns `False`, leaves status), same posture as a failed GitHub board-move today. An HTTP or transport error is different: `JiraTracker._request` raises `RuntimeError`, which `set_status` lets propagate.
 - **Issue keys** (`PROJ-123`) are the opaque string ID. Branches become `feat/issue-PROJ-123-<slug>`; PR/MR search keys off the sanitized key.
 - **Labels / comments** map to native Jira `labels` (`PUT /issue/{key}`) and `/comment` (marker idempotency by body scan, exactly as `board.py` does now).
 - **Epic → children via Epic Link.** Children are independent Story/Task issues linked to the epic through the Epic Link custom field (`JIRA_EPIC_LINK_FIELD`, e.g. `customfield_10008`). `get_children(epic)` = JQL `"cf[EPIC_LINK]" = <epic key> AND …`. This matches how the factory dispatches epic children as first-class, independently-runnable tickets (own branch/PR/status). Sub-tasks were rejected (tighter coupling, workflow restrictions).
-- **Required env:** `JIRA_BASE_URL`, `JIRA_PROJECT_KEY`, `JIRA_TOKEN` (secret), `JIRA_EPIC_LINK_FIELD`, and the seven `FACTORY_STATUS_*` holding Jira status *names*.
+- **Required env:** `JIRA_BASE_URL`, `JIRA_PROJECT_KEY`, `JIRA_TOKEN` (secret), `JIRA_EPIC_LINK_FIELD`. These four are what `JiraTracker.required_env()` returns and what preflight enforces.
+- **Optional env:** the seven `FACTORY_STATUS_*` vars hold Jira status *names* and default to `Ready`, `In progress`, `In review`, `Blocked`, `Done`, `Backlog`, `Refined` (matched case-insensitively); `JIRA_ISSUE_TYPE` (default `Task`) sets the type `create_item` uses; `JIRA_REQUEST_TIMEOUT_SECONDS` (default `30`).
 
 ## 6. Axis 2 — Code host
 
@@ -146,6 +171,7 @@ Plain git stays inline; the only git-adjacent method is `remote_url()`.
 |---|---|---|---|
 | `remote_url()` | auth-embedded clone/push URL | `https://$TOKEN@github.com/slug` | `https://oauth2:$TOKEN@gitlab.com/slug` |
 | `find_change_for(branch)` → id | PR/MR for a branch | `gh pr list --search head:` | MR list `?source_branch=` |
+| `find_change_details(branch, exact, repo)` → `{number, isDraft, mergeable}` | PR/MR details for a branch (added after this design) | `gh pr list` | MR list `?source_branch=` |
 | `open_change(src, dst, title, body, draft)` | create PR/MR | `gh pr create --draft` | `POST /merge_requests` (`Draft:` prefix) |
 | `update_change_body(id, body)` | backfill close-keyword | `gh pr edit` | `PUT /merge_requests` |
 | `mark_ready(id)` | draft → ready | `gh pr ready` | remove `Draft:` prefix |
@@ -156,6 +182,8 @@ Plain git stays inline; the only git-adjacent method is `remote_url()`.
 | `get_change_inline_comments(id)` | review feedback | REST `/pulls/{n}/comments` | discussions API |
 | `close_keyword(issue_id)` → str | close-on-merge snippet **iff tracker==host**, else `""` | `"Closes #N"` | `"Closes #N"` or `""` |
 
+As implemented (`providers/codehost/base.py`), the ABC has 12 abstract methods (the 11 designed here plus `find_change_details`) and a `required_env()` classmethod. `open_change` returns the new id; `update_change_body` and `merge_change` return `bool`. `GitHubCodeHost` accepts extra `repo` / `exact` / `fields` parameters that the ABC does not declare for most methods, and the CLI passes them (see the known defect in §4.2, [#488](https://github.com/omniscient/dark-factory/issues/488)).
+
 ### 6.2 GitHub reference
 
 `GitHubCodeHost` extracts the current `gh pr …` / `gh api …pulls…` calls and the token-in-URL remote construction from `entrypoint.sh`, `scheduler.sh`, `rescue.py`, `main_red_fixer.py`, and the run DAG. Golden-argv parity.
@@ -163,6 +191,8 @@ Plain git stays inline; the only git-adjacent method is `remote_url()`.
 ### 6.3 GitLab sketch (follow-up impl)
 
 Enough to prove the seam fits: MRs replace PRs; `Draft:` title prefix replaces the draft flag; pipelines API replaces checks; approvals API replaces reviews; `oauth2:$TOKEN@` remote auth. No implementation this spec; the ABC + a stub with the mapping documented guards against a GitHub-shaped interface.
+
+> **Implementation status:** the stub exists as `providers/codehost/gitlab.py`. Its pure-mapping methods (`remote_url`, `close_keyword`, draft-prefix helpers) run for real; every HTTP-backed operation raises `NotImplementedError`. It is not registered: `_CODEHOSTS` contains only `github`, so `FACTORY_CODEHOST=gitlab` fails preflight as an unknown code host. `GITLAB_BASE_URL` is read as a bare host name (default `gitlab.com`), and `required_env()` is `GITLAB_TOKEN`.
 
 ### 6.4 Cross-provider close-on-merge
 
@@ -173,6 +203,8 @@ host.merge_change(id) succeeds  →  tracker.resolve_item(issue_id)
 ```
 
 `close_keyword(issue_id)` returns the body snippet only when tracker == host, else `""`, so the factory never emits a dead `Closes #N`. GitHub Projects' built-in "card → Done on close" automation, which the factory leans on today for the final Done, has no Jira equivalent — so `resolve_item` performs the Done transition explicitly.
+
+> **Implementation status: not wired.** Both methods exist on the providers, but nothing calls them: no script, command or DAG node invokes `close_keyword` or `tracker resolve`. The run DAG writes a literal `Closes #${ISSUE}` into the PR body, and `main_red_fixer.py` does the same. `GitHubCodeHost.close_keyword` also returns `Closes #N` unconditionally rather than checking `FACTORY_TRACKER` (only the GitLab stub checks). A Jira tracker with a GitHub code host would therefore emit a dead `Closes #N` and never resolve the Jira issue. Tracked with the rest of the un-migrated call sites in [#489](https://github.com/omniscient/dark-factory/issues/489).
 
 ## 7. Axis 3 — Model endpoint
 
@@ -185,9 +217,11 @@ The harness is Archon driving Claude Code sessions. Claude Code natively honors 
 - **Native fast paths (no gateway):** `anthropic` (default, parity), `bedrock`, `vertex` — all serve Claude via native Claude Code flags.
 - **Gateway path:** `databricks` and `openai` do not speak the Anthropic Messages shape, so a reference **LiteLLM-style gateway** presents `/v1/messages` to Claude Code and routes to the real backend. The factory sets `ANTHROPIC_BASE_URL` → gateway and `ANTHROPIC_AUTH_TOKEN` → the gateway key; the **real Databricks/OpenAI secrets live in the gateway config, not smeared across the factory.**
 
+> **Implementation status: the gateway path was not built (§11 step 5).** There is no `deploy/gateway/` directory and no gateway service in any compose file. Preflight for `databricks` and `openai` always fails with "requires the model gateway, which is not yet implemented" (`providers/model.py`). The native paths work as designed: `anthropic`, `bedrock` and `vertex` have env-presence preflight checks. What shipped instead of the gateway is a narrower, opt-in transparent proxy with a request ledger; see §7.4.
+
 ### 7.3 Model names become logical aliases
 
-The Claude model names already in the code (`claude-opus-4-8`, `sonnet`, `haiku`, `claude-haiku-4-5-20251001`, in `workflows/archon-dark-factory.yaml`, `commands/*.md`, `config/config.yaml`) stay as **tier tokens**. The gateway maps them per backend:
+The Claude model names already in the code (the `opus` / `sonnet` / `haiku` aliases and some full model IDs in `workflows/archon-dark-factory.yaml`, `commands/*.md`, `config/config.yaml`) stay as **tier tokens**. Today the aliases are pinned to concrete model IDs by the `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` variables in `run-compose.yml`; that file is the place to look for the current IDs, which is why none are named here. The designed gateway would map the tokens per backend (not implemented, see §7.2):
 
 - `anthropic`: pass-through — **factory code byte-identical (parity).**
 - `databricks`: → the governed Claude serving endpoint.
@@ -210,10 +244,12 @@ This answers *"is each persona using the proper tools and carrying the proper co
 - **Persona attribution:** Archon sets a per-node env → Claude Code `ANTHROPIC_CUSTOM_HEADERS: "X-Factory-Persona: <node>"` → the gateway reads the header and tags the record. Requests without the header log as `persona=unknown` (graceful degradation — nothing is lost). Confirming Archon can set that env per node is a design risk to validate early; fallback is run_id+timing correlation.
 - **Sink:** structured JSON logs to stdout for shipping to Seq (consistent with the existing stack); LiteLLM's own request DB is an optional richer store.
 
+> **Implementation status: superseded for the ledger part.** No reference gateway ships. The ledger idea shipped separately as `scripts/factory_core/model_proxy.py`: a transparent Anthropic passthrough that forwards requests unchanged and writes one ledger row per request. It does no translation and no alias routing, is opt-in via `FACTORY_MODEL_PROXY_ENABLED`, and records `persona` as `"unknown"` on every row: the `X-Factory-Persona` / `ANTHROPIC_CUSTOM_HEADERS` attribution described above is not implemented anywhere. See `docs/dark-factory-model-proxy-rollout.md` for the proxy as shipped.
+
 ### 7.5 Selection, preflight, caveats
 
 - **Selection:** `FACTORY_MODEL_PROVIDER` (default `anthropic`).
-- **Preflight:** `anthropic` → token present (today's check); `databricks`/`openai` → gateway reachable and holds backend creds; `bedrock`/`vertex` → cloud creds present.
+- **Preflight:** `anthropic` → token present (today's check); `databricks`/`openai` → gateway reachable and holds backend creds; `bedrock`/`vertex` → cloud creds present. As implemented, `databricks`/`openai` hard-fail preflight as not yet implemented (§7.2), and the `bedrock`/`vertex` checks accept either static credentials or an env signal that the cloud credential chain supplies them.
 - **Caveat 1 — cost goes approximate off-Anthropic.** Archon prices token usage as Claude. Under Databricks/OpenAI the token *counts* still flow, but dollar figures are mislabeled; reports stay directional, not billing-accurate. (The gateway's own ledger can carry truer per-backend cost later.)
 - **Caveat 2 — GPT quality is empirical.** Databricks-*Claude* is risk-free (identical model, different endpoint). OpenAI is the Claude-tuned harness *driving* GPT through a translation shim — it runs, but coding quality is a separate, measured question, not an assumed equivalence.
 
@@ -228,14 +264,14 @@ This answers *"is each persona using the proper tools and carrying the proper co
 ## 9. Error handling & fail-open
 
 - **Parity invariant, test-enforced** (§2, §10).
-- **Fail-open matches today.** Degradable ops return safe defaults; a failed `set_status` / missing Jira transition edge logs and leaves the item where it is — same as a failed `gh project item-edit` now. Adapter-config parse errors follow the existing `adapter.py` fail-open posture.
+- **Fail-open matches today.** Degradable ops return safe defaults; a failed `set_status` / missing Jira transition edge logs and leaves the item where it is — same as a failed `gh project item-edit` now. As implemented the signal differs by provider (documented on the `Tracker` ABC): "not found / no valid transition" returns `False` everywhere, but an API or transport failure returns `False` on GitHub and raises `RuntimeError` on Jira, and `JiraTracker.add_label` / `remove_label` have no false-on-failure path at all. Callers must handle both. Adapter-config parse errors follow the existing `adapter.py` fail-open posture.
 - **Boot-time preflight is hard-fail.** The selected providers validate required env at startup; a misconfigured instance exits loudly rather than failing mid-run.
 - **Idempotency preserved.** Marker-comment upsert semantics are part of the contract, so re-runs don't spam any tracker.
 
 ## 10. Testing
 
 - **Parity / golden-argv tests** — GitHub tracker & code host emit argv identical to the current inline calls. This is the guardrail for touching `scheduler.sh`, `entrypoint.sh`, `smoke_gate.sh`, the run DAG, and the five `factory_core` modules.
-- **Contract tests** — one shared abstract suite run against every `Tracker` / `CodeHost` implementation using recorded HTTP fixtures (VCR-style), so Jira/GitLab are covered in CI with no live server.
+- **Contract tests** — one shared abstract suite run against every `Tracker` / `CodeHost` implementation using recorded HTTP fixtures (VCR-style), so Jira/GitLab are covered in CI with no live server. As implemented: `tests/test_tracker_contract.py` and `tests/test_provider_codehost_contract.py`, with hand-written JSON fixtures under `tests/fixtures/jira/` substituted at `JiraTracker._request` rather than recorded HTTP traffic.
 - **Live validation (the end-to-end proofs):**
   - **Jira** against the live instance + a throwaway project: create → label → idempotent comment → transition through all seven statuses → Epic-Link children → resolve.
   - **Model** against **Databricks** (governed-Claude routing) and **OpenAI** (GPT) through the gateway: a real dispatched run per backend, plus assertion that the ledger captured persona/tool/context records.
@@ -252,15 +288,26 @@ This answers *"is each persona using the proper tools and carrying the proper co
 
 Each step is independently shippable; a phased implementation plan will decompose these into PRs (likely one epic with per-step tickets).
 
+### Implementation status by step (reconciled against the code 2026-11-16)
+
+| Step | Status | Where |
+|---|---|---|
+| 1. ABCs + GitHub implementations + parity tests | Done | `providers/tracker/{base,github}.py`, `providers/codehost/{base,github}.py`; `tests/test_provider_tracker_parity.py`, `tests/test_provider_codehost_parity.py` |
+| 2. Route hosted calls through the provider CLIs | **Partial** | Some call sites migrated; `board.py`, scheduler board discovery and many inline `gh issue` calls are not (§4.1). [#489](https://github.com/omniscient/dark-factory/issues/489) |
+| 3. Selection + provider-aware boot preflight | Done | `providers/__init__.py`; `cli.py preflight` runs at the top of `scheduler.sh` and `entrypoint.sh`. Selection env is not passed to run containers (§4, [#489](https://github.com/omniscient/dark-factory/issues/489)) |
+| 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. `tracker get` fails under Jira ([#488](https://github.com/omniscient/dark-factory/issues/488)) |
+| 5. Reference model gateway + `databricks` / `openai` | **Not implemented** | `providers/model.py` hard-fails preflight for both. A transparent proxy + ledger shipped instead (§7.4) |
+| 6. Adapter-authoring guide + GitLab sketch | Done | `docs/adapter-authoring-guide.md`; `providers/codehost/gitlab.py` (unregistered stub, §6.3) |
+
 ## 12. Adapter-authoring guide (the requirements documentation)
 
 To add a **tracker**: implement the `Tracker` operations (§5.1), honor the canonical status + label vocabulary (§5.2), declare the env vars your adapter reads, map the seven canonical statuses via `FACTORY_STATUS_*`, and pass the shared contract suite (fixtures) + a live smoke of create/label/comment/transition/resolve.
 
-To add a **code host**: implement the ~11 `CodeHost` methods (§6.1), provide an auth-embedded `remote_url()`, map draft/ready/merge/checks/reviews to your host's model, return `close_keyword` only when your host is also the tracker, declare env vars, and pass the contract suite.
+To add a **code host**: implement the 12 `CodeHost` methods (§6.1), provide an auth-embedded `remote_url()`, map draft/ready/merge/checks/reviews to your host's model, return `close_keyword` only when your host is also the tracker, declare env vars, and pass the contract suite.
 
 To add a **model endpoint**: either (a) if it speaks Anthropic Messages or is a native Claude-Code backend (Bedrock/Vertex), set the endpoint env + preflight; or (b) add a gateway alias-map entry that routes the tier tokens to your backend and holds its credentials. Document the model-tier mapping and whether cost/quality caveats apply.
 
-Every adapter: **default path unchanged** (parity), **secrets in instance env only**, **fail-open on degradable ops**, **hard-fail at preflight on missing required config**.
+Every adapter: **default path unchanged** (parity), **secrets in instance env only**, **fail-open on degradable ops**, **hard-fail at preflight on missing required config**. ("Instance env" currently means two files, the scheduler's `deploy/instance.env` and the run containers' `.archon/.env`; see the implementation note in §4.) The maintained how-to is `docs/adapter-authoring-guide.md`.
 
 ## 13. Open questions / risks
 

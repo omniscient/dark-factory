@@ -1,5 +1,7 @@
 # Gate Calibration Audit
 
+> **Archived 2026-11-16 — unfilled template; the audit was never run.** Migrated from MarketHawk on 2026-07-10 and not updated since. Config paths and lever names below predate the extraction and should not be relied on.
+
 **Status**: PENDING — audit not yet run.
 
 This document records the calibration audit for MarketHawk's LLM judge gates (conformance and code-review). Complete this before changing `fail_open: false` or raising `block_on_material` thresholds. The 5-step process is defined in the spec for issue #334.

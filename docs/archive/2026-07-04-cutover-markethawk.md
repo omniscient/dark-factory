@@ -1,5 +1,7 @@
 # Dark Factory — MarketHawk Cutover Runbook
 
+> **Archived 2026-11-16 — completed historical record.** The cutover was executed on 2026-07-06 (per [2026-07-06-parity-p2.md](2026-07-06-parity-p2.md)); the "Not executed" status below is the text as originally prepared. Do not follow this procedure today: the deploy layout has since changed (see `README.md`).
+
 > **Status: PREPARED (P2). Not executed. Executing this document IS P3.**
 
 This runbook covers stopping the in-repo (MarketHawk-bundled) Dark Factory
@@ -14,7 +16,7 @@ gated on post-cutover observation.
 
 All of the following must hold before executing the cutover:
 
-- [ ] `docs/parity-p2.md` verdict = **PASS** (bench suite pass^k ≥ baseline on
+- [ ] `docs/archive/2026-07-06-parity-p2.md` verdict = **PASS** (bench suite pass^k ≥ baseline on
   all size buckets).
 - [ ] MarketHawk project board is **quiet**: no tickets in *In Progress* or *In Review*
   at the moment of the switch (let running factory runs complete or mark them
@@ -208,7 +210,7 @@ git commit -m "cleanup(p3): remove in-repo dark-factory after extracted cutover"
   [docs/superpowers/plans/2026-07-03-dark-factory-extraction-p0-p1.md](https://github.com/omniscient/markethawk/blob/main/docs/superpowers/plans/2026-07-03-dark-factory-extraction-p0-p1.md)
 - P2 plan:
   [docs/superpowers/plans/2026-07-04-dark-factory-extraction-p2.md](https://github.com/omniscient/markethawk/blob/main/docs/superpowers/plans/2026-07-04-dark-factory-extraction-p2.md)
-- Parity evidence: `docs/parity-p2.md` (dark-factory repo)
+- Parity evidence: `docs/archive/2026-07-06-parity-p2.md` (dark-factory repo)
 - MarketHawk adapter PR: see omniscient/markethawk PR linked from #738
 - Instance env template: `deploy/instances/markethawk/instance.env`
 - Tracking issue: [omniscient/markethawk #738](https://github.com/omniscient/markethawk/issues/738)
