@@ -57,8 +57,9 @@ each destroyed real runs when violated (see #212, #214):
 
 ## Conventions
 
-- Tests: `python -m pytest tests/ -v` (CI runs exactly this plus `smoke_gate.sh` and the
-  workflow DAG checks). TDD for behavior changes.
+- Tests: `python -m pytest tests/ -v` (CI sets `PYTHONPATH=scripts`). CI also runs the
+  `tests/test_*.sh` scripts listed in `.github/workflows/ci.yml`, the two workflow DAG checks
+  and a docker build. TDD for behavior changes.
 - Issue dependencies: a plain `Depends on: #N` line in the issue body (one per line) gates
   implementation dispatch until #N is Done.
 - Label semantics: `ready-for-agent` opts a Backlog issue into refinement;

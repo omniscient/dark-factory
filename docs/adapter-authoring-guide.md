@@ -56,7 +56,7 @@ anywhere in a conforming implementation, including in test fixtures.
   `FACTORY_STATUS_REFINED`) — GitHub uses single-select option IDs; a Jira adapter would use
   status *names* under the same seven variables. No new mapping surface is introduced per adapter.
 - **Required label vocabulary:** `ready-for-agent, spec-pending-review, plan-pending-review,
-  needs-discussion, factory-regression, above-ceiling-work, direct-to-pr, epic, ready-for-human,
+  needs-discussion, factory-regression, above-ceiling, direct-to-pr, epic, ready-for-human,
   merged-with-edits, regression`. Your tracker must support hyphenated labels.
 
 ### Required env (per-adapter example: Jira, design doc §5.4)

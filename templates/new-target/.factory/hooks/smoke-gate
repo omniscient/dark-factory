@@ -2,8 +2,8 @@
 # smoke-gate hook — CHECK ONLY. Exit 0 = origin/main is green, non-zero = red.
 # Runs in the factory image (Ubuntu, Python 3.14, Node 22) with CLONE_DIR set to a fresh
 # clone. Red/green state handling (sentinel, regression ticket) stays factory-side;
-# do not add it here. Without this hook the factory runs MarketHawk's check, which
-# fails on any other layout and halts dispatch.
+# do not add it here. Without this hook the factory refuses the run: it comments on
+# the ticket and fails the run instead of checking main.
 set -uo pipefail
 cd "${CLONE_DIR}"
 
