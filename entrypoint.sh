@@ -744,6 +744,38 @@ _resolve_merge_conflicts() {
     deconflict --issue "$ISSUE_NUM" || return $?
 }
 
+# Tier-3 escalation for the deconflict path's own guard rails (no feature branch, checkout
+# failure, wrong HEAD, failed post-merge validation). Mirrors factory_core/deconflict.py's
+# _escalate(): board -> Blocked plus one explanatory issue comment (#485 -- the function was
+# deleted in the #437 extraction while these five call sites survived).
+# Deliberately returns 0 and does NOT exit: every call site follows it with `exit 0`. A
+# non-zero return would trip `set -e` + the ERR trap before that `exit 0`, and on_failure
+# would post a second, generic "Refinement Pipeline -- Failed" comment on top of this one.
+_conflict_escalate() {
+  local reason="$1" footer
+  echo "[deconflict] Tier 3 escalation: ${reason}"
+  set_board_status "blocked" 2>/dev/null || true
+  footer=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory 2>/dev/null || true)
+  gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
+"## Dark Factory — Conflict Resolution Escalated
+
+The factory attempted automatic merge conflict resolution but could not complete it.
+
+**Reason:** ${reason}
+
+**To fix manually:**
+\`\`\`bash
+git checkout feat/issue-${ISSUE_NUM}-*
+git fetch origin main
+git merge origin/main
+# Resolve conflicts manually, then push
+\`\`\`
+
+---
+${footer}" 2>/dev/null || true
+  return 0
+}
+
 # Guard: allow sourcing for unit tests without running the main execution block.
 # Set ENTRYPOINT_SOURCE_ONLY=1 before sourcing. External commands (git, gh, docker,
 # claude) must be stubbed by the test to prevent real side effects.

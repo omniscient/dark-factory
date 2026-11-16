@@ -279,7 +279,12 @@ nodes:
       codeindex analyze . 2>/dev/null || echo "WARNING: codeindex analyze failed"
       codeindex symbols . --output symbolindex.json 2>/dev/null || echo "WARNING: codeindex symbols failed"
       mkdir -p docs
-      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.tmp \
+      # #490: codeindex ignores .git/info/exclude and indexes the run-time staged
+      # dark-factory/ copy; filter_hotspots drops rows git reports as excluded (tracked
+      # dark-factory/ in a vendoring target is kept; fails open on any git error).
+      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.raw \
+        && python3 /opt/dark-factory/scripts/filter_hotspots.py --repo . < docs/codeindex-hotspots.md.raw > docs/codeindex-hotspots.md.tmp \
+        && rm -f docs/codeindex-hotspots.md.raw \
         && mv docs/codeindex-hotspots.md.tmp docs/codeindex-hotspots.md \
         || echo "WARNING: codeindex high-blast failed — hotspots file unchanged"
       git add docs/codeindex-hotspots.md
@@ -739,7 +744,12 @@ nodes:
       codeindex analyze . 2>/dev/null || echo "WARNING: codeindex analyze failed"
       codeindex symbols . --output symbolindex.json 2>/dev/null || echo "WARNING: codeindex symbols failed"
       mkdir -p docs
-      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.tmp \
+      # #490: codeindex ignores .git/info/exclude and indexes the run-time staged
+      # dark-factory/ copy; filter_hotspots drops rows git reports as excluded (tracked
+      # dark-factory/ in a vendoring target is kept; fails open on any git error).
+      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.raw \
+        && python3 /opt/dark-factory/scripts/filter_hotspots.py --repo . < docs/codeindex-hotspots.md.raw > docs/codeindex-hotspots.md.tmp \
+        && rm -f docs/codeindex-hotspots.md.raw \
         && mv docs/codeindex-hotspots.md.tmp docs/codeindex-hotspots.md \
         || echo "WARNING: codeindex high-blast failed — hotspots file unchanged"
       echo "codeindex hotspots generated locally (not committed — post-merge refresh via post-merge-update-codeindex)"

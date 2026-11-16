@@ -85,3 +85,31 @@ def test_http_backed_method_accepts_hosts_own_opaque_id_shape(impl, method_name)
             getattr(cls(), method_name)(*args)
         return
     getattr(cls(), method_name)(*args)  # must not raise given a mocked subprocess boundary
+
+
+# Exactly the keyword shape `providers/cli.py` uses for every codehost verb (#488).
+CLI_SHAPE_CALLS = {
+    "find_change_for": (("feat/issue-1-x",), {"exact": True, "repo": "o/r"}),
+    "find_change_details": (("feat/issue-1-x",), {"exact": True, "repo": "o/r"}),
+    "open_change": (("src", "tgt", "title", "body"), {"draft": True, "repo": "o/r"}),
+    "mark_ready": (("{id}",), {"repo": "o/r"}),
+    "merge_change": (("{id}",), {"strategy": "squash", "delete_branch": False, "repo": "o/r"}),
+    "get_change_checks": (("{id}",), {"fields": "name,bucket,link", "repo": "o/r"}),
+    "get_change_mergeable": (("{id}",), {"repo": "o/r"}),
+    "get_change_reviews": (("{id}",), {"repo": "o/r"}),
+    "get_change_inline_comments": (("{id}",), {"repo": "o/r"}),
+    "update_change_body": (("{id}", "body"), {}),
+}
+
+
+@pytest.mark.parametrize("method_name", sorted(CLI_SHAPE_CALLS))
+def test_method_accepts_the_exact_keywords_the_cli_passes(impl, method_name):
+    cls, change_id, is_stub = impl
+    args, kwargs = CLI_SHAPE_CALLS[method_name]
+    args = tuple(a.format(id=change_id) for a in args)
+    if is_stub:
+        # A stub must fail with NotImplementedError, never TypeError for a CLI keyword.
+        with pytest.raises(NotImplementedError):
+            getattr(cls(), method_name)(*args, **kwargs)
+        return
+    getattr(cls(), method_name)(*args, **kwargs)

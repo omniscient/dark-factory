@@ -83,13 +83,12 @@ Return contracts (`tracker/base.py`):
 - `create_item` returns the new item's opaque id; `upsert_comment` and `resolve_item`
   return nothing.
 
-**The CLI calls a wider signature than the ABC declares.** `providers/cli.py`'s `tracker get`
-calls `get_item(id, fields=...)`. Only `GitHubTracker.get_item` accepts `fields`; the ABC and
-`JiraTracker.get_item(self, id)` do not, so `tracker get` raises `TypeError` under
-`FACTORY_TRACKER=jira` ([#488](https://github.com/omniscient/dark-factory/issues/488)).
-Until that is resolved, a new tracker should accept `fields: tuple | None = None` on
-`get_item` (a tuple of field names such as `("body",)` or `("state",)`; `None` means the
-adapter's default set).
+**`get_item` takes `fields`.** The ABC declares `get_item(id, fields: tuple | None = None)`,
+which is what `providers/cli.py`'s `tracker get` calls. `fields` is a tuple of field names
+such as `("body",)` or `("state",)`; the result contains exactly those keys, and `None` means
+the adapter's default set. `state` is `"OPEN"` or `"CLOSED"` (`scheduler.sh` reads `body` and
+`state` for `Depends on:` gating). `JiraTracker` returns `CLOSED` iff the canonical status is
+`done`, and fetches `comments` only when asked.
 
 ### Canonical vocabulary (frozen contract, design doc §5.2)
 
@@ -163,17 +162,17 @@ env var names boot preflight requires (default `[]`).
 Plain `git` (clone/branch/commit/push/fetch/diff) is host-agnostic and stays **outside** this
 contract (design doc principle 3) — the only git-adjacent method here is `remote_url()`.
 
-**The CLI calls a wider signature than the ABC declares.** `providers/cli.py` passes keyword
-arguments that only `GitHubCodeHost` accepts today: `find_change_for(branch, exact=, repo=)`,
+**The ABC declares every keyword the CLI passes.** `providers/cli.py` calls
+`find_change_for(branch, exact=, repo=)`, `find_change_details(branch, exact=, repo=)`,
 `open_change(..., draft=, repo=)`, `mark_ready(id, repo=)`,
 `merge_change(id, strategy=, delete_branch=, repo=)`, `get_change_checks(id, fields=, repo=)`,
 and `repo=` on `get_change_mergeable`, `get_change_reviews` and
-`get_change_inline_comments`. A code host written to the ABC's signatures alone raises
-`TypeError` when driven through the CLI
-([#488](https://github.com/omniscient/dark-factory/issues/488)). Until the ABC is widened,
-accept those keyword arguments: `repo` is an optional `owner/name` override, `exact` selects
-an exact branch match instead of a prefix match, and `fields` is a comma-separated string of
-check fields (the CLI default is `name,bucket,link`).
+`get_change_inline_comments`, so every implementation must accept them, with the ABC's
+defaults: `repo` is an optional `owner/name` override, `exact` selects an exact branch match
+instead of a prefix match, and `fields` is a comma-separated string of check fields (default
+`name,bucket,link`). Parameter names must match the ABC (the change id parameter is `id`).
+`tests/test_provider_signature_conformance.py` enforces this with `inspect.signature`, and the
+contract suites call each verb through the CLI's argument shape.
 
 ### `remote_url()` — auth-embedded URL requirement
 

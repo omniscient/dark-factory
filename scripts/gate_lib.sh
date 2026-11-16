@@ -7,8 +7,6 @@
 # Do NOT add set -euo pipefail: this file is sourced and must not alter caller shell options.
 
 GATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/agent_roles.sh
-source "${GATE_LIB_DIR}/agent_roles.sh"
 
 route_memory_file() {
   local FILE="$1"
@@ -45,7 +43,7 @@ route_memory_file() {
 }
 
 write_memory_entry() {
-  # Usage: write_memory_entry TARGET PATH_PREFIX VIOLATION_TEXT SOURCE ISSUE_NUM [AGENT_ROLE]
+  # Usage: write_memory_entry TARGET PATH_PREFIX VIOLATION_TEXT SOURCE ISSUE_NUM
   # Delegates all write logic to memory_write.py (normalized dedup, cap, expiry, tagging).
   # ${BASH_SOURCE[0]} (not $0) is required because this file is sourced, not executed.
   local TARGET="$1" PATH_PREFIX="$2" TEXT="$3" SOURCE="$4" ISSUE="$5"

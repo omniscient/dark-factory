@@ -46,7 +46,6 @@ You are running with no human attached; an ended turn ends the process.
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
 source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
-AGENT_ID="${AGENT_ID_CODE_REVIEW}"
 ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 ```
 

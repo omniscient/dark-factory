@@ -32,6 +32,20 @@ _SECTION_REGISTRY: dict[str, list[str]] = {
     "code-review": ["skill_prompts", "issue_context", "diff"],
 }
 
+# Sections whose optimised output is actually delivered to the phase's prompt today,
+# per scenario. Only these count toward the headline savings_tokens; every other
+# section with a baseline is measured-only telemetry (#487).
+#   diff (conformance, code-review): the commands run diff_rank.py with the exported
+#     TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS cap and review the ranked diff.
+# NOT delivered: architecture_md (slice is never injected; implement reads the full
+#   ARCHITECTURE.md and no node runs context_pack.py) and memory_context (the memory
+#   cap is not applied as capped output; #486 changes this). Add an entry here only
+#   when a phase command really consumes the optimised text.
+_DELIVERED_SAVINGS: dict[str, frozenset[str]] = {
+    "conformance": frozenset({"diff"}),
+    "code-review": frozenset({"diff"}),
+}
+
 _SKILL_PROMPT_DIR = "/opt/refinement-skills"
 # Each entry: (baked filename under _SKILL_PROMPT_DIR, clone-live path relative to
 # <clone_dir>/.claude/skills/, or None). Only the two files #44 migrates get a
@@ -316,17 +330,21 @@ def build_budget(
     estimated = sum(v.get("tokens", 0) for v in sections.values())
     utilization = round(estimated / BUDGET_TOKENS * 100, 1)
 
-    # Compute aggregate savings across all sections with baseline_tokens (schema v2)
-    savings_tokens = sum(
-        max(0, v.get("baseline_tokens", v.get("tokens", 0)) - v.get("tokens", 0))
-        for v in sections.values()
-        if v.get("status") not in ("dropped",)
-    )
-    baseline_total = sum(
-        v.get("baseline_tokens", v.get("tokens", 0))
-        for v in sections.values()
-        if v.get("status") not in ("dropped",)
-    )
+    # Aggregate savings (schema v2). Only sections whose optimised output actually
+    # reaches the phase's prompt count toward the headline savings_tokens; the rest
+    # are reported separately as measured-only (#487). See _DELIVERED_SAVINGS.
+    delivered = _DELIVERED_SAVINGS.get(scenario, frozenset())
+
+    def _saving(v: dict) -> int:
+        return max(0, v.get("baseline_tokens", v.get("tokens", 0)) - v.get("tokens", 0))
+
+    live = {k: v for k, v in sections.items() if v.get("status") not in ("dropped",)}
+    savings_tokens = sum(_saving(v) for k, v in live.items() if k in delivered)
+    measured_only_by_section = {
+        k: _saving(v) for k, v in live.items() if k not in delivered and _saving(v) > 0
+    }
+    measured_only_savings_tokens = sum(measured_only_by_section.values())
+    baseline_total = sum(v.get("baseline_tokens", v.get("tokens", 0)) for v in live.values())
     savings_pct = round(savings_tokens / baseline_total * 100, 1) if baseline_total > 0 else 0.0
 
     # Collect fallback events for display in the cost report
@@ -353,6 +371,8 @@ def build_budget(
         "utilization_pct": utilization,
         "savings_tokens": savings_tokens,
         "savings_pct": savings_pct,
+        "measured_only_savings_tokens": measured_only_savings_tokens,
+        "measured_only_sections": list(measured_only_by_section),
         "fallback_events": fallback_events,
         "sections": sections,
         "included_sections": included_sections,
