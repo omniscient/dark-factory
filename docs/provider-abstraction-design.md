@@ -121,7 +121,7 @@ IDs are opaque strings. This operation set is the entire contract an adapter imp
 ### 5.2 Canonical vocabulary (frozen contract)
 
 1. **Seven canonical statuses** — `ready, in_progress, in_review, blocked, done, backlog, refined` (already the `STATUS` dict keys). Each adapter owns the mapping to its representation, supplied via `FACTORY_STATUS_*`.
-2. **Required label vocabulary** — workflow tokens the factory branches on, kept as literal label strings: `ready-for-agent, spec-pending-review, plan-pending-review, needs-discussion, factory-regression, above-ceiling-work, direct-to-pr, epic, ready-for-human, merged-with-edits, regression`. A tracker must support hyphenated labels (Jira labels forbid spaces; ours are already hyphenated).
+2. **Required label vocabulary** — workflow tokens the factory branches on, kept as literal label strings: `ready-for-agent, spec-pending-review, plan-pending-review, needs-discussion, factory-regression, above-ceiling, direct-to-pr, epic, ready-for-human, merged-with-edits, regression`. A tracker must support hyphenated labels (Jira labels forbid spaces; ours are already hyphenated).
 
 ### 5.3 GitHub reference
 
