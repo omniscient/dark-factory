@@ -648,3 +648,72 @@ def test_code_review_scenario_labels_skill_prompts_included_on_clone_live(tmp_pa
 
     assert result["scenario"] == "code-review"
     assert result["sections"]["skill_prompts"]["status"] == "included"
+
+
+# ── #487: savings are counted only for features delivered to the prompt ───────
+
+class TestDeliveredVsMeasuredOnlySavings:
+    """Only the diff cap (conformance / code-review) reaches a prompt today.
+    Architecture slicing and memory caps are measured-only (#487, #486)."""
+
+    def test_architecture_only_saving_is_not_realised(self, tmp_path):
+        make_arch_file(tmp_path)
+        arch_p = tmp_path / "ARCHITECTURE.md"
+        # Pad omitted sections so the slice is genuinely smaller than the full doc.
+        arch_p.write_text(arch_p.read_text().replace(
+            "Frontend content.", "Frontend content. " + "padding words " * 400))
+        result = run_budget(tmp_path, "implement", spec_component="backend",
+                            issue_json=make_issue_json(tmp_path))
+        arch = result["sections"]["architecture_md"]
+        assert arch["baseline_tokens"] > arch["tokens"], "fixture must really slice"
+        assert result["savings_tokens"] == 0
+        assert result["savings_pct"] == 0.0
+        assert result["measured_only_savings_tokens"] == (
+            arch["baseline_tokens"] - arch["tokens"])
+        assert result["measured_only_sections"] == ["architecture_md"]
+
+    def test_memory_cap_saving_is_measured_only(self, tmp_path):
+        import json as _json
+        (tmp_path / "memory-trace.json").write_text(
+            _json.dumps({"entries_selected_total": 1, "uncapped_tokens": 9000}))
+        mem = make_memory_file(tmp_path)
+        result = run_budget(tmp_path, "plan",
+                            issue_json=make_issue_json(tmp_path), memory_file=mem)
+        mc = result["sections"]["memory_context"]
+        assert mc["baseline_tokens"] == 9000
+        assert result["savings_tokens"] == 0
+        assert "memory_context" in result["measured_only_sections"]
+        assert result["measured_only_savings_tokens"] >= 9000 - mc["tokens"]
+
+    def test_diff_saving_in_code_review_is_realised(self, tmp_path):
+        import json as _json
+        diff_file = make_diff_file(tmp_path, lines=50)
+        (tmp_path / "diff-ranking.json").write_text(
+            _json.dumps({"raw_diff_tokens": 5000, "files": []}))
+        result = run_budget(tmp_path, "code-review",
+                            issue_json=make_issue_json(tmp_path),
+                            diff_file=diff_file)
+        d = result["sections"]["diff"]
+        assert result["savings_tokens"] == 5000 - d["tokens"] > 0
+        assert result["savings_pct"] > 0
+        assert result["measured_only_savings_tokens"] == 0
+        assert result["measured_only_sections"] == []
+
+    def test_diff_saving_in_conformance_is_realised(self, tmp_path):
+        import json as _json
+        diff_file = make_diff_file(tmp_path, lines=50)
+        (tmp_path / "diff-ranking.json").write_text(
+            _json.dumps({"raw_diff_tokens": 5000, "files": []}))
+        result = run_budget(tmp_path, "conformance",
+                            issue_json=make_issue_json(tmp_path),
+                            spec_file=make_spec_file(tmp_path),
+                            impl_file=make_impl_file(tmp_path),
+                            diff_file=diff_file)
+        assert result["savings_tokens"] > 0
+
+    def test_schema_version_unchanged_and_fields_additive(self, tmp_path):
+        result = run_budget(tmp_path, "refine", issue_json=make_issue_json(tmp_path))
+        assert result["schema_version"] == 2
+        for f in ("savings_tokens", "savings_pct", "measured_only_savings_tokens",
+                  "measured_only_sections"):
+            assert f in result

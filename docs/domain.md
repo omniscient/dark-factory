@@ -61,24 +61,6 @@ The memory schema and lifecycle are specified in [`dark-factory-memory-contract.
 
 Refine, plan and implement load memory through `scripts/load_memory_context.sh`; validate calls `memory_retrieve.py --phase validate` directly, so it sees conformance entries and not implementation reasoning. Conformance and code-review do not read memory; they write it through `write_memory_entry` in `scripts/gate_lib.sh`.
 
-### Role constants (declared, not used)
+### Role constants (removed)
 
-`scripts/agent_roles.sh` defines 13 role ID constants and `MEMORY_PROJECT`:
-
-| Constant | Value |
-|---|---|
-| `AGENT_ID_FACTORY_DIRECTOR` | `factory-director` |
-| `AGENT_ID_INTAKE_TRIAGE` | `intake-triage-agent` |
-| `AGENT_ID_REFINEMENT` | `refinement-agent` |
-| `AGENT_ID_PLANNING` | `planning-agent` |
-| `AGENT_ID_IMPLEMENTATION` | `implementation-agent` |
-| `AGENT_ID_VALIDATION` | `validation-agent` |
-| `AGENT_ID_CODE_REVIEW` | `code-review-agent` |
-| `AGENT_ID_SECURITY` | `security-agent` |
-| `AGENT_ID_DECONFLICT` | `deconflict-agent` |
-| `AGENT_ID_CI_RESCUE` | `ci-rescue-agent` |
-| `AGENT_ID_MERGE_GATE` | `merge-gate-agent` |
-| `AGENT_ID_COST_TELEMETRY` | `cost-telemetry-agent` |
-| `AGENT_ID_HUMAN_LIAISON` | `human-liaison-agent` |
-
-These are not used for tagging or filtering today. Only the conformance and code-review commands assign one to `$AGENT_ID`, and nothing passes that variable on to `memory_write.py`; the retrieval trace uses a separate vocabulary (`PHASE_AGENT_ID` in `memory_retrieve.py`). Wiring them through or removing them is tracked in [#491](https://github.com/omniscient/dark-factory/issues/491).
+`scripts/agent_roles.sh` used to declare 13 `AGENT_ID_*` role constants and `MEMORY_PROJECT`. They were dead: nothing consumed `$AGENT_ID`, `write_memory_entry` never passed a role to `memory_write.py`, and retrieval used its own vocabulary (`PHASE_AGENT_ID` in `memory_retrieve.py`). The file and the `AGENT_ID=` assignments in the conformance and code-review commands were removed in [#491](https://github.com/omniscient/dark-factory/issues/491). Memory tagging and filtering go through `--source` and `PHASE_SOURCE_MAP` only.

@@ -15,8 +15,11 @@ class Tracker(ABC):
         optionally further filtered to items carrying every label in `labels`."""
 
     @abstractmethod
-    def get_item(self, id: str) -> dict:
-        """Title/body/labels (+ comments, adapter-dependent) for a single item."""
+    def get_item(self, id: str, fields: tuple | None = None) -> dict:
+        """Title/body/labels/state (+ comments, adapter-dependent) for a single item.
+        `fields` is a tuple of field names (e.g. ("body",) or ("state",)); the result
+        contains exactly those keys. None means the adapter's default set. `state` is
+        "OPEN" or "CLOSED"."""
 
     @abstractmethod
     def get_comments(self, id: str) -> list:

@@ -556,3 +556,33 @@ def test_render_push_succeeded_matches_golden_unchanged():
     body = cr.render(record, prior_comment_body="", timestamp="2026-07-22 13:02 UTC",
                      intent="fix")
     assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
+
+
+def test_format_savings_block_measured_only_not_in_headline():
+    """#487: savings from undelivered features must not appear as 'Context savings'."""
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 0,
+        "savings_pct": 0.0,
+        "measured_only_savings_tokens": 4200,
+        "measured_only_sections": ["architecture_md"],
+        "fallback_events": [],
+    }
+    block = cr.format_savings_block(budget)
+    assert "Context savings" not in block
+    assert "Measured-only (not delivered to the prompt): 4.2K tokens" in block
+    assert "architecture_md" in block
+
+
+def test_format_savings_block_realised_and_measured_only_separate():
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 3000,
+        "savings_pct": 15.5,
+        "measured_only_savings_tokens": 1000,
+        "measured_only_sections": ["memory_context"],
+        "fallback_events": [],
+    }
+    block = cr.format_savings_block(budget)
+    assert "**Context savings: 3.0K tokens (15.5%)**" in block
+    assert "Measured-only (not delivered to the prompt): 1.0K tokens" in block

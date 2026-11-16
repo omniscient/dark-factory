@@ -210,13 +210,18 @@ artifacts are present, the comment includes a savings line:
 **Fallbacks:** architecture_md: safety_keyword:migration
 ```
 
-- **Context savings** = total tokens saved across all optimized sections vs. the unoptimized baseline.
+- **Context savings** = tokens saved by features whose output is actually delivered to the phase's
+  prompt, vs. the unoptimized baseline. Today that is the diff cap in conformance and code-review
+  only (`_DELIVERED_SAVINGS` in `context_budget.py`).
+- **Measured-only** = savings `context_budget.py` computed for features that do not reach a prompt
+  (architecture slice, memory cap). Reported on a separate line and never added to the headline
+  figure: `Measured-only (not delivered to the prompt): 4.2K tokens (architecture_md)`. Delivery
+  wiring for refine/plan/implement is not done ([#487](https://github.com/omniscient/dark-factory/issues/487));
+  memory is also being changed by [#486](https://github.com/omniscient/dark-factory/issues/486).
 - **Fallbacks** = sections where a safety trigger fired and the full baseline was loaded instead of the optimized version. These are expected and correct behavior (not errors).
 
-The figure is computed from what `context_budget.py` measures, not from what reached the
-prompt. It includes the architecture slice saving even though the slice is not delivered to
-the phase commands, so it currently overstates real savings
-([#487](https://github.com/omniscient/dark-factory/issues/487)).
+Artifacts written before this change fold measured-only savings into `savings_tokens`, so older
+cost reports can still show the overstated figure.
 
 If no savings line appears, the `context-budget.json` artifact was absent, `schema_version` < 2
 (older run artifact), or the computed saving was zero.
@@ -232,6 +237,8 @@ The `context-budget.json` artifact (in `$ARTIFACTS_DIR`) includes per-section sa
   "schema_version": 2,
   "savings_tokens": 4200,
   "savings_pct": 28.5,
+  "measured_only_savings_tokens": 3800,
+  "measured_only_sections": ["architecture_md"],
   "fallback_events": [
     {"section": "architecture_md", "reason": "safety_keyword:migration"}
   ],

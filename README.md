@@ -29,7 +29,9 @@ GitHub issue with an acceptance-tested specification, the factory:
 The factory is **product-agnostic**: all target-specific knowledge lives in a
 `.factory/adapter.yaml` file and `.factory/hooks/` committed to the target repo.
 When the adapter is absent the built-in defaults are MarketHawk's, so a new product
-must supply its own; a missing `smoke-gate` hook refuses the run outright (#436) —
+must supply its own; an adapter that fails to parse or validate refuses the run
+([#492](https://github.com/omniscient/dark-factory/issues/492)) and a missing `smoke-gate`
+hook refuses it too (#436) —
 see [`docs/onboarding-new-target.md`](docs/onboarding-new-target.md)
 and the starter files in [`templates/new-target/`](templates/new-target/).
 
@@ -176,9 +178,10 @@ FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | 
 ```
 
 `jira` is registered but not yet usable end to end: `tracker get` fails under it
-([#488](https://github.com/omniscient/dark-factory/issues/488)), and a selection made
-in `instance.env` is not passed to run containers
-([#489](https://github.com/omniscient/dark-factory/issues/489)).
+([#488](https://github.com/omniscient/dark-factory/issues/488)), and the scheduler poll
+loop still shells `gh` directly ([#489](https://github.com/omniscient/dark-factory/issues/489)).
+A selection (and the provider's variables) made in `instance.env` is forwarded to run
+containers by `dispatch()`.
 `databricks`/`openai` are recognized but not yet implemented (the model
 gateway is a later step). An unknown value for any of the three, or
 missing provider-specific required env, fails scheduler startup loudly via

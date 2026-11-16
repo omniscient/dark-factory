@@ -99,11 +99,13 @@ docker run --rm -v "TARGET:/src:ro" --entrypoint bash ghcr.io/omniscient/dark-fa
 ```
 
 Expected: `adapter OK`. Anything else prints `adapter INVALID: <reason>` and exits 1.
-Do not skip this check. The factory does not run it for you: a run that meets an
-adapter it cannot parse or validate logs the error to its own stderr and carries on
-with the built-in MarketHawk defaults, exactly the outcome this file exists to prevent
-([#492](https://github.com/omniscient/dark-factory/issues/492)). A YAML slip such as a
-bad escape inside a double-quoted regex is enough to trigger it.
+Do not skip this check. The factory runs the same validation at run start and refuses
+the run (stderr, a `hook-warnings.log` line, and a ticket comment) when the committed
+adapter is invalid, rather than carrying on with the built-in MarketHawk defaults
+([#492](https://github.com/omniscient/dark-factory/issues/492)); the scheduler also logs a
+`WARNING: ADAPTER INVALID` line at boot. `close` and `recheck` runs are not refused. Catching
+it here saves a failed ticket attempt. A YAML slip such as a bad escape inside a
+double-quoted regex is enough to trigger it.
 
 ### 3b. `.factory/hooks/smoke-gate` (required)
 

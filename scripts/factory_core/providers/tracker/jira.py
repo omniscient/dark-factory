@@ -115,15 +115,26 @@ class JiraTracker(Tracker):
         issues = self._search_all(jql)
         return [self._issue_to_item(issue) for issue in issues]
 
-    def get_item(self, id: str) -> dict:
+    def get_item(self, id: str, fields: tuple | None = None) -> dict:
+        """Same dict shape as GitHubTracker.get_item, restricted to `fields` when given.
+        `state` is "OPEN"/"CLOSED" (CLOSED iff the canonical status is `done`), matching
+        what `scheduler.sh` reads for `Depends on:` gating. `comments` is fetched only
+        when requested. Unknown field names are omitted."""
         issue = self._request("GET", f"/issue/{id}")
-        fields = issue.get("fields", {})
-        return {
-            "title": fields.get("summary"),
-            "body": fields.get("description") or "",
-            "labels": fields.get("labels", []),
-            "status": self._canonical_status(fields),
+        issue_fields = issue.get("fields", {})
+        status = self._canonical_status(issue_fields)
+        full = {
+            "title": issue_fields.get("summary"),
+            "body": issue_fields.get("description") or "",
+            "labels": issue_fields.get("labels", []),
+            "status": status,
+            "state": "CLOSED" if status == "done" else "OPEN",
         }
+        if not fields:
+            return full
+        if "comments" in fields:
+            full["comments"] = self.get_comments(id)
+        return {k: full[k] for k in fields if k in full}
 
     def get_comments(self, id: str) -> list:
         data = self._request("GET", f"/issue/{id}/comment")

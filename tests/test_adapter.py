@@ -1222,3 +1222,28 @@ def test_boundary_floor_survives_a_scalar_safety_value(tmp_path):
         vals = adapter.get(str(tmp_path), f"safety.{key}")
         assert "^" not in vals, f"{key} exploded a scalar into characters: {vals}"
         assert set(floor) <= set(vals)
+
+
+# ── #492: an invalid adapter.yaml fails open, but the boundary floor still applies ─────
+
+def _write_invalid_adapter(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("safety: [unclosed\n")
+
+
+def test_safety_path_patterns_invalid_adapter_keeps_floor(tmp_path):
+    _write_invalid_adapter(tmp_path)
+    sys.path.insert(0, "scripts")
+    import diff_rank as dr
+    patterns = [p.pattern for p in dr._safety_path_patterns(str(tmp_path))]
+    for floor in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert floor in patterns
+
+
+def test_migration_seed_auth_patterns_invalid_adapter_keeps_floor(tmp_path):
+    _write_invalid_adapter(tmp_path)
+    sys.path.insert(0, "scripts")
+    import gate_blast_radius as gbr
+    patterns = [p.pattern for p in gbr._migration_seed_auth_patterns(str(tmp_path))]
+    for floor in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert floor in patterns

@@ -13,6 +13,7 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/scheduler_lib.sh"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/provider_env.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
@@ -374,8 +375,11 @@ dispatch() {
     profile_flags+=(--profile factory-model-proxy)
   fi
   echo "[$(date -u +%FT%TZ)] dispatch command=\"${command}\""
+  # Forward provider selection/env set in the scheduler's env (#489); see scripts/provider_env.sh.
+  local -a env_flags=()
+  mapfile -t env_flags < <(provider_env_flags)
   docker compose -f /opt/dark-factory/docker-compose.yml "${profile_flags[@]}" run \
-    -d --rm dark-factory "$command" || exit_code=$?
+    "${env_flags[@]}" -d --rm dark-factory "$command" || exit_code=$?
   if [ "$exit_code" -ne 0 ]; then
     echo "[$(date -u +%FT%TZ)] dispatch_error command=\"${command}\" exit=${exit_code}" >&2
   fi
@@ -1532,6 +1536,18 @@ fi
 STALE_COUNT=$(docker ps -a --filter "name=mh-preview-" --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$STALE_COUNT" -gt "$STALE_PREVIEW_WARN_COUNT" ]; then
   echo "[$(date -u +%FT%TZ)] WARNING: $STALE_COUNT stale mh-preview-* containers found (threshold: ${STALE_PREVIEW_WARN_COUNT}). Run 'docker ps -a --filter name=mh-preview-' to inspect and clean up." >&2
+fi
+
+# --- Startup: validate the mounted target's adapter.yaml once (#492) ---
+# Warn-only: the mounted checkout can be stale, so the run-start check in entrypoint.sh
+# (which refuses runs on the freshly cloned adapter) is the enforcement point. Never fatal.
+if [ -f /workspace/project/.factory/adapter.yaml ]; then
+  if ADAPTER_CHECK_OUT=$(PYTHONPATH="${FACTORY_SCRIPTS_DIR:-/opt/dark-factory/scripts}" \
+      python3 -m factory_core.adapter --clone-dir /workspace/project --validate 2>&1 >/dev/null); then
+    :
+  else
+    echo "[$(date -u +%FT%TZ)] WARNING: ADAPTER INVALID at /workspace/project/.factory/adapter.yaml — $(printf '%s' "$ADAPTER_CHECK_OUT" | tr '\n' ' ') — runs on this target will be refused until it is fixed (#492)" >&2
+  fi
 fi
 
 # --- Main loop ---

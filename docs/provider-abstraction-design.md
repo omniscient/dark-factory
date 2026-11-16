@@ -48,7 +48,7 @@ Identical across all three axes:
   - `FACTORY_CODEHOST` (default `github`)
   - `FACTORY_MODEL_PROVIDER` (default `anthropic`)
 - **Config + secrets** — provider-specific connection config and secrets live in the gitignored instance env (`deploy/instance.env`), never in the committed adapter. Examples: `JIRA_BASE_URL`, `JIRA_PROJECT_KEY`, `JIRA_TOKEN`, `JIRA_EPIC_LINK_FIELD`; `GITLAB_BASE_URL`, `GITLAB_TOKEN`; gateway URL + key.
-  > **Implementation status:** `deploy/instance.env` is read only by the scheduler container (`deploy/docker-compose.yml` `env_file`). Dispatched run containers read `<PROJECT_DIR>/.archon/.env` instead (`run-compose.yml` `env_file`), run the same preflight (`entrypoint.sh`), and `run-compose.yml` does not pass `FACTORY_TRACKER`, `FACTORY_CODEHOST`, `FACTORY_MODEL_PROVIDER` or `JIRA_*` through from the scheduler. A selection made only in `instance.env` therefore reaches the scheduler but not the runs; today both files must carry the provider selection and the provider's env. Tracked in [#489](https://github.com/omniscient/dark-factory/issues/489).
+  > **Implementation status:** `deploy/instance.env` is read only by the scheduler container (`deploy/docker-compose.yml` `env_file`). Dispatched run containers read `<PROJECT_DIR>/.archon/.env` instead (`run-compose.yml` `env_file`) and run the same preflight (`entrypoint.sh`). `scheduler.sh` `dispatch()` forwards `FACTORY_TRACKER`, `FACTORY_CODEHOST`, `FACTORY_MODEL_PROVIDER` and the provider variables in `scripts/provider_env.sh` as `docker compose run -e NAME` when they are set and non-empty in the scheduler's environment, so a selection made only in `instance.env` reaches the runs ([#489](https://github.com/omniscient/dark-factory/issues/489)). It is not an `environment:` entry in `run-compose.yml` because that would beat `env_file` and blank values supplied via `.archon/.env`. `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are not forwarded. `tests/test_provider_env_passthrough.py` asserts every `required_env()` is covered.
 - **Status representation reuses `FACTORY_STATUS_*`.** The existing seven env vars already carry the per-instance status representation — GitHub single-select option IDs today, Jira status *names* under the Jira adapter. The provider interprets them. No new mapping surface.
 - **Optional target-level overrides** — the already-reserved `adapter.yaml` keys `board:` / `repo:` / `labels:` (deep-merged, fail-open via `factory_core/adapter.py`) hold optional per-target tweaks (custom WIP limits, label-vocabulary overrides). Absent by default; not required for any adapter to function.
 - **Boot preflight** — a provider-aware validator replaces today's single `CLAUDE_CODE_OAUTH_TOKEN || ANTHROPIC_API_KEY` check. Each provider declares its required env; a misconfigured instance dies loudly at startup, matching the current `GH_TOKEN` check.
@@ -118,7 +118,7 @@ python3 $CLI preflight   # provider-aware boot validation; prints "providers pre
 
 `tracker label` accepts `--add` and `--remove` more than once. `codehost merge` deletes the branch by default.
 
-> **Known defect:** the CLI passes keyword arguments the contracts do not declare. `tracker get` calls `get_item(id, fields=…)`, but the `Tracker` ABC and `JiraTracker.get_item` take only `id`, so `tracker get` raises `TypeError` under `FACTORY_TRACKER=jira`. The codehost verbs likewise pass `repo=` / `exact=` / `fields=`, which only `GitHubCodeHost` accepts. Tracked in [#488](https://github.com/omniscient/dark-factory/issues/488).
+> **Contract note:** the ABCs declare exactly the keyword arguments the CLI passes: `get_item(id, fields=None)` on the tracker, and `repo=` / `exact=` / `fields=` on the codehost verbs that use them, each with a default. A signature-conformance test (`tests/test_provider_signature_conformance.py`) keeps every implementation in line.
 
 ## 5. Axis 1 — Tracker
 
@@ -182,7 +182,7 @@ Plain git stays inline; the only git-adjacent method is `remote_url()`.
 | `get_change_inline_comments(id)` | review feedback | REST `/pulls/{n}/comments` | discussions API |
 | `close_keyword(issue_id)` → str | close-on-merge snippet **iff tracker==host**, else `""` | `"Closes #N"` | `"Closes #N"` or `""` |
 
-As implemented (`providers/codehost/base.py`), the ABC has 12 abstract methods (the 11 designed here plus `find_change_details`) and a `required_env()` classmethod. `open_change` returns the new id; `update_change_body` and `merge_change` return `bool`. `GitHubCodeHost` accepts extra `repo` / `exact` / `fields` parameters that the ABC does not declare for most methods, and the CLI passes them (see the known defect in §4.2, [#488](https://github.com/omniscient/dark-factory/issues/488)).
+As implemented (`providers/codehost/base.py`), the ABC has 12 abstract methods (the 11 designed here plus `find_change_details`) and a `required_env()` classmethod. `open_change` returns the new id; `update_change_body` and `merge_change` return `bool`. The ABC declares the optional `repo` / `exact` / `fields` parameters the CLI passes (see §4.2); every implementation, including the `GitLabCodeHost` stub, accepts them.
 
 ### 6.2 GitHub reference
 
@@ -294,8 +294,8 @@ Each step is independently shippable; a phased implementation plan will decompos
 |---|---|---|
 | 1. ABCs + GitHub implementations + parity tests | Done | `providers/tracker/{base,github}.py`, `providers/codehost/{base,github}.py`; `tests/test_provider_tracker_parity.py`, `tests/test_provider_codehost_parity.py` |
 | 2. Route hosted calls through the provider CLIs | **Partial** | Some call sites migrated; `board.py`, scheduler board discovery and many inline `gh issue` calls are not (§4.1). [#489](https://github.com/omniscient/dark-factory/issues/489) |
-| 3. Selection + provider-aware boot preflight | Done | `providers/__init__.py`; `cli.py preflight` runs at the top of `scheduler.sh` and `entrypoint.sh`. Selection env is not passed to run containers (§4, [#489](https://github.com/omniscient/dark-factory/issues/489)) |
-| 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. `tracker get` fails under Jira ([#488](https://github.com/omniscient/dark-factory/issues/488)) |
+| 3. Selection + provider-aware boot preflight | Done | `providers/__init__.py`; `cli.py preflight` runs at the top of `scheduler.sh` and `entrypoint.sh`. Selection env is forwarded to run containers by `scheduler.sh` `dispatch()` via `scripts/provider_env.sh` (§4) |
+| 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. |
 | 5. Reference model gateway + `databricks` / `openai` | **Not implemented** | `providers/model.py` hard-fails preflight for both. A transparent proxy + ledger shipped instead (§7.4) |
 | 6. Adapter-authoring guide + GitLab sketch | Done | `docs/adapter-authoring-guide.md`; `providers/codehost/gitlab.py` (unregistered stub, §6.3) |
 
