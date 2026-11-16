@@ -2,7 +2,8 @@
 """Write-through memory adapter — flat-file only.
 
 Ports write logic from gate_lib.sh::write_memory_entry() to Python,
-adding normalized dedup, agent/scope tagging, and index.jsonl stub write.
+adding normalized dedup and agent/scope tagging. It does not write index.jsonl
+(see the note at the end of main()).
 
 Usage:
     python3 memory_write.py \\
@@ -13,14 +14,11 @@ Usage:
         --issue       <issue number>
 
 Exit 0: write succeeded or intentionally skipped (dedup/cap).
-Exit 1: markdown I/O error. index.jsonl failures do NOT set exit 1.
+Exit 1: markdown I/O error.
 """
 import argparse
 import calendar
-import json
-import os
 import re
-import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -92,85 +90,6 @@ def _parse_args():
     return p.parse_args()
 
 
-def _git_origin_name(start_dir):
-    """Bare repo name from origin, or None. Never raises; never echoes the URL.
-
-    In run containers origin embeds the GitHub token (entrypoint.sh clones from
-    https://${GH_TOKEN}@github.com/...), so the URL must never leave this function.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(start_dir), "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    url = result.stdout.strip()
-    if not url:
-        return None
-    # Split on ':' too, so scp-style remotes with no path slash still resolve.
-    name = re.split(r"[/:]", url.rstrip("/"))[-1]
-    if name.endswith(".git"):
-        name = name[: -len(".git")]
-    # Malformed origins with no path (e.g. "https://ghp_x@github.com") leave the
-    # userinfo/token glued to the host in `name`. Strip up to the last '@' so a
-    # token can never end up in stderr or index.jsonl.
-    if "@" in name:
-        name = name.rsplit("@", 1)[-1]
-    return name or None
-
-
-def _resolve_project(start_dir):
-    """index.jsonl project: FACTORY_REPO -> FACTORY_PRODUCT_NAME -> git origin -> "unknown".
-
-    Every outcome returns a string; unresolved or mismatched values warn on stderr
-    (one line) instead of failing the write — the field is provenance only.
-    """
-    env_name = (os.environ.get("FACTORY_REPO", "").strip()
-                or os.environ.get("FACTORY_PRODUCT_NAME", "").strip())
-    git_name = _git_origin_name(start_dir)
-    if env_name:
-        if git_name and git_name.lower() != env_name.lower():
-            print(
-                f"memory-write: WARNING: project '{env_name}' does not match git origin "
-                f"'{git_name}' (FACTORY_REPO defaulted?)",
-                file=sys.stderr,
-            )
-        return env_name
-    if git_name:
-        return git_name
-    print(
-        "memory-write: WARNING: project unresolved (FACTORY_REPO/FACTORY_PRODUCT_NAME "
-        "unset, no git origin) - writing project:unknown",
-        file=sys.stderr,
-    )
-    return "unknown"
-
-
-def _write_index(index_path, args, agent_id, scope, today_str, expires_str, project):
-    record = {
-        "project": project,
-        "type": "avoidance",
-        "status": "active",
-        "source": args.source,
-        "agent_id": agent_id,
-        "phase": args.source,
-        "issue_number": args.issue,
-        "files": [args.path_prefix],
-        "scope": scope,
-        "content": args.text,
-        "created_at": today_str,
-        "expires_at": expires_str,
-    }
-    try:
-        with index_path.open("a") as fh:
-            fh.write(json.dumps(record) + "\n")
-    except OSError as exc:
-        print(f"memory-write: WARNING: index.jsonl: write failed ({exc})", file=sys.stderr)
-
-
 def main():
     args = _parse_args()
     target = Path(args.target)
@@ -178,7 +97,6 @@ def main():
     today_str = today.strftime("%Y-%m-%d")
     expires_str = _add_months(today, 6).strftime("%Y-%m-%d")
     scope = _scope_from_stem(target.stem)
-    agent_id = args.source
 
     if not args.text.strip():
         print("memory-write: error: --text is empty", file=sys.stderr)
@@ -235,7 +153,6 @@ def main():
 
     # Step 2: Normalized dedup check + reinforcement
     candidate_norm = _normalize(args.text)
-    skip_index = False
 
     for i, line in enumerate(lines):
         if not _ENTRY_RE.match(line):
@@ -257,7 +174,6 @@ def main():
                 print(f"memory-write: error writing {target}: {exc}", file=sys.stderr)
                 sys.exit(1)
             print(f"memory-write: reinforced existing entry in {target}")
-            skip_index = True
             break
     else:
         # Step 3: Cap check (30 authoritative entries per file).
@@ -265,7 +181,6 @@ def main():
         count = sum(1 for l in lines if _ENTRY_RE.match(l))
         if count >= 30:
             print(f"memory-write: cap reached ({count} entries) in {target} — skipping write")
-            skip_index = True
         else:
             # Step 4: Build entry with full tag set per #645 contract.
             # Strip --> and newlines from metadata fields to prevent early comment closure.
@@ -297,13 +212,11 @@ def main():
                 print(f"memory-write: error writing {target}: {exc}", file=sys.stderr)
                 sys.exit(1)
 
-    # Step 6: Best-effort index.jsonl write (skip when markdown was a no-op)
-    if not skip_index:
-        project = _resolve_project(target.parent)
-        _write_index(
-            target.parent / "index.jsonl", args, agent_id, scope, today_str, expires_str, project
-        )
-
+    # No index.jsonl write (#486). The markdown file is the only store this script
+    # writes. The index rows it used to append lacked the `id`/`source_file` fields
+    # the retriever requires, so they were never read; and any row the retriever
+    # *can* read would flip retrieval to the index path and hide every markdown-only
+    # entry. Readable rows come only from `memory_import.py`.
     sys.exit(0)
 
 

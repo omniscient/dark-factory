@@ -46,10 +46,7 @@ If your output contradicts an existing ADR, surface it explicitly rather than si
 
 The memory schema and lifecycle are specified in [`dark-factory-memory-contract.md`](dark-factory-memory-contract.md); the operator runbook is [`dark-factory-memory-v2.md`](dark-factory-memory-v2.md). This section covers only how entries are tagged and filtered.
 
-`scripts/memory_write.py` tags each `index.jsonl` row with:
-
-- `project` — resolved from `FACTORY_REPO`, then `FACTORY_PRODUCT_NAME`, then the git origin name. It is provenance only.
-- `source`, `phase` and `agent_id` — all three hold the `--source` value, i.e. the writing phase (`refine`, `conformance`, `code-review`, …). `agent_id` is not a separate role identity.
+`scripts/memory_write.py` tags each markdown entry with `source:` and `agent:` (both hold the `--source` value, i.e. the writing phase: `refine`, `conformance`, `code-review`, …; `agent` is not a separate role identity), plus `scope:` and `path:`. It does not write `index.jsonl`.
 
 ### Cross-phase read filter
 

@@ -19,7 +19,7 @@ As of T3b (#733), the enforcement flags are on for conformance, code-review, ref
 | Feature | Config key | Env override | Effect when enabled | Status in a run |
 |---------|-----------|--------------|---------------------|-----------------|
 | Architecture slicing | `token_optimization.architecture.enabled` | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` | Computes the component-relevant slice of ARCHITECTURE.md | **Telemetry only.** `context_budget.py` measures the slice, but no DAG node produces the context pack that would deliver it, so phase commands still read the full file ([#487](https://github.com/omniscient/dark-factory/issues/487)) |
-| Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) | **Index path only.** The cap is not applied on the markdown fallback path, which is the path in use for the self-target ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
+| Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) | Applies on both the index path and the markdown fallback path (the path in use for the self-target); on the markdown path entries are ranked by `path:` tag specificity, label boost and `date:` recency ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
 | Comment digesting | *(none read in a run — see below)* | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` | Collapses raw comment history into a single human-feedback digest | Active for `continue` runs |
 | Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap | Active in conformance and code-review |
 | Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config | Changes the prompt only through the diff cap in conformance and code-review (see Budget Enforcement) |
@@ -56,7 +56,7 @@ token_optimization:
     min_tokens: 2500
   memory:
     enabled: true
-    max_entries: 8           # not read by any script; top-k is a constant in memory_retrieve.py
+    max_entries: 8           # read by memory_retrieve.py; falls back to TOP_K_DEFAULT = 8
     max_tokens: 1500
     min_tokens: 750
   comments:
@@ -100,8 +100,6 @@ runs on the baked defaults.
   per-feature switches.
 - `token_optimization.comments.enabled`: the comment-digest gate reads only the
   `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` environment variable.
-- `token_optimization.memory.max_entries`: top-k is the constant `TOP_K_DEFAULT = 8` in
-  `scripts/memory_retrieve.py`.
 
 Removing or implementing these keys is tracked in
 [#487](https://github.com/omniscient/dark-factory/issues/487).
@@ -405,7 +403,7 @@ implement command ([#487](https://github.com/omniscient/dark-factory/issues/487)
 | Cost report shows no savings line | `context-budget.json` absent, schema v1, or zero computed saving | Check for `context_budget.py` errors in the run log |
 | Architecture slice always falls back | Safety keyword in labels or changed files | Expected behavior; check `fallback_reason` in `context-budget.json` |
 | Agent still reads the full ARCHITECTURE.md | Slicing is telemetry-only | Expected today; see [#487](https://github.com/omniscient/dark-factory/issues/487) |
-| Memory returns all entries (ignores top-k) | Retrieval fell back to the markdown scan (no usable index rows), or `TOKEN_OPTIMIZATION_MEMORY_ENABLED=false` | Check `fallback_used` in `memory-trace.json`; see [#486](https://github.com/omniscient/dark-factory/issues/486) |
+| Memory returns all entries (ignores top-k) | `TOKEN_OPTIMIZATION_MEMORY_ENABLED=false` (env, or `memory.enabled: false` in the config of the clone) | Check `memory_enabled` in `memory-trace.json` |
 | Comment digest skipped | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED=false`, or the run is not a `continue` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
 | Full diff passed to code-review | `TOKEN_OPTIMIZATION_DIFF_ENABLED=false` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
 | `over_budget` fires on conformance / code-review | Reserved context (CLAUDE.md + safety fallback) reaches the 22k budget | Raise `budgets.<scenario>` in the adapter's `token_optimization` block, or use Tier 2 rollback to disable enforcement for that scenario |
