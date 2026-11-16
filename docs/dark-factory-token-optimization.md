@@ -156,10 +156,9 @@ a run.
 
 Diff ranking and architecture slicing read the run's resolved config, so they can also be
 disabled durably through the adapter (`token_optimization.diff.enabled: false` or
-`token_optimization.architecture.enabled: false` in `.factory/adapter.yaml`). Memory and
-comments cannot: the memory retriever, as `load_memory_context.sh` calls it, is not given the
-clone path and reads the baked config, and the comments config key is not read. Use the env
-override for those two.
+`token_optimization.architecture.enabled: false` in `.factory/adapter.yaml`) and memory
+(`token_optimization.memory.enabled: false`; `load_memory_context.sh` passes the clone path to the
+retriever). Comments cannot: the comments config key is not read. Use the env override for comments.
 
 **Fail-safe semantics:** Every disabled path widens context to the full/original baseline.
 Disabling a feature never silently drops content.
@@ -231,13 +230,14 @@ artifacts are present, the comment includes a savings line:
 ```
 
 - **Context savings** = tokens saved by features whose output is actually delivered to the phase's
-  prompt, vs. the unoptimized baseline. Today that is the diff cap in conformance and code-review
-  only (`_DELIVERED_SAVINGS` in `context_budget.py`).
+  prompt, vs. the unoptimized baseline. Today that is the diff cap in conformance and code-review and the
+  memory cap in refine, plan, implement and continue (`_DELIVERED_SAVINGS` in `context_budget.py`). Memory
+  counts because those phases load it through `load_memory_context.sh`, whose retriever applies the top-k /
+  token cap on both the index and markdown paths ([#486](https://github.com/omniscient/dark-factory/issues/486)).
 - **Measured-only** = savings `context_budget.py` computed for features that do not reach a prompt
-  (architecture slice, memory cap). Reported on a separate line and never added to the headline
+  (today only the architecture slice). Reported on a separate line and never added to the headline
   figure: `Measured-only (not delivered to the prompt): 4.2K tokens (architecture_md)`. Delivery
-  wiring for refine/plan/implement is not done ([#487](https://github.com/omniscient/dark-factory/issues/487));
-  memory is also being changed by [#486](https://github.com/omniscient/dark-factory/issues/486).
+  wiring of the architecture slice for refine/plan/implement is not done ([#487](https://github.com/omniscient/dark-factory/issues/487)).
 - **Fallbacks** = sections where a safety trigger fired and the full baseline was loaded instead of the optimized version. These are expected and correct behavior (not errors).
 
 Artifacts written before this change fold measured-only savings into `savings_tokens`, so older
@@ -290,15 +290,16 @@ As of T3b (#733), the enforcement flags are on for `conformance`, `code-review`,
 
 | Scenario | Enforce | Budget | Effect on the prompt |
 |----------|---------|--------|----------------------|
-| refine | **true** | **30 000** | None today: caps are exported but nothing in the refine prompt path consumes them |
-| plan | **true** | **30 000** | None today, for the same reason |
+| refine | **true** | **30 000** | Memory cap only (via `load_memory_context.sh`); the other exported caps have no consumer |
+| plan | **true** | **30 000** | Memory cap only, for the same reason |
 | implement | false | 30 000 | Observe-only |
 | conformance | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
 | code-review | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
 
-Why refine and plan see no effect: the caps file is sourced only by
+Why refine and plan see only the memory effect: the caps file is sourced only by
 `scripts/load_memory_context.sh` and by the conformance and code-review commands. For refine
-and plan that leaves the memory cap, which is inert on the markdown retrieval path; the
+and plan that leaves the memory cap, which applies (the retriever caps the markdown path too,
+[#486](https://github.com/omniscient/dark-factory/issues/486)); the
 architecture cap has no consumer in the prompt path; and the comments cap has none, because
 the comment digest runs only for `continue` and does not source the file. Tracked in
 [#487](https://github.com/omniscient/dark-factory/issues/487).

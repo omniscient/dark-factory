@@ -46,7 +46,7 @@ If your output contradicts an existing ADR, surface it explicitly rather than si
 
 The memory schema and lifecycle are specified in [`dark-factory-memory-contract.md`](dark-factory-memory-contract.md); the operator runbook is [`dark-factory-memory-v2.md`](dark-factory-memory-v2.md). This section covers only how entries are tagged and filtered.
 
-`scripts/memory_write.py` tags each markdown entry with `source:` and `agent:` (both hold the `--source` value, i.e. the writing phase: `refine`, `conformance`, `code-review`, …; `agent` is not a separate role identity), plus `scope:` and `path:`. It does not write `index.jsonl`.
+`scripts/memory_write.py` tags each markdown entry with `source:` and `agent:` (both hold the `--source` value, i.e. the writing phase: `refine`, `conformance`, `code-review`, …; `agent` is not a separate role identity), plus `scope:` and `path:`. It does not write `index.jsonl`. At the 30-entry cap per file it writes the new lesson and evicts the oldest authoritative entry by `date:`.
 
 ### Cross-phase read filter
 

@@ -13,7 +13,8 @@ Usage:
         --source      <conformance|code-review|refine|implement> \\
         --issue       <issue number>
 
-Exit 0: write succeeded or intentionally skipped (dedup/cap).
+Exit 0: write succeeded, or intentionally skipped (dedup/reinforcement). At the
+30-entry cap the oldest authoritative entries are evicted to make room.
 Exit 1: markdown I/O error.
 """
 import argparse
@@ -73,6 +74,15 @@ def _extract_body(line):
     if idx != -1:
         body = body[:idx]
     return body.strip()
+
+
+CAP = 30  # authoritative entries per memory file (R4)
+
+
+def _entry_date(line):
+    """date: tag of an entry line as YYYY-MM-DD; undated entries sort as oldest."""
+    m = re.search(r"date:(\d{4}-\d{2}-\d{2})", line)
+    return m.group(1) if m else "0000-00-00"
 
 
 def _is_expired(line, today_str):
@@ -176,41 +186,57 @@ def main():
             print(f"memory-write: reinforced existing entry in {target}")
             break
     else:
-        # Step 3: Cap check (30 authoritative entries per file).
-        # Count all [PATTERN]/[AVOID]/[FIX] entries, matching the bash floor behavior.
-        count = sum(1 for l in lines if _ENTRY_RE.match(l))
-        if count >= 30:
-            print(f"memory-write: cap reached ({count} entries) in {target} — skipping write")
+        # Step 3: Build the new entry; step 6 makes room if the file is at the cap.
+        # Step 4: Build entry with full tag set per #645 contract.
+        # Strip --> and newlines from metadata fields to prevent early comment closure.
+        safe_source = args.source.replace("-->", "").replace("\n", "").replace("\r", "")
+        safe_path = args.path_prefix.replace("-->", "").replace("\n", "").replace("\r", "")
+        entry = (
+            f"- [AVOID] {args.text} "
+            f"<!-- issue:#{args.issue} date:{today_str} expires:{expires_str} "
+            f"source:{safe_source} agent:{safe_source} scope:{scope} "
+            f"path:{safe_path} -->"
+        )
+
+        # Step 5: Insert before --- delimiter, or append if absent
+        delim_idx = next(
+            (i for i, l in enumerate(lines) if l.rstrip("\n") == "---"),
+            None,
+        )
+        if delim_idx is not None:
+            lines.insert(delim_idx, entry + "\n")
         else:
-            # Step 4: Build entry with full tag set per #645 contract.
-            # Strip --> and newlines from metadata fields to prevent early comment closure.
-            safe_source = args.source.replace("-->", "").replace("\n", "").replace("\r", "")
-            safe_path = args.path_prefix.replace("-->", "").replace("\n", "").replace("\r", "")
-            entry = (
-                f"- [AVOID] {args.text} "
-                f"<!-- issue:#{args.issue} date:{today_str} expires:{expires_str} "
-                f"source:{safe_source} agent:{safe_source} scope:{scope} "
-                f"path:{safe_path} -->"
-            )
+            if lines and not lines[-1].endswith("\n"):
+                lines.append("\n")
+            lines.append(entry + "\n")
 
-            # Step 5: Insert before --- delimiter, or append if absent
-            delim_idx = next(
-                (i for i, l in enumerate(lines) if l.rstrip("\n") == "---"),
-                None,
-            )
-            if delim_idx is not None:
-                lines.insert(delim_idx, entry + "\n")
-            else:
-                if lines and not lines[-1].endswith("\n"):
-                    lines.append("\n")
-                lines.append(entry + "\n")
+        # Step 6: Cap (R4, 30 authoritative [PATTERN]/[AVOID]/[FIX] entries per file).
+        # Write the new lesson and evict the oldest authoritative entries by
+        # `date:` (undated legacy entries count as oldest; ties go to the earliest
+        # in the file) until the file is back at the cap. The new entry is never
+        # the one evicted. [PROVISIONAL] and [INVALID] lines are not counted or
+        # evicted. This matches the implement agent's R4 drop rule ("oldest by date").
+        new_idx = next(i for i, l in enumerate(lines) if l.rstrip(chr(10)) == entry)
+        evicted = 0
+        while True:
+            idxs = [i for i, l in enumerate(lines) if _ENTRY_RE.match(l) and i != new_idx]
+            if len(idxs) + 1 <= CAP:
+                break
+            victim = min(idxs, key=lambda i: (_entry_date(lines[i]), i))
+            del lines[victim]
+            if victim < new_idx:
+                new_idx -= 1
+            evicted += 1
+        if evicted:
+            print(f"memory-write: cap reached in {target} - evicted {evicted} oldest entr"
+                  f"{'y' if evicted == 1 else 'ies'} to make room")
 
-            # Write markdown (source of truth)
-            try:
-                target.write_text("".join(lines), encoding="utf-8")
-            except OSError as exc:
-                print(f"memory-write: error writing {target}: {exc}", file=sys.stderr)
-                sys.exit(1)
+        # Write markdown (source of truth)
+        try:
+            target.write_text("".join(lines), encoding="utf-8")
+        except OSError as exc:
+            print(f"memory-write: error writing {target}: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # No index.jsonl write (#486). The markdown file is the only store this script
     # writes. The index rows it used to append lacked the `id`/`source_file` fields

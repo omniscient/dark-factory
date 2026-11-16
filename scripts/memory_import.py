@@ -14,6 +14,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -44,6 +45,12 @@ ENTRY_RE = re.compile(r"^- \[([^\]]+)\] (.+?) <!-- (.+?) -->$")
 
 # Matches key:value pairs in metadata; supports keys like evidence2, evidence3
 TAG_RE = re.compile(r"(\w+\d*):([^\s>]+)")
+
+
+def _project():
+    """Target repo name, resolved like scripts/identity.sh (FACTORY_REPO; default
+    markethawk for parity)."""
+    return os.environ.get("FACTORY_REPO") or "markethawk"
 
 
 @dataclass
@@ -233,7 +240,7 @@ def parse_entry(line: str, source_file: str) -> Optional["MemoryRecord"]:
 
     return MemoryRecord(
         id=record_id,
-        project="markethawk",
+        project=_project(),
         kind=kind,
         scope=scope,
         path_prefixes=path_prefixes,
@@ -395,7 +402,7 @@ def _print_report(result: dict, memory_dir: Path, dry_run: bool) -> None:
     index_path = memory_dir / "index.jsonl"
     mode = "dry-run" if dry_run else "write"
 
-    print("Memory import — markethawk")
+    print(f"Memory import — {_project()}")
     print(f"  Source:  {memory_dir}/")
     print(f"  Records: {records_dir}/")
     print(f"  Index:   {index_path}")

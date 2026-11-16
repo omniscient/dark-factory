@@ -36,7 +36,7 @@ maps each field to its current `.archon/memory/*.md` encoding.
 | `created_at` | ISO-8601 date | `date:YYYY-MM-DD` inline comment token |
 | `updated_at` | ISO-8601 date | *(none — the only in-place update is reinforcement: when `memory_write.py` is given a lesson whose normalized text matches an existing entry, it rewrites that entry's `date:` and `expires:` instead of adding a duplicate, so `date:` is "last reinforced", not strictly "created")* |
 | `expires_at` | ISO-8601 date | `expires:YYYY-MM-DD` inline comment token |
-| `supersedes` | string (id of replaced entry) | *(implicit — cap-drop in favour of a newer entry; no explicit `supersedes` tag. `memory_maintain.py` dedup currently retags the older near-duplicate as `[INVALID: superseded by identical entry added <date>]`, which conflicts with §2; see [#486](https://github.com/omniscient/dark-factory/issues/486))* |
+| `supersedes` | string (id of replaced entry) | *(implicit — the older entry is removed: by cap eviction in favour of a newer entry, or by `memory_maintain.py` dedup when two entries are near-identical (similarity ≥ 0.90; the older by `date:` is dropped). No explicit `supersedes` tag, and never an `[INVALID]` retag)* |
 | `project` | string | *(none in flat-file; `index.jsonl` rows older than #486 carry one, but `memory_write.py` no longer writes the index)* |
 | `agent_id` | string | `agent:` inline comment token on entries written by `memory_write.py`, which sets it to the same value as `source:`. The former role constants (`scripts/agent_roles.sh`) were removed as dead code in [#491](https://github.com/omniscient/dark-factory/issues/491); tagging and filtering use `source:` only |
 | `phase` | enum: `refine`, `implement`, `conformance`, `code-review` | Overlaps with `source:` |
@@ -95,9 +95,9 @@ supersession is expressed **implicitly**: B is appended, A is removed by the R4 
 carries `supersedes: A.id` and A transitions to `status=superseded`.
 **Supersession is not invalidation** — A was never wrong; it is merely outdated. Conflating
 the two destroys the "was this ever right?" signal agents use when weighting historical context.
-Known deviation: `memory_maintain.py run` dedup (similarity ≥ 0.90) retags the older entry as
-`[INVALID: superseded by identical entry added <date>]`, which is exactly this conflation.
-Tracked in [#486](https://github.com/omniscient/dark-factory/issues/486).
+`memory_maintain.py run` dedup (similarity ≥ 0.90) follows this rule: it removes the older
+near-duplicate (by `date:`) and never retags it `[INVALID]`
+([#486](https://github.com/omniscient/dark-factory/issues/486)).
 
 **4. Promotion** — `provisional` → `active`. A `[PROVISIONAL]` entry is promoted to
 `[PATTERN]` when confirmed by a *different* issue number in a later pipeline run.
@@ -196,12 +196,13 @@ All are written as `<!-- token:value -->` comment at the end of the entry line:
 
 | Quota | Limit | Enforcement |
 |---|---|---|
-| Authoritative entries per file (`[PATTERN]` + `[AVOID]` + `[FIX]`) | Cap 30 (R4) | Two different behaviours. `memory_write.py` (refine, conformance, code-review) **skips the new entry** when the file already holds 30 and drops nothing. The implement agent is instructed by its command to drop the oldest/lowest-signal entries before committing when the count exceeds 30. |
+| Authoritative entries per file (`[PATTERN]` + `[AVOID]` + `[FIX]`) | Cap 30 (R4) | `memory_write.py` (refine, conformance, code-review) **writes the new entry and evicts the oldest authoritative entries by `date:`** until the file holds 30; undated legacy entries count as oldest, ties go to the earliest line in the file, the new entry is never the one evicted. `[PROVISIONAL]` and `[INVALID]` lines are neither counted nor evicted (no category is protected beyond that). The implement agent is instructed by its command to drop expired, then superseded, then oldest entries before committing when the count exceeds 30. |
 | Provisional entries per file | Cap 10 | Instruction to the implement agent only; no script enforces it. |
 
-The cap is not hard-enforced: as of 2026-11-16 this repo's three memory files hold 31, 31 and
-34 authoritative entries. Tracked in
-[#486](https://github.com/omniscient/dark-factory/issues/486).
+Memory files that were already over the cap are trimmed to 30 by the next `memory_write.py`
+write to them, not before: the script never rewrites a file it is not writing to. As of
+2026-11-16 this repo's three memory files hold 31, 31 and 34 authoritative entries.
+([#486](https://github.com/omniscient/dark-factory/issues/486).)
 
 Where the implement agent does drop an entry under the cap, that is the flat-file
 implementation of supersession: the older entry is `status=superseded` even though no explicit

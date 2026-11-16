@@ -250,17 +250,21 @@ def _strip_meta(body: str) -> str:
 def op_dedup(entries: list) -> DedupResult:
     """
     Pure function. Compare each pair of non-INVALID entries by body similarity.
-    If ratio >= 0.90, tag the older entry (by date:) as INVALID: superseded.
-    Returns all entries with INVALID tags applied.
+    If ratio >= 0.90, drop the older entry (by date:) and keep the newer one.
+
+    The older entry is removed, not retagged: supersession is not invalidation
+    (memory contract section 2). The older claim was never wrong, so it must not
+    be tombstoned as INVALID; in the flat file it is implicitly superseded by
+    removal. Returns the surviving entries in their original order.
     """
     working = [copy.copy(e) for e in entries]
-    deduped = 0
+    dropped = set()
 
     for i in range(len(working)):
-        if working[i].tag.startswith("INVALID"):
+        if i in dropped or working[i].tag.startswith("INVALID"):
             continue
         for j in range(i + 1, len(working)):
-            if working[j].tag.startswith("INVALID"):
+            if j in dropped or working[j].tag.startswith("INVALID"):
                 continue
             a_body = _strip_meta(working[i].body)
             b_body = _strip_meta(working[j].body)
@@ -269,16 +273,13 @@ def op_dedup(entries: list) -> DedupResult:
                 a_date = working[i].date_val or date.min
                 b_date = working[j].date_val or date.min
                 if a_date <= b_date:
-                    newer_date = working[j].meta.get("date", "unknown")
-                    working[i].tag = f"INVALID: superseded by identical entry added {newer_date}"
-                    deduped += 1
-                    break  # working[i] is now INVALID; outer loop guard catches it
+                    dropped.add(i)
+                    break  # entry i is gone; move on to the next outer entry
                 else:
-                    newer_date = working[i].meta.get("date", "unknown")
-                    working[j].tag = f"INVALID: superseded by identical entry added {newer_date}"
-                    deduped += 1
+                    dropped.add(j)
 
-    return DedupResult(entries=working, deduped_count=deduped)
+    survivors = [e for k, e in enumerate(working) if k not in dropped]
+    return DedupResult(entries=survivors, deduped_count=len(dropped))
 
 
 def invalidate_content(content: str, match: str, reason: str) -> str:

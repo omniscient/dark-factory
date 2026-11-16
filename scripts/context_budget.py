@@ -37,11 +37,19 @@ _SECTION_REGISTRY: dict[str, list[str]] = {
 # section with a baseline is measured-only telemetry (#487).
 #   diff (conformance, code-review): the commands run diff_rank.py with the exported
 #     TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS cap and review the ranked diff.
+#   memory_context (refine, plan, implement, continue): these phases load memory with
+#     load_memory_context.sh, which runs memory_retrieve.py; since #486 the retriever
+#     applies the top-k / token cap on the markdown path as well as the index path, and
+#     the capped text is what the command puts in its prompt. (implement and continue
+#     share one command, which loads memory before branching on intent.)
 # NOT delivered: architecture_md (slice is never injected; implement reads the full
-#   ARCHITECTURE.md and no node runs context_pack.py) and memory_context (the memory
-#   cap is not applied as capped output; #486 changes this). Add an entry here only
+#   ARCHITECTURE.md and no node runs context_pack.py). Add an entry here only
 #   when a phase command really consumes the optimised text.
 _DELIVERED_SAVINGS: dict[str, frozenset[str]] = {
+    "refine": frozenset({"memory_context"}),
+    "plan": frozenset({"memory_context"}),
+    "implement": frozenset({"memory_context"}),
+    "continue": frozenset({"memory_context"}),
     "conformance": frozenset({"diff"}),
     "code-review": frozenset({"diff"}),
 }

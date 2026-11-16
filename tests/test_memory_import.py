@@ -213,6 +213,20 @@ def test_expires_at_absent():
     assert record.expires_at is None
 
 
+def test_record_project_follows_factory_repo(monkeypatch):
+    line = "- [PATTERN] Foo bar baz <!-- date:2026-06-02 source:refine -->"
+    monkeypatch.setenv("FACTORY_REPO", "dark-factory")
+    assert mi.parse_entry(line, "architecture.md").project == "dark-factory"
+    monkeypatch.delenv("FACTORY_REPO")
+    assert mi.parse_entry(line, "architecture.md").project == "markethawk"
+
+
+def test_report_header_follows_factory_repo(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("FACTORY_REPO", "dark-factory")
+    mi._print_report({"per_file": {}, "totals": {"total": 0, "created": 0, "skipped": 0, "failed": 0, "index_appended": 0}, "records": []}, tmp_path, True)
+    assert "Memory import — dark-factory" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Idempotency
 # ---------------------------------------------------------------------------
