@@ -3,7 +3,8 @@
 # Usage: load_memory_context.sh <phase>
 # Env:   ARTIFACTS_DIR (required), REPO_ROOT (optional, defaults to git rev-parse),
 #        MEMORY_DIR (optional, defaults to ${REPO_ROOT}/.archon/memory),
-#        ISSUE_NUM (optional)
+#        ISSUE_NUM (optional), CLONE_DIR (optional, defaults to REPO_ROOT; its
+#        .claude/skills/refinement/config.yaml supplies the effective memory config)
 # Stdout: memory context text (empty string if memory_retrieve.py fails or has no output)
 # Side effects:
 #   - writes $ARTIFACTS_DIR/memory-context.md
@@ -28,6 +29,7 @@ MEMORY_CONTEXT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/memory_retrieve.py" \
   --files "$AFFECTED" \
   ${ISSUE_ARG} \
   --memory-dir "${MEMORY_DIR}" \
+  --clone-dir "${CLONE_DIR:-${REPO_ROOT}}" \
   --emit-trace-to "${ARTIFACTS_DIR}/memory-trace.json" 2>/dev/null || true)
 printf '%s\n' "$MEMORY_CONTEXT" > "${ARTIFACTS_DIR}/memory-context.md"
 printf '%s\n' "$MEMORY_CONTEXT"

@@ -2,8 +2,10 @@
 """
 memory_retrieve.py — Role-aware memory retrieval for Dark Factory workflows.
 
-Primary path: .archon/memory/index.jsonl + records/ (when index is present and non-empty)
-Fallback path: scan .archon/memory/*.md files directly
+Primary path: .archon/memory/index.jsonl + records/ (when index has rows carrying `id` + `source_file`)
+Fallback path: scan .archon/memory/*.md files directly (the path in use unless memory_import.py has run)
+
+Both paths rank candidates and apply the same top-k / token cap (see format_index_output).
 
 Usage:
     python memory_retrieve.py --phase implement [--files "path1\\npath2"] \\
@@ -121,6 +123,34 @@ def _is_memory_enabled(clone_dir: str | None = None) -> bool:
         except Exception:
             continue
     return True
+
+
+def _get_memory_config_int(key: str, clone_dir: str | None = None):
+    """First positive integer `token_optimization.memory.<key>` found in the config chain, else None."""
+    candidates = list(_MEMORY_CONFIG_PATHS)
+    if clone_dir:
+        candidates.insert(0, Path(clone_dir) / ".claude" / "skills" / "refinement" / "config.yaml")
+    try:
+        import yaml  # type: ignore[import]
+        for path in candidates:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                val = (data or {}).get("token_optimization", {}).get("memory", {}).get(key)
+                if val is not None:
+                    v = int(val)
+                    return v if v > 0 else None
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _get_memory_max_entries(clone_dir: str | None = None) -> int:
+    """Return the top-k entry cap: config `token_optimization.memory.max_entries` → TOP_K_DEFAULT."""
+    v = _get_memory_config_int("max_entries", clone_dir)
+    return v if v is not None else TOP_K_DEFAULT
 
 
 def _get_memory_max_tokens(clone_dir: str | None = None) -> int:
@@ -290,6 +320,27 @@ def scan_markdown_files(memory_dir, area_files, files, allowed_sources):
     return results
 
 
+def markdown_candidates(results, files):
+    """Turn scan_markdown_files output into ranked-capable candidate dicts.
+
+    Same shape as scan_index() candidates. Specificity comes from the entry's
+    `path:` tag, recency from its `date:` tag; both are optional.
+    """
+    candidates = []
+    for fname, lines in results.items():
+        for line in lines:
+            m = _ENTRY_RE.match(line)
+            meta = parse_meta(m.group("meta") or "") if m else {}
+            path_tag = meta.get("path", "")
+            candidates.append({
+                "source_file": fname,
+                "text": line,
+                "specificity": path_specificity([path_tag] if path_tag else [], files),
+                "created_at": meta.get("date", ""),
+            })
+    return candidates
+
+
 def format_markdown_output(results):
     """Format scan_markdown_files output as a ### Memory: block string."""
     parts = []
@@ -378,7 +429,8 @@ def format_index_output(candidates, labels=None, _cap_out=None, config_path=None
     """Format scan_index output with dual cap and label-boost ranking.
 
     Sort key: (path_specificity + label_boost, created_at DESC) globally.
-    Cap: stop at TOP_K_DEFAULT entries OR TOKEN_BUDGET_DEFAULT tokens, whichever first.
+    Cap: stop at memory.max_entries (default TOP_K_DEFAULT) entries OR the memory max_tokens
+    budget (default TOKEN_BUDGET_DEFAULT), whichever first.
     Groups selected entries by source_file in ALL_MEMORY_FILES order.
 
     When memory optimization is disabled (TOKEN_OPTIMIZATION_MEMORY_ENABLED=false or
@@ -412,6 +464,7 @@ def format_index_output(candidates, labels=None, _cap_out=None, config_path=None
     # Only resolve the budget when memory is enabled; deferred to avoid reading
     # config/env on disabled paths.
     effective_budget = _get_memory_max_tokens(clone_dir) if memory_enabled else None
+    top_k = _get_memory_max_entries(clone_dir) if memory_enabled else None
 
     for c in ranked:
         token_cost = te.estimate_tokens(c["text"])
@@ -424,8 +477,8 @@ def format_index_output(candidates, labels=None, _cap_out=None, config_path=None
             # so a single large memory never silently yields an empty block.
             # Over-budget entries are skipped individually (not a hard stop); a later
             # smaller entry may still be admitted if it fits within the remaining budget.
-            if len(selected) >= TOP_K_DEFAULT or (selected and token_total + token_cost > effective_budget):
-                if selected and token_total + token_cost > effective_budget and len(selected) < TOP_K_DEFAULT:
+            if len(selected) >= top_k or (selected and token_total + token_cost > effective_budget):
+                if selected and token_total + token_cost > effective_budget and len(selected) < top_k:
                     sys.stderr.write(
                         f"memory-cap: dropped oversized entry ({token_cost} tokens) from {c['source_file']}\n"
                     )
@@ -481,16 +534,14 @@ def retrieve_memory(memory_dir, phase, files, labels=None, _cap_out=None, clone_
         if candidates:
             return format_index_output(candidates, labels=labels, _cap_out=_cap_out, clone_dir=clone_dir)
 
+    # Markdown fallback: same ranking and cap as the index path (#486). Ranking uses
+    # what the markdown carries: `path:` tag specificity, issue-label boost, `date:` recency.
     results = scan_markdown_files(memory_dir, area_files, files, allowed_sources)
-    # Markdown fallback: populate _cap_out with zero counts so downstream consumers
-    # can distinguish "no cap applied" (fallback_used=True) from absent telemetry.
+    candidates = markdown_candidates(results, files)
+    output = format_index_output(candidates, labels=labels, _cap_out=_cap_out, clone_dir=clone_dir)
     if _cap_out is not None:
-        _cap_out["entries_selected"] = 0
-        _cap_out["entries_dropped_by_cap"] = 0
-        _cap_out["per_file_selected"] = {}
-        _cap_out["per_file_dropped"] = {}
         _cap_out["fallback_used"] = True
-    return format_markdown_output(results)
+    return output
 
 
 # ── Trace emission ────────────────────────────────────────────────────────
@@ -549,10 +600,8 @@ def emit_memory_trace(trace_path, phase, files, memory_dir, area_files, allowed_
                 "entries_dropped_by_cap": per_file_dropped.get(fname, 0),
             })
 
-        # When the index path ran and provided cap_counts, use fallback_used from
-        # cap_counts (which reflects the actual retrieval path) rather than the
-        # markdown-file existence check above, so the two signals stay consistent.
-        index_path_ran = cap_counts is not None and not cap_counts.get("fallback_used")
+        if cap_counts and cap_counts.get("fallback_used"):
+            fallback_used = True
 
         trace = {
             "schema_version": 1,
@@ -566,7 +615,7 @@ def emit_memory_trace(trace_path, phase, files, memory_dir, area_files, allowed_
             "fallback_used": fallback_used,
         }
 
-        if cap_counts and not cap_counts.get("fallback_used"):
+        if cap_counts and "entries_selected" in cap_counts:
             trace["entries_selected_total"] = cap_counts.get("entries_selected", 0)
             trace["entries_dropped_by_cap_total"] = cap_counts.get("entries_dropped_by_cap", 0)
             if "uncapped_tokens" in cap_counts:

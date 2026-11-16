@@ -1178,17 +1178,184 @@ class TestFormatIndexOutputCap:
         out = mr.format_index_output(candidates)
         assert "Entry 8" not in out
 
-    def test_markdown_fallback_unchanged_by_cap(self, tmp_path):
+
+# ── Markdown fallback cap (#486) ───────────────────────────────────────────
+
+def _md_store(tmp_path, n=49, body="Entry"):
+    """Markdown-only store (no index.jsonl) with n entries across two files."""
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    glob = [
+        f"- [PATTERN] Global {body} {i}. <!-- date:2026-01-{i % 28 + 1:02d} expires:2099-12-31 -->"
+        for i in range(n // 2)
+    ]
+    area = [
+        f"- [AVOID] Area {body} {i}. <!-- source:implement date:2026-02-{i % 28 + 1:02d} "
+        f"expires:2099-12-31 -->"
+        for i in range(n - n // 2)
+    ]
+    (mem_dir / "codebase-patterns.md").write_text("\n".join(glob) + "\n", encoding="utf-8")
+    (mem_dir / "backend-patterns.md").write_text("\n".join(area) + "\n", encoding="utf-8")
+    return mem_dir
+
+
+def _count(out):
+    return sum(1 for ln in out.splitlines() if ln.startswith("- ["))
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for k in ("TOKEN_OPTIMIZATION_MEMORY_ENABLED", "TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    # Isolate from any config baked on the host.
+    monkeypatch.setattr(mr, "_MEMORY_CONFIG_PATHS", [])
+
+
+def _clone_with_config(tmp_path, memory_cfg):
+    clone = tmp_path / "clone"
+    cfg = clone / ".claude" / "skills" / "refinement"
+    cfg.mkdir(parents=True)
+    lines = ["token_optimization:", "  memory:"] + [f"    {k}: {v}" for k, v in memory_cfg.items()]
+    (cfg / "config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(clone)
+
+
+class TestMarkdownFallbackCap:
+    def test_markdown_only_store_is_capped_at_top_k(self, tmp_path, clean_env):
+        mem_dir = _md_store(tmp_path, n=49)
+        caps = {}
+        out = mr.retrieve_memory(str(mem_dir), "implement", ["backend/app/foo.py"], _cap_out=caps)
+        assert _count(out) == mr.TOP_K_DEFAULT
+        assert caps["entries_selected"] == mr.TOP_K_DEFAULT
+        assert caps["entries_dropped_by_cap"] == 49 - mr.TOP_K_DEFAULT
+        assert caps["fallback_used"] is True
+
+    def test_markdown_output_within_token_cap(self, tmp_path, clean_env, monkeypatch):
+        mem_dir = _md_store(tmp_path, n=49, body="x" * 200)
+        monkeypatch.setenv("TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS", "300")
+        out = mr.retrieve_memory(str(mem_dir), "implement", ["backend/app/foo.py"])
+        entries = [ln for ln in out.splitlines() if ln.startswith("- [")]
+        assert 1 <= len(entries) < mr.TOP_K_DEFAULT
+        assert sum(mr.te.estimate_tokens(e) for e in entries) <= 300
+
+    def test_small_store_is_not_trimmed(self, tmp_path, clean_env):
+        mem_dir = _md_store(tmp_path, n=6)
+        out = mr.retrieve_memory(str(mem_dir), "implement", ["backend/app/foo.py"])
+        assert _count(out) == 6
+
+    def test_ranking_prefers_path_match_then_recency(self, tmp_path, clean_env):
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
         lines = [
-            f"- [PATTERN] Entry {i}. <!-- source:implement expires:2099-12-31 -->"
+            f"- [AVOID] Plain {i}. <!-- source:implement date:2026-03-{i + 1:02d} expires:2099-12-31 -->"
             for i in range(10)
         ]
-        (mem_dir / "backend-patterns.md").write_text("\n".join(lines), encoding="utf-8")
+        lines.append(
+            "- [AVOID] Specific old. <!-- source:implement date:2020-01-01 "
+            "path:backend/app/ expires:2099-12-31 -->"
+        )
+        (mem_dir / "backend-patterns.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         out = mr.retrieve_memory(str(mem_dir), "implement", ["backend/app/foo.py"])
-        for i in range(10):
-            assert f"Entry {i}" in out
+        assert "Specific old" in out          # path match outranks recency
+        assert "Plain 9" in out               # newest of the rest is kept
+        assert "Plain 0" not in out           # oldest plain entry is dropped
+        assert _count(out) == mr.TOP_K_DEFAULT
+
+    def test_label_boost_applies_on_markdown_path(self, tmp_path, clean_env):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "codebase-patterns.md").write_text(
+            "\n".join(f"- [PATTERN] G{i}. <!-- date:2026-05-{i + 1:02d} expires:2099-12-31 -->"
+                      for i in range(10)) + "\n", encoding="utf-8")
+        (mem_dir / "backend-patterns.md").write_text(
+            "- [AVOID] Backend old. <!-- source:implement date:2020-01-01 expires:2099-12-31 -->\n",
+            encoding="utf-8")
+        out = mr.retrieve_memory(str(mem_dir), "implement", [], labels=["backend"])
+        assert "Backend old" in out
+
+    def test_global_files_still_exempt_from_source_filter(self, tmp_path, clean_env):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "codebase-patterns.md").write_text(
+            "- [PATTERN] Global lesson. <!-- source:code-review expires:2099-12-31 -->\n",
+            encoding="utf-8")
+        out = mr.retrieve_memory(str(mem_dir), "implement", [])
+        assert "Global lesson" in out
+
+    def test_disabled_by_env_emits_everything(self, tmp_path, clean_env, monkeypatch):
+        mem_dir = _md_store(tmp_path, n=49)
+        monkeypatch.setenv("TOKEN_OPTIMIZATION_MEMORY_ENABLED", "false")
+        out = mr.retrieve_memory(str(mem_dir), "implement", [])
+        assert _count(out) == 49
+
+    def test_disabled_by_config_emits_everything(self, tmp_path, clean_env, monkeypatch):
+        mem_dir = _md_store(tmp_path, n=49)
+        clone = _clone_with_config(tmp_path, {"enabled": "false"})
+        out = mr.retrieve_memory(str(mem_dir), "implement", [], clone_dir=clone)
+        assert _count(out) == 49
+
+    def test_config_max_entries_is_read(self, tmp_path, clean_env):
+        mem_dir = _md_store(tmp_path, n=49)
+        clone = _clone_with_config(tmp_path, {"max_entries": 3})
+        out = mr.retrieve_memory(str(mem_dir), "implement", [], clone_dir=clone)
+        assert _count(out) == 3
+
+    def test_max_entries_falls_back_to_constant(self, tmp_path, clean_env):
+        assert mr._get_memory_max_entries(None) == mr.TOP_K_DEFAULT
+        clone = _clone_with_config(tmp_path, {"max_entries": "nonsense"})
+        assert mr._get_memory_max_entries(clone) == mr.TOP_K_DEFAULT
+
+    def test_index_path_honours_config_max_entries(self, tmp_path, clean_env):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        rows = [
+            _make_index_line(id=f"{i:016x}", summary_snippet=f"Idx {i}.",
+                             created_at=f"2026-04-{i + 1:02d}")
+            for i in range(12)
+        ]
+        (mem_dir / "index.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        clone = _clone_with_config(tmp_path, {"max_entries": 2})
+        out = mr.retrieve_memory(str(mem_dir), "implement", [], clone_dir=clone)
+        assert _count(out) == 2
+
+
+class TestCliCloneDir:
+    SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "memory_retrieve.py"
+
+    def _run(self, tmp_path, *extra, env_extra=None):
+        import os
+        import subprocess
+        env = os.environ.copy()
+        for k in ("TOKEN_OPTIMIZATION_MEMORY_ENABLED", "TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS"):
+            env.pop(k, None)
+        env.update(env_extra or {})
+        mem_dir = _md_store(tmp_path, n=49)
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--phase", "implement",
+             "--memory-dir", str(mem_dir), *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_clone_dir_config_is_honoured(self, tmp_path):
+        clone = _clone_with_config(tmp_path, {"max_entries": 4})
+        r = self._run(tmp_path, "--clone-dir", clone)
+        assert r.returncode == 0, r.stderr
+        assert _count(r.stdout) == 4
+
+    def test_clone_dir_can_disable_memory_cap(self, tmp_path):
+        clone = _clone_with_config(tmp_path, {"enabled": "false"})
+        r = self._run(tmp_path, "--clone-dir", clone)
+        assert _count(r.stdout) == 49
+
+    def test_without_clone_dir_default_cap_applies(self, tmp_path):
+        r = self._run(tmp_path)
+        assert _count(r.stdout) <= mr.TOP_K_DEFAULT
+
+    def test_env_overrides_still_win_over_clone_config(self, tmp_path):
+        clone = _clone_with_config(tmp_path, {"enabled": "true"})
+        r = self._run(tmp_path, "--clone-dir", clone,
+                      env_extra={"TOKEN_OPTIMIZATION_MEMORY_ENABLED": "false"})
+        assert _count(r.stdout) == 49
 
 
 # ── TestEmitMemoryTraceCap ─────────────────────────────────────────────────

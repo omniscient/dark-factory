@@ -148,3 +148,57 @@ class TestLoadMemoryContextScript:
             env=env,
         )
         assert result.returncode != 0, "Script should fail when phase arg is missing"
+
+
+class TestCloneDirAndCaps:
+    """load_memory_context.sh must pass --clone-dir and honour the cap (#486)."""
+
+    def _store(self, tmp_path, n=30):
+        mem = tmp_path / "store"
+        mem.mkdir()
+        (mem / "codebase-patterns.md").write_text(
+            "\n".join(f"- [PATTERN] Lesson {i}. <!-- expires:2099-12-31 -->" for i in range(n)) + "\n"
+        )
+        return mem
+
+    def _clone(self, tmp_path, cfg):
+        d = tmp_path / "clone" / ".claude" / "skills" / "refinement"
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text("token_optimization:\n  memory:\n" + cfg)
+        return tmp_path / "clone"
+
+    def _env(self, tmp_path, mem, clone):
+        env = base_env(tmp_path)
+        env["MEMORY_DIR"] = str(mem)
+        env["CLONE_DIR"] = str(clone)
+        env.pop("TOKEN_OPTIMIZATION_MEMORY_ENABLED", None)
+        env.pop("TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS", None)
+        return env
+
+    def test_default_cap_applies_to_markdown_store(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 8\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count("- [PATTERN]") == 8
+
+    def test_target_config_reaches_retriever(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    enabled: false\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count("- [PATTERN]") == 30
+
+    def test_target_config_max_entries_reaches_retriever(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 3\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.stdout.count("- [PATTERN]") == 3
+
+    def test_caps_env_is_honoured(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 8\n")
+        (tmp_path / "token-opt-caps.env").write_text(
+            "export TOKEN_OPTIMIZATION_MEMORY_ENABLED=false\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.stdout.count("- [PATTERN]") == 30

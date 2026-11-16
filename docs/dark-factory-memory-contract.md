@@ -37,7 +37,7 @@ maps each field to its current `.archon/memory/*.md` encoding.
 | `updated_at` | ISO-8601 date | *(none — the only in-place update is reinforcement: when `memory_write.py` is given a lesson whose normalized text matches an existing entry, it rewrites that entry's `date:` and `expires:` instead of adding a duplicate, so `date:` is "last reinforced", not strictly "created")* |
 | `expires_at` | ISO-8601 date | `expires:YYYY-MM-DD` inline comment token |
 | `supersedes` | string (id of replaced entry) | *(implicit — cap-drop in favour of a newer entry; no explicit `supersedes` tag. `memory_maintain.py` dedup currently retags the older near-duplicate as `[INVALID: superseded by identical entry added <date>]`, which conflicts with §2; see [#486](https://github.com/omniscient/dark-factory/issues/486))* |
-| `project` | string | *(none in flat-file; `index.jsonl` only — `memory_write.py` resolves `FACTORY_REPO` → `FACTORY_PRODUCT_NAME` → git `origin` repo name → `unknown`, #444)* |
+| `project` | string | *(none in flat-file; `index.jsonl` rows older than #486 carry one, but `memory_write.py` no longer writes the index)* |
 | `agent_id` | string | `agent:` inline comment token on entries written by `memory_write.py`, which sets it to the same value as `source:`. The former role constants (`scripts/agent_roles.sh`) were removed as dead code in [#491](https://github.com/omniscient/dark-factory/issues/491); tagging and filtering use `source:` only |
 | `phase` | enum: `refine`, `implement`, `conformance`, `code-review` | Overlaps with `source:` |
 | `issue_number` | int | `issue:#N` inline comment token |

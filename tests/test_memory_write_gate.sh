@@ -43,25 +43,9 @@ ENTRY_COUNT=$(grep -c '\[AVOID\]' "$MD" || true)
 assert "dedup skips second identical write (count=1)" \
   "$([ "$ENTRY_COUNT" -eq 1 ] && echo 0 || echo 1)"
 
-# ── Test 3: index.jsonl created next to the markdown ────────────────────────
-assert "index.jsonl created" \
-  "$([ -f "$TMP/index.jsonl" ] && echo 0 || echo 1)"
-
-# ── Test 4: index.jsonl record is valid JSON with agent_id field ─────────────
-INDEX_CHECK_VALID=$(python3 - "$TMP/index.jsonl" <<'PYEOF' && echo 0 || echo 1
-import json, sys
-json.loads(open(sys.argv[1]).readline())
-PYEOF
-)
-assert "index.jsonl record is valid JSON" "$INDEX_CHECK_VALID"
-
-INDEX_CHECK_AGENT=$(python3 - "$TMP/index.jsonl" <<'PYEOF' && echo 0 || echo 1
-import json, sys
-r = json.loads(open(sys.argv[1]).readline())
-exit(0 if r['agent_id'] == 'conformance' else 1)
-PYEOF
-)
-assert "index.jsonl agent_id is conformance" "$INDEX_CHECK_AGENT"
+# ── Test 3/4: no index.jsonl is written (rows lacked id/source_file; #486) ───
+assert "index.jsonl not created" \
+  "$([ ! -f "$TMP/index.jsonl" ] && echo 0 || echo 1)"
 
 # ── Test 5: route_memory_file() still works (bash function unchanged) ─────────
 ROUTE_RESULT=$(route_memory_file 'dark-factory/scripts/foo.sh')
