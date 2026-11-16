@@ -80,9 +80,9 @@ providers/
 > - `board.py` does **not** delegate to `get_tracker()`. It still shells `gh project item-list` / `item-edit` / `item-add`, `gh api` and `gh issue comment` directly. Scheduler status moves go through `scripts/factory_core/cli.py board-move` → `board.py`; only the run container's status moves (`entrypoint.sh` `set_board_status`) go through `tracker set-status`.
 > - Scheduler board discovery (`fetch_board_items`) is still an inline `gh api graphql` query, and the off-board `ready-for-agent` detector is an inline `gh issue list`.
 > - Inline `gh issue comment` / `gh issue list` / `gh issue close` / `gh api …/comments` calls remain in `scheduler.sh`, `entrypoint.sh`, `smoke_gate.sh` and the run DAG.
-> - Routed through the provider CLI today: in the scheduler, label add/remove, `tracker get` (dependency gating), `get-comments`, `get-status-limits` and `get-rate-budget`; entrypoint status moves; and the smoke gate's `tracker create` / `tracker comment`.
+> - Routed through the provider CLI today (not exhaustive): in the scheduler, tracker label add/remove, `tracker get` (dependency gating), `get-comments`, `get-status-limits` and `get-rate-budget`, plus the code-host verbs `reviews`, `mergeable`, `remote-url`, `find-change` and `checks`; in the entrypoint, status moves, `tracker comment` and `tracker get`; in the run DAG, `tracker get`, `set-status`, `label` and `comment`; and the smoke gate's `tracker create` / `tracker comment`.
 >
-> Net effect: `FACTORY_TRACKER=jira` passes preflight and the `JiraTracker` verbs work, but it cannot drive the scheduler poll loop yet. Tracked in [#489](https://github.com/omniscient/dark-factory/issues/489).
+> Net effect: `FACTORY_TRACKER=jira` passes preflight and the `JiraTracker` verbs work, but it cannot drive the scheduler poll loop yet. Tracked in [#507](https://github.com/omniscient/dark-factory/issues/507).
 
 ### 4.2 CLI surface
 
@@ -204,7 +204,7 @@ host.merge_change(id) succeeds  →  tracker.resolve_item(issue_id)
 
 `close_keyword(issue_id)` returns the body snippet only when tracker == host, else `""`, so the factory never emits a dead `Closes #N`. GitHub Projects' built-in "card → Done on close" automation, which the factory leans on today for the final Done, has no Jira equivalent — so `resolve_item` performs the Done transition explicitly.
 
-> **Implementation status: not wired.** Both methods exist on the providers, but nothing calls them: no script, command or DAG node invokes `close_keyword` or `tracker resolve`. The run DAG writes a literal `Closes #${ISSUE}` into the PR body, and `main_red_fixer.py` does the same. `GitHubCodeHost.close_keyword` also returns `Closes #N` unconditionally rather than checking `FACTORY_TRACKER` (only the GitLab stub checks). A Jira tracker with a GitHub code host would therefore emit a dead `Closes #N` and never resolve the Jira issue. Tracked with the rest of the un-migrated call sites in [#489](https://github.com/omniscient/dark-factory/issues/489).
+> **Implementation status: not wired.** Both methods exist on the providers, but nothing calls them: no script, command or DAG node invokes `close_keyword` or `tracker resolve`. The run DAG writes a literal `Closes #${ISSUE}` into the PR body, and `main_red_fixer.py` does the same. `GitHubCodeHost.close_keyword` also returns `Closes #N` unconditionally rather than checking `FACTORY_TRACKER` (only the GitLab stub checks). A Jira tracker with a GitHub code host would therefore emit a dead `Closes #N` and never resolve the Jira issue. Tracked with the rest of the un-migrated call sites in [#507](https://github.com/omniscient/dark-factory/issues/507).
 
 ## 7. Axis 3 — Model endpoint
 
@@ -293,7 +293,7 @@ Each step is independently shippable; a phased implementation plan will decompos
 | Step | Status | Where |
 |---|---|---|
 | 1. ABCs + GitHub implementations + parity tests | Done | `providers/tracker/{base,github}.py`, `providers/codehost/{base,github}.py`; `tests/test_provider_tracker_parity.py`, `tests/test_provider_codehost_parity.py` |
-| 2. Route hosted calls through the provider CLIs | **Partial** | Some call sites migrated; `board.py`, scheduler board discovery and many inline `gh issue` calls are not (§4.1). [#489](https://github.com/omniscient/dark-factory/issues/489) |
+| 2. Route hosted calls through the provider CLIs | **Partial** | Some call sites migrated; `board.py`, scheduler board discovery and many inline `gh issue` calls are not (§4.1). [#507](https://github.com/omniscient/dark-factory/issues/507) |
 | 3. Selection + provider-aware boot preflight | Done | `providers/__init__.py`; `cli.py preflight` runs at the top of `scheduler.sh` and `entrypoint.sh`. Selection env is forwarded to run containers by `scheduler.sh` `dispatch()` via `scripts/provider_env.sh` (§4) |
 | 4. `JiraTracker` + fixtures + contract tests | Code done and registered | `providers/tracker/jira.py`, `tests/fixtures/jira/`, `tests/test_tracker_contract.py`. Live validation against a Jira instance is not recorded in this repo. |
 | 5. Reference model gateway + `databricks` / `openai` | **Not implemented** | `providers/model.py` hard-fails preflight for both. A transparent proxy + ledger shipped instead (§7.4) |

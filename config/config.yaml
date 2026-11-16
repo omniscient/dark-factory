@@ -7,7 +7,7 @@ scheduler:
   main_red_recheck_enabled: true # periodically recheck a red main to self-clear (#365); env: MAIN_RED_RECHECK_ENABLED overrides
   main_red_recheck_minutes: 20   # interval between red-main recheck dispatches; env: MAIN_RED_RECHECK_MINUTES overrides
   blocked_rescue_enabled: true   # promote a Blocked ticket whose PR is green+mergeable to In review instead of re-running it; env: BLOCKED_RESCUE_ENABLED overrides
-  session_window_backoff_enabled: true   # env: SESSION_WINDOW_BACKOFF_ENABLED overrides — false = old sleep-forever fallback
+  session_window_backoff_enabled: true   # read by the run container's entrypoint.sh, not by scheduler.sh; env: SESSION_WINDOW_BACKOFF_ENABLED overrides — false = old sleep-forever fallback
   session_window_buffer_minutes: 5       # added to a parsed resetsAt; env: SESSION_WINDOW_BUFFER_MINUTES overrides
   session_window_fallback_minutes: 30    # pause length when the reset time can't be parsed; env: SESSION_WINDOW_FALLBACK_MINUTES overrides
 
@@ -61,7 +61,7 @@ conflict_resolution:
 blast_radius:
   enabled: true
   hotspot_score_floor: 5.0      # files at or above this codeindex blast score trigger HUMAN_REQUIRED
-  size_budget_lines: 400        # total added+deleted lines threshold (0 = disabled)
+  size_budget_lines: 400        # total added+deleted lines threshold. 0 does NOT disable it: with size_budget_blocks: true, 0 makes every non-empty diff trip the size trigger
   size_budget_blocks: false     # true = size alone is blocking; false = advisory only
 
 dispatch_ceiling:
@@ -71,7 +71,7 @@ dispatch_ceiling:
   # XL tickets always park in Blocked for human pairing; M tickets park only on a
   # keyword title match; L tickets are never parked. M tickets (whether or not they
   # park) lose the plan-pending-review grace-window auto-advance. S is unaffected.
-  # See docs/superpowers/specs/2026-06-12-size-type-aware-dispatch-ceiling-design.md
+  # See docs/archive/2026-06-12-size-type-aware-dispatch-ceiling.md
   # Revisit: 2026-09-12
 
 epic_autopilot:
@@ -109,7 +109,7 @@ epic_autopilot:
     - ".factory/hooks/"
   # When starved (a poll dispatched nothing) and main is green, review the refined, below-ceiling
   # children of in-progress epics with Opus and advance the low-risk ones via direct-to-pr.
-  # See docs/superpowers/specs/2026-06-20-epic-autopilot-design.md
+  # See docs/archive/2026-06-20-epic-autopilot-design.md
 
 main_red_autofix:
   # kill-switch — ships OFF. To ENABLE, set MAIN_RED_AUTOFIX_ENABLED=true in .archon/.env
@@ -145,8 +145,8 @@ token_optimization:
     refine: 30000
     plan: 30000
     implement: 30000
-    conformance: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/agents/dark-factory-token-optimization.md)
-    code-review: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/agents/dark-factory-token-optimization.md)
+    conformance: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/dark-factory-token-optimization.md)
+    code-review: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/dark-factory-token-optimization.md)
   enforce:
     refine: true               # T3b: enforcement live — #733 via #731 scorecard: 0% section_at_risk
     plan: true                 # T3b: enforcement live — #733 via #731 scorecard: 0% section_at_risk
@@ -158,22 +158,22 @@ token_optimization:
   architecture:
     enabled: true             # false = skip slicing, load full ARCHITECTURE.md; env: TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED overrides
     mode: slice               # slice = emit only the changed file excerpt + its direct callers
-    max_tokens: 5000          # token ceiling for architecture context per scenario (baked — no env override)
+    max_tokens: 5000          # derivation input for budget_enforce.py, not a live cap: architecture_slice.py applies only env TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS
     min_tokens: 2500          # floor for budget_enforce.py proportional distribution (50% of max_tokens)
   memory:
     enabled: true             # false = skip top-k cap, emit all matching entries; env: TOKEN_OPTIMIZATION_MEMORY_ENABLED overrides
     mode: top_k               # top_k = emit only the K highest-scored memory entries
     max_entries: 8            # max memory entries surfaced per phase (baked — no env override)
-    max_tokens: 1500          # token ceiling for memory context per phase (baked — no env override)
+    max_tokens: 1500          # token ceiling for memory context per phase; env TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS takes priority (memory_retrieve.py)
     min_tokens: 750           # floor for budget_enforce.py proportional distribution (50% of max_tokens)
   comments:
     enabled: true             # NOT consulted by the comment-digest gate in a run (it reads only env TOKEN_OPTIMIZATION_COMMENTS_ENABLED); scheduler.sh exports this value into its own process, which does not reach run containers
     digest_after_factory_marker: true  # collapse comment blocks below the factory marker into a one-line digest
-    max_tokens: 2000          # token ceiling for comment context per scenario (baked — no env override)
+    max_tokens: 2000          # derivation input for budget_enforce.py, not a live cap: comment_digest.py applies only env TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS
     min_tokens: 1000          # floor for budget_enforce.py proportional distribution (50% of max_tokens)
   diff:
     enabled: true             # false = skip diff ranking/truncation, emit full diff; env: TOKEN_OPTIMIZATION_DIFF_ENABLED overrides
-    max_review_tokens: 6000   # token ceiling for diff context fed to the code-review sub-stage (baked — no env override)
+    max_review_tokens: 6000   # token ceiling for diff context fed to the code-review sub-stage; env TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS overrides (diff_rank.py)
     min_review_tokens: 3000   # floor for budget_enforce.py proportional distribution (50% of max_review_tokens)
   escalation:
     opus_only_for:            # scenario tags matched by factory command files (dark-factory-implement.md, etc.); reserved — nothing reads it today

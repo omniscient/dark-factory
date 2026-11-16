@@ -6,7 +6,8 @@ The Dark Factory has four context-optimization features intended to reduce input
 per run, plus per-scenario budget enforcement on top of them. All are **enabled by default**
 in config and can be independently disabled via config flags or environment variable
 overrides. Enabled is not the same as effective: architecture slicing currently changes
-telemetry only (see "What changes a phase's prompt" below) (see the status column below).
+telemetry only, and budget enforcement changes no prompt today (see "What changes a phase's
+prompt" and the status column below).
 
 Rollout phases 1–3 (observe, low-risk optimization, implementation/conformance) landed
 via issues #664–#671. Phase 4 (budget enforcement) shipped via #713–#719.
@@ -22,7 +23,7 @@ As of T3b (#733), the enforcement flags are on for conformance, code-review, ref
 | Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) | Applies on both the index path and the markdown fallback path (the path in use for the self-target); on the markdown path entries are ranked by `path:` tag specificity, label boost and `date:` recency ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
 | Comment digesting | *(none read in a run — see below)* | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` | Collapses raw comment history into a single human-feedback digest | Active for `continue` runs |
 | Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap | Active in conformance and code-review |
-| Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config | Changes the prompt only through the diff cap in conformance and code-review (see Budget Enforcement) |
+| Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config | **No prompt effect today.** The gate derives tighter caps and writes them to the caps file, but the lines are not exported, so the optimizers never see them and keep applying the config default caps ([#511](https://github.com/omniscient/dark-factory/issues/511); see Budget Enforcement) |
 
 ---
 
@@ -108,7 +109,8 @@ switches.
 
 ### What changes a phase's prompt, and what is only measured
 
-Only these change what a phase sees:
+Only these change what a phase sees, each at its **config default cap** (not a
+budget-derived one, see below):
 
 - **Diff cap** (`diff.*`): conformance and code-review receive the ranked, truncated diff.
 - **Memory cap** (`memory.*`): memory retrieval is cut to the top entries / token cap.
@@ -121,8 +123,14 @@ These are **measured only**; they do not shrink any prompt:
   was deliberately not wired (the telemetry-only path was chosen for
   [#487](https://github.com/omniscient/dark-factory/issues/487)). `context_budget.py` still
   computes the slice, and the cost report lists those savings separately as "measured-only".
-- **Budget enforcement** for refine and plan: the caps it exports have no consumer there. It
-  changes behaviour only through the diff cap in conformance and code-review.
+- **Budget enforcement**, in every scenario. The intended wiring is that the gate's derived
+  caps tighten the memory cap (refine, plan) and the diff cap (conformance, code-review)
+  through `token-opt-caps.env`. Today `budget_enforce.py` writes plain `VAR=N` lines without
+  `export`, and the consumers source the file and then start a Python child process, which
+  does not inherit un-exported shell variables. The derived caps therefore never reach
+  `memory_retrieve.py` or `diff_rank.py`, and enforce mode changes no prompt
+  ([#511](https://github.com/omniscient/dark-factory/issues/511)). The architecture and
+  comments caps additionally have no consumer in refine and plan.
 
 ### Environment overrides
 
@@ -234,6 +242,12 @@ artifacts are present, the comment includes a savings line:
   memory cap in refine, plan, implement and continue (`_DELIVERED_SAVINGS` in `context_budget.py`). Memory
   counts because those phases load it through `load_memory_context.sh`, whose retriever applies the top-k /
   token cap on both the index and markdown paths ([#486](https://github.com/omniscient/dark-factory/issues/486)).
+  That is what the figure is *meant* to count. What it can contain today is narrower
+  ([#511](https://github.com/omniscient/dark-factory/issues/511)): `context_budget.py` runs in the
+  pre-command budget nodes, before `memory-context.md` exists, so `memory_context` is reported as dropped
+  and contributes 0; and the diff figure is taken from the raw `git diff` (cut at 1000 lines) against a
+  baseline that exists only when an earlier phase left a `diff-ranking.json`, not from `diff_rank.py`'s
+  ranked output.
 - **Measured-only** = savings `context_budget.py` computed for features that do not reach a prompt
   (today only the architecture slice). Reported on a separate line and never added to the headline
   figure: `Measured-only (not delivered to the prompt): 4.2K tokens (architecture_md)`. Delivery
@@ -288,21 +302,28 @@ The `context-budget.json` artifact (in `$ARTIFACTS_DIR`) includes per-section sa
 
 As of T3b (#733), the enforcement flags are on for `conformance`, `code-review`, `refine`, and `plan`.
 
-| Scenario | Enforce | Budget | Effect on the prompt |
-|----------|---------|--------|----------------------|
-| refine | **true** | **30 000** | Memory cap only (via `load_memory_context.sh`); the other exported caps have no consumer |
-| plan | **true** | **30 000** | Memory cap only, for the same reason |
-| implement | false | 30 000 | Observe-only |
-| conformance | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
-| code-review | **true** | **22 000** | Diff cap applied by `diff_rank.py` |
+| Scenario | Enforce | Budget | Intended effect on the prompt | Effect today |
+|----------|---------|--------|-------------------------------|--------------|
+| refine | **true** | **30 000** | Derived memory cap (via `load_memory_context.sh`); the other caps have no consumer | None: config default memory cap applies |
+| plan | **true** | **30 000** | Derived memory cap, for the same reason | None: config default memory cap applies |
+| implement | false | 30 000 | Observe-only | Observe-only |
+| conformance | **true** | **22 000** | Derived diff cap applied by `diff_rank.py` | None: config default diff cap applies |
+| code-review | **true** | **22 000** | Derived diff cap applied by `diff_rank.py` | None: config default diff cap applies |
 
-Why refine and plan see only the memory effect: the caps file is sourced only by
+**Enforcement changes no prompt today**
+([#511](https://github.com/omniscient/dark-factory/issues/511)). `budget_enforce.py` writes
+the derived caps to `token-opt-caps.env` as plain `VAR=N` lines without `export`. The three
+consumers (`scripts/load_memory_context.sh` and the conformance and code-review commands)
+source the file and then start a Python child, which does not inherit un-exported shell
+variables. `memory_retrieve.py` and `diff_rank.py` therefore fall back to their config
+default caps (memory 8 entries / 1 500 tokens, diff 6 000 tokens) whatever the gate derived.
+
+Why refine and plan are wired for the memory effect only: the caps file is sourced only by
 `scripts/load_memory_context.sh` and by the conformance and code-review commands. For refine
-and plan that leaves the memory cap, which applies (the retriever caps the markdown path too,
+and plan that leaves the memory cap (the retriever caps the markdown path too,
 [#486](https://github.com/omniscient/dark-factory/issues/486)); the
 architecture cap has no consumer in the prompt path; and the comments cap has none, because
-the comment digest runs only for `continue` and does not source the file. Tracked in
-[#487](https://github.com/omniscient/dark-factory/issues/487).
+the comment digest runs only for `continue` and does not source the file.
 
 Budgets for refine and plan were validated by the full-corpus calibration in #731 (Phase 4b T2)
 with 0% `section_at_risk_rate` at the 30k budget. Budgets for conformance and code-review were
@@ -319,10 +340,12 @@ each scenario's command node. It:
    + `issue_context` floor).
 2. Distributes the remaining allowance across the four optimizable sections proportional
    to their default caps, clamped to each section's floor.
-3. In **enforce mode**: exports derived caps as env vars that the optimizers read
-   (`TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS`, `TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS`,
-   `TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS`, `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS`),
-   via `$ARTIFACTS_DIR/token-opt-caps.env`.
+3. In **enforce mode**: writes the derived caps to `$ARTIFACTS_DIR/token-opt-caps.env` under
+   the env var names the optimizers read (`TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS`,
+   `TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS`, `TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS`,
+   `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS`). The lines carry no `export`, so the values do
+   not reach the optimizer processes today
+   ([#511](https://github.com/omniscient/dark-factory/issues/511)).
 4. If the un-trimmable core reaches or exceeds the budget, records `over_budget: true` in
    telemetry and proceeds — enforcement **never blocks a run**.
 
@@ -333,7 +356,7 @@ use their config defaults.
 
 In `context-budget.json` (`$ARTIFACTS_DIR`):
 - `over_budget` — `true` if the un-trimmable reserved context is at or above the scenario budget
-- `would_trim` — `true` in observe mode when enforce mode would have tightened caps
+- `would_trim` — `true` when the derived caps are tighter than the config defaults; computed and written the same way in observe and enforce mode
 - `derived_caps` — computed cap values (enforced or hypothetical)
 
 The cost-report comment surfaces `over_budget` when it fires.
@@ -361,7 +384,11 @@ python3 evals/token_opt_eval.py --calibrate \
 
 Per-run `context-budget.json` artifacts hold `sections.architecture_md.tokens` —
 collect these to compute the p90 architecture slice size and verify it fits within the
-planned `architecture.max_tokens` cap before flipping.
+planned `architecture.max_tokens` cap before flipping. Caveat: in a new/continue run the
+conformance and code-review budget nodes overwrite the same `context-budget.json`, and those
+scenarios have no `architecture_md` section, so the value survives only in refine/plan runs
+or in implement runs that stop before conformance
+([#511](https://github.com/omniscient/dark-factory/issues/511)).
 
 **Flip procedure (when gates pass):**
 1. Set `budgets.<scenario>: <calibrated_value>` and `enforce.<scenario>: true`. For one
@@ -375,9 +402,11 @@ planned `architecture.max_tokens` cap before flipping.
 
 ## Path to Phase 4 — Current Status
 
-- **Conformance and code-review**: enforcement active since T6 (#719); effective through the diff cap.
-- **Refine and plan**: enforcement flags on since T3b (#733) — #731 scorecard gated go-live.
-  No effect on the prompt yet ([#487](https://github.com/omniscient/dark-factory/issues/487)).
+- **Conformance and code-review**: enforcement flags on since T6 (#719); wired to the diff cap.
+- **Refine and plan**: enforcement flags on since T3b (#733) — #731 scorecard gated go-live;
+  wired to the memory cap.
+- In all four, the derived caps do not reach the optimizers today, so enforcement has no
+  effect on the prompt ([#511](https://github.com/omniscient/dark-factory/issues/511)).
 - **Implement**: observe-only — deferred pending calibration.
 
 ### Follow-up Path for deferred scenario (implement)
@@ -395,7 +424,9 @@ still `enforce: false`; the most recent calibration scorecard in `evals/reports/
 **Unlock steps:**
 
 1. **Measure real arch slice sizes** — collect `sections.architecture_md.tokens` from
-   per-run `context-budget.json` artifacts across ≥ 10 full-corpus bench issues:
+   per-run `context-budget.json` artifacts across ≥ 10 full-corpus bench issues (use
+   refine/plan artifacts: later budget nodes overwrite the file in implement runs, see the
+   caveat under the Observe → Enforce Procedure):
    ```bash
    # Example: extract p90 slice size from recent artifacts
    python3 -c "
@@ -419,8 +450,11 @@ still `enforce: false`; the most recent calibration scorecard in `evals/reports/
 
 4. **Flip** implement using the Observe → Enforce Procedure above.
 
-Flipping implement will have no prompt effect until architecture slicing is delivered to the
-implement command ([#487](https://github.com/omniscient/dark-factory/issues/487)).
+Flipping implement is wired to the memory cap only (implement loads memory through
+`load_memory_context.sh`); architecture slicing is not delivered to the implement command
+([#487](https://github.com/omniscient/dark-factory/issues/487)). Until the caps file is
+exported it will have no prompt effect at all
+([#511](https://github.com/omniscient/dark-factory/issues/511)).
 
 ---
 
@@ -435,5 +469,5 @@ implement command ([#487](https://github.com/omniscient/dark-factory/issues/487)
 | Comment digest skipped | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED=false`, or the run is not a `continue` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
 | Full diff passed to code-review | `TOKEN_OPTIMIZATION_DIFF_ENABLED=false` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
 | `over_budget` fires on conformance / code-review | Reserved context (CLAUDE.md + safety fallback) reaches the 22k budget | Raise `budgets.<scenario>` in the adapter's `token_optimization` block, or use Tier 2 rollback to disable enforcement for that scenario |
-| Enforcement seems to have no effect | Scenario is refine or plan; per-scenario `enforce` flag is `false`; `enforce_budgets: false`; or the kill switch is set | Check the run's `.claude/skills/refinement/config.yaml` and `.archon/.env`; a change to `config/config.yaml` needs an image publish |
+| Enforcement seems to have no effect | Expected today in every scenario: derived caps are not exported to the optimizers ([#511](https://github.com/omniscient/dark-factory/issues/511)). Otherwise: per-scenario `enforce` flag is `false`; `enforce_budgets: false`; or the kill switch is set | Check the run's `.claude/skills/refinement/config.yaml` and `.archon/.env`; a change to `config/config.yaml` needs an image publish |
 | An env change in `.archon/.env` is ignored | Scheduler was not restarted, so run containers still load the old copy | Recreate the scheduler (see Tier 0) |

@@ -5,9 +5,10 @@
 # with dark-factory-appropriate ones.
 schema_version: 1
 
-# No ARCHITECTURE.md in this repo yet — an empty map makes architecture
-# slicing fall back to full-doc/no-doc behavior instead of resolving
-# MarketHawk section names.
+# No ARCHITECTURE.md in this repo yet. An empty map does not clear the
+# built-in map (mappings are merged key by key, so the MarketHawk component
+# entries remain); slicing falls back to full-doc/no-doc behavior only because
+# none of those section names match (#513).
 components: {}
 
 safety:

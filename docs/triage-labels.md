@@ -7,7 +7,7 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 | `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
 | `needs-info`               | `needs-info`         | Waiting on reporter for more information |
 | `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
-| `ready-for-human`          | `ready-for-human`    | Requires human implementation. The scheduler skips the ticket everywhere (dispatch, retry, rescue, orphan sweep) |
+| `ready-for-human`          | `ready-for-human`    | Requires human implementation. The scheduler skips the ticket from Ready onward (dispatch, retry, rescue, orphan sweep, grace advance). The refine and plan stages do **not** check it, so a Backlog or Refined ticket carrying it can still be refined or planned ([#512](https://github.com/omniscient/dark-factory/issues/512)) |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
@@ -57,9 +57,9 @@ Every label the scheduler, gates or phase agents apply or branch on. `scripts/bo
 
 | Label | Applied by | Read by / effect |
 |-------|-----------|------------------|
-| `needs-discussion` | Refine, plan, conformance and code-review commands when they block; the circuit breaker when it trips | **Halts all automation for the ticket.** In the scheduler's skip list for every stage, and in the refine/plan skip lists. Remove it to resume |
+| `needs-discussion` | Refine, plan, validate (blast-radius block), conformance and code-review commands when they block; the circuit breaker when it trips | **Halts all automation for the ticket.** In the scheduler's skip list for every stage, and in the refine/plan skip lists. Remove it to resume |
 | `ready-for-agent` | Humans (triage); epic autopilot on an epic's open children | Opt-in gate for auto-refinement of Backlog items |
-| `ready-for-human` | Humans | Scheduler skips the ticket everywhere |
+| `ready-for-human` | Humans | Scheduler skips the ticket from Ready onward; the refine and plan stages do not check it ([#512](https://github.com/omniscient/dark-factory/issues/512)) |
 | `epic` | Humans | Scheduler never dispatches the epic itself; epic autopilot works on its children |
 | `spec-pending-review`, `plan-pending-review` | The run DAG, after the spec/plan artifact is pushed | Gate labels; see Workflow flags |
 | `direct-to-pr` | Humans; epic autopilot | Straight-through flow; see Workflow flags |

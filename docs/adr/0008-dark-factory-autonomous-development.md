@@ -36,3 +36,11 @@ Credentials (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`) are i
 ### Residual Risk Acceptance (2026-06-05)
 
 `tecnativa/docker-socket-proxy` does not support label-based container filtering. With `POST=1, CONTAINERS=1`, the factory can create or list any container on the host, not only `mh-preview-*` stacks. This risk is accepted: the factory is a trusted first-party tool run by the repo owner, not an adversarial workload. The entrypoint and Archon workflows operate on `mh-preview-*` resources by convention. A custom proxy with namespace-enforcement would require writing and maintaining a bespoke API gateway — cost not justified at this scale. Reviewed and accepted: issue #203.
+
+## Current state (2026-11-16)
+
+The decision above stands. These details have changed since it was recorded (found by the documentation drift audit; the text above is left as written):
+
+- **Socket proxy.** The proxy service is `docker-socket-proxy-scheduler` and the scheduler connects with `DOCKER_HOST=tcp://docker-socket-proxy-scheduler:2375`. `BUILD` is `0`, not `1`: image builds for previews go through a remote BuildKit daemon instead of the Docker API (`deploy/docker-compose.yml`, `workflows/archon-dark-factory.yaml` `preview-up` node).
+- **Preview ports.** Ports are no longer derived from the issue number's last two digits. `preview-up` recovers the slot of an already-running preview or picks the lowest free two-digit slot, so the port collision described under Consequences no longer applies (`workflows/archon-dark-factory.yaml`, `preview-up` node).
+- **Dockerfile location.** `USER factory` is in the repo-root `Dockerfile`; there is no `dark-factory/` directory since the extraction into this repository.
