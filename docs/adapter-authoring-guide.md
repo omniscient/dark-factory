@@ -522,7 +522,11 @@ it costs a failed ticket attempt
   merge.
 - `mechanism_candidates` is reserved and rejected.
 - Mappings merge key by key over the defaults; a list or scalar value replaces the default
-  outright. The two exceptions are `safety.critical_diff_paths` and
+  outright. `components` is the exception to the merge: a declared `components` map (even
+  `{}`) replaces the default map, so `components: {}` disables ARCHITECTURE.md slicing, and
+  omitting the key keeps the defaults. `memory_routing`, `deconflict` and
+  `token_optimization` still merge key by key, so an empty mapping there does not clear
+  default entries. Two further exceptions are `safety.critical_diff_paths` and
   `safety.migration_seed_auth_patterns`: after every load, a factory-owned floor
   (`adapter_defaults.py`) is unioned into both, whatever the file declares, and a non-list
   value in either is treated as empty.
