@@ -347,6 +347,21 @@ def _sensitive_keywords(clone_dir: str | None = None) -> str:
     return _DEFAULT_SENSITIVE_KEYWORDS
 
 
+def _effective_sensitive_keywords(clone_dir: str | None, env_value: str | None) -> str:
+    """Union of the config/env pattern and the adapter's safety.sensitive_keywords.
+
+    Never narrower than either source: anything that blocks autopilot under the env
+    (config.yaml) value or under the adapter value still blocks it (#513).
+    """
+    parts = []
+    for p in (env_value, _sensitive_keywords(clone_dir)):
+        if p and p not in parts:
+            parts.append(p)
+    if len(parts) == 1:
+        return parts[0]
+    return "|".join(f"(?:{p})" for p in parts)
+
+
 def _gh_json(args: list):
     """Run a gh command and parse JSON stdout; return None on failure."""
     try:
@@ -579,9 +594,8 @@ def main_once() -> int:
         exclude_paths=_load_exclude_paths(clone_dir),
         opt_out_label=os.environ.get("EPIC_AUTOPILOT_OPT_OUT_LABEL", "no-autopilot"),
         size_ceiling=os.environ.get("EPIC_AUTOPILOT_SIZE_CEILING", "XL"),
-        sensitive_keywords=os.environ.get(
-            "EPIC_AUTOPILOT_SENSITIVE_KEYWORDS",
-            _sensitive_keywords(clone_dir)),
+        sensitive_keywords=_effective_sensitive_keywords(
+            clone_dir, os.environ.get("EPIC_AUTOPILOT_SENSITIVE_KEYWORDS")),
         hold_ttl_hours=float(os.environ.get("EPIC_AUTOPILOT_HOLD_TTL_HOURS", "24")),
         start_epics=os.environ.get("EPIC_AUTOPILOT_START_EPICS", "true").lower() == "true",
         # Fail-closed: self-improvement is only on when config/env says so explicitly.

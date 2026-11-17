@@ -362,3 +362,40 @@ def test_run_stuck_when_no_children_and_no_eligible_epic():
     assert out["outcome"] == "no_candidates"
     assert io.promoted == []
     assert any(key == "autopilot-stuck" for _, key in io.notes)
+
+
+# ── #513: adapter sensitive_keywords are unioned with config/env ─────────────
+
+def _adapter_with_keywords(tmp_path, kw):
+    d = tmp_path / ".factory"
+    d.mkdir()
+    (d / "adapter.yaml").write_text(f'safety:\n  sensitive_keywords: "{kw}"\n')
+    return str(tmp_path)
+
+
+def test_effective_keywords_union_blocks_config_only_keyword(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish|secret")
+    kw = ap._effective_sensitive_keywords(clone, "trading|ibkr")
+    for word in ("trading", "ibkr", "publish", "secret"):
+        ex, why = ap.hard_excluded(c(title=f"touch {word} thing", body="", target_paths=[]), [], kw)
+        assert ex and why == "sensitive-keyword", word
+
+
+def test_effective_keywords_env_unset_uses_adapter(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish")
+    kw = ap._effective_sensitive_keywords(clone, None)
+    ex, _ = ap.hard_excluded(c(title="publish it", body="", target_paths=[]), [], kw)
+    assert ex
+
+
+def test_effective_keywords_never_narrower_than_env(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "zzz")
+    kw = ap._effective_sensitive_keywords(clone, "alpha")
+    ex, _ = ap.hard_excluded(c(title="alpha", body="", target_paths=[]), [], kw)
+    assert ex
+
+
+def test_effective_keywords_empty_env_does_not_empty_union(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish")
+    kw = ap._effective_sensitive_keywords(clone, "")
+    assert kw and "publish" in kw
