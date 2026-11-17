@@ -16,7 +16,7 @@
 # to preserve the DAG's fail-open semantics; this script does not change that):
 #   0 = ran to completion (observe mode, enforce-mode green, or enforce-mode
 #       over-budget — budget_enforce.py itself only fails on malformed input)
-#   1 = budget_enforce.py hard failure (unreadable/malformed context-budget.json)
+#   1 = budget_enforce.py hard failure (unreadable/malformed context-budget.<scenario>.json)
 #   2 = usage error (missing <scenario> argument, ARTIFACTS_DIR unset)
 
 SCENARIO="${1:-}"
@@ -51,6 +51,6 @@ _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS:-}"
 case "${_EENV,,}" in false|0|no) _MODE="observe" ;; esac
 
 python3 "${_SCRIPT_DIR}/budget_enforce.py" \
-  --context-budget-json "$ARTIFACTS_DIR/context-budget.json" \
+  --context-budget-json "$ARTIFACTS_DIR/context-budget.${SCENARIO}.json" \
   --budget-tokens "${_BUD:-30000}" --mode "$_MODE" --config "$_CFG" \
   > "$ARTIFACTS_DIR/token-opt-caps.env"  # truncate (not append) — clears stale caps from prior enforce runs

@@ -506,6 +506,7 @@ def format_index_output(candidates, labels=None, _cap_out=None, config_path=None
         _cap_out["per_file_selected"] = per_file_selected
         _cap_out["per_file_dropped"] = per_file_dropped
         _cap_out["uncapped_tokens"] = uncapped_tokens
+        _cap_out["selected_tokens"] = token_total
         _cap_out["memory_enabled"] = memory_enabled
 
     grouped: dict = {}
@@ -627,12 +628,20 @@ def emit_memory_trace(trace_path, phase, files, memory_dir, area_files, allowed_
             trace["entries_dropped_by_cap_total"] = cap_counts.get("entries_dropped_by_cap", 0)
             if "uncapped_tokens" in cap_counts:
                 trace["uncapped_tokens"] = cap_counts["uncapped_tokens"]
+            if "selected_tokens" in cap_counts:
+                trace["selected_tokens"] = cap_counts["selected_tokens"]
             if "memory_enabled" in cap_counts:
                 trace["memory_enabled"] = cap_counts["memory_enabled"]
 
         trace_path = Path(trace_path)
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         trace_path.write_text(json.dumps(trace, indent=2), encoding="utf-8")
+        if cap_counts and "uncapped_tokens" in cap_counts and "selected_tokens" in cap_counts:
+            # Append-only measurement of what was actually emitted (#511): the trace
+            # itself is overwritten by the next phase.
+            te.record_delivered(str(trace_path.parent), "memory",
+                                cap_counts["uncapped_tokens"], cap_counts["selected_tokens"],
+                                phase=phase)
     except Exception:
         pass
 

@@ -1594,3 +1594,46 @@ def test_markdown_fallback_is_cap_immune(tmp_path, monkeypatch):
     # Both entries present — markdown fallback has no token cap
     assert "Entry A" in output
     assert "Entry B" in output
+
+
+# ── #511: delivered-savings measurement ────────────────────────────────────
+
+class TestDeliveredSavingsRecord:
+    """The cost report's memory saving is baseline-minus-delivered for the emitted text."""
+
+    def _cands(self, n):
+        return [
+            {"source_file": "backend-patterns.md", "text": f"- [PATTERN] Entry {i} " + "x" * 40,
+             "specificity": 0, "created_at": "2026-01-01"}
+            for i in range(n)
+        ]
+
+    def test_cap_out_reports_selected_tokens(self):
+        caps = {}
+        mr.format_index_output(self._cands(12), _cap_out=caps)
+        assert caps["entries_selected"] == 8
+        assert 0 < caps["selected_tokens"] < caps["uncapped_tokens"]
+
+    def test_emit_trace_appends_delivered_record(self, tmp_path):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        trace = tmp_path / "art" / "memory-trace.json"
+        caps = {"entries_selected": 8, "entries_dropped_by_cap": 4,
+                "uncapped_tokens": 600, "selected_tokens": 400}
+        mr.emit_memory_trace(trace, "plan", [], mem_dir, [], {"plan"}, cap_counts=caps)
+        assert json.loads(trace.read_text())["selected_tokens"] == 400
+        lines = (tmp_path / "art" / "delivered-savings.jsonl").read_text().splitlines()
+        assert [json.loads(x) for x in lines] == [
+            {"kind": "memory", "phase": "plan", "baseline_tokens": 600, "delivered_tokens": 400}
+        ]
+
+    def test_later_phase_does_not_overwrite_earlier_record(self, tmp_path):
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        trace = tmp_path / "memory-trace.json"
+        for phase in ("implement", "validate"):
+            mr.emit_memory_trace(trace, phase, [], mem_dir, [], {phase}, cap_counts={
+                "entries_selected": 1, "entries_dropped_by_cap": 0,
+                "uncapped_tokens": 10, "selected_tokens": 10})
+        lines = (tmp_path / "delivered-savings.jsonl").read_text().splitlines()
+        assert [json.loads(x)["phase"] for x in lines] == ["implement", "validate"]

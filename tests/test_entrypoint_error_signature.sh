@@ -105,14 +105,15 @@ rm -f "${ARTIFACTS_DIR}/implementation.md"
 
 echo ""
 echo "--- D: pre-existing workflow context files must NOT count as artifact_present (#279 regression) ---"
-# issue.json / context-budget.json / token-opt-caps.env are written into ARTIFACTS_DIR by
+# issue.json / context-budget.<scenario>.json / token-opt-caps.env are written into ARTIFACTS_DIR by
 # the workflow runner BEFORE the phase command ever executes — present on every run,
 # including one where the agent did zero work. If these counted toward artifact_present,
 # delivery_failure would never classify, which is exactly the false-positive early-trip
 # the operator's carve-out (#279) was added to prevent.
 rm -rf "$SCHEDULER_STATE_DIR"; SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-es-statedir3-XXXXXX)
 echo '{"resolved_number":33}' > "${ARTIFACTS_DIR}/issue.json"
-echo '{}' > "${ARTIFACTS_DIR}/context-budget.json"
+echo '{}' > "${ARTIFACTS_DIR}/context-budget.implement.json"
+echo '{"kind":"memory"}' > "${ARTIFACTS_DIR}/delivered-savings.jsonl"
 _write_error_signature "implement" 1 ""
 SIG_FILE="${SCHEDULER_STATE_DIR}/error-signatures/33.implement.sig"
 assert_true "context-only artifacts still classify as delivery_failure" \

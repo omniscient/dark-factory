@@ -28,13 +28,15 @@ RC=0
 ARTIFACTS_DIR="$CASE1" CLONE_DIR="$REPO_ROOT" bash "$SCRIPT" \
   > "${CASE1}/stdout.log" 2> "${CASE1}/stderr.log" || RC=$?
 [ "$RC" = "0" ] || { echo "FAIL case1 exit code: $RC"; cat "${CASE1}/stderr.log"; exit 1; }
-[ -f "${CASE1}/context-budget.json" ] || { echo "FAIL case1 expected context-budget.json to exist"; exit 1; }
-SCEN=$(jq -r '.scenario' "${CASE1}/context-budget.json")
+[ -f "${CASE1}/context-budget.implement.json" ] || { echo "FAIL case1 expected context-budget.implement.json to exist"; exit 1; }
+SCEN=$(jq -r '.scenario' "${CASE1}/context-budget.implement.json")
 [ "$SCEN" = "implement" ] || { echo "FAIL case1 expected scenario=implement, got $SCEN"; exit 1; }
-CLAUDE_MD_STATUS=$(jq -r '.sections.claude_md.status' "${CASE1}/context-budget.json")
-[ "$CLAUDE_MD_STATUS" = "included" ] || { echo "FAIL case1 expected sections.claude_md.status=included, got $CLAUDE_MD_STATUS"; cat "${CASE1}/context-budget.json"; exit 1; }
-EST_TOKENS=$(jq -r '.estimated_input_tokens' "${CASE1}/context-budget.json")
+CLAUDE_MD_STATUS=$(jq -r '.sections.claude_md.status' "${CASE1}/context-budget.implement.json")
+[ "$CLAUDE_MD_STATUS" = "included" ] || { echo "FAIL case1 expected sections.claude_md.status=included, got $CLAUDE_MD_STATUS"; cat "${CASE1}/context-budget.implement.json"; exit 1; }
+EST_TOKENS=$(jq -r '.estimated_input_tokens' "${CASE1}/context-budget.implement.json")
 [ "$EST_TOKENS" -gt 0 ] || { echo "FAIL case1 expected estimated_input_tokens > 0, got $EST_TOKENS"; exit 1; }
+
+[ ! -f "${CASE1}/context-budget.json" ] || { echo "FAIL case1 must not write the legacy single context-budget.json (#511)"; exit 1; }
 
 # --- Case 2: intent=continue maps to scenario=continue ----------------------
 CASE2="${WORK}/case2"
@@ -43,7 +45,7 @@ RC=0
 ARTIFACTS_DIR="$CASE2" CLONE_DIR="$CASE2" bash "$SCRIPT" \
   > "${CASE2}/stdout.log" 2> "${CASE2}/stderr.log" || RC=$?
 [ "$RC" = "0" ] || { echo "FAIL case2 exit code: $RC"; cat "${CASE2}/stderr.log"; exit 1; }
-SCEN=$(jq -r '.scenario' "${CASE2}/context-budget.json")
+SCEN=$(jq -r '.scenario' "${CASE2}/context-budget.implement.json")
 [ "$SCEN" = "continue" ] || { echo "FAIL case2 expected scenario=continue, got $SCEN"; exit 1; }
 
 # --- Case 3: unrecognized intent fails loud, is NOT swallowed ---------------
@@ -54,7 +56,7 @@ ARTIFACTS_DIR="$CASE3" CLONE_DIR="$CASE3" bash "$SCRIPT" \
   > "${CASE3}/stdout.log" 2> "${CASE3}/stderr.log" || RC=$?
 [ "$RC" = "1" ] || { echo "FAIL case3 expected exit 1, got $RC"; cat "${CASE3}/stderr.log"; exit 1; }
 grep -q "unexpected INTENT" "${CASE3}/stderr.log" || { echo "FAIL case3 expected 'unexpected INTENT' in stderr"; cat "${CASE3}/stderr.log"; exit 1; }
-[ ! -f "${CASE3}/context-budget.json" ] || { echo "FAIL case3 expected no context-budget.json to be written"; exit 1; }
+[ ! -f "${CASE3}/context-budget.implement.json" ] || { echo "FAIL case3 expected no context-budget.implement.json to be written"; exit 1; }
 
 # --- Case 4: usage errors ----------------------------------------------------
 RC=0
@@ -67,9 +69,9 @@ RC=0
 ARTIFACTS_DIR="$CASE4B" bash "$SCRIPT" 2>/dev/null || RC=$?
 [ "$RC" = "2" ] || { echo "FAIL case4b expected exit 2 on missing issue.json, got $RC"; exit 1; }
 
-# --- Case 5: WARNING visibility line when context-budget.json isn't written -
+# --- Case 5: WARNING visibility line when context-budget.implement.json isn't written -
 # A non-numeric resolved_number makes context_budget.py's --issue-num (type=int)
-# fail argparse validation, so context-budget.json is never written.
+# fail argparse validation, so context-budget.implement.json is never written.
 CASE5="${WORK}/case5"
 mkdir -p "$CASE5"
 printf '{"resolved_number": "not-a-number", "intent": "new"}' > "${CASE5}/issue.json"
@@ -77,7 +79,7 @@ RC=0
 ARTIFACTS_DIR="$CASE5" CLONE_DIR="$CASE5" bash "$SCRIPT" \
   > "${CASE5}/stdout.log" 2> "${CASE5}/stderr.log" || RC=$?
 [ "$RC" = "0" ] || { echo "FAIL case5 expected exit 0 even when context_budget.py fails, got $RC"; cat "${CASE5}/stderr.log"; exit 1; }
-[ ! -s "${CASE5}/context-budget.json" ] || { echo "FAIL case5 expected no/empty context-budget.json when python3 fails"; exit 1; }
+[ ! -s "${CASE5}/context-budget.implement.json" ] || { echo "FAIL case5 expected no/empty context-budget.implement.json when python3 fails"; exit 1; }
 grep -q "WARNING:" "${CASE5}/stderr.log" || { echo "FAIL case5 expected WARNING: line in stderr"; cat "${CASE5}/stderr.log"; exit 1; }
 
 echo PASS

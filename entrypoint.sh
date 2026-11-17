@@ -428,7 +428,7 @@ _write_error_signature() {
   [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty_flag="--worktree-dirty"
   # Allowlist of genuine phase-deliverable filenames, not a denylist of
   # run-record.json alone: $ARTIFACTS_DIR always already contains workflow-written
-  # context artifacts (issue.json, context-budget.json, token-opt-caps.env — present
+  # context artifacts (issue.json, context-budget.<scenario>.json, token-opt-caps.env — present
   # before the phase command even starts) and, for implement-intent failures,
   # run_post_mortem() unconditionally writes factory-failures.jsonl (line 250) before
   # this helper runs. A denylist of only run-record.json would treat all of those as
@@ -497,9 +497,11 @@ post_cost_report() {
 
   # --intent/--product-name/--budget-file: see "Deviations from the spec" items
   # 1-2 above — render() cannot derive these from run-record.json alone.
-  local BUDGET_FILE="${ARTIFACTS_DIR:-}/context-budget.json"
+  # --artifacts-dir: the report aggregates every per-scenario context-budget.<scenario>.json
+  # of the run plus the optimizers' delivered-savings.jsonl (#511); the legacy single
+  # context-budget.json is read only when no per-scenario file exists.
   local BUDGET_ARGS=()
-  [ -f "$BUDGET_FILE" ] && BUDGET_ARGS=(--budget-file "$BUDGET_FILE")
+  [ -n "${ARTIFACTS_DIR:-}" ] && BUDGET_ARGS=(--artifacts-dir "$ARTIFACTS_DIR")
   local PRIOR_ARGS=()
   [ -n "$PRIOR_BODY_FILE" ] && PRIOR_ARGS=(--prior-body-file "$PRIOR_BODY_FILE")
 

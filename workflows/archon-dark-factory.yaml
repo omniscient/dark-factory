@@ -390,7 +390,7 @@ nodes:
         --clone-dir "$_CLONE" \
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --memory-file "$ARTIFACTS_DIR/memory-context.md" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.refine.json" || true
     depends_on: [setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'refine'"
     timeout: 30000
@@ -430,7 +430,7 @@ nodes:
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --memory-file "$ARTIFACTS_DIR/memory-context.md" \
         ${SPEC_FILE:+--spec-file "$SPEC_FILE"} \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.plan.json" || true
     depends_on: [setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'plan'"
     timeout: 30000
@@ -1101,7 +1101,7 @@ nodes:
         ${SPEC_FILE:+--spec-file "$SPEC_FILE"} \
         --impl-file "$ARTIFACTS_DIR/implementation.md" \
         --diff-file "$DIFF_TMP" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.conformance.json" || true
       rm -f "$DIFF_TMP"
     depends_on: [validate]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
@@ -1337,7 +1337,7 @@ nodes:
         --clone-dir "$_CLONE" \
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --diff-file "$DIFF_TMP" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.code-review.json" || true
       rm -f "$DIFF_TMP"
     depends_on: [push-and-pr]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
