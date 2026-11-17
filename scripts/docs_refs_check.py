@@ -201,6 +201,55 @@ def _check_config_keys(doc: str, text: str, config_path: Path) -> list[str]:
     return errors
 
 
+_NODE_LEAD = re.compile(r"(?<![\w-])[Nn]odes?\s+(?=`)")
+_NODE_ID = re.compile(r"`([a-z][a-z0-9_-]*)`")
+_NODE_SEP = re.compile(r"\s*(?:,\s*and\s+|,\s*|\s+and\s+)(?=`)")
+
+
+def _skip_aside(line: str, i: int) -> int:
+    """Return the index just past a parenthetical aside starting at *i*, else *i*."""
+    j = i
+    while j < len(line) and line[j] == " ":
+        j += 1
+    if j >= len(line) or line[j] != "(":
+        return i
+    depth = 0
+    for k in range(j, len(line)):
+        if line[k] == "(":
+            depth += 1
+        elif line[k] == ")":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+    return len(line)
+
+
+def _check_feature_nodes(doc: str, text: str, workflow_path: Path) -> list[str]:
+    try:
+        data = yaml.safe_load(workflow_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return [f"{workflow_path}: cannot load workflow: {exc}"]
+    nodes = data.get("nodes") if isinstance(data, dict) else None
+    if not isinstance(nodes, list):
+        return [f"{workflow_path}: 'nodes' is not a list"]
+    ids = {n["id"] for n in nodes if isinstance(n, dict) and "id" in n}
+    errors: list[str] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for lead in _NODE_LEAD.finditer(line):
+            i = lead.end()
+            while m := _NODE_ID.match(line, i):
+                if m[1] not in ids:
+                    errors.append(
+                        f"{doc}:{lineno}: workflow node `{m[1]}` is not a node id in {workflow_path}"
+                    )
+                i = _skip_aside(line, m.end())
+                sep = _NODE_SEP.match(line, i)
+                if not sep:
+                    break
+                i = sep.end()
+    return errors
+
+
 def check(
     doc_paths: Iterable[PathLike],
     repo_root: PathLike = ".",
@@ -223,6 +272,8 @@ def check(
         errors.extend(_check_path_refs(str(doc), text, root, files))
         if doc.name == "configuration.md":
             errors.extend(_check_config_keys(str(doc), text, config))
+        if doc.name == "features.md":
+            errors.extend(_check_feature_nodes(str(doc), text, workflow))
     return errors
 
 

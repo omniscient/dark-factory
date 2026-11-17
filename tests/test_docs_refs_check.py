@@ -149,3 +149,60 @@ def test_config_key_added_without_docs(tmp_path):
     config = "a:\n  b: 1\n  c: 3\n  items: [x]\nbudgets:\n  code-review: 2\n"
     errors = _config_check(tmp_path, _CONFIG_DOC, config)
     assert len(errors) == 1 and "config key `a.c`" in errors[0] and "is not documented" in errors[0]
+
+
+# ---------------------------------------------------------------------------
+# Workflow nodes (features.md only)
+# ---------------------------------------------------------------------------
+
+_WORKFLOW = "nodes:\n  - id: alpha\n  - id: beta-step\n  - id: gamma\n"
+
+
+def _node_check(tmp_path: Path, doc: str, name: str = "features.md") -> list[str]:
+    root = _tree(tmp_path, {f"docs/{name}": doc, "workflows/archon-dark-factory.yaml": _WORKFLOW})
+    return check([root / "docs" / name], root)
+
+
+def test_node_lists_and_asides(tmp_path):
+    doc = (
+        "Nodes `alpha` (`workflow:1`; `mark-ready` `:2`), `beta-step` and `gamma`.\n"
+        "workflow node `alpha`. Per-node `model:` pins. The `smoke-gate` hook.\n"
+    )
+    assert _node_check(tmp_path, doc) == []
+
+
+def test_unknown_node_is_reported(tmp_path):
+    errors = _node_check(tmp_path, "Nodes `alpha` (`workflow:1`) and `delta`.\n")
+    assert len(errors) == 1 and "features.md:1: workflow node `delta` is not a node id" in errors[0]
+
+
+def test_node_check_only_runs_on_features_md(tmp_path):
+    assert _node_check(tmp_path, "Node `delta`.\n", name="scheduler.md") == []
+
+
+# ---------------------------------------------------------------------------
+# Fixture trees: one pass, one fail with one break per check
+# ---------------------------------------------------------------------------
+
+def test_pass_fixture_has_no_errors():
+    root, docs = _fixture_docs("pass")
+    assert check(docs, root) == []
+
+
+def test_fail_fixture_reports_one_error_per_check():
+    root, docs = _fixture_docs("fail")
+    errors = check(docs, root)
+    assert len(errors) == 4, errors
+    joined = "\n".join(errors)
+    assert "features.md:5: `scripts/missing.sh`: no such file or directory" in joined
+    assert "features.md:6: `scripts/tool.sh:1,4-9`: line 4-9 is out of range" in joined
+    assert "config key `scheduler.max_retries`" in joined and "is not documented" in joined
+    assert "features.md:5: workflow node `deploy-step` is not a node id" in joined
+
+
+def test_cli_exit_codes(capsys):
+    root, docs = _fixture_docs("pass")
+    assert main([*map(str, docs), "--repo-root", str(root)]) == 0
+    root, docs = _fixture_docs("fail")
+    assert main([*map(str, docs), "--repo-root", str(root)]) == 1
+    assert "deploy-step" in capsys.readouterr().err
