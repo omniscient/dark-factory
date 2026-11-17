@@ -56,6 +56,8 @@ RC=$(_run_gate "$CASE1" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=)
 [ "$RC" = "0" ] || { echo "FAIL case1 exit code: $RC"; cat "${CASE1}/stderr.log"; exit 1; }
 grep -q "over_budget=False" "${CASE1}/stderr.log" || { echo "FAIL case1 expected over_budget=False"; cat "${CASE1}/stderr.log"; exit 1; }
 [ -s "${CASE1}/token-opt-caps.env" ] || { echo "FAIL case1 expected non-empty token-opt-caps.env (enforce mode)"; exit 1; }
+# Caps must be exported so the Python optimizers started by a sourcing shell see them (#511).
+grep -q '^export TOKEN_OPTIMIZATION_' "${CASE1}/token-opt-caps.env" || { echo "FAIL case1 caps lines must start with 'export '"; exit 1; }
 
 # --- Case 2: over-budget — enforce mode, budget too small to cover reserved
 CASE2="${WORK}/case2"
