@@ -76,3 +76,26 @@ Every label the scheduler, gates or phase agents apply or branch on. `scripts/bo
 | `enhancement` | `commands/ceiling-revisit.md` on the tickets it files | Not read. **Not created by `bootstrap_target.sh`** (a GitHub default label) |
 | `cost-report-lost` | Created by `bootstrap_target.sh`; no apply site was found in this repo's scripts, commands or workflow | — |
 | `spec-approved`, `needs-info` | Created by `bootstrap_target.sh`; never applied by the factory | Never read |
+
+## Labels with no factory effect
+
+Every other label in the tracker is for humans only: no factory code reads or applies it.
+As of 2026-11-17 in this repo these are:
+
+- **Topic tags:** `Dark Factory`, `bug`, `documentation`, `foundation`, `infrastructure`,
+  `observability`, `performance`, `security`, `testing`, `analytics`.
+- **One-off batches:** `architecture-audit`, `architecture-audit-v2`, `architecture-audit-v3`,
+  `architecture-audit-v4`, `security-audit-2026-06-12`.
+- **GitHub defaults:** `duplicate`, `invalid`, `question`, `wontfix`, `good first issue`,
+  `help wanted`.
+
+They are not free, for two reasons:
+
+- **Only the first 10 labels of an issue are fetched** by the scheduler's board query
+  (`labels(first: 10)` in `scripts/factory_core/providers/tracker/github.py`). On an issue
+  with more than 10 labels, a functional label such as `needs-discussion` or `epic` can fall
+  outside what the scheduler sees. Keep issues at 10 labels or fewer until that limit is
+  lifted (tracked in [#529](https://github.com/omniscient/dark-factory/issues/529)).
+- **The scheduler matches label names as substrings** (see `docs/scheduler.md`). A new label
+  whose name contains `epic`, `needs-discussion` or another functional label name acts as
+  that label.
