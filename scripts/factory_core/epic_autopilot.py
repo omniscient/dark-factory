@@ -373,6 +373,25 @@ def _gh_json(args: list):
         return None
 
 
+# Where the scheduler container mounts the target checkout (read-only).
+_SCHEDULER_TARGET_DIR = "/workspace/project"
+
+
+def _target_dir() -> str:
+    """Directory whose .factory/adapter.yaml governs this autopilot pass.
+
+    CLONE_DIR wins when set. The scheduler does not set it and runs from /workspace,
+    so default to the mounted target checkout; without that, "." read no adapter and
+    the built-in defaults silently replaced the target's safety settings.
+    """
+    explicit = os.environ.get("CLONE_DIR")
+    if explicit:
+        return explicit
+    if os.path.isfile(os.path.join(_SCHEDULER_TARGET_DIR, ".factory", "adapter.yaml")):
+        return _SCHEDULER_TARGET_DIR
+    return "."
+
+
 def _load_exclude_paths(clone_dir: str | None = None) -> list:
     """Read hard_exclude_paths from adapter, then config.yaml (via yq); fall back to defaults."""
     # Try adapter first (use-time read, fail-open)
@@ -589,7 +608,7 @@ def main_once() -> int:
     except Exception:
         state = {}
     today = datetime.now(timezone.utc).date().isoformat()
-    clone_dir = os.environ.get("CLONE_DIR", ".")
+    clone_dir = _target_dir()
     cfg = dict(
         exclude_paths=_load_exclude_paths(clone_dir),
         opt_out_label=os.environ.get("EPIC_AUTOPILOT_OPT_OUT_LABEL", "no-autopilot"),
