@@ -1245,15 +1245,22 @@ nodes:
 
       _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
       EXISTING_PR=$(python3 "$_PCLI" codehost find-change --branch "$BRANCH" --exact)
+      # Close-on-merge snippet from the code host (GitHub: "Closes #N"). If the CLI itself
+      # fails, fall back to the GitHub literal so a transient error never drops the keyword.
+      if ! CLOSE_KW=$(python3 "$_PCLI" codehost close-keyword --id "$ISSUE"); then
+        echo "WARNING: codehost close-keyword failed; using 'Closes #${ISSUE}'" >&2
+        CLOSE_KW="Closes #${ISSUE}"
+      fi
       if [ -n "$EXISTING_PR" ]; then
         echo "PR #${EXISTING_PR} already exists, updated with latest push."
         # Backfill the closing keyword on PRs created before it was added — without
         # "Closes #N" GitHub never attaches the PR to the issue's Development sidebar.
         # Not migrated: gh pr view --json body has no matching CodeHost read method.
         EXISTING_BODY=$(gh pr view "$EXISTING_PR" --json body --jq '.body')
-        if ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
+        # The snippet comes from the code host (empty when tracker != host: nothing to backfill).
+        if [ -n "$CLOSE_KW" ] && ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
           _BACKFILL_BODY_FILE=$(mktemp)
-          printf 'Closes #%s\n\n%s' "$ISSUE" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
+          printf '%s\n\n%s' "$CLOSE_KW" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
           # update-body always exits 0 (its Python process never raises on a failed
           # edit) — update_change_body's own bool return is the real signal, so check stdout.
           UPDATE_BODY_OK=$(python3 "$_PCLI" codehost update-body --id "$EXISTING_PR" --body-file "$_BACKFILL_BODY_FILE")
@@ -1272,9 +1279,13 @@ nodes:
       **Epic:** #${EPIC_NUM}"
         fi
         ISSUE_TITLE=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields title | jq -r '.title')
-        _PR_BODY="Closes #${ISSUE}
+        CLOSE_BLOCK=""
+        if [ -n "$CLOSE_KW" ]; then
+          CLOSE_BLOCK="${CLOSE_KW}
 
-      ## Summary
+      "
+        fi
+        _PR_BODY="${CLOSE_BLOCK}## Summary
       Automated implementation for issue #${ISSUE}.${EPIC_LINE}
 
       ## Preview
