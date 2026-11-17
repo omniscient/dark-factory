@@ -82,6 +82,11 @@ The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 
 documented below section by section. `_set_cfg` is `scheduler.sh:49-64`; the list of exported
 keys is `scheduler.sh:66-98`.
 
+Every key in these tables is written out in full (`token_optimization.budgets.refine`, not
+`budgets.refine`): `scripts/docs_refs_check.py` matches them against the leaf keys of
+`config/config.yaml` in CI, in both directions, so a key added, renamed or removed without a
+table row fails the pull request.
+
 Verification note for the "unread" claims: I ran
 `grep -rnE "<key>|<ENV_NAME>" scheduler.sh entrypoint.sh scripts workflows commands evals bench run-compose.yml Dockerfile`
 for every key and every candidate environment variable, and followed every hit to the reading
@@ -261,30 +266,36 @@ file is what the later phases source
 
 | Key | Default | Controls | Reader | Env override (scope) |
 |---|---|---|---|---|
-| `enforce_budgets` | `true` | global switch: enforce only for scenarios whose `enforce.<s>` is also true | `scripts/budget_gate.sh:44` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false\|0\|no` forces observe, can never force enforce (`budget_gate.sh:50-51`) (run) |
-| `default_budget_tokens` | `30000` | budget when `budgets.<s>` is absent | `scripts/budget_gate.sh:46`; `evals/token_opt_eval.py:282-298` | none |
-| `budgets.refine`, `.plan`, `.implement` | `30000` each | per-scenario token budget | `scripts/budget_gate.sh:46` | none |
-| `budgets.conformance`, `.code-review` | `22000` each | same | `scripts/budget_gate.sh:46` | none |
-| `enforce.refine`, `.plan`, `.conformance`, `.code-review` | `true` | enforce for the scenario | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
-| `enforce.implement` | `false` | same | `scripts/budget_gate.sh:45` | none |
-| `issue_context.reserve_tokens` | `2000` | floor reserved for issue context | `scripts/budget_enforce.py:137,183` | none |
-| `architecture.enabled` | `true` | false = skip slicing, load full ARCHITECTURE.md | `scripts/architecture_slice.py:152-162` (env, then config) | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` (run) |
-| `architecture.mode` | `slice` | **unread** | none | none |
-| `architecture.max_tokens` | `5000` | derivation input for `budget_enforce.py`, not a live cap | `scripts/budget_enforce.py:57-60,138`. The live cap is env only: `scripts/architecture_slice.py:165-182` | `TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS` (run; set by the gate in enforce mode) |
-| `architecture.min_tokens` | `2500` | proportional-distribution floor | `scripts/budget_enforce.py:57-60,138` | none |
-| `memory.enabled` | `true` | false = skip top-k cap | `scripts/memory_retrieve.py:110-130` (env, then config) | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` (run) |
-| `memory.mode` | `top_k` | **unread** | none | none |
-| `memory.max_entries` | `8` | entries surfaced per phase | `scripts/memory_retrieve.py:157-160,474` (config only; code default `TOP_K_DEFAULT = 8` at `:78`) | none |
-| `memory.max_tokens` | `1500` | token ceiling for memory context | `scripts/memory_retrieve.py:163-190`: env, then config, then `TOKEN_BUDGET_DEFAULT = 1500` (`:79`); also a derivation input (`budget_enforce.py:63-66`) | `TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS` (run) |
-| `memory.min_tokens` | `750` | distribution floor | `scripts/budget_enforce.py:63-66,139` | none |
-| `comments.enabled` | `true` | the comment-digest gate | **Not read from config.** The only reader is the workflow node, which checks the env var alone: `workflows/archon-dark-factory.yaml:143-146` | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` (run); `_set_cfg` exports it in the scheduler only (D4) |
-| `comments.digest_after_factory_marker` | `true` | **unread** | none | none |
-| `comments.max_tokens` | `2000` | derivation input, not a live cap | `scripts/budget_enforce.py:71-74,140`; live cap is env only at `scripts/comment_digest.py:30` | `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS` (run; set by the gate) |
-| `comments.min_tokens` | `1000` | distribution floor | `scripts/budget_enforce.py:71-74,140` | none |
-| `diff.enabled` | `true` | false = emit the full diff | `scripts/diff_rank.py:140-147` (env, then config) | `TOKEN_OPTIMIZATION_DIFF_ENABLED` (run) |
-| `diff.max_review_tokens` | `6000` | diff context cap for code review | `scripts/diff_rank.py:133-136,151-157` (config, then env wins) | `TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS` (run) |
-| `diff.min_review_tokens` | `3000` | distribution floor | `scripts/budget_enforce.py:79-84,141` | none |
-| `escalation.opus_only_for` | `security, trading, auth, high_blast_radius, material_conformance_uncertainty` | **unread** (the YAML comment already says reserved) | none | none |
+| `token_optimization.enforce_budgets` | `true` | global switch: enforce only for scenarios whose `enforce.<s>` is also true | `scripts/budget_gate.sh:44` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false\|0\|no` forces observe, can never force enforce (`budget_gate.sh:50-51`) (run) |
+| `token_optimization.default_budget_tokens` | `30000` | budget when `budgets.<s>` is absent | `scripts/budget_gate.sh:46`; `evals/token_opt_eval.py:282-298` | none |
+| `token_optimization.budgets.refine` | `30000` | per-scenario token budget | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.budgets.plan` | `30000` | same | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.budgets.implement` | `30000` | same | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.budgets.conformance` | `22000` | same | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.budgets.code-review` | `22000` | same | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.enforce.refine` | `true` | enforce for the scenario | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
+| `token_optimization.enforce.plan` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
+| `token_optimization.enforce.conformance` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
+| `token_optimization.enforce.code-review` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
+| `token_optimization.enforce.implement` | `false` | same | `scripts/budget_gate.sh:45` | none |
+| `token_optimization.issue_context.reserve_tokens` | `2000` | floor reserved for issue context | `scripts/budget_enforce.py:137,183` | none |
+| `token_optimization.architecture.enabled` | `true` | false = skip slicing, load full ARCHITECTURE.md | `scripts/architecture_slice.py:152-162` (env, then config) | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` (run) |
+| `token_optimization.architecture.mode` | `slice` | **unread** | none | none |
+| `token_optimization.architecture.max_tokens` | `5000` | derivation input for `budget_enforce.py`, not a live cap | `scripts/budget_enforce.py:57-60,138`. The live cap is env only: `scripts/architecture_slice.py:165-182` | `TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS` (run; set by the gate in enforce mode) |
+| `token_optimization.architecture.min_tokens` | `2500` | proportional-distribution floor | `scripts/budget_enforce.py:57-60,138` | none |
+| `token_optimization.memory.enabled` | `true` | false = skip top-k cap | `scripts/memory_retrieve.py:110-130` (env, then config) | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` (run) |
+| `token_optimization.memory.mode` | `top_k` | **unread** | none | none |
+| `token_optimization.memory.max_entries` | `8` | entries surfaced per phase | `scripts/memory_retrieve.py:157-160,474` (config only; code default `TOP_K_DEFAULT = 8` at `:78`) | none |
+| `token_optimization.memory.max_tokens` | `1500` | token ceiling for memory context | `scripts/memory_retrieve.py:163-190`: env, then config, then `TOKEN_BUDGET_DEFAULT = 1500` (`:79`); also a derivation input (`budget_enforce.py:63-66`) | `TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS` (run) |
+| `token_optimization.memory.min_tokens` | `750` | distribution floor | `scripts/budget_enforce.py:63-66,139` | none |
+| `token_optimization.comments.enabled` | `true` | the comment-digest gate | **Not read from config.** The only reader is the workflow node, which checks the env var alone: `workflows/archon-dark-factory.yaml:143-146` | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` (run); `_set_cfg` exports it in the scheduler only (D4) |
+| `token_optimization.comments.digest_after_factory_marker` | `true` | **unread** | none | none |
+| `token_optimization.comments.max_tokens` | `2000` | derivation input, not a live cap | `scripts/budget_enforce.py:71-74,140`; live cap is env only at `scripts/comment_digest.py:30` | `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS` (run; set by the gate) |
+| `token_optimization.comments.min_tokens` | `1000` | distribution floor | `scripts/budget_enforce.py:71-74,140` | none |
+| `token_optimization.diff.enabled` | `true` | false = emit the full diff | `scripts/diff_rank.py:140-147` (env, then config) | `TOKEN_OPTIMIZATION_DIFF_ENABLED` (run) |
+| `token_optimization.diff.max_review_tokens` | `6000` | diff context cap for code review | `scripts/diff_rank.py:133-136,151-157` (config, then env wins) | `TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS` (run) |
+| `token_optimization.diff.min_review_tokens` | `3000` | distribution floor | `scripts/budget_enforce.py:79-84,141` | none |
+| `token_optimization.escalation.opus_only_for` | `security, trading, auth, high_blast_radius, material_conformance_uncertainty` | **unread** (the YAML comment already says reserved) | none | none |
 
 Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 7, `code_review` 5,
 `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3, `epic_autopilot` 11,
@@ -427,7 +438,7 @@ containers (`run-compose.yml:31-47`).
 | Variable | Default | Reader | Notes |
 |---|---|---|---|
 | `SCHEDULER_STATE_DIR` | `/var/lib/dark-factory` | `scheduler.sh:10`, `entrypoint.sh:35`, `breaker.py`, `epic_autopilot.py:617`, `main_red_fixer.py:279` | shared state volume; do not change independently of the volume mount |
-| `STATE_FILE` | `${SCHEDULER_STATE_DIR}/scheduler-state.json` | `scripts/factory_core/breaker.py:15`, `cli.py:47` | breaker state |
+| `STATE_FILE` | `${SCHEDULER_STATE_DIR}/scheduler-state.json` | `scripts/factory_core/breaker.py:15`, `scripts/factory_core/cli.py:47` | breaker state |
 | `CLONE_DIR` | `.` | `epic_autopilot.py:357,401` (`_effective_exclude_paths`, `_target_dir`), `main_red_fixer.py:278-292`, `effective_config.py:130`, `adapter.py:306`, `diff_rank.py`, `budget_gate.sh:33` | set by `entrypoint.sh` in runs. The scheduler does not set it; epic autopilot then uses `/workspace/project` if that holds an adapter (`_SCHEDULER_TARGET_DIR`, [PR #524](https://github.com/omniscient/dark-factory/pull/524)) |
 | `ARTIFACTS_DIR` | per run | `entrypoint.sh:146`; `budget_gate.sh:25` (required) | |
 | `FACTORY_CORE_CLI`, `FACTORY_PROVIDERS_CLI` | baked paths | `scheduler.sh:17-18`, `entrypoint.sh:9` | override seams |
