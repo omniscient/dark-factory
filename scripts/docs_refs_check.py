@@ -163,6 +163,44 @@ def _check_path_refs(doc: str, text: str, repo_root: Path, files: set[str]) -> l
     return errors
 
 
+_KEY_ROW = re.compile(r"^\|\s*`([a-z_][a-z0-9_-]*(?:\.[a-z_][a-z0-9_-]*)+)`\s*\|")
+
+
+def _config_leaves(data: dict, prefix: str = "") -> Iterator[str]:
+    for key, value in data.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict) and value:
+            yield from _config_leaves(value, path)
+        else:
+            yield path
+
+
+def _check_config_keys(doc: str, text: str, config_path: Path) -> list[str]:
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return [f"{config_path}: cannot load config: {exc}"]
+    if not isinstance(data, dict):
+        return [f"{config_path}: top level is not a mapping"]
+    documented: dict[str, int] = {}
+    in_layer1 = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.startswith("## "):
+            in_layer1 = line.startswith("## Layer 1")
+        elif in_layer1 and (m := _KEY_ROW.match(line)):
+            documented.setdefault(m[1], lineno)
+    leaves = set(_config_leaves(data))
+    errors = [
+        f"{doc}:{lineno}: config key `{key}` is documented but is not in {config_path}"
+        for key, lineno in documented.items() if key not in leaves
+    ]
+    errors += [
+        f"{doc}: config key `{key}` in {config_path} is not documented in the Layer 1 tables"
+        for key in sorted(leaves - documented.keys())
+    ]
+    return errors
+
+
 def check(
     doc_paths: Iterable[PathLike],
     repo_root: PathLike = ".",
@@ -183,6 +221,8 @@ def check(
             errors.append(f"{doc}: cannot read file: {exc}")
             continue
         errors.extend(_check_path_refs(str(doc), text, root, files))
+        if doc.name == "configuration.md":
+            errors.extend(_check_config_keys(str(doc), text, config))
     return errors
 
 

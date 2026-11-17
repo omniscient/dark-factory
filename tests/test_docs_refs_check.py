@@ -116,3 +116,36 @@ def test_git_index_ignores_ignored_and_deleted_files(tmp_path):
     (root / "scripts" / "deleted.py").unlink()
     assert _paths_only(root, "`x.py:1`\n") == []
     assert len(_paths_only(root, "`scripts/deleted.py`\n")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Config keys (configuration.md only)
+# ---------------------------------------------------------------------------
+
+_CONFIG_DOC = (
+    "# Config\n\n## Layer 1: `config/config.yaml`\n\n"
+    "| Key | Default |\n|---|---|\n"
+    "| `a.b` | `1` |\n| `a.items` | `[x]` |\n| `budgets.code-review` | `2` |\n"
+    "\n## Layer 2: env\n\n| Key | Default |\n|---|---|\n| `env.only` | `1` |\n"
+)
+
+
+def _config_check(tmp_path: Path, doc: str, config: str) -> list[str]:
+    root = _tree(tmp_path, {"docs/configuration.md": doc, "config/config.yaml": config})
+    return check([root / "docs" / "configuration.md"], root)
+
+
+def test_config_keys_round_trip(tmp_path):
+    config = "a:\n  b: 1\n  items: [x, y]\nbudgets:\n  code-review: 2\n"
+    assert _config_check(tmp_path, _CONFIG_DOC, config) == []
+
+
+def test_config_key_documented_but_removed(tmp_path):
+    errors = _config_check(tmp_path, _CONFIG_DOC, "a:\n  items: [x]\nbudgets:\n  code-review: 2\n")
+    assert len(errors) == 1 and "configuration.md:7: config key `a.b` is documented but is not in" in errors[0]
+
+
+def test_config_key_added_without_docs(tmp_path):
+    config = "a:\n  b: 1\n  c: 3\n  items: [x]\nbudgets:\n  code-review: 2\n"
+    errors = _config_check(tmp_path, _CONFIG_DOC, config)
+    assert len(errors) == 1 and "config key `a.c`" in errors[0] and "is not documented" in errors[0]
