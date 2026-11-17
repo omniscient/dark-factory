@@ -34,6 +34,12 @@ def test_ineligible_already_direct_to_pr():
     assert not ok
 
 
+def test_ineligible_ready_for_human():
+    ok, why = ap.is_eligible(c(labels=["ready-for-agent", "ready-for-human"]), "no-autopilot")
+    assert not ok
+    assert why == "label:ready-for-human"
+
+
 def test_ineligible_wrong_status():
     ok, _ = ap.is_eligible(c(status="Ready"), "no-autopilot")
     assert not ok
