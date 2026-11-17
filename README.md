@@ -363,6 +363,10 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 ## Further reading
 
 - [Extraction plan](https://github.com/omniscient/markethawk/blob/main/docs/superpowers/plans/2026-07-03-dark-factory-extraction-p0-p1.md) — P0 extract + P1 generalize design
+- [`docs/run-lifecycle.md`](docs/run-lifecycle.md) : what one run does, from container start to exit: entrypoint, workflow DAG, gates, artifacts
+- [`docs/scheduler.md`](docs/scheduler.md) : how the scheduler decides what to run: poll loop, stages, limits, retries, safety mechanisms
+- [`docs/features.md`](docs/features.md) : feature index with a code-backed status for each feature
+- [`docs/configuration.md`](docs/configuration.md) : every config key, env var and hardcoded value, and which code reads it
 - [`docs/dark-factory-token-optimization.md`](docs/dark-factory-token-optimization.md) — token optimization operator guide
 - [`docs/dark-factory-memory-contract.md`](docs/dark-factory-memory-contract.md) — memory schema and lifecycle
 - [`docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md) — Claude Skills naming, safety, and tool-permission policy
