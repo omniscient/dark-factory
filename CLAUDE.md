@@ -65,7 +65,8 @@ each destroyed real runs when violated (see #212, #214):
 - Label semantics: `ready-for-agent` opts a Backlog issue into refinement;
   `spec-pending-review`/`plan-pending-review` are gate labels applied **only after** the
   spec/plan artifact actually exists on the branch; `needs-discussion` halts all
-  automation; `direct-to-pr` enables grace-timer auto-advance and end-gate auto-merge.
+  automation; `direct-to-pr` also opts a Backlog issue in by itself, and enables
+  grace-timer auto-advance and end-gate auto-merge. Full list: `docs/triage-labels.md`.
 - Scope discipline: touch only what the plan lists; the conformance gate excises
   out-of-scope changes and files spillover tickets.
 
