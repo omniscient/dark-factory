@@ -478,18 +478,17 @@ post_cost_report() {
     return
   fi
 
-  # Find existing cost report comment by marker
+  # Find existing cost report comment by marker (newest match); its body, when found, is
+  # written to PRIOR_BODY_FILE so the renderer can fold in the prior report. Lookup
+  # failure == "no prior comment" (prints nothing, exits 0), as the old `|| true` did.
   local COMMENT_ID
-  COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
-    --jq "[.[] | select(.body | contains(\"$COST_MARKER\"))] | last | .id // empty" 2>/dev/null || true)
-
-  local PRIOR_BODY_FILE=""
-  if [ -n "$COMMENT_ID" ]; then
-    PRIOR_BODY_FILE=$(mktemp /tmp/prior-body-XXXXXX.md)
-    # Single-comment endpoint omits the issue number: /issues/comments/{id}, NOT
-    # /issues/{n}/comments/{id} (the latter 404s).
-    gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-      --jq '.body' > "$PRIOR_BODY_FILE" 2>/dev/null || true
+  local PRIOR_BODY_FILE
+  PRIOR_BODY_FILE=$(mktemp /tmp/prior-body-XXXXXX.md)
+  COMMENT_ID=$(python3 "$FACTORY_PROVIDERS_CLI" tracker find-comment --id "$ISSUE_NUM" \
+    --marker "$COST_MARKER" --body-out "$PRIOR_BODY_FILE" 2>/dev/null || true)
+  if [ -z "$COMMENT_ID" ]; then
+    rm -f "$PRIOR_BODY_FILE"
+    PRIOR_BODY_FILE=""
   fi
 
   local TIMESTAMP
@@ -520,12 +519,13 @@ post_cost_report() {
   echo "$BODY" > "$TMPFILE"
 
   if [ -n "$COMMENT_ID" ]; then
-    if ! gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-        --method PATCH -F "body=@${TMPFILE}" >/dev/null; then
+    if ! python3 "$FACTORY_PROVIDERS_CLI" tracker update-comment --id "$ISSUE_NUM" \
+        --comment-id "$COMMENT_ID" --body-file "$TMPFILE" >/dev/null; then
       echo "WARNING: Could not update cost report comment ${COMMENT_ID}"
     fi
   else
-    gh issue comment "$ISSUE_NUM" --body-file "$TMPFILE" 2>/dev/null \
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+      --body-file "$TMPFILE" 2>/dev/null \
       || echo "WARNING: Could not post cost report"
   fi
   rm -f "$TMPFILE"
@@ -758,8 +758,8 @@ _conflict_escalate() {
   echo "[deconflict] Tier 3 escalation: ${reason}"
   set_board_status "blocked" 2>/dev/null || true
   footer=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory 2>/dev/null || true)
-  gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
-"## Dark Factory — Conflict Resolution Escalated
+  python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+  --body="## Dark Factory — Conflict Resolution Escalated
 
 The factory attempted automatic merge conflict resolution but could not complete it.
 
@@ -1009,8 +1009,8 @@ EOF
 
   # --- Post success comment ---
   FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory)
-  gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
-"## Dark Factory — Merge Conflicts Resolved
+  python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+  --body="## Dark Factory — Merge Conflicts Resolved
 
 \`main\` has been merged into \`${FEATURE_BRANCH}\` and all conflicts were resolved automatically.
 

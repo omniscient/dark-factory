@@ -3,9 +3,11 @@ calls (board.py, scheduler.sh, entrypoint.sh, epic_autopilot.py, smoke_gate.sh).
 Must emit argv identical to what runs today — proven by golden-argv parity tests,
 not asserted by inspection (spec requirement 3)."""
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 from factory_core import board, identity
 from factory_core.providers.tracker.base import Tracker
@@ -169,6 +171,112 @@ class GitHubTracker(Tracker):
 
     def upsert_comment(self, id: str, marker: str, body: str) -> None:
         board.post_or_update_comment(id, marker, body)
+
+    def add_comment(self, id: str, body: str) -> bool:
+        # Same argv as the scheduler/entrypoint `gh issue comment N --repo SLUG --body ...`
+        # posts. gh's stdout (the comment URL) is not forwarded: no caller consumed it.
+        r = subprocess.run(
+            ["gh", "issue", "comment", id, "--repo", identity.SLUG, "--body", body],
+            capture_output=True, text=True,
+        )
+        if r.stderr:
+            sys.stderr.write(r.stderr)
+        return r.returncode == 0
+
+    def find_comment(self, id: str, marker: str) -> dict | None:
+        # Same two gh api calls as the entrypoint cost-report upsert: list endpoint with the
+        # marker --jq (newest match), then the single-comment endpoint for its body. Note
+        # the single-comment endpoint omits the issue number (/issues/comments/{id}); the
+        # /issues/{n}/comments/{id} form 404s.
+        r = subprocess.run(
+            ["gh", "api", f"repos/{identity.SLUG}/issues/{id}/comments",
+             "--jq", f'[.[] | select(.body | contains("{marker}"))] | last | .id // empty'],
+            capture_output=True, text=True,
+        )
+        comment_id = r.stdout.strip() if r.returncode == 0 else ""
+        if not comment_id:
+            return None
+        b = subprocess.run(
+            ["gh", "api", f"repos/{identity.SLUG}/issues/comments/{comment_id}",
+             "--jq", ".body"],
+            capture_output=True, text=True,
+        )
+        return {"id": comment_id, "body": b.stdout if b.returncode == 0 else ""}
+
+    def update_comment(self, id: str, comment_id: str, body: str) -> bool:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(body)
+            tmp = fh.name
+        try:
+            r = subprocess.run(
+                ["gh", "api", f"repos/{identity.SLUG}/issues/comments/{comment_id}",
+                 "--method", "PATCH", "-F", f"body=@{tmp}"],
+                capture_output=True, text=True,
+            )
+        finally:
+            os.unlink(tmp)
+        if r.returncode != 0 and r.stderr:
+            sys.stderr.write(r.stderr)
+        return r.returncode == 0
+
+    def list_board_items(self) -> dict:
+        # Mirrors the scheduler's former bash fetch_board_items exactly: same query text
+        # (identical template as list_work_items), one `gh api graphql` per 100 items, the
+        # exit status of gh is NOT consulted (a GraphQL error body parses to "no nodes",
+        # as the old `jq '// []'` did) and only an unparsable body is a hard failure.
+        cursor = ""
+        nodes = []
+        while True:
+            after_arg = f', after: "{cursor}"' if cursor else ""
+            query = _BOARD_ITEMS_QUERY_TEMPLATE % (identity.PROJECT_ID, after_arg)
+            r = subprocess.run(
+                ["gh", "api", "graphql", "-f", "query=" + query],
+                capture_output=True, text=True,
+            )
+            try:
+                data = json.loads(r.stdout)
+                items = ((data.get("data") or {}).get("node") or {}).get("items") or {}
+                nodes.extend(items.get("nodes") or [])
+                page_info = items.get("pageInfo") or {}
+            except (json.JSONDecodeError, AttributeError, TypeError) as e:
+                raise RuntimeError(f"github: unreadable project-items response: {e}") from e
+            has_next = page_info.get("hasNextPage") is True
+            cursor = page_info.get("endCursor") or ""
+            if has_next and not cursor:
+                raise RuntimeError(
+                    "GitHub ProjectV2 pageInfo indicated another page but returned no cursor")
+            if not has_next:
+                break
+        out = []
+        for node in nodes:
+            content = node.get("content") or {}
+            if content.get("number") is None:
+                continue
+            out.append({
+                "content": {"number": content["number"], "title": content.get("title"),
+                            "type": "Issue"},
+                "labels": [n["name"] for n in (content.get("labels") or {}).get("nodes") or []],
+                "status": (node.get("fieldValueByName") or {}).get("name"),
+            })
+        return {"items": out}
+
+    def list_items(self, label: str, limit: int = 200) -> list:
+        # Same argv as the scheduler's former off-board `gh issue list` lookup.
+        r = subprocess.run(
+            ["gh", "issue", "list", "--repo", identity.SLUG, "--state", "open",
+             "--label", label, "--limit", str(limit), "--json", "number"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"gh issue list failed: {r.stderr.strip()}")
+        try:
+            rows = json.loads(r.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"gh issue list returned non-JSON: {e}") from e
+        if not isinstance(rows, list):
+            raise RuntimeError("gh issue list did not return a JSON array")
+        return [str(row["number"]) for row in rows]
 
     def create_item(self, title: str, body: str, labels: list | None = None) -> str:
         cmd = ["gh", "issue", "create", "--repo", identity.SLUG]

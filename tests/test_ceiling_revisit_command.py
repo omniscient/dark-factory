@@ -67,3 +67,16 @@ def test_guard_anchor_matches_filed_title_substring():
         f"guard anchor {filter_match.group(1)!r} must be a substring of the filed title "
         f"{title_match.group(1)!r} — they must never drift apart"
     )
+
+
+def test_pr_closing_keyword_comes_from_the_code_host_with_github_fallback():
+    """#507: no hardcoded `Closes #N` literal in the PR body; the snippet is the code
+    host's (empty off-GitHub -> no closing line), falling back to the GitHub literal only
+    when the CLI call itself fails."""
+    text = _text()
+    assert 'codehost close-keyword --id "$ISSUE_NUM"' in text
+    assert '|| CLOSE_KW="Closes #${ISSUE_NUM}"' in text
+    assert '${CLOSE_LINE}"' in text
+    # the only remaining literal is the fallback assignment above
+    literals = [ln for ln in text.splitlines() if "Closes #${ISSUE_NUM}" in ln]
+    assert len(literals) == 1 and "CLOSE_KW=" in literals[0]

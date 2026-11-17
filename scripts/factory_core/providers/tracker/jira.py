@@ -208,6 +208,43 @@ class JiraTracker(Tracker):
         else:
             self._request("POST", f"/issue/{id}/comment", json_body={"body": body})
 
+    def add_comment(self, id: str, body: str) -> bool:
+        self._request("POST", f"/issue/{id}/comment", json_body={"body": body})
+        return True
+
+    def find_comment(self, id: str, marker: str) -> dict | None:
+        data = self._request("GET", f"/issue/{id}/comment")
+        matches = [c for c in data.get("comments", []) if marker in (c.get("body") or "")]
+        if not matches:
+            return None
+        newest = matches[-1]  # Jira returns comments oldest-first
+        return {"id": str(newest["id"]), "body": newest.get("body") or ""}
+
+    def update_comment(self, id: str, comment_id: str, body: str) -> bool:
+        self._request("PUT", f"/issue/{id}/comment/{comment_id}", json_body={"body": body})
+        return True
+
+    def list_board_items(self) -> dict:
+        """Scheduler snapshot shape. Jira has no board object here: every issue in the
+        project, `content.number` carries the issue key (opaque string), `status` the
+        Jira status display name."""
+        issues = self._search_all(f"project={self._project_key}")
+        items = []
+        for issue in issues:
+            fields = issue.get("fields", {})
+            items.append({
+                "content": {"number": issue.get("key"), "title": fields.get("summary"),
+                            "type": "Issue"},
+                "labels": fields.get("labels", []),
+                "status": (fields.get("status") or {}).get("name"),
+            })
+        return {"items": items}
+
+    def list_items(self, label: str, limit: int = 200) -> list:
+        jql = (f'project={self._project_key} AND labels = "{_jql_escape(label)}" '
+               f"AND statusCategory != Done")
+        return [issue.get("key") for issue in self._search_all(jql)][:limit]
+
     def create_item(self, title: str, body: str, labels: list | None = None) -> str:
         fields = {
             "project": {"key": self._project_key},

@@ -49,3 +49,23 @@ def test_concrete_methods_accept_every_abc_parameter(abc, impl):
                     and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 problems.append(f"{impl.__name__}.{name}: extra parameter {n!r} is required")
     assert not problems, "\n".join(problems)
+
+
+_NEW_IN_507 = {
+    "add_comment": ("id", "body"),
+    "find_comment": ("id", "marker"),
+    "update_comment": ("id", "comment_id", "body"),
+    "list_board_items": (),
+    "list_items": ("label", "limit"),
+}
+
+
+@pytest.mark.parametrize("impl", [GitHubTracker, JiraTracker], ids=lambda c: c.__name__)
+def test_507_tracker_methods_are_covered_and_keep_exact_parameters(impl):
+    """The #507 contract additions are abstract, so the generic check above covers them;
+    this pins their names and parameter lists so a rename cannot silently drop coverage."""
+    assert set(_NEW_IN_507) <= set(_public_methods(Tracker))
+    assert set(_NEW_IN_507) <= Tracker.__abstractmethods__
+    for name, params in _NEW_IN_507.items():
+        got = tuple(p for p in inspect.signature(getattr(impl, name)).parameters if p != "self")
+        assert got == params, f"{impl.__name__}.{name}: {got} != {params}"
