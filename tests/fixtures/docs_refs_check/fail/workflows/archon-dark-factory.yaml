@@ -1,0 +1,10 @@
+name: docs-refs-fixture
+nodes:
+  - id: fetch
+    bash: echo fetch
+  - id: build-step
+    depends_on: [fetch]
+    bash: echo build
+  - id: report
+    depends_on: [build-step]
+    bash: echo report
