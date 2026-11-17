@@ -115,6 +115,12 @@ def _codehost_open_change(args):
         args.source, args.target, args.title, body, draft=args.draft, repo=args.repo))
 
 
+def _codehost_close_keyword(args):
+    # Prints the snippet verbatim ("" when tracker != host). _print() emits a trailing
+    # newline, which shell command substitution strips.
+    _print(get_codehost().close_keyword(args.id))
+
+
 def _codehost_mark_ready(args):
     get_codehost().mark_ready(args.id, repo=args.repo)
 
@@ -238,6 +244,10 @@ def main():
     coc.add_argument("--draft", action="store_true")
     coc.add_argument("--repo")
     coc.set_defaults(func=_codehost_open_change)
+
+    cck = csub.add_parser("close-keyword")
+    cck.add_argument("--id", required=True)
+    cck.set_defaults(func=_codehost_close_keyword)
 
     cmr = csub.add_parser("mark-ready")
     cmr.add_argument("--id", required=True)

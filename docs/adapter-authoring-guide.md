@@ -206,10 +206,12 @@ Returns the body snippet that auto-closes an issue on merge (e.g. `"Closes #42"`
 your code host is also the tracker** (design doc §6.4) — otherwise it must return `""`. Getting
 this wrong emits a dead close-keyword the tracker can never see.
 
-That is the contract for a new adapter. The shipped code does not yet exercise it:
-`GitHubCodeHost.close_keyword` returns `Closes #N` without checking `FACTORY_TRACKER`, and
-nothing calls `close_keyword` — the workflow's PR-creation and backfill steps and
-`scripts/factory_core/main_red_fixer.py` write `Closes #N` into the PR body directly.
+That is the contract for a new adapter. The run DAG's `push-and-pr` node now calls it
+(`providers/cli.py codehost close-keyword --id N`) for the new-PR body and the existing-PR
+backfill; an empty snippet means no closing line and no backfill. The shipped code does not
+yet honour the `tracker == host` rule everywhere: `GitHubCodeHost.close_keyword` returns
+`Closes #N` without checking `FACTORY_TRACKER`, and `scripts/factory_core/main_red_fixer.py`
+still writes `Closes #N` into its PR body directly.
 
 ### Test bar
 
@@ -303,9 +305,9 @@ container, each against its own environment (see Overview).
   dead `"Closes #N"` snippet the tracker can never observe would silently break this invariant.
 
   The explicit close is the designed flow, not shipped behaviour. No caller invokes
-  `resolve_item` (the `tracker resolve` CLI verb exists but is unused) or `close_keyword`,
-  and the workflow hardcodes `Closes #N` in the PR body, so a tracker other than the code
-  host is not resolved on merge today
+  `resolve_item` (the `tracker resolve` CLI verb exists but is unused), and
+  `GitHubCodeHost.close_keyword` returns `Closes #N` regardless of the tracker, so a tracker
+  other than the code host is not resolved on merge today
   ([#507](https://github.com/omniscient/dark-factory/issues/507) tracks this with the other
   provider-wiring gaps).
 

@@ -178,7 +178,7 @@ FACTORY_MODEL_PROVIDER=anthropic  # anthropic | bedrock | vertex | databricks | 
 ```
 
 `jira` is registered but not yet usable end to end: the scheduler poll loop, the
-board code and several run-container call sites still shell `gh` directly
+board code and several run-container call sites (notably plain `gh issue comment` posts) still shell `gh` directly
 ([#507](https://github.com/omniscient/dark-factory/issues/507)).
 A selection (and the provider's variables) made in `instance.env` is forwarded to run
 containers by `dispatch()`.

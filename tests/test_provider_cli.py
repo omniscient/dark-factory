@@ -373,3 +373,27 @@ def test_tracker_label_catches_runtime_error_and_exits_1(monkeypatch, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "ERROR: jira: PUT /issue/42 failed (500): boom" in err
+
+
+def test_codehost_close_keyword_prints_snippet(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeCodeHost:
+        def close_keyword(self, issue_id):
+            return f"Closes #{issue_id}"
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+    monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "close-keyword", "--id", "42"])
+    cli_mod.main()
+    assert capsys.readouterr().out == "Closes #42\n"
+
+
+def test_codehost_close_keyword_empty_prints_blank_line(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    class _FakeCodeHost:
+        def close_keyword(self, issue_id):
+            return ""
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+    monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "close-keyword", "--id", "42"])
+    cli_mod.main()
+    assert capsys.readouterr().out.strip() == ""
