@@ -9,7 +9,7 @@ GATE="${REPO_ROOT}/scripts/budget_gate.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# context-budget.json fixture shared by all cases: claude_md=500, issue_context=300
+# context-budget.refine.json fixture shared by all cases: claude_md=500, issue_context=300
 # (floored to 2000 by budget_enforce.py's reserve_tokens), two optimizable sections
 # present (memory_context, comments) so enforce-mode output is non-empty.
 _CONTEXT_BUDGET_JSON='{
@@ -28,7 +28,7 @@ _CONTEXT_BUDGET_JSON='{
 _make_case() {
   local dir="$1"
   mkdir -p "${dir}/.claude/skills/refinement"
-  printf '%s' "$_CONTEXT_BUDGET_JSON" > "${dir}/context-budget.json"
+  printf '%s' "$_CONTEXT_BUDGET_JSON" > "${dir}/context-budget.refine.json"
   cat > "${dir}/.claude/skills/refinement/config.yaml" <<CFG
 token_optimization:
   enforce_budgets: ${2}

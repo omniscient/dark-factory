@@ -716,3 +716,30 @@ def test_check_nonempty_missing_file_exits_ge_2(tmp_path, capsys):
     # the abort comment). This assertion is also what makes the test red before Task 3
     # lands: argparse's own missing/unrecognized-argument exit is already 2.
     assert "diff_rank --check-nonempty error" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# #511: delivered-savings record (what was really emitted under the cap)
+# ---------------------------------------------------------------------------
+
+def test_main_appends_delivered_savings_record(tmp_path):
+    diff = "".join(make_diff(f"src/mod{i}.py", added=40, removed=10) for i in range(6))
+    diff_file = tmp_path / "d.txt"
+    diff_file.write_text(diff)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(yaml.dump(make_config(token_cap=50)))
+    art = tmp_path / "art"
+    art.mkdir()
+    for _ in range(2):  # conformance then code-review: the second must not clobber the first
+        with patch("sys.argv", ["diff_rank.py", "--diff", str(diff_file),
+                                "--artifacts-dir", str(art), "--config", str(cfg),
+                                "--hotspots", str(tmp_path / "none.md")]), \
+                patch("sys.stdout", io.StringIO()):
+            dr.main()
+    ranking = json.loads((art / "diff-ranking.json").read_text())
+    recs = [json.loads(x) for x in (art / "delivered-savings.jsonl").read_text().splitlines()]
+    assert len(recs) == 2
+    assert recs[0]["kind"] == "diff"
+    assert recs[0]["baseline_tokens"] == ranking["raw_diff_tokens"]
+    assert recs[0]["delivered_tokens"] == ranking["estimated_tokens_emitted"]
+    assert recs[0]["delivered_tokens"] < recs[0]["baseline_tokens"]

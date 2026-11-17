@@ -707,6 +707,15 @@ def main():
     # Write diff-ranking.json
     ranking_path = Path(args.artifacts_dir) / "diff-ranking.json"
     ranking_path.write_text(json.dumps(ranking_info, indent=2))
+    # Append-only record of what was actually emitted (#511): diff-ranking.json is
+    # overwritten by the next diff_rank run (code-review after conformance).
+    try:
+        import token_estimate as _te
+        _te.record_delivered(args.artifacts_dir, "diff",
+                             ranking_info.get("raw_diff_tokens", 0),
+                             ranking_info.get("estimated_tokens_emitted", 0))
+    except Exception:
+        pass
 
     # Write ranked diff to stdout
     sys.stdout.write(ranked_diff)

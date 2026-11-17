@@ -236,34 +236,48 @@ artifacts are present, the comment includes a savings line:
 **Fallbacks:** architecture_md: safety_keyword:migration
 ```
 
-- **Context savings** = tokens saved by features whose output is actually delivered to the phase's
-  prompt, vs. the unoptimized baseline. Today that is the diff cap in conformance and code-review and the
-  memory cap in refine, plan, implement and continue (`_DELIVERED_SAVINGS` in `context_budget.py`). Memory
-  counts because those phases load it through `load_memory_context.sh`, whose retriever applies the top-k /
-  token cap on both the index and markdown paths ([#486](https://github.com/omniscient/dark-factory/issues/486)).
-  That is what the figure is *meant* to count. What it can contain today is narrower (a known,
-  unfixed measurement gap, [#511](https://github.com/omniscient/dark-factory/issues/511)): `context_budget.py` runs in the
-  pre-command budget nodes, before `memory-context.md` exists, so `memory_context` is reported as dropped
-  and contributes 0; and the diff figure is taken from the raw `git diff` (cut at 1000 lines) against a
-  baseline that exists only when an earlier phase left a `diff-ranking.json`, not from `diff_rank.py`'s
-  ranked output.
+- **Context savings** = baseline minus delivered, in tokens, for the text that really went into
+  the prompts of the whole run, summed across its scenarios (a new/continue run covers implement,
+  conformance and code-review). Two optimizers count, matching `_DELIVERED_SAVINGS` in
+  `context_budget.py`: the memory cap in refine, plan, implement and continue
+  ([#486](https://github.com/omniscient/dark-factory/issues/486)) and the diff cap in conformance
+  and code-review. Both are measured **after** the optimizer ran, from its own output, not from a
+  pre-run probe (the budget nodes run before `memory-context.md` or the ranked diff exist):
+  - `memory_retrieve.py` (when it emits its trace) appends `{kind: memory, phase, baseline_tokens:
+    uncapped, delivered_tokens: emitted}` to `$ARTIFACTS_DIR/delivered-savings.jsonl`. Only the
+    refine/plan/implement/continue phases count; the validate-phase load does not.
+  - `diff_rank.py` appends `{kind: diff, baseline_tokens: raw_diff_tokens, delivered_tokens:
+    estimated_tokens_emitted}` to the same file, one line per ranking run.
+  The file is append-only because `memory-trace.json` and `diff-ranking.json` are overwritten by
+  the next phase. The percentage is saved over the baseline of the delivered text.
 - **Measured-only** = savings `context_budget.py` computed for features that do not reach a prompt
   (today only the architecture slice). Reported on a separate line and never added to the headline
-  figure: `Measured-only (not delivered to the prompt): 4.2K tokens (architecture_md)`. Delivery
-  wiring of the architecture slice for refine/plan/implement is not done ([#487](https://github.com/omniscient/dark-factory/issues/487)).
+  figure: `Measured-only (not delivered to the prompt): 4.2K tokens (architecture_md)`. Architecture
+  stays measured-only until its delivery is wired ([#487](https://github.com/omniscient/dark-factory/issues/487)).
+  Summed over the run's scenarios.
 - **Fallbacks** = sections where a safety trigger fired and the full baseline was loaded instead of the optimized version. These are expected and correct behavior (not errors).
+- **Budget trim / Over budget** lines are rendered once per scenario that tripped them.
 
-Artifacts written before this change fold measured-only savings into `savings_tokens`, so older
-cost reports can still show the overstated figure.
+Artifacts written before #487 fold measured-only savings into `savings_tokens`, and runs that
+predate `delivered-savings.jsonl` fall back to summing the budget artifacts' own `savings_tokens`,
+so older cost reports can still show the old figure.
 
-If no savings line appears, the `context-budget.json` artifact was absent, `schema_version` < 2
-(older run artifact), or the computed saving was zero.
+If no savings line appears, no `context-budget.<scenario>.json` artifact was present,
+`schema_version` < 2 (older run artifact), or the computed saving was zero.
 
 ---
 
 ## Per-Section Savings Data
 
-The `context-budget.json` artifact (in `$ARTIFACTS_DIR`) includes per-section savings:
+Each budget node writes its own artifact in `$ARTIFACTS_DIR`: `context-budget.refine.json`,
+`.plan.json`, `.implement.json`, `.conformance.json`, `.code-review.json`. The name is the budget
+slot (the argument of `budget_gate.sh`), so later nodes of a new/continue run no longer overwrite
+earlier scenarios' measurements; the implement slot holds both `new` and `continue` runs (the
+`scenario` field inside says which). The cost report (`cost-report-render --artifacts-dir`) reads
+all of them, and falls back to the legacy single `context-budget.json` only when no per-scenario
+file exists (artifacts from before the split). Each artifact includes per-section savings. Its
+`savings_tokens` / `savings_pct` are the pre-run probe; the cost report's headline comes from
+`delivered-savings.jsonl` (above), not from these two fields:
 
 ```json
 {
@@ -360,7 +374,7 @@ use their config defaults.
 
 ### Telemetry signals
 
-In `context-budget.json` (`$ARTIFACTS_DIR`):
+In `context-budget.<scenario>.json` (`$ARTIFACTS_DIR`; the enforce write-back targets the same file the gate read):
 - `over_budget` — `true` if the un-trimmable reserved context is at or above the scenario budget
 - `would_trim` — `true` when the derived caps are tighter than the config defaults; computed and written the same way in observe and enforce mode
 - `derived_caps` — computed cap values (enforced or hypothetical)
@@ -388,13 +402,10 @@ python3 evals/token_opt_eval.py --calibrate \
   --clone-dir <path to the target clone>
 ```
 
-Per-run `context-budget.json` artifacts hold `sections.architecture_md.tokens` —
-collect these to compute the p90 architecture slice size and verify it fits within the
-planned `architecture.max_tokens` cap before flipping. Caveat: in a new/continue run the
-conformance and code-review budget nodes overwrite the same `context-budget.json`, and those
-scenarios have no `architecture_md` section, so the value survives only in refine/plan runs
-or in implement runs that stop before conformance
-([#511](https://github.com/omniscient/dark-factory/issues/511)).
+Per-run `context-budget.implement.json` (and `.refine.json` / `.plan.json`) artifacts hold
+`sections.architecture_md.tokens` — collect these to compute the p90 architecture slice size and
+verify it fits within the planned `architecture.max_tokens` cap before flipping. Each scenario has
+its own file, so the value survives a full new/continue run.
 
 **Flip procedure (when gates pass):**
 1. Set `budgets.<scenario>: <calibrated_value>` and `enforce.<scenario>: true`. For one
@@ -431,15 +442,14 @@ still `enforce: false`; the most recent calibration scorecard in `evals/reports/
 **Unlock steps:**
 
 1. **Measure real arch slice sizes** — collect `sections.architecture_md.tokens` from
-   per-run `context-budget.json` artifacts across ≥ 10 full-corpus bench issues (use
-   refine/plan artifacts: later budget nodes overwrite the file in implement runs, see the
-   caveat under the Observe → Enforce Procedure):
+   per-run `context-budget.<scenario>.json` artifacts across ≥ 10 full-corpus bench issues
+   (implement, refine and plan carry the `architecture_md` section):
    ```bash
    # Example: extract p90 slice size from recent artifacts
    python3 -c "
    import json, glob, statistics
    sizes = []
-   for f in glob.glob('$ARTIFACTS_DIR/**/context-budget.json', recursive=True):
+   for f in glob.glob('$ARTIFACTS_DIR/**/context-budget.*.json', recursive=True):
        d = json.load(open(f))
        s = d.get('sections', {}).get('architecture_md', {}).get('tokens')
        if s: sizes.append(s)
@@ -468,8 +478,8 @@ derived memory cap ([#511](https://github.com/omniscient/dark-factory/issues/511
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Cost report shows no savings line | `context-budget.json` absent, schema v1, or zero computed saving | Check for `context_budget.py` errors in the run log |
-| Architecture slice always falls back | Safety keyword in labels or changed files | Expected behavior; check `fallback_reason` in `context-budget.json` |
+| Cost report shows no savings line | No `context-budget.<scenario>.json`, schema v1, or zero delivered saving (check `delivered-savings.jsonl`) | Check for `context_budget.py` errors in the run log |
+| Architecture slice always falls back | Safety keyword in labels or changed files | Expected behavior; check `fallback_reason` in `context-budget.<scenario>.json` |
 | Agent still reads the full ARCHITECTURE.md | Slicing is telemetry-only | Expected today; see [#487](https://github.com/omniscient/dark-factory/issues/487) |
 | Memory returns all entries (ignores top-k) | `TOKEN_OPTIMIZATION_MEMORY_ENABLED=false` (env, or `memory.enabled: false` in the config of the clone) | Check `memory_enabled` in `memory-trace.json` |
 | Comment digest skipped | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED=false`, or the run is not a `continue` | Set to `true` in the target's `.archon/.env` and restart the scheduler |
