@@ -347,6 +347,20 @@ def _sensitive_keywords(clone_dir: str | None = None) -> str:
     return _DEFAULT_SENSITIVE_KEYWORDS
 
 
+def _effective_exclude_paths(clone_dir: str | None) -> list:
+    """Union of the exclusions in force before the target adapter was consulted
+    (lookup from CLONE_DIR or the cwd) and the target adapter's own list.
+
+    Never narrower than either: pointing autopilot at the target's adapter must not
+    drop an exclusion as a side effect.
+    """
+    merged = list(_load_exclude_paths(os.environ.get("CLONE_DIR", ".")))
+    for p in _load_exclude_paths(clone_dir):
+        if p not in merged:
+            merged.append(p)
+    return merged
+
+
 def _effective_sensitive_keywords(clone_dir: str | None, env_value: str | None) -> str:
     """Union of the config/env pattern and the adapter's safety.sensitive_keywords.
 
@@ -371,6 +385,25 @@ def _gh_json(args: list):
         return json.loads(p.stdout)
     except Exception:
         return None
+
+
+# Where the scheduler container mounts the target checkout (read-only).
+_SCHEDULER_TARGET_DIR = "/workspace/project"
+
+
+def _target_dir() -> str:
+    """Directory whose .factory/adapter.yaml governs this autopilot pass.
+
+    CLONE_DIR wins when set. The scheduler does not set it and runs from /workspace,
+    so default to the mounted target checkout; without that, "." read no adapter and
+    the built-in defaults silently replaced the target's safety settings.
+    """
+    explicit = os.environ.get("CLONE_DIR")
+    if explicit:
+        return explicit
+    if os.path.isfile(os.path.join(_SCHEDULER_TARGET_DIR, ".factory", "adapter.yaml")):
+        return _SCHEDULER_TARGET_DIR
+    return "."
 
 
 def _load_exclude_paths(clone_dir: str | None = None) -> list:
@@ -589,9 +622,9 @@ def main_once() -> int:
     except Exception:
         state = {}
     today = datetime.now(timezone.utc).date().isoformat()
-    clone_dir = os.environ.get("CLONE_DIR", ".")
+    clone_dir = _target_dir()
     cfg = dict(
-        exclude_paths=_load_exclude_paths(clone_dir),
+        exclude_paths=_effective_exclude_paths(clone_dir),
         opt_out_label=os.environ.get("EPIC_AUTOPILOT_OPT_OUT_LABEL", "no-autopilot"),
         size_ceiling=os.environ.get("EPIC_AUTOPILOT_SIZE_CEILING", "XL"),
         sensitive_keywords=_effective_sensitive_keywords(
