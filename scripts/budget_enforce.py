@@ -282,7 +282,7 @@ def run_cli(argv: list[str] | None = None) -> BudgetResult:
     )
     parser.add_argument(
         "--mode", choices=["observe", "enforce"], default="observe",
-        help="observe = compute only; enforce = also print KEY=VALUE to stdout",
+        help="observe = compute only; enforce = also print `export KEY=VALUE` lines to stdout",
     )
     parser.add_argument(
         "--config", default=_DEFAULT_CONFIG_PATH,
@@ -328,7 +328,9 @@ def run_cli(argv: list[str] | None = None) -> BudgetResult:
                     )
                 env_lines[env_var] = cap
         for env_var in sorted(env_lines):
-            print(f"{env_var}={env_lines[env_var]}")
+            # `export` so a sourcing shell passes the cap on to the Python
+            # optimizers it starts (a bare VAR=N is not in a child's environment, #511).
+            print(f"export {env_var}={env_lines[env_var]}")
         print(
             f"budget_enforce: scenario={scenario} budget={args.budget_tokens} "
             f"reserved={result.reserved_tokens} allowance={result.allowance} "
