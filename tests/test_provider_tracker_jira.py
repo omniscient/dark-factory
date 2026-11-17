@@ -415,3 +415,68 @@ def test_opaque_ids_never_coerced_to_int(monkeypatch):
     tracker = JiraTracker()
     monkeypatch.setattr(JiraTracker, "_request", lambda self, *a, **kw: {"transitions": []})
     tracker.set_status("PROJ-123", "blocked")  # must not raise ValueError from int()
+
+
+# --- #507 contract additions ---------------------------------------------------------------
+
+def _recording_jira(monkeypatch, responder):
+    from factory_core.providers.tracker.jira import JiraTracker
+
+    _set_jira_env(monkeypatch)
+    calls = []
+
+    def fake_request(self, method, path, params=None, json_body=None):
+        calls.append((method, path, params, json_body))
+        return responder(method, path, params, json_body)
+
+    monkeypatch.setattr(JiraTracker, "_request", fake_request)
+    return JiraTracker(), calls
+
+
+def test_add_comment_posts_a_new_comment_without_reading_first(monkeypatch):
+    tracker, calls = _recording_jira(monkeypatch, lambda *a: {})
+    assert tracker.add_comment("PROJ-1", "hello") is True
+    assert calls == [("POST", "/issue/PROJ-1/comment", None, {"body": "hello"})]
+
+
+def test_find_comment_returns_newest_marker_match_from_fixture(monkeypatch):
+    comments = json.loads((FIXTURES / "comments.json").read_text())
+    comments["comments"].append({"id": 502, "body": "<!-- factory:refinement -->\nlater"})
+    tracker, calls = _recording_jira(monkeypatch, lambda *a: comments)
+    assert tracker.find_comment("PROJ-1", "<!-- factory:refinement -->") == {
+        "id": "502", "body": "<!-- factory:refinement -->\nlater"}
+    assert calls[0][:2] == ("GET", "/issue/PROJ-1/comment")
+
+
+def test_find_comment_none_when_no_marker_match(monkeypatch):
+    comments = json.loads((FIXTURES / "comments.json").read_text())
+    tracker, _ = _recording_jira(monkeypatch, lambda *a: comments)
+    assert tracker.find_comment("PROJ-1", "<!-- absent -->") is None
+
+
+def test_update_comment_puts_to_the_comment_resource(monkeypatch):
+    tracker, calls = _recording_jira(monkeypatch, lambda *a: {})
+    assert tracker.update_comment("PROJ-1", "501", "edited") is True
+    assert calls == [("PUT", "/issue/PROJ-1/comment/501", None, {"body": "edited"})]
+
+
+def test_list_board_items_uses_scheduler_snapshot_shape(monkeypatch):
+    search = json.loads((FIXTURES / "search_result.json").read_text())
+    tracker, calls = _recording_jira(monkeypatch, lambda *a: search)
+    snapshot = tracker.list_board_items()
+    assert calls[0][1] == "/search" and calls[0][2]["jql"] == "project=PROJ"
+    assert set(snapshot) == {"items"}
+    assert len(snapshot["items"]) == len(search["issues"])
+    first = snapshot["items"][0]
+    assert set(first) == {"content", "labels", "status"}
+    assert first["content"]["number"] == search["issues"][0]["key"]
+    assert first["content"]["type"] == "Issue"
+
+
+def test_list_items_jql_filters_label_and_open_and_honours_limit(monkeypatch):
+    search = json.loads((FIXTURES / "search_result.json").read_text())
+    tracker, calls = _recording_jira(monkeypatch, lambda *a: search)
+    ids = tracker.list_items('ready-for-agent', limit=1)
+    assert calls[0][2]["jql"] == (
+        'project=PROJ AND labels = "ready-for-agent" AND statusCategory != Done')
+    assert ids == [search["issues"][0]["key"]]

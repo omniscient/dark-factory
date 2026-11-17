@@ -1117,10 +1117,26 @@ JSON
 export -f gh
 > "$STUB_LOG"
 
+# fetch_board_items now goes through `providers/cli.py tracker board-items`, which spawns gh
+# as a subprocess. Run the REAL provider CLI here (not the python3 stub), and read the gh
+# calls from the PATH shim's SHIM_LOG: the shim re-enters bash so the gh function above
+# still answers, and logs each argv line to SHIM_LOG (STUB_LOG is /dev/null in the child).
+_PY3_STUB_DEF=$(declare -f python3)
+_PROVIDERS_CLI_SAVED="$FACTORY_PROVIDERS_CLI"
+python3() { "$_REAL_PY3" "$@"; }
+export FACTORY_PROVIDERS_CLI="$SCRIPT_DIR/../scripts/factory_core/providers/cli.py"
+: > "$SHIM_LOG"
 _BOARD_PAGE_RESULT=$(fetch_board_items)
+eval "$_PY3_STUB_DEF"
+FACTORY_PROVIDERS_CLI="$_PROVIDERS_CLI_SAVED"
 assert_eq "fetch_board_items returns both pages" "2" "$(echo "$_BOARD_PAGE_RESULT" | jq '.items | length')"
-assert_eq "fetch_board_items requests first: 100 on both pages" "2" "$(grep -c 'items(first: 100' "$STUB_LOG" || true)"
-assert_eq "fetch_board_items requests the cursor page" "1" "$(grep -c 'after: "CUR1"' "$STUB_LOG" || true)"
+assert_eq "fetch_board_items requests first: 100 on both pages" "2" "$(grep -c 'items(first: 100' "$SHIM_LOG" || true)"
+assert_eq "fetch_board_items requests the cursor page" "1" "$(grep -c 'after: "CUR1"' "$SHIM_LOG" || true)"
+assert_eq "fetch_board_items makes exactly one gh api graphql call per page (2 pages, 2 calls)" \
+  "2" "$(grep -c '^gh api graphql -f query=' "$SHIM_LOG" || true)"
+assert_eq "fetch_board_items keeps the {content:{number,title,type},labels,status} shape" \
+  '{"content":{"number":101,"title":"first page issue","type":"Issue"},"labels":["ready-for-agent"],"status":"Backlog"}' \
+  "$(echo "$_BOARD_PAGE_RESULT" | jq -c '.items[0]')"
 
 gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }
 export -f gh
@@ -1346,7 +1362,7 @@ assert_eq "R9: dispatch_stage(stage_orphan_sweep) skips on session_window_paused
 assert_eq "R9b: no set_board_status call when skipped" \
   "0" "$(grep -c 'set_board_status' "$STUB_LOG" || true)"
 assert_eq "R9c: no gh comment call when skipped" \
-  "0" "$(grep -c 'gh issue comment' "$STUB_LOG" || true)"
+  "0" "$(grep -c 'tracker add-comment' "$STUB_LOG" || true)"
 
 # R10: dispatch_stage(stage_orphan_sweep) still sweeps normally when SESSION_WINDOW_PAUSED=false
 # (regression guard: unpaused orphan recovery is unchanged).
@@ -1360,6 +1376,10 @@ assert_eq "R10b: sweep runs and moves orphaned issue 962 to blocked" \
   "1" "$(echo "$STDOUT_R10" | grep -c 'sweep=orphaned_in_progress issue=#962 action=move_to_blocked')"
 assert_eq "R10c: set_board_status called for issue 962" \
   "1" "$(grep -c 'set_board_status 962' "$STUB_LOG" || true)"
+assert_eq "R10d (#507): the recovery comment goes through the provider add-comment verb for issue 962" \
+  "1" "$(grep -c 'providers/cli.py tracker add-comment --id 962 --body=## Dark Factory — Orphaned Run Recovered' "$STUB_LOG" || true)"
+assert_eq "R10e (#507): no inline gh issue comment is left in the scheduler" \
+  "0" "$(grep -c 'gh issue comment' "$SCHED" || true)"
 
 # R11: dispatch_stage(stage_orphan_sweep) still sweeps when MAIN_IS_RED=true and
 # SESSION_WINDOW_PAUSED=false — confirms guard type is paused_only, not red_or_paused: a

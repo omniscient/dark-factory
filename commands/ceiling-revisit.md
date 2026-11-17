@@ -121,6 +121,12 @@ Analysis window: ${SINCE} → ${UNTIL}
 Decision: n>=5 and keyword success rate >= M_baseline (no discriminative value)."
 
   git push origin "$PR_BRANCH"
+  # Close-on-merge snippet from the code host (GitHub: "Closes #N"; empty when the tracker
+  # is not the code host). If the lookup itself fails, fall back to the GitHub literal.
+  CLOSE_KW=$(python3 dark-factory/scripts/factory_core/providers/cli.py codehost close-keyword --id "$ISSUE_NUM") \
+    || CLOSE_KW="Closes #${ISSUE_NUM}"
+  CLOSE_LINE=""
+  [ -n "$CLOSE_KW" ] && CLOSE_LINE="${CLOSE_KW} (if this is the actionable change)."
   gh pr create \
     --repo "$REPO" \
     --title "chore(env): update ABOVE_CEILING_KEYWORDS per weekly ceiling revisit" \
@@ -130,7 +136,7 @@ Removes: \`${KEYWORDS_TO_REMOVE}\`
 
 See the analysis comment on #${ISSUE_NUM} for full data and decision rationale.
 
-Closes #${ISSUE_NUM} (if this is the actionable change)." \
+${CLOSE_LINE}" \
     --label "priority: should-have" \
     --base main
 fi

@@ -11,21 +11,34 @@
 #
 # Behavioral testing of the full render path now lives in
 # tests/test_cost_report.py (factory_core.cost_report unit + golden tests, #182).
-# This file remains a static guard specifically for the gh endpoint bug below,
-# which stays bash-side post-refactor: the single-comment endpoint must NOT
-# carry an issue number. The list/create endpoint (/issues/{n}/comments, no
-# trailing id) is fine.
+# Since #507 the gh calls themselves live in GitHubTracker (find_comment / update_comment,
+# argv parity-tested in tests/test_provider_tracker_parity.py); this file remains a static
+# guard for the endpoint bug above: the single-comment endpoint must NOT carry an issue
+# number. The list/create endpoint (/issues/{n}/comments, no trailing id) is fine.
 #
 # Run: bash tests/test_cost_report_endpoint.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENTRYPOINT="${SCRIPT_DIR}/../entrypoint.sh"
+GH_TRACKER="${SCRIPT_DIR}/../scripts/factory_core/providers/tracker/github.py"
 FAIL=0
 
+# entrypoint.sh must reach the comment through the provider verbs, not inline gh.
+if grep -nE 'gh (api|issue comment)' "$ENTRYPOINT"; then
+  echo "  FAIL: entrypoint.sh calls gh for the cost-report comment inline (see above lines)"
+  FAIL=1
+elif grep -q 'tracker find-comment' "$ENTRYPOINT" && grep -q 'tracker update-comment' "$ENTRYPOINT" \
+    && grep -q 'tracker add-comment' "$ENTRYPOINT"; then
+  echo "  PASS: entrypoint.sh uses the tracker find/update/add-comment verbs"
+else
+  echo "  FAIL: entrypoint.sh is missing a tracker find-comment/update-comment/add-comment call"
+  FAIL=1
+fi
+
 # A single-comment op = the path ends in .../comments/<something>. Such a path must never
-# include the issue number segment (issues/$ISSUE_NUM/comments/<id>).
-if grep -nE 'issues/\$\{?ISSUE_NUM\}?/comments/[^"]' "$ENTRYPOINT"; then
+# include the issue number segment (issues/{id}/comments/<id>).
+if grep -nE 'issues/\{(id|issue_num|ISSUE_NUM)\}/comments/[^"]' "$GH_TRACKER"; then
   echo "  FAIL: single-comment endpoint includes the issue number (404s — see above lines)"
   FAIL=1
 else
@@ -33,7 +46,7 @@ else
 fi
 
 # And the canonical single-comment endpoint should be present (read + PATCH).
-CANON=$(grep -cE 'issues/comments/\$\{?COMMENT_ID\}?' "$ENTRYPOINT")
+CANON=$(grep -cE 'issues/comments/\{comment_id\}' "$GH_TRACKER")
 if [ "$CANON" -ge 2 ]; then
   echo "  PASS: canonical /issues/comments/{id} endpoint used (${CANON} occurrences)"
 else

@@ -16,15 +16,27 @@ export SCHEDULER_STATE_DIR="$(mktemp -d /tmp/sched-offboard-test-statedir-XXXXXX
 export FACTORY_CORE_CLI="$SCRIPT_DIR/../scripts/factory_core/cli.py"
 export FACTORY_REPO_SLUG="omniscient/dark-factory"
 
+# #507: off_board_ready_issues / fetch_board_items now go through providers/cli.py, which
+# runs `gh` as a SUBPROCESS. An exported shell function is invisible to a non-bash child,
+# so put a PATH shim in front that re-enters bash and lets the gh() function below answer.
+GH_SHIM_DIR="$(mktemp -d /tmp/sched-gh-shim-XXXXXX)"
+printf '#!/usr/bin/env bash\ngh "$@"\n' > "$GH_SHIM_DIR/gh"
+chmod +x "$GH_SHIM_DIR/gh"
+export PATH="$GH_SHIM_DIR:$PATH"
+export FACTORY_PROVIDERS_CLI="$SCRIPT_DIR/../scripts/factory_core/providers/cli.py"
+
 cleanup() {
-  rm -rf "$SCHEDULER_STATE_DIR"
+  rm -rf "$SCHEDULER_STATE_DIR" "$GH_SHIM_DIR" "$GH_ARGV_LOG"
 }
 trap cleanup EXIT
 
 BOARD_ITEMS='{"items":[{"content":{"number":101,"title":"on board","type":"Issue"},"labels":["ready-for-agent"],"status":"Backlog"}]}'
 
 # --- Case 1: an open ready-for-agent issue (#102) absent from the board ---
+GH_ARGV_LOG="$(mktemp /tmp/sched-offboard-gh-argv-XXXXXX)"
+export GH_ARGV_LOG
 gh() {
+  echo "$*" >> "$GH_ARGV_LOG"
   if echo "$*" | grep -q 'issue list'; then
     echo '[{"number":101},{"number":102}]'
     return 0
@@ -41,6 +53,15 @@ if [ "$OFF_BOARD" != "102" ]; then
   echo "FAIL: expected off-board issue 102, got: $OFF_BOARD" >&2
   exit 1
 fi
+# Parity with the pre-#507 inline call: same gh argv, exactly one gh call.
+EXPECTED_ARGV="issue list --repo ${FACTORY_REPO_SLUG} --state open --label ready-for-agent --limit 200 --json number"
+if [ "$(cat "$GH_ARGV_LOG")" != "$EXPECTED_ARGV" ]; then
+  echo "FAIL: gh argv drifted from the pre-#507 lookup" >&2
+  echo "  expected: $EXPECTED_ARGV" >&2
+  echo "  got:      $(cat "$GH_ARGV_LOG")" >&2
+  exit 1
+fi
+echo "PASS: off-board lookup issues exactly one 'gh issue list ... --limit 200 --json number' call"
 echo "PASS: off_board_ready_issues finds issue #102 missing from the board"
 
 # --- Case 2: every open ready-for-agent issue is already on the board ---

@@ -181,7 +181,8 @@ nodes:
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       SUMMARY="$summarize-feedback.output.summary"
       echo "Acknowledging feedback for issue #${ISSUE}..."
-      gh issue comment "$ISSUE" --body "Resuming work — Feedback understood: ${SUMMARY}"
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Resuming work — Feedback understood: ${SUMMARY}"
       echo "Acknowledged feedback for issue #${ISSUE}"
     depends_on: [summarize-feedback]
     when: "$parse-intent.output.intent == 'continue'"
@@ -192,7 +193,8 @@ nodes:
     bash: |
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       echo "Closing issue #${ISSUE}: merging PR and tearing down preview..."
-      gh issue comment "$ISSUE" --body "Merging PR and tearing down preview environment."
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Merging PR and tearing down preview environment."
       echo "Announced close for issue #${ISSUE}"
     depends_on: [fetch-issue]
     when: "$parse-intent.output.intent == 'close'"
@@ -259,7 +261,7 @@ nodes:
       else
         echo "WARNING: board move to done failed for #$ISSUE — check board state manually"
       fi
-      gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
       echo "CLOSED"
     depends_on: [parse-intent, fetch-issue]
     when: "$parse-intent.output.intent == 'close'"
@@ -894,7 +896,8 @@ nodes:
         write_preview_env true true "preview failed: ${REASON}" "" "" "" ""
         LOG_TAIL=""
         [ -f "$BUILD_LOG" ] && LOG_TAIL=$(tail -30 "$BUILD_LOG")
-        gh issue comment "$ISSUE" --body "⚠️ **Preview environment failed to start** — ${REASON}
+        _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+        python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="⚠️ **Preview environment failed to start** — ${REASON}
 
       The run continued in degraded mode (no live-endpoint validation; PR still created). Last build/boot output:
       \`\`\`
@@ -1539,7 +1542,8 @@ nodes:
       fi
 
       _FOOTER=$(python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/cli.py" marker factory 2>/dev/null || echo "")
-      gh issue comment "$ISSUE" --body "## Dark Factory Run — ${ACTION}
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="## Dark Factory Run — ${ACTION}
 
       ${PR_LINE}
       ${EPIC_LINE}

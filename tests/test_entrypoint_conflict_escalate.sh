@@ -43,8 +43,21 @@ assert_true() {
   else echo "  FAIL: $desc" >&2; FAILED=$((FAILED+1)); fi
 }
 
-# Record every gh / board call instead of touching the network.
-gh() { printf 'GH %s\n' "$*" >> "$OUT"; return 0; }
+# Record every gh / board call instead of touching the network. The comment now goes
+# through `providers/cli.py tracker add-comment`, which runs `gh` as a SUBPROCESS: a shell
+# function cannot intercept that, so `gh` is a PATH shim that records its argv.
+# (identity.SLUG is derived from FACTORY_OWNER/FACTORY_REPO, so set those, not the slug.)
+SHIM_DIR=$(mktemp -d /tmp/ep-ce-shim-XXXXXX)
+cat > "$SHIM_DIR/gh" <<'SHIM'
+#!/usr/bin/env bash
+printf 'GH %s\n' "$*" >> "$GH_SHIM_LOG"
+exit 0
+SHIM
+chmod +x "$SHIM_DIR/gh"
+export GH_SHIM_LOG="$OUT"
+export PATH="$SHIM_DIR:$PATH"
+export FACTORY_OWNER=acme FACTORY_REPO=widgets
+unset -f gh
 set_board_status() { printf 'BOARD %s\n' "$1" >> "$OUT"; return 0; }
 
 assert_true "_conflict_escalate is defined" "declare -F _conflict_escalate >/dev/null"
@@ -54,10 +67,10 @@ _conflict_escalate "No feature branch matching feat/issue-485-* was found." >/de
 RC=$?
 assert_true "returns 0 (call sites follow with 'exit 0'; non-zero would fire the ERR trap)" "[ $RC -eq 0 ]"
 assert_true "posts exactly one issue comment" "[ \$(grep -c '^GH issue comment' '$OUT') -eq 1 ]"
-assert_true "comment targets this issue on the factory repo" "grep -q '^GH issue comment 485 --repo acme/widgets' '$OUT'"
+assert_true "comment targets this issue on the factory repo (exact gh argv prefix)" "grep -q '^GH issue comment 485 --repo acme/widgets --body ## Dark Factory' '$OUT'"
 assert_true "comment carries the reason" "grep -q 'No feature branch matching feat/issue-485' '$OUT'"
 assert_true "board moved to blocked" "grep -q '^BOARD blocked' '$OUT'"
 
 echo "--- $PASSED passed, $FAILED failed ---"
-rm -rf "$OUT" "$CURRENT_RUN_DIR"
+rm -rf "$OUT" "$CURRENT_RUN_DIR" "$SHIM_DIR"
 [ "$FAILED" -eq 0 ]

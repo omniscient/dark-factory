@@ -68,6 +68,11 @@ be added to `PROVIDER_PASSTHROUGH_VARS` in `scripts/provider_env.sh`;
 | `set_status(id, canonical)` | move to canonical status | no |
 | `add_label(id, name)` / `remove_label(id, name)` | label state machine | no |
 | `upsert_comment(id, marker, body)` | idempotent marker comment | no |
+| `add_comment(id, body)` → bool | append-only comment; never edits an existing one | no |
+| `find_comment(id, marker)` → `{"id", "body"}` or `None` | newest comment containing `marker`, with its body | no |
+| `update_comment(id, comment_id, body)` → bool | replace the body of a comment returned by `find_comment` | no |
+| `list_board_items()` → `{"items": [{"content": {"number", "title", "type": "Issue"}, "labels": [str], "status": str or None}]}` | whole-board snapshot for the scheduler poll (paged internally; `status` is the board's display name) | no |
+| `list_items(label, limit=200)` → `[id]` | ids of OPEN items carrying `label`, on the board or not | no |
 | `create_item(title, body, labels)` → id | regression tickets | no |
 | `resolve_item(id)` | explicit close-on-merge | no |
 | `get_status_limits()` → `{status: n}` | WIP limits | **yes** — safe default `{}` |
@@ -88,6 +93,16 @@ Return contracts (`tracker/base.py`):
   well as checking the return value.
 - `create_item` returns the new item's opaque id; `upsert_comment` and `resolve_item`
   return nothing.
+- `add_comment` and `update_comment` return `bool` with the same per-provider failure split
+  as `add_label` (GitHub: `False` on a failed `gh` call; Jira: `RuntimeError` propagates).
+  `find_comment` returns `None` for "no such comment" **and** for "lookup failed" (callers
+  treat both as "post a fresh comment"); the returned `id` is an opaque string.
+- `list_board_items` and `list_items` raise `RuntimeError` when the read itself fails
+  (unreadable response, non-list result); the CLI turns that into exit 1 and the scheduler
+  skips the cycle. The scheduler's `jq` filters consume the `list_board_items` shape as is
+  (`.items[].content.number`, `.labels[]`, `.status`), so keep the key names. `status` is
+  matched case-insensitively against the display names the instance's `FACTORY_STATUS_*`
+  config uses.
 
 **`get_item` takes `fields`.** The ABC declares `get_item(id, fields: tuple | None = None)`,
 which is what `providers/cli.py`'s `tracker get` calls. `fields` is a tuple of field names

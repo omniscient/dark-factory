@@ -61,6 +61,37 @@ class Tracker(ABC):
         """Idempotent marker-comment: create if absent, else update in place."""
 
     @abstractmethod
+    def add_comment(self, id: str, body: str) -> bool:
+        """Append a new comment (never edits an existing one; contrast `upsert_comment`).
+        True iff the comment was posted. GitHub returns False on a failed gh call (no
+        raise); Jira lets `_request`'s RuntimeError propagate (same split as `add_label`)."""
+
+    @abstractmethod
+    def find_comment(self, id: str, marker: str) -> dict | None:
+        """The newest comment on `id` whose body contains `marker`, as
+        {"id": str, "body": str}; None when there is none or the lookup failed
+        (callers treat the two the same: "post a fresh one")."""
+
+    @abstractmethod
+    def update_comment(self, id: str, comment_id: str, body: str) -> bool:
+        """Replace the body of the comment `comment_id` (as returned by `find_comment`)
+        on item `id`. True iff updated; failure signalling as for `add_comment`."""
+
+    @abstractmethod
+    def list_board_items(self) -> dict:
+        """Poll-loop snapshot of every item on the board, in the shape the scheduler's jq
+        filters consume: {"items": [{"content": {"number", "title", "type": "Issue"},
+        "labels": [str], "status": <board status display name or None>}]}. One call
+        sequence per poll (paged internally). Raises RuntimeError when the board cannot
+        be read at all, so the poll loop can skip the cycle."""
+
+    @abstractmethod
+    def list_items(self, label: str, limit: int = 200) -> list:
+        """Ids (opaque strings) of OPEN items carrying `label`, at most `limit`, whether
+        or not they are on the board (off-board detection). Raises RuntimeError when
+        the lookup fails or returns something that is not a list."""
+
+    @abstractmethod
     def create_item(self, title: str, body: str, labels: list | None = None) -> str:
         """Create a new item (e.g. a regression ticket); returns its opaque id."""
 
