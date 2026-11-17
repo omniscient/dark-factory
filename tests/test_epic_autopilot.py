@@ -437,3 +437,19 @@ def test_target_dir_falls_back_to_cwd_without_mount(tmp_path, monkeypatch):
     monkeypatch.delenv("CLONE_DIR", raising=False)
     monkeypatch.setattr(ap, "_SCHEDULER_TARGET_DIR", str(tmp_path / "absent"))
     assert ap._target_dir() == "."
+
+
+def test_exclude_paths_never_narrower_than_before(tmp_path, monkeypatch):
+    """Reading the target adapter may add exclusions, never remove the ones in force before."""
+    d = tmp_path / "project" / ".factory"
+    d.mkdir(parents=True)
+    (d / "adapter.yaml").write_text(
+        'safety:\n  hard_exclude_paths: ["deploy/instances/"]\n', encoding="utf-8")
+    target = str(tmp_path / "project")
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # no adapter in cwd: the pre-fix lookup
+    before = ap._load_exclude_paths(".")
+    merged = ap._effective_exclude_paths(target)
+    assert "deploy/instances/" in merged
+    for p in before:
+        assert p in merged
