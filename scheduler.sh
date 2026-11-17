@@ -18,7 +18,7 @@ FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
-REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review,plan-pending-review"
+REFINE_SKIP_LABELS="needs-discussion,epic,ready-for-human,spec-pending-review,plan-pending-review"
 REFINE_MAX_RETRIES="${REFINE_MAX_RETRIES:-3}"
 
 # --- Config YAML resolution ---

@@ -48,7 +48,7 @@ def is_eligible(c: dict, opt_out_label: str, size_ceiling: str = "XL"):
     labels = [label.lower() for label in c.get("labels", [])]
     if c.get("status") not in _GATED_STATUSES:
         return False, f"status={c.get('status')}"
-    for blk in ("direct-to-pr", opt_out_label, "needs-discussion", "epic"):
+    for blk in ("direct-to-pr", opt_out_label, "needs-discussion", "epic", "ready-for-human"):
         if blk.lower() in labels:
             return False, f"label:{blk}"
     size = _size(c) or ""

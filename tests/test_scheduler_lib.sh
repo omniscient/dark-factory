@@ -25,6 +25,15 @@ assert_eq "needs-discussion label skips" \
 assert_eq "no skip label does not skip" \
   "1" "$(has_refine_skip_label '{"labels":["ready-for-agent"]}'; echo $?)"
 
+# #512: the production list (scheduler.sh) must park ready-for-human in refine AND plan.
+REFINE_SKIP_LABELS=$(grep -m1 '^REFINE_SKIP_LABELS=' "${REPO_ROOT}/scheduler.sh" | sed -E 's/^REFINE_SKIP_LABELS="([^"]*)"$/\1/')
+assert_eq "Backlog + ready-for-agent + ready-for-human is not refined" \
+  "0" "$(has_refine_skip_label '{"labels":["ready-for-agent","ready-for-human"]}'; echo $?)"
+assert_eq "Refined + ready-for-human is not planned" \
+  "0" "$(has_refine_skip_label '{"labels":["ready-for-human"]}'; echo $?)"
+assert_eq "ready-for-agent alone is still refined (production list)" \
+  "1" "$(has_refine_skip_label '{"labels":["ready-for-agent"]}'; echo $?)"
+
 # ---- has_opt_in_refine_label ----
 echo "--- has_opt_in_refine_label ---"
 assert_eq "ready-for-agent present" \
