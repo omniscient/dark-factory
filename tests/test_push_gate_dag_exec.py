@@ -201,3 +201,18 @@ class TestPushVerification:
         assert push_result is not None and push_result["pushed"] is False
         assert push_result["local_sha"] == head
         assert push_result["remote_sha"] == main_sha
+
+    def test_multibyte_push_error_still_posts_marker(self, env, node_id, prefix, label):
+        # ~5 KB of 200-é lines: the byte cut at 2000 lands mid-character unless
+        # the capture is sanitised, and the marker comment used to be lost (#479).
+        _commit_artifact(env["work"], prefix)
+        _write_hook(env["bare"], "pre-receive",
+                    'i=0\nwhile [ "$i" -lt 25 ]; do printf "%s\n" "' + "\u00e9" * 200
+                    + '" >&2; i=$((i+1)); done\nexit 1\n')
+
+        result, log, push_result = _run_node(env, node_id)
+
+        assert result.returncode == 0, result.stderr
+        assert "--marker <!-- df-push-failure -->" in log, \
+            "the marker comment must survive a multibyte push error"
+        assert push_result is not None and push_result["pushed"] is False

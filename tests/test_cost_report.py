@@ -559,6 +559,16 @@ def test_render_push_succeeded_matches_golden_unchanged():
     assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
 
 
+def test_parse_prior_cumulative_counts_only_header_lines():
+    """"### Run:" mentioned inside an error line must not inflate the count (#479)."""
+    body = (
+        "### Run: 2026-07-21 10:00 UTC (fix, completed)\n"
+        "error first line mentioning ### Run: inline, from a failed step\n"
+        "### Run: 2026-07-22 10:00 UTC (fix, completed)\n"
+    )
+    assert cr.parse_prior_cumulative(body)["run_count"] == 2
+
+
 def test_format_savings_block_measured_only_not_in_headline():
     """#487: savings from undelivered features must not appear as 'Context savings'."""
     budget = {
