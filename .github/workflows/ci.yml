@@ -54,6 +54,7 @@ jobs:
       - run: pip install pyyaml
       - run: python scripts/check_workflow_dag.py workflows/archon-dark-factory.yaml
       - run: python scripts/check_workflow_when.py workflows/archon-dark-factory.yaml
+      - run: python scripts/docs_refs_check.py docs/run-lifecycle.md docs/scheduler.md docs/features.md docs/configuration.md
   docker-build:
     runs-on: ubuntu-latest
     steps:

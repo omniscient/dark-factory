@@ -22,7 +22,7 @@ Related documents:
 - Label meanings: [triage-labels.md](triage-labels.md).
 
 Source files: `scheduler.sh`, `scripts/scheduler_lib.sh` (pure label/size predicates),
-`scripts/provider_env.sh`, `scripts/identity.sh`, `scripts/factory_core/` (`cli.py`,
+`scripts/provider_env.sh`, `scripts/identity.sh`, `scripts/factory_core/` (`factory_core/cli.py`,
 `breaker.py`, `board.py`, `rescue.py`, `epic_autopilot.py`, `session_window.py`,
 `error_signature.py`, `main_red_fixer.py`, `providers/`), `run-compose.yml`,
 `deploy/docker-compose.yml`, `config/config.yaml`.

@@ -1,0 +1,5 @@
+scheduler:
+  poll_interval: 60
+  skip_labels: [wontfix, duplicate]
+budgets:
+  code-review: 22000
