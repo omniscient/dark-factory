@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 from factory_core import identity
 from factory_core.providers.codehost.base import CodeHost
@@ -68,7 +69,13 @@ class GitHubCodeHost(CodeHost):
             cmd.append("--draft")
         r = subprocess.run(cmd, capture_output=True, text=True)
         m = re.search(r"/pull/(\d+)", r.stdout or "")
-        return m.group(1) if m else (r.stdout or "").strip()
+        if m:
+            return m.group(1)
+        # No PR id: surface gh's own error so the run log says why (the caller only
+        # sees an empty id otherwise).
+        print(f"open_change: gh pr create failed (rc={r.returncode}): "
+              f"{(r.stderr or '').strip() or '<no stderr>'}", file=sys.stderr)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
 
     def update_change_body(self, id: str, body: str) -> bool:
         r = subprocess.run(["gh", "pr", "edit", id, "--body", body], capture_output=True)
