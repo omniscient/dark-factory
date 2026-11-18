@@ -148,3 +148,122 @@ class TestLoadMemoryContextScript:
             env=env,
         )
         assert result.returncode != 0, "Script should fail when phase arg is missing"
+
+
+class TestCloneDirAndCaps:
+    """load_memory_context.sh must pass --clone-dir and honour the cap (#486)."""
+
+    def _store(self, tmp_path, n=30):
+        mem = tmp_path / "store"
+        mem.mkdir()
+        (mem / "codebase-patterns.md").write_text(
+            "\n".join(f"- [PATTERN] Lesson {i}. <!-- expires:2099-12-31 -->" for i in range(n)) + "\n"
+        )
+        return mem
+
+    def _clone(self, tmp_path, cfg):
+        d = tmp_path / "clone" / ".claude" / "skills" / "refinement"
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text("token_optimization:\n  memory:\n" + cfg)
+        return tmp_path / "clone"
+
+    def _env(self, tmp_path, mem, clone):
+        env = base_env(tmp_path)
+        env["MEMORY_DIR"] = str(mem)
+        env["CLONE_DIR"] = str(clone)
+        env.pop("TOKEN_OPTIMIZATION_MEMORY_ENABLED", None)
+        env.pop("TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS", None)
+        return env
+
+    def test_default_cap_applies_to_markdown_store(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 8\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count("- [PATTERN]") == 8
+
+    def test_target_config_reaches_retriever(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    enabled: false\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count("- [PATTERN]") == 30
+
+    def test_target_config_max_entries_reaches_retriever(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 3\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.stdout.count("- [PATTERN]") == 3
+
+    def test_caps_env_is_honoured(self, tmp_path):
+        mem = self._store(tmp_path)
+        clone = self._clone(tmp_path, "    max_entries: 8\n")
+        # Same `export VAR=N` format budget_enforce.py emits.
+        (tmp_path / "token-opt-caps.env").write_text(
+            "export TOKEN_OPTIMIZATION_MEMORY_ENABLED=false\n")
+        r = run_script("implement", self._env(tmp_path, mem, clone))
+        assert r.stdout.count("- [PATTERN]") == 30
+
+
+class TestRealCapsFileReachesChildProcess:
+    """#511: caps written by the REAL budget_enforce.py must reach the Python
+    optimizers started by each consumer, i.e. be exported, not just sourced."""
+
+    CAP_VAR = "TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS"
+
+    def _produce_caps(self, tmp_path):
+        import json
+        art = tmp_path / "artifacts"
+        art.mkdir(exist_ok=True)
+        cb = {"scenario": "plan", "sections": {
+            "claude_md": {"status": "loaded", "tokens": 500},
+            "issue_context": {"status": "loaded", "tokens": 300},
+            "architecture_md": {"status": "dropped"},
+            "memory_context": {"status": "loaded", "tokens": 1500},
+            "comments": {"status": "dropped"},
+            "diff": {"status": "dropped"}}}
+        (art / "context-budget.json").write_text(json.dumps(cb))
+        cfg = tmp_path / "budget-config.yaml"
+        cfg.write_text("token_optimization:\n  memory:\n    max_tokens: 1500\n    min_tokens: 100\n")
+        out = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "budget_enforce.py"),
+             "--context-budget-json", str(art / "context-budget.json"),
+             "--budget-tokens", "2600", "--mode", "enforce", "--config", str(cfg)],
+            capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        (art / "token-opt-caps.env").write_text(out.stdout)
+        return art
+
+    def test_memory_script_child_sees_derived_cap(self, tmp_path):
+        art = self._produce_caps(tmp_path)
+        store = tmp_path / "store"
+        store.mkdir()
+        (store / "codebase-patterns.md").write_text(
+            "\n".join(f"- [PATTERN] Lesson {i} " + "x" * 200 + " <!-- expires:2099-12-31 -->"
+                      for i in range(60)) + "\n")
+        clone = tmp_path / "clone" / ".claude" / "skills" / "refinement"
+        clone.mkdir(parents=True)
+        (clone / "config.yaml").write_text(
+            "token_optimization:\n  memory:\n    max_entries: 60\n    max_tokens: 1500\n")
+        env = base_env(tmp_path)
+        env.update(ARTIFACTS_DIR=str(art), MEMORY_DIR=str(store),
+                   CLONE_DIR=str(tmp_path / "clone"))
+        env.pop(self.CAP_VAR, None)
+        capped = run_script("implement", env).stdout.count("- [PATTERN]")
+        (art / "token-opt-caps.env").unlink()
+        uncapped = run_script("implement", env).stdout.count("- [PATTERN]")
+        assert uncapped > 10
+        assert capped < uncapped, "derived memory cap never reached memory_retrieve.py"
+
+    @pytest.mark.parametrize("cmd", ["dark-factory-conformance.md", "dark-factory-code-review.md"])
+    def test_command_source_line_exports_to_child(self, tmp_path, cmd):
+        art = self._produce_caps(tmp_path)
+        text = (REPO_ROOT / "commands" / cmd).read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines()
+                    if "token-opt-caps.env" in l and l.lstrip().startswith("[ -f"))
+        env = base_env(tmp_path)
+        env["ARTIFACTS_DIR"] = str(art)
+        probe = "import os;print(os.environ.get('%s',''))" % self.CAP_VAR
+        r = subprocess.run(["bash", "-c", line + '\npython3 -c "' + probe + '"'],
+                           capture_output=True, text=True, env=env)
+        assert r.stdout.strip() == "100", r.stdout + r.stderr

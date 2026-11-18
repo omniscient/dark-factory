@@ -1,6 +1,6 @@
 # Dark Factory Model Proxy — Rollout, Rollback, and Caveats
 
-Issue: #208. Spec: `docs/superpowers/specs/2026-07-11-transparent-model-proxy-design.md`.
+Issue: #208. Spec: `docs/archive/2026-07-11-transparent-model-proxy-design.md`.
 
 ## What this is
 
@@ -12,25 +12,51 @@ artifacts). Disabled by default — zero behavior change from today.
 
 ## Enabling it
 
-Add to your instance's gitignored `.archon/.env` (the file `run-compose.yml`'s
-`dark-factory` service already loads via `env_file:`):
+Two env files are involved, and each setting has to go in the right one. The scheduler reads
+`deploy/instance.env`; dispatched run containers read `<PROJECT_DIR>/.archon/.env` (the file
+`run-compose.yml`'s `dark-factory` service loads via `env_file:`) and never read
+`instance.env`.
+
+**1. Scheduler side — `deploy/instance.env`** (or the instance's own env file):
 
 ```
 FACTORY_MODEL_PROXY_ENABLED=true
-ANTHROPIC_BASE_URL=http://factory-model-proxy:8787
 ```
 
-Optionally, also set:
+`scheduler.sh`'s `dispatch()` reads `FACTORY_MODEL_PROXY_ENABLED` from the scheduler's own
+environment and adds `--profile factory-model-proxy` to its `docker compose run` invocation,
+which brings the `factory-model-proxy` service (defined in `run-compose.yml`) online as an
+optional dependency of the `dark-factory` run container. Setting this variable in
+`.archon/.env` does nothing: the scheduler copies that file for run containers but never
+sources it.
+
+Optionally, in the same file:
 
 ```
 RAW_ARTIFACT_CAPTURE=true
 RAW_ARTIFACT_RETENTION_DAYS=7
 ```
 
-`scheduler.sh`'s `dispatch()` reads `FACTORY_MODEL_PROXY_ENABLED` and adds
-`--profile factory-model-proxy` to its `docker compose run` invocation, which brings the
-`factory-model-proxy` service (defined in `run-compose.yml`) online as an optional
-dependency of the `dark-factory` run container. No other file needs to change.
+The proxy service has no `env_file`; `run-compose.yml` interpolates these two from the
+environment of the process that runs `docker compose`, which is the scheduler.
+
+**2. Run side — `<PROJECT_DIR>/.archon/.env`:**
+
+```
+ANTHROPIC_BASE_URL=http://factory-model-proxy:8787
+```
+
+This points Claude Code inside the run container at the proxy.
+
+**3. Recreate the scheduler** so it picks up `instance.env` and re-copies `.archon/.env` for
+dispatched runs (it copies that file once, at startup):
+
+```
+docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d --force-recreate backlog-scheduler
+```
+
+Set both sides together. With `ANTHROPIC_BASE_URL` set but the scheduler flag missing, runs
+are pointed at a proxy that is never started and their model calls fail.
 
 ## Why generic passthrough, not a `/v1/messages`-only allowlist
 
@@ -44,9 +70,12 @@ avoid this failure mode.
 
 ## Rolling back
 
-Unset `FACTORY_MODEL_PROXY_ENABLED` and `ANTHROPIC_BASE_URL` in `.archon/.env`. The next
-dispatched run talks to `api.anthropic.com` directly — no other state depends on the proxy
-being present; nothing else needs to be reverted or cleaned up.
+Remove `ANTHROPIC_BASE_URL` from `<PROJECT_DIR>/.archon/.env` and
+`FACTORY_MODEL_PROXY_ENABLED` (plus any `RAW_ARTIFACT_*` lines) from `deploy/instance.env`,
+then recreate the scheduler with the command above. Runs dispatched after that talk to
+`api.anthropic.com` directly — no other state depends on the proxy being present; nothing
+else needs to be reverted or cleaned up. Remove `ANTHROPIC_BASE_URL` first, or at the same
+time: leaving it set after the proxy is disabled breaks runs.
 
 ## Known limitations
 
@@ -73,7 +102,8 @@ being present; nothing else needs to be reverted or cleaned up.
   §7.4, gated on #250) lands with real per-persona headers.
 - **Streamed-response token counts are best-effort.** Non-streaming responses are fully
   parsed for `usage`; SSE responses are scanned for `"input_tokens"`/`"output_tokens"`
-  substrings as they pass through (never buffered/blocked), which is robust to the current
+  substrings after the stream completes. The stream is forwarded to the client unblocked
+  while the proxy keeps a copy of the bytes for that scan. The scan is robust to the current
   Anthropic streaming format but not schema-guaranteed.
 - **The AC8 smoke test does not make a live Anthropic call.** It runs the real
   `factory_core.model_proxy` module (actual `create_app`/`handle_proxy` code) end-to-end over
@@ -90,6 +120,6 @@ being present; nothing else needs to be reverted or cleaned up.
 
 - Ledger: size-rotated at 100 MB, 3 rotations kept, oldest deleted — bounded regardless of
   request volume.
-- Raw artifacts (only written when `RAW_ARTIFACT_CAPTURE=true`): swept by mtime on proxy
-  startup and hourly thereafter; default retention 7 days
+- Raw artifacts (only written when `RAW_ARTIFACT_CAPTURE=true`): swept by mtime once, when
+  the proxy process starts; there is no periodic sweep. Default retention 7 days
   (`RAW_ARTIFACT_RETENTION_DAYS`).

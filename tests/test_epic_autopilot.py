@@ -34,6 +34,12 @@ def test_ineligible_already_direct_to_pr():
     assert not ok
 
 
+def test_ineligible_ready_for_human():
+    ok, why = ap.is_eligible(c(labels=["ready-for-agent", "ready-for-human"]), "no-autopilot")
+    assert not ok
+    assert why == "label:ready-for-human"
+
+
 def test_ineligible_wrong_status():
     ok, _ = ap.is_eligible(c(status="Ready"), "no-autopilot")
     assert not ok
@@ -362,3 +368,88 @@ def test_run_stuck_when_no_children_and_no_eligible_epic():
     assert out["outcome"] == "no_candidates"
     assert io.promoted == []
     assert any(key == "autopilot-stuck" for _, key in io.notes)
+
+
+# ── #513: adapter sensitive_keywords are unioned with config/env ─────────────
+
+def _adapter_with_keywords(tmp_path, kw):
+    d = tmp_path / ".factory"
+    d.mkdir()
+    (d / "adapter.yaml").write_text(f'safety:\n  sensitive_keywords: "{kw}"\n')
+    return str(tmp_path)
+
+
+def test_effective_keywords_union_blocks_config_only_keyword(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish|secret")
+    kw = ap._effective_sensitive_keywords(clone, "trading|ibkr")
+    for word in ("trading", "ibkr", "publish", "secret"):
+        ex, why = ap.hard_excluded(c(title=f"touch {word} thing", body="", target_paths=[]), [], kw)
+        assert ex and why == "sensitive-keyword", word
+
+
+def test_effective_keywords_env_unset_uses_adapter(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish")
+    kw = ap._effective_sensitive_keywords(clone, None)
+    ex, _ = ap.hard_excluded(c(title="publish it", body="", target_paths=[]), [], kw)
+    assert ex
+
+
+def test_effective_keywords_never_narrower_than_env(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "zzz")
+    kw = ap._effective_sensitive_keywords(clone, "alpha")
+    ex, _ = ap.hard_excluded(c(title="alpha", body="", target_paths=[]), [], kw)
+    assert ex
+
+
+def test_effective_keywords_empty_env_does_not_empty_union(tmp_path):
+    clone = _adapter_with_keywords(tmp_path, "publish")
+    kw = ap._effective_sensitive_keywords(clone, "")
+    assert kw and "publish" in kw
+
+
+# ── The scheduler runs autopilot from /workspace with CLONE_DIR unset: the target
+#    checkout (and its .factory/adapter.yaml) is the read-only mount, not the cwd. ──
+
+def _target_with_adapter(tmp_path, keywords):
+    d = tmp_path / "project" / ".factory"
+    d.mkdir(parents=True)
+    (d / "adapter.yaml").write_text(
+        f'safety:\n  sensitive_keywords: "{keywords}"\n', encoding="utf-8")
+    return str(tmp_path / "project")
+
+
+def test_target_dir_defaults_to_scheduler_mount_when_clone_dir_unset(tmp_path, monkeypatch):
+    target = _target_with_adapter(tmp_path, "zebra")
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+    monkeypatch.setattr(ap, "_SCHEDULER_TARGET_DIR", target)
+    assert ap._target_dir() == target
+    assert "zebra" in ap._effective_sensitive_keywords(ap._target_dir(), "trading")
+
+
+def test_target_dir_honours_explicit_clone_dir(tmp_path, monkeypatch):
+    target = _target_with_adapter(tmp_path, "zebra")
+    monkeypatch.setenv("CLONE_DIR", "/some/clone")
+    monkeypatch.setattr(ap, "_SCHEDULER_TARGET_DIR", target)
+    assert ap._target_dir() == "/some/clone"
+
+
+def test_target_dir_falls_back_to_cwd_without_mount(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+    monkeypatch.setattr(ap, "_SCHEDULER_TARGET_DIR", str(tmp_path / "absent"))
+    assert ap._target_dir() == "."
+
+
+def test_exclude_paths_never_narrower_than_before(tmp_path, monkeypatch):
+    """Reading the target adapter may add exclusions, never remove the ones in force before."""
+    d = tmp_path / "project" / ".factory"
+    d.mkdir(parents=True)
+    (d / "adapter.yaml").write_text(
+        'safety:\n  hard_exclude_paths: ["deploy/instances/"]\n', encoding="utf-8")
+    target = str(tmp_path / "project")
+    monkeypatch.delenv("CLONE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # no adapter in cwd: the pre-fix lookup
+    before = ap._load_exclude_paths(".")
+    merged = ap._effective_exclude_paths(target)
+    assert "deploy/instances/" in merged
+    for p in before:
+        assert p in merged

@@ -71,3 +71,44 @@ def test_workflow_gates_comment_digest_on_env_var():
         / "workflows/archon-dark-factory.yaml"
     ).read_text(encoding="utf-8")
     assert "TOKEN_OPTIMIZATION_COMMENTS_ENABLED" in content
+
+
+# ── #487: dead keys must not creep back into config.yaml ─────────────────────
+
+_DEAD_ENV_NAMES = (
+    "TOKEN_OPTIMIZATION_ENABLED",
+    "TOKEN_OPTIMIZATION_DEFAULT_BUDGET_TOKENS",
+    "TOKEN_OPTIMIZATION_CHEAP_MODEL_FIRST",
+)
+
+
+def _repo_text(*rel):
+    root = pathlib.Path(__file__).resolve().parents[1]
+    parts = []
+    for r in rel:
+        base = root / r
+        files = [base] if base.is_file() else list(base.rglob("*"))
+        for p in files:
+            if p.is_file() and p.suffix in {".py", ".sh", ".yaml", ".yml", ".md"}:
+                parts.append(p.read_text(encoding="utf-8", errors="ignore"))
+    return "\n".join(parts)
+
+
+def test_removed_dead_keys_not_in_config():
+    """token_optimization.enabled and escalation.cheap_model_first have no reader (#487)."""
+    to = _tok_opt()
+    assert "enabled" not in to, "top-level token_optimization.enabled has no reader"
+    assert "cheap_model_first" not in (to.get("escalation") or {}), \
+        "escalation.cheap_model_first has no reader"
+
+
+def test_removed_env_names_not_advertised_in_config():
+    text = CONFIG.read_text(encoding="utf-8")
+    for name in _DEAD_ENV_NAMES:
+        assert name not in text, f"{name} has no reader; do not advertise it in config.yaml"
+
+
+def test_removed_env_names_have_no_reader():
+    code = _repo_text("scripts", "scheduler.sh", "entrypoint.sh", "workflows", "commands")
+    for name in _DEAD_ENV_NAMES:
+        assert name not in code, f"{name} is read somewhere; restore the key and its docs"

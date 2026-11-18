@@ -69,7 +69,8 @@ services:
 
   # Opt-in transparent Anthropic-traffic proxy + request ledger (#208). Only
   # started when scheduler.sh dispatches with --profile factory-model-proxy
-  # (gated on FACTORY_MODEL_PROXY_ENABLED in .archon/.env) — see
+  # (gated on FACTORY_MODEL_PROXY_ENABLED in the scheduler's environment, i.e.
+  # deploy/instance.env; ANTHROPIC_BASE_URL goes in .archon/.env) — see
   # docs/dark-factory-model-proxy-rollout.md. `required: false` above means
   # the dark-factory service starts fine whether or not this profile is active.
   factory-model-proxy:

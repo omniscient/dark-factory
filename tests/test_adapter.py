@@ -1,4 +1,5 @@
 import copy
+import os
 import re
 import sys
 sys.path.insert(0, "scripts")
@@ -814,7 +815,7 @@ def test_component_section_map_default_parity(tmp_path):
 
 
 def test_component_section_map_adapter_override(tmp_path):
-    """With adapter file overriding components, merged result is returned."""
+    """An adapter that declares components REPLACES the default map (#513)."""
     d = tmp_path / ".factory"; d.mkdir()
     (d / "adapter.yaml").write_text(
         "components:\n  api: ['Overview', 'API Layer']\n")
@@ -822,7 +823,33 @@ def test_component_section_map_adapter_override(tmp_path):
     import architecture_slice as a
     m = a._component_section_map(str(tmp_path))
     assert m["api"] == ["Overview", "API Layer"]
-    assert "backend" in m  # defaults still merged in
+    assert m == {"api": ["Overview", "API Layer"]}  # defaults replaced, not merged (#513)
+
+
+def test_components_empty_map_replaces_defaults(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("components: {}\n")
+    assert adapter.load(str(tmp_path))["components"] == {}
+
+
+def test_components_absent_keeps_defaults(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("schema_version: 1\n")
+    assert adapter.load(str(tmp_path))["components"] == adapter_defaults.DEFAULTS["components"]
+
+
+def test_markethawk_style_components_unchanged(tmp_path):
+    """A target declaring its own full component map gets exactly that map."""
+    d = tmp_path / ".factory"; d.mkdir()
+    mh = adapter_defaults.DEFAULTS["components"]
+    import yaml
+    (d / "adapter.yaml").write_text(yaml.safe_dump({"components": mh}))
+    assert adapter.load(str(tmp_path))["components"] == mh
+
+
+def test_self_target_adapter_has_empty_components():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    assert adapter.load(root)["components"] == {}
 
 
 # ── Consumer 6: adapter CLI --format keyvalue (gate_lib.sh support) ───────────
@@ -1222,3 +1249,28 @@ def test_boundary_floor_survives_a_scalar_safety_value(tmp_path):
         vals = adapter.get(str(tmp_path), f"safety.{key}")
         assert "^" not in vals, f"{key} exploded a scalar into characters: {vals}"
         assert set(floor) <= set(vals)
+
+
+# ── #492: an invalid adapter.yaml fails open, but the boundary floor still applies ─────
+
+def _write_invalid_adapter(tmp_path):
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text("safety: [unclosed\n")
+
+
+def test_safety_path_patterns_invalid_adapter_keeps_floor(tmp_path):
+    _write_invalid_adapter(tmp_path)
+    sys.path.insert(0, "scripts")
+    import diff_rank as dr
+    patterns = [p.pattern for p in dr._safety_path_patterns(str(tmp_path))]
+    for floor in adapter_defaults.FACTORY_OWNED_CRITICAL_DIFF_FLOOR:
+        assert floor in patterns
+
+
+def test_migration_seed_auth_patterns_invalid_adapter_keeps_floor(tmp_path):
+    _write_invalid_adapter(tmp_path)
+    sys.path.insert(0, "scripts")
+    import gate_blast_radius as gbr
+    patterns = [p.pattern for p in gbr._migration_seed_auth_patterns(str(tmp_path))]
+    for floor in adapter_defaults.FACTORY_OWNED_MIGRATION_SEED_FLOOR:
+        assert floor in patterns

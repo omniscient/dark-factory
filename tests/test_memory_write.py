@@ -3,7 +3,6 @@ Unit tests for memory_write.py — markdown write pipeline.
 Tests are pure filesystem: no mocking, no network.
 Run from repo root: pytest tests/test_memory_write.py -v
 """
-import json
 import re
 import shutil
 import subprocess
@@ -23,26 +22,6 @@ def run(*args):
         capture_output=True,
         text=True,
     )
-
-
-requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
-
-
-def _git_repo(path, origin=None):
-    """Create a real git repo at *path*, optionally with an origin remote."""
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
-    if origin is not None:
-        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin],
-                       check=True, capture_output=True)
-    return path
-
-
-def _project_of(target):
-    """The project field of the single index.jsonl row next to *target*."""
-    lines = (target.parent / "index.jsonl").read_text().strip().splitlines()
-    assert len(lines) == 1, lines
-    return json.loads(lines[0])["project"]
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -267,14 +246,74 @@ class TestCapEnforcement:
         assert result.returncode == 0
         assert md_at_cap.read_text().count("[AVOID]") == 30
 
-    def test_31st_entry_skipped(self, md_at_cap):
+    def test_31st_entry_evicts_oldest_and_writes_new(self, md_at_cap):
         run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
             "--text", "entry 30", "--source", "conformance", "--issue", "648")
         result = run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
-                     "--text", "entry 31 — completely unique text here", "--source", "conformance",
+                     "--text", "entry 31 - completely unique text here", "--source", "conformance",
                      "--issue", "648")
         assert result.returncode == 0
-        assert md_at_cap.read_text().count("[AVOID]") == 30
+        text = md_at_cap.read_text()
+        assert text.count("[AVOID]") == 30
+        assert "entry 31 - completely unique text here" in text
+        # All fixture entries share a date; the tie evicts the earliest in the file.
+        assert "[AVOID] Entry 0 " not in text
+        assert "[AVOID] Entry 1 " in text
+
+    def test_evicts_oldest_by_date_not_file_position(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(30):
+            d = "2025-01-01" if i == 17 else "2026-03-01"
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:{d} expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        result = run("--target", str(f), "--path-prefix", "x/", "--text", "brand new lesson",
+                     "--source", "refine", "--issue", "9")
+        assert result.returncode == 0
+        text = f.read_text()
+        assert "[AVOID] Entry 17 " not in text
+        assert "[AVOID] Entry 0 " in text
+        assert "brand new lesson" in text
+
+    def test_undated_entry_is_oldest(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(30):
+            if i == 5:
+                lines.append("- [PATTERN] Entry 5 legacy undated\n")
+            else:
+                lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2020-01-01 expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert "legacy undated" not in text
+        assert "fresh" in text
+
+    def test_overfull_file_is_trimmed_to_cap(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n"]
+        for i in range(34):
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2026-01-{i + 1:02d} expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert len(re.findall(r"^- \[(?:PATTERN|AVOID|FIX)\]", text, re.M)) == 30
+        assert "fresh" in text
+        assert "[AVOID] Entry 5 " in text and "[AVOID] Entry 4 " not in text
+
+    def test_provisional_and_invalid_not_evicted(self, tmp_path):
+        f = tmp_path / "dark-factory-ops.md"
+        lines = ["# Ops\n\n- [INVALID: wrong] tombstone <!-- date:2000-01-01 -->\n"]
+        for i in range(30):
+            lines.append(f"- [AVOID] Entry {i} <!-- issue:#1 date:2026-01-01 expires:2099-01-01 source:refine -->\n")
+        lines.append("---\n- [PROVISIONAL] prov <!-- date:2000-01-01 -->\n")
+        f.write_text("".join(lines))
+        run("--target", str(f), "--path-prefix", "x/", "--text", "fresh", "--source", "refine", "--issue", "9")
+        text = f.read_text()
+        assert "tombstone" in text and "[PROVISIONAL] prov" in text
 
     def test_pattern_entries_count_toward_cap(self, md_at_cap_mixed):
         # 29 [PATTERN] entries are already at the floor; the 30th write (AVOID) must succeed.
@@ -282,12 +321,14 @@ class TestCapEnforcement:
             "--text", "entry 30", "--source", "conformance", "--issue", "648")
         assert md_at_cap_mixed.read_text().count("[AVOID]") == 1
 
-        # 31st write must be rejected — total authoritative entries ([PATTERN]+[AVOID]) == 30.
+        # 31st write evicts the oldest ([PATTERN]) entry; the total stays at 30.
         result = run("--target", str(md_at_cap_mixed), "--path-prefix", "backend/app/",
                      "--text", "entry 31 — completely unique", "--source", "conformance",
                      "--issue", "648")
         assert result.returncode == 0
-        assert md_at_cap_mixed.read_text().count("[AVOID]") == 1  # still only 1 AVOID written
+        text = md_at_cap_mixed.read_text()
+        assert text.count("[AVOID]") == 2
+        assert text.count("[PATTERN]") == 28
 
 
 # ── expiry cleanup ──────────────────────────────────────────────────────────
@@ -308,92 +349,39 @@ class TestExpiryCleanup:
         assert content.count("[AVOID]") == 2  # valid + new
 
 
-# ── index.jsonl ─────────────────────────────────────────────────────────────
+# ── index.jsonl is not written (#486) ───────────────────────────────────────
 
-class TestIndexJsonl:
-    @pytest.fixture(autouse=True)
-    def _no_factory_project_env(self, monkeypatch):
-        """Every test here controls project resolution explicitly.
+class TestNoIndexWrite:
+    """memory_write.py used to append index rows without `id`/`source_file`, which
+    the retriever skips. It now writes the markdown only; readable index rows come
+    from memory_import.py."""
 
-        Without this, a stray FACTORY_REPO on the CI host — or a git origin
-        picked up because tmp_path happens to sit inside a worktree — would
-        leak into these assertions instead of the deterministic project value
-        each test expects.
-        """
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+    def test_write_does_not_create_index(self, md_empty):
+        result = run("--target", str(md_empty), "--path-prefix", "backend/app/",
+                     "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
+        assert result.returncode == 0, result.stderr
+        assert "[AVOID] avoid mocks" in md_empty.read_text()
+        assert not (md_empty.parent / "index.jsonl").exists()
 
-    def test_successful_write_creates_index_next_to_target(self, md_empty):
-        run("--target", str(md_empty), "--path-prefix", "backend/app/",
-            "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
+    def test_existing_index_is_left_untouched(self, md_empty):
         index = md_empty.parent / "index.jsonl"
-        assert index.exists(), "index.jsonl should be created on first write"
-
-    def test_index_record_has_required_fields(self, md_empty, monkeypatch):
-        monkeypatch.setenv("FACTORY_REPO", "jobfinder")
+        index.write_text('{"id": "abc"}\n')
         run("--target", str(md_empty), "--path-prefix", "backend/app/",
             "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
-        record = json.loads((md_empty.parent / "index.jsonl").read_text().strip())
-        assert record["agent_id"] == "conformance"
-        assert record["scope"] == "backend"
-        assert record["content"] == "avoid mocks"
-        assert record["issue_number"] == 648
-        assert record["files"] == ["backend/app/"]
-        assert record["project"] == "jobfinder"
-        assert record["type"] == "avoidance"
-        assert record["status"] == "active"
+        assert index.read_text() == '{"id": "abc"}\n'
 
-    def test_second_write_appends_second_record(self, md_empty):
+    def test_written_entry_is_readable_by_retriever(self, md_empty):
+        """What the writer produces must be visible to retrieval."""
+        sys.path.insert(0, str(SCRIPT.parent))
+        import memory_retrieve as mr
         run("--target", str(md_empty), "--path-prefix", "backend/app/",
-            "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
-        run("--target", str(md_empty), "--path-prefix", "backend/app/",
-            "--text", "avoid global state", "--source", "conformance", "--issue", "648")
-        lines = (md_empty.parent / "index.jsonl").read_text().strip().splitlines()
-        assert len(lines) == 2
-        assert json.loads(lines[0])["content"] == "avoid mocks"
-        assert json.loads(lines[1])["content"] == "avoid global state"
+            "--text", "avoid mocks", "--source", "implement", "--issue", "648")
+        out = mr.retrieve_memory(md_empty.parent, "implement", ["backend/app/x.py"])
+        assert "avoid mocks" in out
 
-    def test_dedup_skip_does_not_append_to_index(self, md_empty):
-        run("--target", str(md_empty), "--path-prefix", "backend/app/",
-            "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
-        first = (md_empty.parent / "index.jsonl").read_text()
-        # normalized duplicate
-        run("--target", str(md_empty), "--path-prefix", "backend/app/",
-            "--text", "AVOID MOCKS.", "--source", "conformance", "--issue", "648")
-        assert (md_empty.parent / "index.jsonl").read_text() == first
-
-    def test_cap_skip_does_not_append_to_index(self, md_at_cap):
-        # md_at_cap has 29 entries; write 30th (should succeed and append to index)
-        run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
-            "--text", "entry 30", "--source", "conformance", "--issue", "648")
-        first = (md_at_cap.parent / "index.jsonl").read_text()
-        # 31st write — cap hit, no index append
-        run("--target", str(md_at_cap), "--path-prefix", "dark-factory/",
-            "--text", "entry 31 unique text that does not exist yet", "--source", "conformance",
-            "--issue", "648")
-        assert (md_at_cap.parent / "index.jsonl").read_text() == first
-
-    def test_index_io_error_is_nonfatal(self, md_empty):
-        """index.jsonl I/O failure must not set exit 1."""
-        index = md_empty.parent / "index.jsonl"
-        index.write_text("")
-        index.chmod(0o000)
-        try:
-            result = run("--target", str(md_empty), "--path-prefix", "backend/app/",
-                         "--text", "avoid mocks", "--source", "conformance", "--issue", "648")
-            assert result.returncode == 0
-            # Markdown was still written
-            assert "[AVOID]" in md_empty.read_text()
-            # Warning emitted to stderr
-            assert "index.jsonl" in result.stderr
-        finally:
-            index.chmod(0o644)
-
-
-# ── first-run directory creation (#444) ─────────────────────────────────────
 
 class TestDirectoryCreation:
-    def test_fresh_target_creates_dir_markdown_and_index(self, tmp_path):
+    def test_fresh_target_creates_dir_and_markdown(self, tmp_path):
         mem_dir = tmp_path / "fresh" / ".archon" / "memory"
         target = mem_dir / "backend-patterns.md"
         assert not mem_dir.exists()
@@ -401,7 +389,6 @@ class TestDirectoryCreation:
                      "--text", "avoid mocks", "--source", "refine", "--issue", "444")
         assert result.returncode == 0, result.stderr
         assert "[AVOID] avoid mocks" in target.read_text()
-        assert (mem_dir / "index.jsonl").exists()
         assert f"memory-write: created {mem_dir.resolve()}" in result.stdout
 
     def test_existing_dir_prints_no_created_line(self, md_empty):
@@ -432,167 +419,6 @@ class TestDirectoryCreation:
         lines = result.stderr.strip().splitlines()
         assert len(lines) == 1, result.stderr
         assert lines[0].startswith(f"memory-write: error: cannot create {archon / 'memory'}: ")
-
-
-# ── project resolution (#444) ───────────────────────────────────────────────
-
-MISMATCH = "memory-write: WARNING: project '"
-UNRESOLVED = (
-    "memory-write: WARNING: project unresolved (FACTORY_REPO/FACTORY_PRODUCT_NAME "
-    "unset, no git origin) - writing project:unknown"
-)
-
-
-def _write(target, text="avoid mocks"):
-    return run("--target", str(target), "--path-prefix", "backend/app/",
-               "--text", text, "--source", "refine", "--issue", "444")
-
-
-class TestProjectResolution:
-    # ── env rungs: tmp_path is typically not a git worktree (git lookup → None) ──
-
-    def test_factory_repo_wins(self, md_empty, monkeypatch):
-        monkeypatch.setenv("FACTORY_REPO", "jobfinder")
-        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
-        result = _write(md_empty)
-        assert result.returncode == 0
-        assert _project_of(md_empty) == "jobfinder"
-
-    def test_product_name_used_as_is_when_repo_unset(self, md_empty, monkeypatch):
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
-        result = _write(md_empty)
-        assert result.returncode == 0
-        assert _project_of(md_empty) == "MarketHawk"
-
-    def test_blank_factory_repo_falls_through(self, md_empty, monkeypatch):
-        monkeypatch.setenv("FACTORY_REPO", "   ")
-        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
-        _write(md_empty)
-        assert _project_of(md_empty) == "MarketHawk"
-
-    # ── git-origin rung ──
-
-    @requires_git
-    def test_git_origin_https(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0, result.stderr
-        assert _project_of(target) == "jobfinder"
-        assert "WARNING" not in result.stderr
-
-    @requires_git
-    def test_git_origin_scp_style_without_path_slash(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo", "git@github.com:jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        _write(target)
-        assert _project_of(target) == "jobfinder"
-
-    # ── terminal rung ──
-
-    @requires_git
-    def test_unknown_when_no_env_and_no_origin(self, tmp_path, monkeypatch):
-        # A fresh repo with NO origin: `git remote get-url origin` exits non-zero
-        # regardless of any git ancestry the host has.
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0
-        assert _project_of(target) == "unknown"
-        assert "Traceback" not in result.stderr
-        assert result.stderr.strip().splitlines() == [UNRESOLVED]
-
-    # ── mismatch warning (Requirement 6) ──
-
-    @requires_git
-    def test_env_vs_origin_mismatch_warns_once_and_env_wins(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("FACTORY_REPO", "markethawk")
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0
-        assert _project_of(target) == "markethawk"
-        assert result.stderr.strip().splitlines() == [
-            "memory-write: WARNING: project 'markethawk' does not match git origin "
-            "'jobfinder' (FACTORY_REPO defaulted?)"
-        ]
-
-    @requires_git
-    def test_case_only_difference_does_not_warn(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.setenv("FACTORY_PRODUCT_NAME", "MarketHawk")
-        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/markethawk.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0
-        assert _project_of(target) == "MarketHawk"
-        assert MISMATCH not in result.stderr
-
-    @requires_git
-    def test_no_mismatch_warning_on_dedup_skip(self, tmp_path, monkeypatch):
-        # Resolver runs only when an index row is written; a reinforce is silent.
-        monkeypatch.setenv("FACTORY_REPO", "markethawk")
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo", "https://github.com/omniscient/jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        _write(target)
-        result = _write(target, text="AVOID MOCKS.")
-        assert result.returncode == 0
-        assert MISMATCH not in result.stderr
-
-    # ── security rider: never echo the remote URL (token lives in it) ──
-
-    @requires_git
-    def test_token_in_origin_url_never_printed(self, tmp_path, monkeypatch):
-        secret = "ghp_SECRETTOKEN444"
-        monkeypatch.setenv("FACTORY_REPO", "markethawk")  # force the mismatch diagnostic
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo",
-                         f"https://{secret}@github.com/omniscient/jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0
-        assert "'jobfinder'" in result.stderr
-        assert secret not in result.stdout
-        assert secret not in result.stderr
-        assert secret not in (target.parent / "index.jsonl").read_text()
-
-    @requires_git
-    def test_token_in_origin_url_not_recorded_via_git_rung(self, tmp_path, monkeypatch):
-        secret = "ghp_SECRETTOKEN444"
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo",
-                         f"https://{secret}@github.com/omniscient/jobfinder.git")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert _project_of(target) == "jobfinder"
-        assert secret not in result.stdout + result.stderr
-
-    @requires_git
-    def test_token_in_pathless_origin_url_never_printed(self, tmp_path, monkeypatch):
-        # Malformed/pathless origin (no "/" after the host): naive `[/:]`-splitting
-        # would return "<token>@github.com" as the "name", leaking the token into
-        # stderr and index.jsonl. The token must never appear anywhere in output.
-        secret = "ghp_SECRETTOKEN444"
-        monkeypatch.delenv("FACTORY_REPO", raising=False)
-        monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
-        repo = _git_repo(tmp_path / "repo", f"https://{secret}@github.com")
-        target = repo / ".archon" / "memory" / "backend-patterns.md"
-        result = _write(target)
-        assert result.returncode == 0
-        assert secret not in result.stdout
-        assert secret not in result.stderr
-        assert secret not in (target.parent / "index.jsonl").read_text()
-        assert "@" not in _project_of(target)
 
 
 # ── sanitization ────────────────────────────────────────────────────────────

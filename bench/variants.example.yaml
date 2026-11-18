@@ -9,7 +9,7 @@
 #
 # Fixture-health caveat (spec Architecture §Tier A item 5): ~6/10 bench/suite.json tasks
 # currently score "expected-fail-both" on outcome for unrelated pre-extraction path/tooling
-# reasons (docs/parity-p2.md §4a), leaving ~3-4 S-bucket tasks with real outcome-discriminating
+# reasons (docs/archive/2026-07-06-parity-p2.md §4a), leaving ~3-4 S-bucket tasks with real outcome-discriminating
 # power. Economics (tokens/cost/wall-clock) remains measurable on all 10 regardless — only the
 # outcome/quality delta should be read against the known-good subset, or re-locked first via
 # bench/find_eligible.py.

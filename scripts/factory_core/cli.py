@@ -240,12 +240,18 @@ def _cost_report_render(args):
         prior_path = Path(args.prior_body_file)
         prior_body = prior_path.read_text() if prior_path.exists() else ""
     budget = None
-    if args.budget_file:
+    deliveries = None
+    if args.artifacts_dir:
+        # Per-scenario budgets + optimizer-measured deliveries of the whole run (#511).
+        budget = cost_report.load_budgets(args.artifacts_dir) or None
+        deliveries = cost_report.load_deliveries(args.artifacts_dir)
+    elif args.budget_file:
         budget_path = Path(args.budget_file)
         if budget_path.exists():
             budget = json.loads(budget_path.read_text())
     print(cost_report.render(run_record_data, prior_body, args.timestamp, args.intent,
-                              product_name=args.product_name, budget=budget))
+                              product_name=args.product_name, budget=budget,
+                              deliveries=deliveries))
 
 
 def _post_mortem_gather(args):
@@ -437,6 +443,7 @@ def main():
     crr.add_argument("--intent", required=True)
     crr.add_argument("--product-name", default="Dark Factory")
     crr.add_argument("--budget-file", default="")
+    crr.add_argument("--artifacts-dir", default="")
     crr.set_defaults(func=_cost_report_render)
 
     pmg = sub.add_parser("post-mortem-gather")

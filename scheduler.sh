@@ -13,11 +13,12 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/scheduler_lib.sh"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/provider_env.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
 # Refinement pipeline (env-only: REFINE_MAX_RETRIES is not in config.yaml by design)
-REFINE_SKIP_LABELS="needs-discussion,epic,spec-pending-review,plan-pending-review"
+REFINE_SKIP_LABELS="needs-discussion,epic,ready-for-human,spec-pending-review,plan-pending-review"
 REFINE_MAX_RETRIES="${REFINE_MAX_RETRIES:-3}"
 
 # --- Config YAML resolution ---
@@ -260,8 +261,8 @@ spec_advance_check() {
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
       --remove "spec-pending-review" || true
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
-"🔄 **Refinement Pipeline** — Re-running with new feedback.
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$issue_num" \
+  --body="🔄 **Refinement Pipeline** — Re-running with new feedback.
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -296,8 +297,8 @@ plan_advance_check() {
     python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
       --remove "plan-pending-review" || true
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$issue_num" --repo "$FACTORY_REPO_SLUG" --body \
-"🔄 **Refinement Pipeline** — Re-running plan with new feedback.
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$issue_num" \
+  --body="🔄 **Refinement Pipeline** — Re-running plan with new feedback.
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -374,8 +375,11 @@ dispatch() {
     profile_flags+=(--profile factory-model-proxy)
   fi
   echo "[$(date -u +%FT%TZ)] dispatch command=\"${command}\""
+  # Forward provider selection/env set in the scheduler's env (#489); see scripts/provider_env.sh.
+  local -a env_flags=()
+  mapfile -t env_flags < <(provider_env_flags)
   docker compose -f /opt/dark-factory/docker-compose.yml "${profile_flags[@]}" run \
-    -d --rm dark-factory "$command" || exit_code=$?
+    "${env_flags[@]}" -d --rm dark-factory "$command" || exit_code=$?
   if [ "$exit_code" -ne 0 ]; then
     echo "[$(date -u +%FT%TZ)] dispatch_error command=\"${command}\" exit=${exit_code}" >&2
   fi
@@ -580,46 +584,10 @@ failing_checks_for_pr() {
 
 # --- Board state ---
 fetch_board_items() {
-  local cursor="" has_next="true" nodes="[]"
-  while [ "$has_next" = "true" ]; do
-    local after_arg="" raw
-    [ -n "$cursor" ] && after_arg=', after: "'"$cursor"'"'
-    raw=$(gh api graphql -f query='
-      query {
-        node(id: "'"$FACTORY_PROJECT_ID"'") {
-          ... on ProjectV2 {
-            items(first: 100'"$after_arg"') {
-              pageInfo { hasNextPage endCursor }
-              nodes {
-                fieldValueByName(name: "Status") {
-                  ... on ProjectV2ItemFieldSingleSelectValue { name }
-                }
-                content {
-                  ... on Issue {
-                    number
-                    title
-                    labels(first: 10) { nodes { name } }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    ')
-    nodes=$(echo "$raw" | jq -c --argjson nodes "$nodes" '$nodes + (.data.node.items.nodes // [])')
-    has_next=$(echo "$raw" | jq -r '.data.node.items.pageInfo.hasNextPage // false')
-    cursor=$(echo "$raw" | jq -r '.data.node.items.pageInfo.endCursor // ""')
-    if [ "$has_next" = "true" ] && [ -z "$cursor" ]; then
-      echo "ERROR: GitHub ProjectV2 pageInfo indicated another page but returned no cursor" >&2
-      return 1
-    fi
-  done
-  echo "$nodes" | jq '{items: [.[]
-    | select(.content.number != null)
-    | {content: {number: .content.number, title: .content.title, type: "Issue"},
-       labels: [.content.labels.nodes[].name],
-       status: .fieldValueByName.name}]}'
+  # One provider call per poll (the paging loop lives in the Tracker). Same graphql query,
+  # same page size and call count as the former inline `gh api graphql`; output is the
+  # {items:[{content:{number,title,type},labels,status}]} snapshot the filters below consume.
+  python3 "$FACTORY_PROVIDERS_CLI" tracker board-items
 }
 
 # Detects issues that carry ready-for-agent but never reached the board (this
@@ -635,8 +603,8 @@ off_board_ready_issues() {
   # earlier the same day with `--limit 40`). 200 is well clear of any plausible
   # ready-for-agent population; the guard below turns a future overflow into a loud
   # failure rather than an under-report.
-  ready_json=$(gh issue list --repo "$FACTORY_REPO_SLUG" --state open \
-    --label ready-for-agent --limit 200 --json number 2>/dev/null) || return 1
+  ready_json=$(python3 "$FACTORY_PROVIDERS_CLI" tracker list-items \
+    --label ready-for-agent --limit 200 2>/dev/null) || return 1
   echo "$ready_json" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
   # A full page means the cap may have truncated the result: report "cannot check"
   # rather than an under-count, per Requirement 7's own principle.
@@ -1001,7 +969,7 @@ stage_ci_gate() {
 
     FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — CI Failing, Moved to Blocked
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" --body="## Dark Factory — CI Failing, Moved to Blocked
 
 PR #${PR_NUM} has failing CI checks, so this ticket has been moved out of **In review** to **Blocked**. The factory will retry automatically, continue the existing PR branch, and attempt to fix the failures.
 
@@ -1060,7 +1028,7 @@ stage_orphan_sweep() {
     echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
     set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "## Dark Factory — Orphaned Run Recovered
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" --body="## Dark Factory — Orphaned Run Recovered
 
 This issue was left in **In progress** with no running factory container — the run died without its error handler executing (e.g. a host restart or OOM/SIGKILL). The scheduler has moved it to **Blocked** so it will be retried automatically.
 
@@ -1197,8 +1165,8 @@ stage_ready_implement() {
           --add "$ABOVE_CEILING_LABEL" || true
         set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
         FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
-        gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body \
-"## Scheduler — Above Dispatch Ceiling
+        python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" \
+  --body="## Scheduler — Above Dispatch Ceiling
 
 This ticket has been classified as **above the autonomous dispatch ceiling** \
 (size: XL, or size: M with a perf/architectural/migration title keyword).
@@ -1335,7 +1303,7 @@ stage_plan() {
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     DELIVERY_NOTE=$(delivery_skip_note)
     SESSION_WINDOW_NOTE=$(session_window_pause_note)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" --body="📋 **Refinement Pipeline** — Starting plan generation and architect validation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -1402,7 +1370,7 @@ stage_refine() {
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     DELIVERY_NOTE=$(delivery_skip_note)
     SESSION_WINDOW_NOTE=$(session_window_pause_note)
-    gh issue comment "$ISSUE" --repo "$FACTORY_REPO_SLUG" --body "🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" --body="🧠 **Refinement Pipeline** — Starting brainstorming and spec generation.${DELIVERY_NOTE}${SESSION_WINDOW_NOTE}
 
 ---
 ${FOOTER}" 2>/dev/null || true
@@ -1532,6 +1500,18 @@ fi
 STALE_COUNT=$(docker ps -a --filter "name=mh-preview-" --format '{{.Names}}' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$STALE_COUNT" -gt "$STALE_PREVIEW_WARN_COUNT" ]; then
   echo "[$(date -u +%FT%TZ)] WARNING: $STALE_COUNT stale mh-preview-* containers found (threshold: ${STALE_PREVIEW_WARN_COUNT}). Run 'docker ps -a --filter name=mh-preview-' to inspect and clean up." >&2
+fi
+
+# --- Startup: validate the mounted target's adapter.yaml once (#492) ---
+# Warn-only: the mounted checkout can be stale, so the run-start check in entrypoint.sh
+# (which refuses runs on the freshly cloned adapter) is the enforcement point. Never fatal.
+if [ -f /workspace/project/.factory/adapter.yaml ]; then
+  if ADAPTER_CHECK_OUT=$(PYTHONPATH="${FACTORY_SCRIPTS_DIR:-/opt/dark-factory/scripts}" \
+      python3 -m factory_core.adapter --clone-dir /workspace/project --validate 2>&1 >/dev/null); then
+    :
+  else
+    echo "[$(date -u +%FT%TZ)] WARNING: ADAPTER INVALID at /workspace/project/.factory/adapter.yaml — $(printf '%s' "$ADAPTER_CHECK_OUT" | tr '\n' ' ') — runs on this target will be refused until it is fixed (#492)" >&2
+  fi
 fi
 
 # --- Main loop ---

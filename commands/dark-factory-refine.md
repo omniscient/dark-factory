@@ -190,7 +190,7 @@ Follow this process:
    REPO_ROOT=$(git rev-parse --show-toplevel)
 
    # Write the rejected approach to architecture.md.
-   # memory_write.py handles expiry cleanup, dedup, R4 cap, and index.jsonl internally.
+   # memory_write.py handles expiry cleanup, dedup and the R4 cap internally.
    # Tool limitation (#652): memory_write.py always writes [AVOID] entries; both the
    # chosen-approach and rejected-approach lessons are written as [AVOID]. This is a
    # known tool constraint, not a silent substitution.

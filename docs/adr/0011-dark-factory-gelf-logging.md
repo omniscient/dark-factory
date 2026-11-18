@@ -34,3 +34,11 @@ GELF was chosen because:
 - **The GELF sidecar must be running for the factory to start.** Docker's GELF driver fails container startup if it can't connect to the log endpoint. This is an acceptable coupling — the sidecar and Seq should be running whenever the factory is.
 - **No offline fallback.** If Seq becomes unreachable mid-run, log lines for that period are silently dropped. For a production system, a Fluent Bit sidecar with disk buffering would be the next step.
 - **Host networking assumption.** `host.docker.internal` must resolve inside containers. This works on Docker Desktop (Windows/Mac). On native Linux hosts, an `extra_hosts` entry may be needed.
+
+## Current state (2026-11-16)
+
+This ADR describes the stack as it was before Dark Factory was extracted into its own repository. In this repository today (found by the documentation drift audit; the text above is left as written):
+
+- GELF logging is optional. The only configuration is a commented-out `logging:` block on the scheduler service in `deploy/docker-compose.yml` ("Comment out if you don't run Seq").
+- Run containers have no `logging:` section (`run-compose.yml`), so their output is not shipped over GELF, and no `seq-input-gelf` sidecar is defined anywhere in this repo.
+- Nothing couples factory startup to a GELF sidecar unless an operator enables that block.

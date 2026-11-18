@@ -508,3 +508,19 @@ def test_full_doc_result_is_cap_immune(arch_file, tmp_path, monkeypatch):
     assert result.fallback is True
     # Full doc contains all sections
     assert len(result.included_sections) > 1
+
+
+# ── #513: an adapter's empty components map disables slicing ─────────────────
+
+def test_empty_components_map_means_full_doc(arch_file, tmp_path):
+    d = tmp_path / ".factory"
+    d.mkdir()
+    (d / "adapter.yaml").write_text("components: {}\n")
+    result = aslice.slice_architecture(
+        arch_path=arch_file, scenario="implement",
+        spec_component="frontend", clone_dir=str(tmp_path),
+    )
+    assert result.fallback
+    assert result.fallback_reason == "unknown_component:frontend"
+    assert "Service Topology" in result.included_sections
+    assert "Frontend Architecture" in result.included_sections

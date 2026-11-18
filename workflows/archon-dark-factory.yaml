@@ -181,7 +181,8 @@ nodes:
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       SUMMARY="$summarize-feedback.output.summary"
       echo "Acknowledging feedback for issue #${ISSUE}..."
-      gh issue comment "$ISSUE" --body "Resuming work — Feedback understood: ${SUMMARY}"
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Resuming work — Feedback understood: ${SUMMARY}"
       echo "Acknowledged feedback for issue #${ISSUE}"
     depends_on: [summarize-feedback]
     when: "$parse-intent.output.intent == 'continue'"
@@ -192,7 +193,8 @@ nodes:
     bash: |
       ISSUE=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
       echo "Closing issue #${ISSUE}: merging PR and tearing down preview..."
-      gh issue comment "$ISSUE" --body "Merging PR and tearing down preview environment."
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Merging PR and tearing down preview environment."
       echo "Announced close for issue #${ISSUE}"
     depends_on: [fetch-issue]
     when: "$parse-intent.output.intent == 'close'"
@@ -259,7 +261,7 @@ nodes:
       else
         echo "WARNING: board move to done failed for #$ISSUE — check board state manually"
       fi
-      gh issue comment "$ISSUE" --body "Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="Dark factory: preview torn down, PR #${PR_NUM} merged. Issue complete.${TEARDOWN_NOTE}"
       echo "CLOSED"
     depends_on: [parse-intent, fetch-issue]
     when: "$parse-intent.output.intent == 'close'"
@@ -279,7 +281,12 @@ nodes:
       codeindex analyze . 2>/dev/null || echo "WARNING: codeindex analyze failed"
       codeindex symbols . --output symbolindex.json 2>/dev/null || echo "WARNING: codeindex symbols failed"
       mkdir -p docs
-      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.tmp \
+      # #490: codeindex ignores .git/info/exclude and indexes the run-time staged
+      # dark-factory/ copy; filter_hotspots drops rows git reports as excluded (tracked
+      # dark-factory/ in a vendoring target is kept; fails open on any git error).
+      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.raw \
+        && python3 /opt/dark-factory/scripts/filter_hotspots.py --repo . < docs/codeindex-hotspots.md.raw > docs/codeindex-hotspots.md.tmp \
+        && rm -f docs/codeindex-hotspots.md.raw \
         && mv docs/codeindex-hotspots.md.tmp docs/codeindex-hotspots.md \
         || echo "WARNING: codeindex high-blast failed — hotspots file unchanged"
       git add docs/codeindex-hotspots.md
@@ -385,7 +392,7 @@ nodes:
         --clone-dir "$_CLONE" \
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --memory-file "$ARTIFACTS_DIR/memory-context.md" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.refine.json" || true
     depends_on: [setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'refine'"
     timeout: 30000
@@ -425,7 +432,7 @@ nodes:
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --memory-file "$ARTIFACTS_DIR/memory-context.md" \
         ${SPEC_FILE:+--spec-file "$SPEC_FILE"} \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.plan.json" || true
     depends_on: [setup-refine-branch, fetch-issue]
     when: "$parse-intent.output.intent == 'plan'"
     timeout: 30000
@@ -767,7 +774,12 @@ nodes:
       codeindex analyze . 2>/dev/null || echo "WARNING: codeindex analyze failed"
       codeindex symbols . --output symbolindex.json 2>/dev/null || echo "WARNING: codeindex symbols failed"
       mkdir -p docs
-      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.tmp \
+      # #490: codeindex ignores .git/info/exclude and indexes the run-time staged
+      # dark-factory/ copy; filter_hotspots drops rows git reports as excluded (tracked
+      # dark-factory/ in a vendoring target is kept; fails open on any git error).
+      codeindex high-blast 2>/dev/null > docs/codeindex-hotspots.md.raw \
+        && python3 /opt/dark-factory/scripts/filter_hotspots.py --repo . < docs/codeindex-hotspots.md.raw > docs/codeindex-hotspots.md.tmp \
+        && rm -f docs/codeindex-hotspots.md.raw \
         && mv docs/codeindex-hotspots.md.tmp docs/codeindex-hotspots.md \
         || echo "WARNING: codeindex high-blast failed — hotspots file unchanged"
       echo "codeindex hotspots generated locally (not committed — post-merge refresh via post-merge-update-codeindex)"
@@ -912,7 +924,8 @@ nodes:
         write_preview_env true true "preview failed: ${REASON}" "" "" "" ""
         LOG_TAIL=""
         [ -f "$BUILD_LOG" ] && LOG_TAIL=$(tail -30 "$BUILD_LOG")
-        gh issue comment "$ISSUE" --body "⚠️ **Preview environment failed to start** — ${REASON}
+        _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+        python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="⚠️ **Preview environment failed to start** — ${REASON}
 
       The run continued in degraded mode (no live-endpoint validation; PR still created). Last build/boot output:
       \`\`\`
@@ -1119,7 +1132,7 @@ nodes:
         ${SPEC_FILE:+--spec-file "$SPEC_FILE"} \
         --impl-file "$ARTIFACTS_DIR/implementation.md" \
         --diff-file "$DIFF_TMP" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.conformance.json" || true
       rm -f "$DIFF_TMP"
     depends_on: [validate]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
@@ -1263,15 +1276,22 @@ nodes:
 
       _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
       EXISTING_PR=$(python3 "$_PCLI" codehost find-change --branch "$BRANCH" --exact)
+      # Close-on-merge snippet from the code host (GitHub: "Closes #N"). If the CLI itself
+      # fails, fall back to the GitHub literal so a transient error never drops the keyword.
+      if ! CLOSE_KW=$(python3 "$_PCLI" codehost close-keyword --id "$ISSUE"); then
+        echo "WARNING: codehost close-keyword failed; using 'Closes #${ISSUE}'" >&2
+        CLOSE_KW="Closes #${ISSUE}"
+      fi
       if [ -n "$EXISTING_PR" ]; then
         echo "PR #${EXISTING_PR} already exists, updated with latest push."
         # Backfill the closing keyword on PRs created before it was added — without
         # "Closes #N" GitHub never attaches the PR to the issue's Development sidebar.
         # Not migrated: gh pr view --json body has no matching CodeHost read method.
         EXISTING_BODY=$(gh pr view "$EXISTING_PR" --json body --jq '.body')
-        if ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
+        # The snippet comes from the code host (empty when tracker != host: nothing to backfill).
+        if [ -n "$CLOSE_KW" ] && ! echo "$EXISTING_BODY" | grep -qiE "(close[sd]?|fix(e[sd])?|resolve[sd]?) #${ISSUE}\b"; then
           _BACKFILL_BODY_FILE=$(mktemp)
-          printf 'Closes #%s\n\n%s' "$ISSUE" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
+          printf '%s\n\n%s' "$CLOSE_KW" "$EXISTING_BODY" > "$_BACKFILL_BODY_FILE"
           # update-body always exits 0 (its Python process never raises on a failed
           # edit) — update_change_body's own bool return is the real signal, so check stdout.
           UPDATE_BODY_OK=$(python3 "$_PCLI" codehost update-body --id "$EXISTING_PR" --body-file "$_BACKFILL_BODY_FILE")
@@ -1290,9 +1310,13 @@ nodes:
       **Epic:** #${EPIC_NUM}"
         fi
         ISSUE_TITLE=$(python3 "$_PCLI" tracker get --id "$ISSUE" --fields title | jq -r '.title')
-        _PR_BODY="Closes #${ISSUE}
+        CLOSE_BLOCK=""
+        if [ -n "$CLOSE_KW" ]; then
+          CLOSE_BLOCK="${CLOSE_KW}
 
-      ## Summary
+      "
+        fi
+        _PR_BODY="${CLOSE_BLOCK}## Summary
       Automated implementation for issue #${ISSUE}.${EPIC_LINE}
 
       ## Preview
@@ -1344,7 +1368,7 @@ nodes:
         --clone-dir "$_CLONE" \
         --issue-json "$ARTIFACTS_DIR/issue.json" \
         --diff-file "$DIFF_TMP" \
-        --out "$ARTIFACTS_DIR/context-budget.json" || true
+        --out "$ARTIFACTS_DIR/context-budget.code-review.json" || true
       rm -f "$DIFF_TMP"
     depends_on: [push-and-pr]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
@@ -1546,7 +1570,8 @@ nodes:
       fi
 
       _FOOTER=$(python3 "${CLONE_DIR:-.}/dark-factory/scripts/factory_core/cli.py" marker factory 2>/dev/null || echo "")
-      gh issue comment "$ISSUE" --body "## Dark Factory Run — ${ACTION}
+      _PCLI="${CLONE_DIR:-.}/dark-factory/scripts/factory_core/providers/cli.py"
+      python3 "$_PCLI" tracker add-comment --id "$ISSUE" --body="## Dark Factory Run — ${ACTION}
 
       ${PR_LINE}
       ${EPIC_LINE}

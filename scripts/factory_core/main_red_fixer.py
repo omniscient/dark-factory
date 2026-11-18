@@ -202,9 +202,18 @@ class LiveIO:
         push = _run(["git", "push", "-u", "origin", branch, "--force-with-lease"])
         if push.returncode != 0:
             raise RuntimeError(f"git push failed for {branch}: {push.stderr.strip()}")
-        body = (f"Closes #{issue}\n\nAutonomous main-red recovery. Reproduced failure:\n\n"
+        # Close-on-merge snippet from the code host (GitHub: "Closes #N"; "" when tracker !=
+        # host). If the lookup itself fails, fall back to the GitHub literal so a transient
+        # error never drops the keyword (same fallback as the run DAG's push-and-pr node).
+        codehost = get_codehost()
+        try:
+            close_kw = codehost.close_keyword(str(issue))
+        except Exception:
+            close_kw = f"Closes #{issue}"
+        lead = f"{close_kw}\n\n" if close_kw else ""
+        body = (f"{lead}Autonomous main-red recovery. Reproduced failure:\n\n"
                 f"```\n{failure[:4000]}\n```\n\n---\n{identity.marker('main_red')}")
-        pr_str = get_codehost().open_change(
+        pr_str = codehost.open_change(
             branch, "main", f"fix: main-red recovery (#{issue})", body,
             draft=False, repo=OWNER)
         if not pr_str.isdigit():

@@ -43,8 +43,8 @@ each destroyed real runs when violated (see #212, #214):
 | Path | What it is |
 |---|---|
 | `scheduler.sh` | Poll loop: board → dispatch decisions (labels, WIP, deps, ceilings) |
-| `entrypoint.sh` | Per-run container entry: clone, budgets, run workflow, reports |
-| `workflows/archon-dark-factory.yaml` | The DAG every run executes |
+| `entrypoint.sh` | Per-run container entry: clone, smoke gate, deconflict/recheck/fix-main, run workflow, reports |
+| `workflows/archon-dark-factory.yaml` | The DAG every other run executes (incl. token-budget nodes) |
 | `commands/*.md` | Phase agent instructions (refine/plan/implement/conformance/…) |
 | `refinement-skills/` | Reviewer/architect/product-owner prompts (baked to `/opt/refinement-skills/`) |
 | `scripts/` + `scripts/factory_core/` | Deterministic gates, context artifacts, board/breaker/autopilot |
@@ -57,14 +57,16 @@ each destroyed real runs when violated (see #212, #214):
 
 ## Conventions
 
-- Tests: `python -m pytest tests/ -v` (CI runs exactly this plus `smoke_gate.sh` and the
-  workflow DAG checks). TDD for behavior changes.
+- Tests: `python -m pytest tests/ -v` (CI sets `PYTHONPATH=scripts`). CI also runs the
+  `tests/test_*.sh` scripts listed in `.github/workflows/ci.yml`, the two workflow DAG checks
+  and a docker build. TDD for behavior changes.
 - Issue dependencies: a plain `Depends on: #N` line in the issue body (one per line) gates
   implementation dispatch until #N is Done.
 - Label semantics: `ready-for-agent` opts a Backlog issue into refinement;
   `spec-pending-review`/`plan-pending-review` are gate labels applied **only after** the
   spec/plan artifact actually exists on the branch; `needs-discussion` halts all
-  automation; `direct-to-pr` enables grace-timer auto-advance and end-gate auto-merge.
+  automation; `direct-to-pr` also opts a Backlog issue in by itself, and enables
+  grace-timer auto-advance and end-gate auto-merge. Full list: `docs/triage-labels.md`.
 - Scope discipline: touch only what the plan lists; the conformance gate excises
   out-of-scope changes and files spillover tickets.
 
@@ -74,5 +76,5 @@ each destroyed real runs when violated (see #212, #214):
   `hard_exclude_paths` — human-in-the-loop surface).
 - Never weaken safety gates (`gate_*`, breaker, budgets) as a side effect of another
   change; gate changes get their own reviewed ticket.
-- Claude Skills policy (naming, `allowed-tools` limits, side-effect rules): see the #42
-  policy spec under `docs/superpowers/specs/` once merged.
+- Claude Skills policy (naming, `allowed-tools` limits, side-effect rules): see
+  `docs/superpowers/specs/2026-07-10-dark-factory-claude-skills-design.md` (#42).

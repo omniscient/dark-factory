@@ -13,6 +13,7 @@ def test_tracker_is_abstract_with_required_ops():
         "list_work_items", "get_item", "get_comments", "get_children",
         "set_status", "add_label", "remove_label", "upsert_comment",
         "create_item", "resolve_item",
+        "add_comment", "find_comment", "update_comment", "list_board_items", "list_items",
     }
     assert required.issubset(Tracker.__abstractmethods__)
     with pytest.raises(TypeError):
@@ -31,6 +32,11 @@ def test_tracker_degradable_ops_have_safe_defaults():
         def add_label(self, id, name): pass
         def remove_label(self, id, name): pass
         def upsert_comment(self, id, marker, body): pass
+        def add_comment(self, id, body): return True
+        def find_comment(self, id, marker): return None
+        def update_comment(self, id, comment_id, body): return True
+        def list_board_items(self): return {"items": []}
+        def list_items(self, label, limit=200): return []
         def create_item(self, title, body, labels=None): return "1"
         def resolve_item(self, id): pass
 

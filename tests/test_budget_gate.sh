@@ -9,7 +9,7 @@ GATE="${REPO_ROOT}/scripts/budget_gate.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-# context-budget.json fixture shared by all cases: claude_md=500, issue_context=300
+# context-budget.refine.json fixture shared by all cases: claude_md=500, issue_context=300
 # (floored to 2000 by budget_enforce.py's reserve_tokens), two optimizable sections
 # present (memory_context, comments) so enforce-mode output is non-empty.
 _CONTEXT_BUDGET_JSON='{
@@ -28,7 +28,7 @@ _CONTEXT_BUDGET_JSON='{
 _make_case() {
   local dir="$1"
   mkdir -p "${dir}/.claude/skills/refinement"
-  printf '%s' "$_CONTEXT_BUDGET_JSON" > "${dir}/context-budget.json"
+  printf '%s' "$_CONTEXT_BUDGET_JSON" > "${dir}/context-budget.refine.json"
   cat > "${dir}/.claude/skills/refinement/config.yaml" <<CFG
 token_optimization:
   enforce_budgets: ${2}
@@ -56,6 +56,8 @@ RC=$(_run_gate "$CASE1" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=)
 [ "$RC" = "0" ] || { echo "FAIL case1 exit code: $RC"; cat "${CASE1}/stderr.log"; exit 1; }
 grep -q "over_budget=False" "${CASE1}/stderr.log" || { echo "FAIL case1 expected over_budget=False"; cat "${CASE1}/stderr.log"; exit 1; }
 [ -s "${CASE1}/token-opt-caps.env" ] || { echo "FAIL case1 expected non-empty token-opt-caps.env (enforce mode)"; exit 1; }
+# Caps must be exported so the Python optimizers started by a sourcing shell see them (#511).
+grep -q '^export TOKEN_OPTIMIZATION_' "${CASE1}/token-opt-caps.env" || { echo "FAIL case1 caps lines must start with 'export '"; exit 1; }
 
 # --- Case 2: over-budget — enforce mode, budget too small to cover reserved
 CASE2="${WORK}/case2"

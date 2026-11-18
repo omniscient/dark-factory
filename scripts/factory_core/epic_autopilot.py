@@ -48,7 +48,7 @@ def is_eligible(c: dict, opt_out_label: str, size_ceiling: str = "XL"):
     labels = [label.lower() for label in c.get("labels", [])]
     if c.get("status") not in _GATED_STATUSES:
         return False, f"status={c.get('status')}"
-    for blk in ("direct-to-pr", opt_out_label, "needs-discussion", "epic"):
+    for blk in ("direct-to-pr", opt_out_label, "needs-discussion", "epic", "ready-for-human"):
         if blk.lower() in labels:
             return False, f"label:{blk}"
     size = _size(c) or ""
@@ -347,6 +347,35 @@ def _sensitive_keywords(clone_dir: str | None = None) -> str:
     return _DEFAULT_SENSITIVE_KEYWORDS
 
 
+def _effective_exclude_paths(clone_dir: str | None) -> list:
+    """Union of the exclusions in force before the target adapter was consulted
+    (lookup from CLONE_DIR or the cwd) and the target adapter's own list.
+
+    Never narrower than either: pointing autopilot at the target's adapter must not
+    drop an exclusion as a side effect.
+    """
+    merged = list(_load_exclude_paths(os.environ.get("CLONE_DIR", ".")))
+    for p in _load_exclude_paths(clone_dir):
+        if p not in merged:
+            merged.append(p)
+    return merged
+
+
+def _effective_sensitive_keywords(clone_dir: str | None, env_value: str | None) -> str:
+    """Union of the config/env pattern and the adapter's safety.sensitive_keywords.
+
+    Never narrower than either source: anything that blocks autopilot under the env
+    (config.yaml) value or under the adapter value still blocks it (#513).
+    """
+    parts = []
+    for p in (env_value, _sensitive_keywords(clone_dir)):
+        if p and p not in parts:
+            parts.append(p)
+    if len(parts) == 1:
+        return parts[0]
+    return "|".join(f"(?:{p})" for p in parts)
+
+
 def _gh_json(args: list):
     """Run a gh command and parse JSON stdout; return None on failure."""
     try:
@@ -356,6 +385,25 @@ def _gh_json(args: list):
         return json.loads(p.stdout)
     except Exception:
         return None
+
+
+# Where the scheduler container mounts the target checkout (read-only).
+_SCHEDULER_TARGET_DIR = "/workspace/project"
+
+
+def _target_dir() -> str:
+    """Directory whose .factory/adapter.yaml governs this autopilot pass.
+
+    CLONE_DIR wins when set. The scheduler does not set it and runs from /workspace,
+    so default to the mounted target checkout; without that, "." read no adapter and
+    the built-in defaults silently replaced the target's safety settings.
+    """
+    explicit = os.environ.get("CLONE_DIR")
+    if explicit:
+        return explicit
+    if os.path.isfile(os.path.join(_SCHEDULER_TARGET_DIR, ".factory", "adapter.yaml")):
+        return _SCHEDULER_TARGET_DIR
+    return "."
 
 
 def _load_exclude_paths(clone_dir: str | None = None) -> list:
@@ -574,14 +622,13 @@ def main_once() -> int:
     except Exception:
         state = {}
     today = datetime.now(timezone.utc).date().isoformat()
-    clone_dir = os.environ.get("CLONE_DIR", ".")
+    clone_dir = _target_dir()
     cfg = dict(
-        exclude_paths=_load_exclude_paths(clone_dir),
+        exclude_paths=_effective_exclude_paths(clone_dir),
         opt_out_label=os.environ.get("EPIC_AUTOPILOT_OPT_OUT_LABEL", "no-autopilot"),
         size_ceiling=os.environ.get("EPIC_AUTOPILOT_SIZE_CEILING", "XL"),
-        sensitive_keywords=os.environ.get(
-            "EPIC_AUTOPILOT_SENSITIVE_KEYWORDS",
-            _sensitive_keywords(clone_dir)),
+        sensitive_keywords=_effective_sensitive_keywords(
+            clone_dir, os.environ.get("EPIC_AUTOPILOT_SENSITIVE_KEYWORDS")),
         hold_ttl_hours=float(os.environ.get("EPIC_AUTOPILOT_HOLD_TTL_HOURS", "24")),
         start_epics=os.environ.get("EPIC_AUTOPILOT_START_EPICS", "true").lower() == "true",
         # Fail-closed: self-improvement is only on when config/env says so explicitly.

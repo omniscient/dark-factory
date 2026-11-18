@@ -4,7 +4,7 @@
 Generic reverse proxy for ANTHROPIC_BASE_URL: forwards every request to the real
 Anthropic API unchanged (streaming responses forwarded byte-for-byte), while writing
 a compact per-request ledger row and optional raw artifacts. See
-docs/superpowers/specs/2026-07-11-transparent-model-proxy-design.md.
+docs/archive/2026-07-11-transparent-model-proxy-design.md.
 """
 import asyncio
 import fcntl

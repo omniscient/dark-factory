@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -566,3 +567,148 @@ def test_parse_prior_cumulative_counts_only_header_lines():
         "### Run: 2026-07-22 10:00 UTC (fix, completed)\n"
     )
     assert cr.parse_prior_cumulative(body)["run_count"] == 2
+
+
+def test_format_savings_block_measured_only_not_in_headline():
+    """#487: savings from undelivered features must not appear as 'Context savings'."""
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 0,
+        "savings_pct": 0.0,
+        "measured_only_savings_tokens": 4200,
+        "measured_only_sections": ["architecture_md"],
+        "fallback_events": [],
+    }
+    block = cr.format_savings_block(budget)
+    assert "Context savings" not in block
+    assert "Measured-only (not delivered to the prompt): 4.2K tokens" in block
+    assert "architecture_md" in block
+
+
+def test_format_savings_block_realised_and_measured_only_separate():
+    budget = {
+        "schema_version": 2,
+        "savings_tokens": 3000,
+        "savings_pct": 15.5,
+        "measured_only_savings_tokens": 1000,
+        "measured_only_sections": ["architecture_md"],
+        "fallback_events": [],
+    }
+    block = cr.format_savings_block(budget)
+    assert "**Context savings: 3.0K tokens (15.5%)**" in block
+    assert "Measured-only (not delivered to the prompt): 1.0K tokens" in block
+
+
+# ---------------------------------------------------------------------------
+# #511: savings measured from what the optimizers delivered, across scenarios
+# ---------------------------------------------------------------------------
+
+def _b(scenario, **kw):
+    d = {"schema_version": 2, "scenario": scenario, "savings_tokens": 0, "savings_pct": 0.0,
+         "baseline_input_tokens": 1000, "fallback_events": []}
+    d.update(kw)
+    return d
+
+
+def test_headline_is_baseline_minus_delivered_from_deliveries():
+    deliveries = [
+        {"kind": "memory", "phase": "implement", "baseline_tokens": 3000, "delivered_tokens": 1500},
+        {"kind": "diff", "baseline_tokens": 9000, "delivered_tokens": 6000},
+        {"kind": "diff", "baseline_tokens": 9000, "delivered_tokens": 7000},
+    ]
+    # The pre-run budget probes claim 0 (memory dropped) -- the headline must ignore them.
+    block = cr.format_savings_block([_b("implement"), _b("conformance"), _b("code-review")],
+                                    deliveries)
+    # saved = 1500 + 3000 + 2000 = 6500 of baseline 21000
+    assert "**Context savings: 6.5K tokens (31.0%)**" in block
+
+
+def test_deliveries_for_phases_outside_delivered_set_are_ignored():
+    deliveries = [{"kind": "memory", "phase": "validate", "baseline_tokens": 900,
+                   "delivered_tokens": 100}]
+    assert "Context savings" not in cr.format_savings_block([_b("implement")], deliveries)
+
+
+def test_delivered_sets_in_sync_with_context_budget():
+    import context_budget as cb
+    mem = {s for s, secs in cb._DELIVERED_SAVINGS.items() if "memory_context" in secs}
+    diff = {s for s, secs in cb._DELIVERED_SAVINGS.items() if "diff" in secs}
+    assert mem == set(cr.DELIVERED_MEMORY_PHASES)
+    assert diff == {"conformance", "code-review"}
+
+
+def test_architecture_stays_measured_only_across_scenarios():
+    budgets = [
+        _b("implement", measured_only_savings_tokens=2000, measured_only_sections=["architecture_md"]),
+        _b("conformance", measured_only_savings_tokens=500, measured_only_sections=["architecture_md"]),
+    ]
+    block = cr.format_savings_block(budgets, [])
+    assert "Context savings" not in block
+    assert "Measured-only (not delivered to the prompt): 2.5K tokens (architecture_md)" in block
+
+
+def test_list_without_deliveries_sums_budget_savings_legacy_path():
+    block = cr.format_savings_block([_b("a", savings_tokens=1000), _b("b", savings_tokens=3000)])
+    assert "Context savings: 4.0K tokens" in block
+
+
+def test_trim_lines_rendered_per_scenario():
+    budgets = [
+        _b("implement", would_trim=True, estimated_input_tokens=10000, scenario_budget=8000,
+           derived_caps={"memory": 750}),
+        _b("conformance", over_budget=True, reserved_tokens=30000, scenario_budget=22000,
+           derived_caps={"diff": 3000}),
+    ]
+    block = cr.format_savings_block(budgets, [])
+    assert "Budget trim (implement)" in block
+    assert "Over budget (conformance)" in block
+
+
+def test_load_budgets_reads_all_scenarios_and_ignores_legacy_when_present(tmp_path):
+    (tmp_path / "context-budget.implement.json").write_text(json.dumps(_b("implement")))
+    (tmp_path / "context-budget.conformance.json").write_text(json.dumps(_b("conformance")))
+    (tmp_path / "context-budget.json").write_text(json.dumps(_b("legacy")))
+    assert [b["scenario"] for b in cr.load_budgets(tmp_path)] == ["conformance", "implement"]
+
+
+def test_load_budgets_falls_back_to_legacy_single_file(tmp_path):
+    (tmp_path / "context-budget.json").write_text(json.dumps(_b("legacy")))
+    assert [b["scenario"] for b in cr.load_budgets(tmp_path)] == ["legacy"]
+    assert cr.load_budgets(tmp_path / "missing") == []
+
+
+def test_load_deliveries_absent_is_none_and_skips_bad_lines(tmp_path):
+    assert cr.load_deliveries(tmp_path) is None
+    (tmp_path / "delivered-savings.jsonl").write_text('{"kind":"diff"}\nnot json\n')
+    assert cr.load_deliveries(tmp_path) == [{"kind": "diff"}]
+
+
+def test_render_before_after_headline():
+    record = {"nodes": [{"node_id": "implement", "model": "m"}], "totals": {}}
+    budgets = [_b("implement"), _b("conformance")]
+    before = cr.render(record, "", "2026-11-16 00:00 UTC", "new", budget=budgets)
+    after = cr.render(record, "", "2026-11-16 00:00 UTC", "new", budget=budgets,
+                      deliveries=[{"kind": "diff", "baseline_tokens": 8000,
+                                   "delivered_tokens": 6000},
+                                  {"kind": "memory", "phase": "implement",
+                                   "baseline_tokens": 2000, "delivered_tokens": 1500}])
+    assert "Context savings" not in before
+    assert "**Context savings: 2.5K tokens (25.0%)**" in after
+
+
+def test_cli_render_aggregates_artifacts_dir(tmp_path, capsys):
+    """End to end: per-scenario budgets + delivered-savings.jsonl -> one headline."""
+    from factory_core import cli
+    from types import SimpleNamespace
+    (tmp_path / "context-budget.implement.json").write_text(json.dumps(_b("implement")))
+    (tmp_path / "context-budget.conformance.json").write_text(json.dumps(_b("conformance")))
+    (tmp_path / "delivered-savings.jsonl").write_text(
+        json.dumps({"kind": "memory", "phase": "implement", "baseline_tokens": 3000,
+                    "delivered_tokens": 1500}) + "\n"
+        + json.dumps({"kind": "diff", "baseline_tokens": 9000, "delivered_tokens": 6000}) + "\n")
+    rr = tmp_path / "run-record.json"
+    rr.write_text(json.dumps({"nodes": [{"node_id": "implement", "model": "m"}], "totals": {}}))
+    cli._cost_report_render(SimpleNamespace(
+        run_record_file=str(rr), prior_body_file="", timestamp="t", intent="new",
+        product_name="X", budget_file="", artifacts_dir=str(tmp_path)))
+    assert "**Context savings: 4.5K tokens (37.5%)**" in capsys.readouterr().out

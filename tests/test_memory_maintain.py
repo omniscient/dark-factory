@@ -157,6 +157,59 @@ class TestRenderFile:
         assert "Auth entry two." in rendered
 
 
+SECTIONED_FILE = """# Sectioned
+
+## Section A
+
+- [PATTERN] A one. <!-- issue:#1 date:2026-01-01 expires:2020-01-01 source:implement -->
+- [PATTERN] A two. <!-- issue:#2 date:2026-01-02 expires:2099-01-01 source:implement -->
+
+## Section B
+
+- [AVOID] B one. <!-- issue:#3 date:2026-01-03 expires:2099-01-01 source:implement -->
+- [AVOID] B two. <!-- issue:#4 date:2026-01-04 expires:2099-01-01 source:implement -->
+"""
+
+
+class TestRenderKeepsSections:
+    """Removing an entry must not slide later entries under an earlier header."""
+
+    def _section_of(self, rendered, needle):
+        section = None
+        for line in rendered.splitlines():
+            if line.startswith("## "):
+                section = line
+            if needle in line:
+                return section
+        return None
+
+    def test_removed_entry_does_not_shift_later_entries(self):
+        mf = mm.parse_file_content(SECTIONED_FILE)
+        mf.auth_entries = mf.auth_entries[1:]  # drop "A one."
+        rendered = mm.render_file(mf)
+        assert "A one." not in rendered
+        assert self._section_of(rendered, "A two.") == "## Section A"
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+    def test_expiry_through_apply_ops_keeps_sections(self):
+        from datetime import date
+        rendered, summary = mm.apply_ops_to_content(SECTIONED_FILE, date(2026, 6, 1), None)
+        assert summary["expired_auth"] == 1
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+    def test_dedup_through_apply_ops_keeps_sections(self):
+        from datetime import date
+        content = SECTIONED_FILE.replace("expires:2020-01-01", "expires:2099-01-01").replace(
+            "A two.", "A one.")  # A's two entries are now duplicates; older is dropped
+        rendered, summary = mm.apply_ops_to_content(content, date(2026, 6, 1), None)
+        assert summary["deduped"] == 1
+        assert rendered.count("A one.") == 1
+        assert self._section_of(rendered, "B one.") == "## Section B"
+        assert self._section_of(rendered, "B two.") == "## Section B"
+
+
 # ---------------------------------------------------------------------------
 # op_expire
 # ---------------------------------------------------------------------------
@@ -267,17 +320,33 @@ class TestOpPromote:
 # ---------------------------------------------------------------------------
 
 class TestOpDedup:
-    def test_identical_bodies_marks_older_invalid(self):
+    def test_identical_bodies_drops_older_without_invalid_tag(self):
         older = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-01-01")
         newer = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-06-01")
         result = mm.op_dedup([older, newer])
-        # Both entries share the same body, so use list-based checks instead of dict keying
-        invalid_entries = [e for e in result.entries if e.tag.startswith("INVALID")]
-        assert len(invalid_entries) == 1
-        assert invalid_entries[0].meta.get("date") == "2026-01-01"
-        surviving = [e for e in result.entries if not e.tag.startswith("INVALID")]
-        assert len(surviving) == 1
-        assert surviving[0].meta.get("date") == "2026-06-01"
+        # Supersession is not invalidation (contract section 2): the older entry is
+        # removed, never retagged INVALID.
+        assert not any(e.tag.startswith("INVALID") for e in result.entries)
+        assert len(result.entries) == 1
+        assert result.entries[0].meta.get("date") == "2026-06-01"
+
+    def test_newer_entry_listed_first_still_wins(self):
+        newer = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-06-01")
+        older = _entry("PATTERN", "Use the transaction rollback fixture", date_str="2026-01-01")
+        result = mm.op_dedup([newer, older])
+        assert [e.meta["date"] for e in result.entries] == ["2026-06-01"]
+
+    def test_apply_ops_removes_superseded_line_and_never_writes_invalid(self):
+        content = (
+            "# H\n"
+            "- [PATTERN] Use the transaction rollback fixture <!-- issue:#1 date:2026-01-01 source:implement -->\n"
+            "- [PATTERN] Use the transaction rollback fixture <!-- issue:#2 date:2026-06-01 source:implement -->\n"
+            "---\n<!-- PROVISIONAL -->\n"
+        )
+        out, summary = mm.apply_ops_to_content(content, _date(2026, 6, 27), None)
+        assert "INVALID" not in out
+        assert out.count("[PATTERN]") == 1 and "issue:#2" in out
+        assert summary["deduped"] == 1
 
     def test_below_threshold_not_deduped(self):
         e1 = _entry("PATTERN", "Use foo for bar operations to get results.")

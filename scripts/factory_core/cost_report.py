@@ -3,9 +3,11 @@
 Extracted from entrypoint.sh's post_cost_report(). No gh, no docker, no archon, no
 network calls in this module — see cli.py's cost-report subcommands for the IO seam.
 """
+import json
 import math
 import re
 from decimal import Decimal
+from pathlib import Path
 
 
 def _round_half_away_from_zero(x: float) -> int:
@@ -111,33 +113,76 @@ def format_push_line(run_record: dict) -> str:
     return f"**Push:** FAILED — {first}"
 
 
-def format_savings_block(budget: "dict | None") -> str:
-    """Mirrors the context-budget.json (schema v2) block at entrypoint.sh:501-548."""
-    if not budget:
-        return ""
-    schema_version = budget.get("schema_version", 1)
+# Optimizer deliveries that count toward the headline "Context savings" (#511). Mirrors
+# scripts/context_budget.py _DELIVERED_SAVINGS (a test keeps the two in sync): memory
+# is delivered to the refine/plan/implement(+continue) prompts, the ranked diff to
+# conformance/code-review (diff_rank.py records no phase, every record counts).
+DELIVERED_MEMORY_PHASES = frozenset({"refine", "plan", "implement", "continue"})
+DELIVERED_SAVINGS_FILE = "delivered-savings.jsonl"
+BUDGET_LEGACY_FILE = "context-budget.json"
+
+
+def load_budgets(artifacts_dir: "str | Path") -> "list[dict]":
+    """All per-scenario budget artifacts of a run (`context-budget.<scenario>.json`),
+    sorted by name. Falls back to the legacy single `context-budget.json` only when no
+    per-scenario file exists (artifacts written before #511)."""
+    d = Path(artifacts_dir)
+    files = sorted(d.glob("context-budget.*.json"))
+    if not files and (d / BUDGET_LEGACY_FILE).is_file():
+        files = [d / BUDGET_LEGACY_FILE]
+    out = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def load_deliveries(artifacts_dir: "str | Path") -> "list[dict] | None":
+    """Optimizer-measured deliveries (memory_retrieve.py / diff_rank.py append one line
+    per run), or None when the run predates them (caller falls back to the budget
+    artifacts' own savings figures)."""
+    f = Path(artifacts_dir) / DELIVERED_SAVINGS_FILE
+    if not f.is_file():
+        return None
+    out = []
     try:
-        schema_version = int(schema_version)
-    except (TypeError, ValueError):
-        return ""
-    if schema_version < 2:
-        return ""
+        lines = f.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
 
-    lines = []
 
-    savings_tokens = budget.get("savings_tokens", 0) or 0
-    if savings_tokens > 0:
-        savings_pct = budget.get("savings_pct", 0)
-        lines.append(
-            f"**Context savings: {format_tokens_cumulative(savings_tokens)} "
-            f"tokens ({savings_pct}%)**"
-        )
+def _delivered_savings(deliveries: "list[dict]") -> "tuple[int, int]":
+    """(saved, baseline) summed over deliveries that reached a prompt."""
+    saved = baseline = 0
+    for rec in deliveries:
+        kind = rec.get("kind")
+        if kind == "memory" and rec.get("phase") not in DELIVERED_MEMORY_PHASES:
+            continue
+        if kind not in ("memory", "diff"):
+            continue
+        try:
+            base = int(rec.get("baseline_tokens", 0))
+            got = int(rec.get("delivered_tokens", 0))
+        except (TypeError, ValueError):
+            continue
+        baseline += base
+        saved += max(0, base - got)
+    return saved, baseline
 
-    fallback_events = budget.get("fallback_events") or []
-    if fallback_events:
-        parts = [f"{ev['section']}: {ev['reason']}" for ev in fallback_events]
-        lines.append("**Fallbacks:** " + ", ".join(parts))
 
+def _trim_line(budget: dict) -> str:
     over_budget = budget.get("over_budget")
     would_trim = budget.get("would_trim")
     caps_str = ", ".join(
@@ -147,24 +192,97 @@ def format_savings_block(budget: "dict | None") -> str:
     scenario_budget = budget.get("scenario_budget", 0)
     if over_budget is True:
         reserved = budget.get("reserved_tokens", 0)
-        lines.append(
+        return (
             f"**⚠️ Over budget ({scenario}): "
             f"{format_tokens_cumulative(reserved)} reserved / "
             f"{format_tokens_cumulative(scenario_budget)} budget — "
             f"trimmed: {caps_str}**"
         )
-    elif would_trim is True:
+    if would_trim is True:
         estimated = budget.get("estimated_input_tokens")
         if estimated:
             label, value = "est", estimated
         else:
             label, value = "rsv", budget.get("reserved_tokens", 0)
-        lines.append(
+        return (
             f"**Budget trim ({scenario}): {label} "
             f"{format_tokens_cumulative(value)} / "
             f"{format_tokens_cumulative(scenario_budget)} budget — "
             f"capped: {caps_str}**"
         )
+    return ""
+
+
+def format_savings_block(budget: "dict | list | None",
+                         deliveries: "list[dict] | None" = None) -> str:
+    """Savings/budget lines for the cost report (context-budget schema v2).
+
+    `budget` is one context-budget artifact or the list of a run's per-scenario
+    artifacts (#511). When `deliveries` is given (the optimizers' own append-only
+    records), the headline "Context savings" is baseline-minus-delivered for the text
+    that really went into the prompts, summed over every scenario of the run; without
+    it the budget artifacts' own savings_tokens are summed (older runs).
+    """
+    if not budget:
+        return ""
+    budgets = budget if isinstance(budget, list) else [budget]
+    valid = []
+    for b in budgets:
+        if not isinstance(b, dict) or not b:
+            continue
+        try:
+            if int(b.get("schema_version", 1)) < 2:
+                continue
+        except (TypeError, ValueError):
+            continue
+        valid.append(b)
+    if not valid:
+        return ""
+
+    lines = []
+
+    if deliveries is not None:
+        savings_tokens, baseline = _delivered_savings(deliveries)
+        savings_pct = round(savings_tokens / baseline * 100, 1) if baseline > 0 else 0
+    elif len(valid) == 1:
+        savings_tokens = valid[0].get("savings_tokens", 0) or 0
+        savings_pct = valid[0].get("savings_pct", 0)
+    else:
+        savings_tokens = sum(b.get("savings_tokens", 0) or 0 for b in valid)
+        baseline = sum(b.get("baseline_input_tokens", 0) or 0 for b in valid)
+        savings_pct = round(savings_tokens / baseline * 100, 1) if baseline > 0 else 0
+    if savings_tokens > 0:
+        lines.append(
+            f"**Context savings: {format_tokens_cumulative(savings_tokens)} "
+            f"tokens ({savings_pct}%)**"
+        )
+
+    # Savings that were computed but never reached a prompt (#487): shown separately,
+    # never added to the headline figure above. Summed across the run's scenarios.
+    measured_only = sum(b.get("measured_only_savings_tokens", 0) or 0 for b in valid)
+    if measured_only > 0:
+        names = []
+        for b in valid:
+            for n in b.get("measured_only_sections") or []:
+                if n not in names:
+                    names.append(n)
+        suffix = f" ({', '.join(names)})" if names else ""
+        lines.append(
+            f"Measured-only (not delivered to the prompt): "
+            f"{format_tokens_cumulative(measured_only)} tokens{suffix}"
+        )
+
+    fallback_events = []
+    for b in valid:
+        fallback_events.extend(b.get("fallback_events") or [])
+    if fallback_events:
+        parts = [f"{ev['section']}: {ev['reason']}" for ev in fallback_events]
+        lines.append("**Fallbacks:** " + ", ".join(parts))
+
+    for b in valid:
+        trim = _trim_line(b)
+        if trim:
+            lines.append(trim)
 
     if not lines:
         return ""
@@ -305,7 +423,8 @@ COST_MARKER = "<!-- dark-factory-cost-report -->"
 
 
 def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: str,
-           product_name: str = "Dark Factory", budget: "dict | None" = None) -> str:
+           product_name: str = "Dark Factory", budget: "dict | list | None" = None,
+           deliveries: "list[dict] | None" = None) -> str:
     """Top-level entry point — assembles the full comment body.
 
     Callers must have already confirmed `check_renderable(run_record) is None`;
@@ -344,7 +463,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     cum_out = prior["prev_out"] + total_out
     run_count = prior["run_count"] + 1
 
-    savings_block = format_savings_block(budget)
+    savings_block = format_savings_block(budget, deliveries)
 
     # NOTE: `{prior['prior_runs']}` and `{savings_block}` are each on their OWN
     # source line here, matching entrypoint.sh's heredoc structure exactly —

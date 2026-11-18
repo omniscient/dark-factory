@@ -188,3 +188,51 @@ def test_build_fix_prompt_names_scope():
     assert "tsc: x.ts(3,1) error" in p
     assert "dark-factory/scheduler.sh" in p          # blocked list shown
     assert "backend/" in p                            # allowed list shown
+
+
+# --- #507: the PR body's closing keyword comes from the code host ---------------------------
+
+def _open_pr_body(monkeypatch, close_keyword):
+    import subprocess
+
+    seen = {}
+
+    class _Host:
+        def close_keyword(self, issue_id):
+            if isinstance(close_keyword, Exception):
+                raise close_keyword
+            seen["kw_arg"] = issue_id
+            return close_keyword
+
+        def open_change(self, source, target, title, body, draft=False, repo=None):
+            seen["body"] = body
+            return "55"
+
+    monkeypatch.setattr(mf, "get_codehost", lambda: _Host())
+    monkeypatch.setattr(mf, "_run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""))
+    io = mf.LiveIO.__new__(mf.LiveIO)
+    assert io.open_pr("fix/x", 42, "boom") == 55
+    return seen
+
+
+def test_pr_body_uses_code_host_close_keyword(monkeypatch):
+    seen = _open_pr_body(monkeypatch, "Closes #42")
+    assert seen["kw_arg"] == "42"
+    assert seen["body"].startswith("Closes #42\n\nAutonomous main-red recovery. Reproduced failure:\n\n")
+
+
+def test_pr_body_is_byte_identical_to_pre_507_literal_on_github(monkeypatch):
+    seen = _open_pr_body(monkeypatch, "Closes #42")
+    legacy = (f"Closes #{42}\n\nAutonomous main-red recovery. Reproduced failure:\n\n"
+              f"```\n{'boom'[:4000]}\n```\n\n---\n{mf.identity.marker('main_red')}")
+    assert seen["body"] == legacy
+
+
+def test_pr_body_has_no_leading_blank_lines_when_host_returns_empty_keyword(monkeypatch):
+    seen = _open_pr_body(monkeypatch, "")
+    assert seen["body"].startswith("Autonomous main-red recovery.")
+
+
+def test_pr_body_falls_back_to_github_literal_when_lookup_raises(monkeypatch):
+    seen = _open_pr_body(monkeypatch, RuntimeError("provider down"))
+    assert seen["body"].startswith("Closes #42\n\n")

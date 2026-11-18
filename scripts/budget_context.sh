@@ -5,8 +5,10 @@
 # budget_gate.sh extraction for the enforce-budget-* nodes.
 #
 # Usage: budget_context.sh
-# Env:   ARTIFACTS_DIR (required) — must contain issue.json; context-budget.json is
-#                   written here
+# Env:   ARTIFACTS_DIR (required) — must contain issue.json; context-budget.implement.json is
+#                   written here (one file per budget slot — never overwritten by
+#                   later budget nodes, #511; new and continue both use the
+#                   implement slot, the scenario field inside records which)
 #        CLONE_DIR (optional, default ".") — clone root; CWD is the clone root in
 #                   bash workflow nodes, so "." is the correct default there
 #        RUN_ID (optional, defaults to basename of ARTIFACTS_DIR — matches the
@@ -59,10 +61,10 @@ python3 "${_SCRIPT_DIR}/context_budget.py" \
   --issue-json "$ARTIFACTS_DIR/issue.json" \
   --memory-file "$ARTIFACTS_DIR/memory-context.md" \
   --comment-digest-file "$ARTIFACTS_DIR/comment-digest.md" \
-  --out "$ARTIFACTS_DIR/context-budget.json" || true
+  --out "$ARTIFACTS_DIR/context-budget.implement.json" || true
 
-if [ ! -s "$ARTIFACTS_DIR/context-budget.json" ]; then
-  echo "WARNING: budget_context.sh: $ARTIFACTS_DIR/context-budget.json was not written (context_budget.py invocation failed)" >&2
+if [ ! -s "$ARTIFACTS_DIR/context-budget.implement.json" ]; then
+  echo "WARNING: budget_context.sh: $ARTIFACTS_DIR/context-budget.implement.json was not written (context_budget.py invocation failed)" >&2
 fi
 
 exit 0

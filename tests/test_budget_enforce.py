@@ -246,9 +246,9 @@ def test_enforce_mode_stdout(tmp_path, capsys):
     ])
     captured = capsys.readouterr()
     lines = captured.out.strip().splitlines()
-    assert any(l.startswith("TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS=") for l in lines)
-    assert any(l.startswith("TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS=") for l in lines)
-    assert any(l.startswith("TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS=") for l in lines)
+    assert any(l.startswith("export TOKEN_OPTIMIZATION_ARCHITECTURE_MAX_TOKENS=") for l in lines)
+    assert any(l.startswith("export TOKEN_OPTIMIZATION_MEMORY_MAX_TOKENS=") for l in lines)
+    assert any(l.startswith("export TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS=") for l in lines)
     # diff not present → must NOT appear
     assert not any("DIFF" in l for l in lines)
 
@@ -268,7 +268,7 @@ def test_enforce_mode_values_are_positive_ints(tmp_path, capsys):
     ])
     captured = capsys.readouterr()
     for line in captured.out.strip().splitlines():
-        key, _, value = line.partition("=")
+        key, _, value = line.removeprefix("export ").partition("=")
         assert key.startswith("TOKEN_OPTIMIZATION_"), f"Unexpected key: {key}"
         assert int(value) > 0
 
@@ -398,7 +398,7 @@ def test_comment_digest_maps_to_comments_env_var(tmp_path, capsys):
         "--mode", "enforce",
     ])
     captured = capsys.readouterr()
-    assert any(l.startswith("TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS=") for l in captured.out.splitlines())
+    assert any(l.startswith("export TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS=") for l in captured.out.splitlines())
 
 
 # ── Test 26: over_budget — derived_caps use floors, not zero ─────────────────

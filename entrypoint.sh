@@ -428,7 +428,7 @@ _write_error_signature() {
   [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty_flag="--worktree-dirty"
   # Allowlist of genuine phase-deliverable filenames, not a denylist of
   # run-record.json alone: $ARTIFACTS_DIR always already contains workflow-written
-  # context artifacts (issue.json, context-budget.json, token-opt-caps.env — present
+  # context artifacts (issue.json, context-budget.<scenario>.json, token-opt-caps.env — present
   # before the phase command even starts) and, for implement-intent failures,
   # run_post_mortem() unconditionally writes factory-failures.jsonl (line 250) before
   # this helper runs. A denylist of only run-record.json would treat all of those as
@@ -478,18 +478,17 @@ post_cost_report() {
     return
   fi
 
-  # Find existing cost report comment by marker
+  # Find existing cost report comment by marker (newest match); its body, when found, is
+  # written to PRIOR_BODY_FILE so the renderer can fold in the prior report. Lookup
+  # failure == "no prior comment" (prints nothing, exits 0), as the old `|| true` did.
   local COMMENT_ID
-  COMMENT_ID=$(gh api "repos/${FACTORY_REPO_SLUG}/issues/${ISSUE_NUM}/comments" \
-    --jq "[.[] | select(.body | contains(\"$COST_MARKER\"))] | last | .id // empty" 2>/dev/null || true)
-
-  local PRIOR_BODY_FILE=""
-  if [ -n "$COMMENT_ID" ]; then
-    PRIOR_BODY_FILE=$(mktemp /tmp/prior-body-XXXXXX.md)
-    # Single-comment endpoint omits the issue number: /issues/comments/{id}, NOT
-    # /issues/{n}/comments/{id} (the latter 404s).
-    gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-      --jq '.body' > "$PRIOR_BODY_FILE" 2>/dev/null || true
+  local PRIOR_BODY_FILE
+  PRIOR_BODY_FILE=$(mktemp /tmp/prior-body-XXXXXX.md)
+  COMMENT_ID=$(python3 "$FACTORY_PROVIDERS_CLI" tracker find-comment --id "$ISSUE_NUM" \
+    --marker "$COST_MARKER" --body-out "$PRIOR_BODY_FILE" 2>/dev/null || true)
+  if [ -z "$COMMENT_ID" ]; then
+    rm -f "$PRIOR_BODY_FILE"
+    PRIOR_BODY_FILE=""
   fi
 
   local TIMESTAMP
@@ -497,9 +496,11 @@ post_cost_report() {
 
   # --intent/--product-name/--budget-file: see "Deviations from the spec" items
   # 1-2 above — render() cannot derive these from run-record.json alone.
-  local BUDGET_FILE="${ARTIFACTS_DIR:-}/context-budget.json"
+  # --artifacts-dir: the report aggregates every per-scenario context-budget.<scenario>.json
+  # of the run plus the optimizers' delivered-savings.jsonl (#511); the legacy single
+  # context-budget.json is read only when no per-scenario file exists.
   local BUDGET_ARGS=()
-  [ -f "$BUDGET_FILE" ] && BUDGET_ARGS=(--budget-file "$BUDGET_FILE")
+  [ -n "${ARTIFACTS_DIR:-}" ] && BUDGET_ARGS=(--artifacts-dir "$ARTIFACTS_DIR")
   local PRIOR_ARGS=()
   [ -n "$PRIOR_BODY_FILE" ] && PRIOR_ARGS=(--prior-body-file "$PRIOR_BODY_FILE")
 
@@ -518,12 +519,13 @@ post_cost_report() {
   echo "$BODY" > "$TMPFILE"
 
   if [ -n "$COMMENT_ID" ]; then
-    if ! gh api "repos/${FACTORY_REPO_SLUG}/issues/comments/${COMMENT_ID}" \
-        --method PATCH -F "body=@${TMPFILE}" >/dev/null; then
+    if ! python3 "$FACTORY_PROVIDERS_CLI" tracker update-comment --id "$ISSUE_NUM" \
+        --comment-id "$COMMENT_ID" --body-file "$TMPFILE" >/dev/null; then
       echo "WARNING: Could not update cost report comment ${COMMENT_ID}"
     fi
   else
-    gh issue comment "$ISSUE_NUM" --body-file "$TMPFILE" 2>/dev/null \
+    python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+      --body-file "$TMPFILE" 2>/dev/null \
       || echo "WARNING: Could not post cost report"
   fi
   rm -f "$TMPFILE"
@@ -664,6 +666,74 @@ ${FOOTER}"
 trap on_failure ERR
 
 # =============================================================================
+# --- Adapter validity gate (#492) ---
+# A target's .factory/adapter.yaml that fails to parse/validate makes every reader
+# (effective_config, gate_lib, gate_blast_radius, ...) fall back to the built-in
+# MarketHawk-shaped defaults. That fail-open is deliberate for the readers (a gate must
+# not crash on a bad file) but must never be silent, so refuse the run here, once, at
+# run start. An ABSENT adapter file is valid (defaults apply) and proceeds.
+# Covered intents: every intent that reads adapter-driven behaviour (fix, continue,
+# refine, plan, deconflict, fix-main). Not covered: `close` (only closes the ticket after
+# merge) and `recheck` (re-runs the smoke-gate hook and clears the main-is-red sentinel;
+# refusing would keep dispatch halted over a file that run never reads).
+# Signals mirror _smoke_hook_missing (smoke_gate.sh): stderr, one durable line in
+# hook-warnings.log, a marker comment when ISSUE_NUM is set. Must `return 1`, never
+# `exit`: an ERR trap does not fire on exit, so an exit would strand the ticket In
+# Progress. Callers invoke it as a bare command so the ERR trap (on_failure) fires.
+# =============================================================================
+ADAPTER_INVALID_MARKER="<!-- df-adapter-invalid -->"
+
+_adapter_check_applies() {
+  case "${INTENT:-fix}" in
+    close|recheck) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_adapter_invalid_refuse() {
+  _adapter_check_applies || return 0
+  local scripts_dir="${FACTORY_SCRIPTS_DIR:-/opt/dark-factory/scripts}"
+  local adapter="${CLONE_DIR:-}/.factory/adapter.yaml"
+  [ -f "$adapter" ] || return 0
+  local err rc=0
+  err=$(PYTHONPATH="$scripts_dir" python3 -m factory_core.adapter \
+    --clone-dir "$CLONE_DIR" --validate 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  local detail
+  detail=$(printf '%s' "$err" | tr '\n' ' ')
+  {
+    echo "ERROR: [adapter] adapter-invalid path=${adapter} — ${detail}"
+    echo "[adapter] refusing this run: an invalid adapter.yaml would make every reader fall back to the built-in defaults (another product's safety keywords, critical paths and routing)."
+    echo "[adapter] Fix: run 'python -m factory_core.adapter --clone-dir <target> --validate', correct .factory/adapter.yaml, commit it to the default branch, then re-dispatch."
+  } >&2
+  local state_dir="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+  if [ -d "$state_dir" ]; then
+    printf '%s adapter-invalid %s issue=%s intent=%s\n' \
+      "$(date -u +%FT%TZ)" "$adapter" "${ISSUE_NUM:-}" "${INTENT:-}" \
+      2>/dev/null >> "${state_dir}/hook-warnings.log" || true
+  fi
+  if [ -n "${ISSUE_NUM:-}" ]; then
+    local BODY_FILE
+    if BODY_FILE=$(mktemp /tmp/adapter-invalid-XXXXXX.md 2>/dev/null); then
+      cat > "$BODY_FILE" << EOF
+${ADAPTER_INVALID_MARKER}
+## Dark Factory — Invalid adapter.yaml
+
+This run was refused before any work started: the target's \`.factory/adapter.yaml\` fails to load. Running anyway would silently apply the factory's built-in defaults (another product's safety keywords, critical paths and routing).
+
+Validator output: \`${detail}\`
+
+**To fix:** correct \`.factory/adapter.yaml\` (check with \`python -m factory_core.adapter --clone-dir <target> --validate\`), commit it to the default branch, then re-dispatch this ticket (a Blocked ticket: move it back to Ready). See \`docs/adapter-authoring-guide.md\`.
+EOF
+      python3 "${FACTORY_PROVIDERS_CLI}" tracker comment --id "$ISSUE_NUM" \
+        --marker "$ADAPTER_INVALID_MARKER" --body-file "$BODY_FILE" >/dev/null 2>&1 || true
+      rm -f "$BODY_FILE"
+    fi
+  fi
+  return 1
+}
+
+# =============================================================================
 # --- Conflict resolution: thin adapter -> factory_core CLI ---
 # =============================================================================
 
@@ -674,6 +744,38 @@ _resolve_merge_conflicts() {
   # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" \
     deconflict --issue "$ISSUE_NUM" || return $?
+}
+
+# Tier-3 escalation for the deconflict path's own guard rails (no feature branch, checkout
+# failure, wrong HEAD, failed post-merge validation). Mirrors factory_core/deconflict.py's
+# _escalate(): board -> Blocked plus one explanatory issue comment (#485 -- the function was
+# deleted in the #437 extraction while these five call sites survived).
+# Deliberately returns 0 and does NOT exit: every call site follows it with `exit 0`. A
+# non-zero return would trip `set -e` + the ERR trap before that `exit 0`, and on_failure
+# would post a second, generic "Refinement Pipeline -- Failed" comment on top of this one.
+_conflict_escalate() {
+  local reason="$1" footer
+  echo "[deconflict] Tier 3 escalation: ${reason}"
+  set_board_status "blocked" 2>/dev/null || true
+  footer=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory 2>/dev/null || true)
+  python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+  --body="## Dark Factory — Conflict Resolution Escalated
+
+The factory attempted automatic merge conflict resolution but could not complete it.
+
+**Reason:** ${reason}
+
+**To fix manually:**
+\`\`\`bash
+git checkout feat/issue-${ISSUE_NUM}-*
+git fetch origin main
+git merge origin/main
+# Resolve conflicts manually, then push
+\`\`\`
+
+---
+${footer}" 2>/dev/null || true
+  return 0
 }
 
 # Guard: allow sourcing for unit tests without running the main execution block.
@@ -693,6 +795,9 @@ if [ -d "$CLONE_DIR" ]; then
 fi
 git clone "$REPO_URL" "$CLONE_DIR"
 cd "$CLONE_DIR"
+
+# --- Refuse the run if the target's adapter.yaml is invalid (#492) ---
+_adapter_invalid_refuse
 
 # --- Self-contained fallbacks: target repos without in-repo factory files (post-P3 cleanup) ---
 # Copy baked factory pieces into the clone ONLY where the target repo does not provide them.
@@ -904,8 +1009,8 @@ EOF
 
   # --- Post success comment ---
   FOOTER=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" marker factory)
-  gh issue comment "$ISSUE_NUM" --repo "$FACTORY_REPO_SLUG" --body \
-"## Dark Factory — Merge Conflicts Resolved
+  python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE_NUM" \
+  --body="## Dark Factory — Merge Conflicts Resolved
 
 \`main\` has been merged into \`${FEATURE_BRANCH}\` and all conflicts were resolved automatically.
 

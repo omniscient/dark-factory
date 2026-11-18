@@ -8,11 +8,15 @@
 schema_version: 1
 
 # Map component labels to ARCHITECTURE.md section names for context slicing.
-# Empty map = no slicing (use this until your repo has an ARCHITECTURE.md).
+# A declared map REPLACES the built-in (MarketHawk) map; it is not merged with it, so
+# `components: {}` means "no slicing" and the full document is always used. Omit the key
+# entirely to fall back to the built-in map.
 components: {}
 
 safety:
   # EDIT: words in a ticket that should keep epic autopilot away from it.
+  # Epic autopilot blocks on the UNION of this pattern and the baked config.yaml
+  # `epic_autopilot.sensitive_keywords`: your value adds to the factory's, never replaces it.
   sensitive_keywords: "auth|oauth|token|secret|credential|password|payment"
   # EDIT: path substrings an autopilot candidate ticket must not target.
   hard_exclude_paths:
@@ -25,12 +29,12 @@ safety:
     - ".factory/hooks/"
   # EDIT: regexes for the highest-risk files, shown first to reviewers.
   critical_diff_paths:
-    - "^\.factory/hooks/"
+    - '^\.factory/hooks/'
   # EDIT: regexes whose diffs require explicit human sign-off (auth, migrations, seeds).
   migration_seed_auth_patterns:
-    - "^\.claude/settings\.json$"
-    - "^\.mcp\.json$"
-    - "^\.factory/hooks/"
+    - '^\.claude/settings\.json$'
+    - '^\.mcp\.json$'
+    - '^\.factory/hooks/'
   # EDIT: path prefixes the (off-by-default) main-red auto-fixer may touch.
   main_red_allowed_paths:
     - "src/"

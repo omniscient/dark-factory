@@ -286,6 +286,10 @@ def load(clone_dir: str) -> dict:
                 raise AdapterError(f"loops[{i}] ('{name}'): duplicate loop name '{name}'")
             seen_names.add(name)
     merged = _deep_merge(adapter_defaults.DEFAULTS, data)
+    # `components` is replaced, not merged: a declared map (including `{}`) is the whole
+    # map, so an adapter can opt out of the MarketHawk-shaped default sections (#513).
+    if "components" in data:
+        merged["components"] = copy.deepcopy(data["components"])
     merged["safety"] = _apply_boundary_floor(merged["safety"])
     return merged
 

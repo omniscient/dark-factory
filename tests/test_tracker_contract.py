@@ -56,6 +56,17 @@ class _GitHubFixtureController:
             if "--remove-label" in cmd:
                 self.items[key]["labels"].discard(cmd[cmd.index("--remove-label") + 1])
             return self._ok()
+        if cmd[:3] == ["gh", "issue", "view"] and "--json" in cmd and "-q" not in cmd:
+            key = cmd[3]
+            if key not in self.items:
+                return subprocess.CompletedProcess([], 1, stdout="", stderr="not found")
+            it = self.items[key]
+            full = {
+                "title": it["title"], "body": "the body", "labels": sorted(it["labels"]),
+                "comments": [], "state": "CLOSED" if it["status"] == "done" else "OPEN",
+            }
+            wanted = cmd[cmd.index("--json") + 1].split(",")
+            return self._ok(stdout=json.dumps({k: full[k] for k in wanted}))
         if cmd[:3] == ["gh", "issue", "create"]:
             new_id = str(self._next_issue_id)
             self._next_issue_id += 1
@@ -70,7 +81,9 @@ class _GitHubFixtureController:
         if cmd[:2] == ["gh", "api"] and "--jq" in cmd and str(cmd[2]).endswith("/comments"):
             key = cmd[2].split("/issues/")[1].split("/")[0]
             marker = cmd[cmd.index("--jq") + 1].split('contains("')[1].split('")')[0]
-            match = next((c for c in self.comments.get(key, []) if marker in c["body"]), None)
+            # the real --jq is `[...] | last | .id`: the NEWEST matching comment
+            matches = [c for c in self.comments.get(key, []) if marker in c["body"]]
+            match = matches[-1] if matches else None
             return self._ok(stdout=str(match["id"]) if match else "")
         if cmd[:2] == ["gh", "api"] and "--method" in cmd and "PATCH" in cmd:
             comment_id = int(str(cmd[2]).rsplit("/", 1)[1])
@@ -81,10 +94,24 @@ class _GitHubFixtureController:
                     if c["id"] == comment_id:
                         c["body"] = new_body
             return self._ok()
+        if cmd[:3] == ["gh", "issue", "list"]:
+            label = cmd[cmd.index("--label") + 1]
+            rows = [{"number": int(k)} for k, it in self.items.items()
+                    if label in it["labels"] and it["status"] != "done"]
+            return self._ok(stdout=json.dumps(rows))
+        if cmd[:2] == ["gh", "api"] and "--jq" in cmd and "/issues/comments/" in str(cmd[2]):
+            comment_id = int(str(cmd[2]).rsplit("/", 1)[1])
+            for lst in self.comments.values():
+                for c in lst:
+                    if c["id"] == comment_id:
+                        return self._ok(stdout=c["body"])
+            return self._ok()
         if cmd[:3] == ["gh", "issue", "comment"]:
             key = cmd[3]
-            body_path = cmd[cmd.index("--body-file") + 1]
-            body_text = Path(body_path).read_text()
+            if "--body" in cmd:
+                body_text = cmd[cmd.index("--body") + 1]
+            else:
+                body_text = Path(cmd[cmd.index("--body-file") + 1]).read_text()
             cid = self._next_comment_id
             self._next_comment_id += 1
             self.comments.setdefault(key, []).append({"id": cid, "body": body_text})
@@ -167,9 +194,11 @@ class _JiraFixtureController:
                 wanted_labels = self._requested_labels(jql)
                 keys = [
                     k for k, it in self.items.items()
-                    if self._status_name(it["status"]) in jql
+                    if (self._status_name(it["status"]) in jql or "status IN" not in jql)
                     and all(label in it["labels"] for label in wanted_labels)
                 ]
+            if "statusCategory != Done" in jql:
+                keys = [k for k in keys if self.items[k]["status"] != "done"]
             return {"issues": [self._issue_json(k) for k in keys]}
         if path.endswith("/transitions"):
             key = path.split("/")[2]
@@ -271,6 +300,79 @@ def test_marker_comment_upsert_updates_in_place_not_duplicate(tracker_and_contro
     assert bodies[0].endswith("second")
 
 
+def test_add_comment_appends_never_edits(tracker_and_controller):
+    tracker, controller = tracker_and_controller
+    id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
+    controller.seed_item(id1)
+
+    assert tracker.add_comment(id1, "first") is True
+    assert tracker.add_comment(id1, "first") is True  # identical body: still a new comment
+
+    assert [c["body"] for c in controller.comments[id1]] == ["first", "first"]
+
+
+def test_find_comment_returns_newest_marker_match_with_body(tracker_and_controller):
+    tracker, controller = tracker_and_controller
+    id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
+    controller.seed_item(id1)
+    marker = "<!-- factory:find-test -->"
+
+    assert tracker.find_comment(id1, marker) is None
+    tracker.add_comment(id1, "unrelated")
+    tracker.add_comment(id1, f"{marker}\nold")
+    tracker.add_comment(id1, f"{marker}\nnew")
+
+    found = tracker.find_comment(id1, marker)
+    assert found["body"].endswith("new")
+    assert isinstance(found["id"], str)
+
+
+def test_update_comment_replaces_body_of_found_comment(tracker_and_controller):
+    tracker, controller = tracker_and_controller
+    id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
+    controller.seed_item(id1)
+    marker = "<!-- factory:update-test -->"
+    tracker.add_comment(id1, f"{marker}\nbefore")
+    tracker.add_comment(id1, "other")
+
+    found = tracker.find_comment(id1, marker)
+    assert tracker.update_comment(id1, found["id"], f"{marker}\nafter") is True
+
+    assert [c["body"] for c in controller.comments[id1]] == [f"{marker}\nafter", "other"]
+
+
+def test_list_board_items_has_the_scheduler_snapshot_shape(tracker_and_controller):
+    tracker, controller = tracker_and_controller
+    gh = isinstance(tracker, GitHubTracker)
+    id1, id2 = ("1", "2") if gh else ("PROJ-1", "PROJ-2")
+    controller.seed_item(id1, title="a", labels=["ready-for-agent"], status="ready")
+    controller.seed_item(id2, title="b", labels=[], status="in_review")
+
+    snapshot = tracker.list_board_items()
+
+    assert set(snapshot) == {"items"}
+    by_title = {i["content"]["title"]: i for i in snapshot["items"]}
+    assert set(by_title) == {"a", "b"}
+    for item in snapshot["items"]:
+        assert set(item) == {"content", "labels", "status"}
+        assert item["content"]["type"] == "Issue"
+        assert item["content"]["number"] is not None
+    assert by_title["a"]["labels"] == ["ready-for-agent"]
+    assert by_title["a"]["status"].casefold() == "ready"
+    assert by_title["b"]["status"].casefold() == "in review"
+
+
+def test_list_items_by_label_returns_open_ids_only(tracker_and_controller):
+    tracker, controller = tracker_and_controller
+    gh = isinstance(tracker, GitHubTracker)
+    id1, id2, id3 = ("1", "2", "3") if gh else ("PROJ-1", "PROJ-2", "PROJ-3")
+    controller.seed_item(id1, labels=["ready-for-agent"], status="backlog")
+    controller.seed_item(id2, labels=[], status="backlog")
+    controller.seed_item(id3, labels=["ready-for-agent"], status="done")
+
+    assert tracker.list_items("ready-for-agent", limit=200) == [id1]
+
+
 def test_set_status_moves_through_canonical_vocabulary(tracker_and_controller):
     tracker, controller = tracker_and_controller
     id1 = "1" if isinstance(tracker, GitHubTracker) else "PROJ-1"
@@ -309,3 +411,59 @@ def test_get_children_returns_list_of_actual_children_and_empty_when_none(tracke
         assert {c["id"] for c in children} == {"PROJ-10", "PROJ-11"}
 
     assert tracker.get_children("no-such-epic" if not is_github else "999") == []
+
+
+def _cli_args(**kw):
+    import argparse
+    return argparse.Namespace(**kw)
+
+
+def test_get_item_fields_filter_is_honoured_by_every_provider(tracker_and_controller):
+    """`scheduler.sh` runs `tracker get --fields body` and `--fields state` (dependency
+    gating); the result must contain exactly the requested keys on every provider."""
+    tracker, controller = tracker_and_controller
+    gh = isinstance(tracker, GitHubTracker)
+    id1, id2 = ("1", "2") if gh else ("PROJ-1", "PROJ-2")
+    controller.seed_item(id1, title="t", labels=["x"], status="ready")
+    controller.seed_item(id2, status="done")
+
+    assert set(tracker.get_item(id1, fields=("body",))) == {"body"}
+    assert set(tracker.get_item(id1, fields=("title", "labels"))) == {"title", "labels"}
+    assert tracker.get_item(id1, fields=("state",)) == {"state": "OPEN"}
+    assert tracker.get_item(id2, fields=("state",)) == {"state": "CLOSED"}
+    default = tracker.get_item(id1)
+    assert {"title", "body", "labels"} <= set(default)
+
+
+def test_every_tracker_verb_works_through_the_cli_argument_shape(
+        tracker_and_controller, monkeypatch, tmp_path):
+    """Drive each `providers/cli.py` tracker verb exactly as argparse would, so a provider
+    that lacks a keyword the CLI passes fails here (#488)."""
+    from factory_core.providers import cli
+    tracker, controller = tracker_and_controller
+    monkeypatch.setattr(cli, "get_tracker", lambda: tracker)
+    gh = isinstance(tracker, GitHubTracker)
+    id1 = "1" if gh else "PROJ-1"
+    controller.seed_item(id1, status="ready")
+    body_file = tmp_path / "body.md"
+    body_file.write_text("hello")
+
+    cli._tracker_list(_cli_args(statuses="ready,done", labels=""))
+    cli._tracker_get(_cli_args(id=id1, fields=""))
+    cli._tracker_get(_cli_args(id=id1, fields="body"))
+    cli._tracker_get(_cli_args(id=id1, fields="state"))
+    cli._tracker_get_comments(_cli_args(id=id1))
+    cli._tracker_get_status_limits(_cli_args())
+    cli._tracker_set_status(_cli_args(id=id1, status="in_review"))
+    cli._tracker_label(_cli_args(id=id1, add=["a"], remove=["a"]))
+    cli._tracker_comment(_cli_args(id=id1, marker="<!-- m -->", body_file=str(body_file)))
+    cli._tracker_add_comment(_cli_args(id=id1, body="hi", body_file=None))
+    cli._tracker_add_comment(_cli_args(id=id1, body=None, body_file=str(body_file)))
+    cli._tracker_find_comment(_cli_args(id=id1, marker="<!-- m -->", body_out=str(tmp_path / "o.md")))
+    cli._tracker_update_comment(_cli_args(
+        id=id1, comment_id="1", body="hi", body_file=None))
+    cli._tracker_board_items(_cli_args())
+    cli._tracker_list_items(_cli_args(label="a", limit=200))
+    cli._tracker_create(_cli_args(title="t", body_file=str(body_file), labels="a,b"))
+    cli._tracker_children(_cli_args(epic=id1))
+    cli._tracker_resolve(_cli_args(id=id1))

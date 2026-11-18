@@ -42,6 +42,9 @@ class MemoryEntry:
     meta: dict = field(default_factory=dict)
     raw_meta: str = ""
     indent: str = ""
+    # (section, raw line index) this entry was parsed from; None for entries built
+    # in code. render_file uses it to put a surviving entry back on its own line.
+    slot: Optional[tuple] = None
 
     @property
     def issue_numbers(self) -> list:
@@ -125,6 +128,38 @@ def render_entry(entry: MemoryEntry) -> str:
     return f"{entry.indent}- [{entry.tag}] {entry.body}{meta_part}"
 
 
+def _parse_section(section: str, raw_lines: list) -> list:
+    entries = []
+    for i, line in enumerate(raw_lines):
+        e = parse_entry(line)
+        if e is not None:
+            e.slot = (section, i)
+            entries.append(e)
+    return entries
+
+
+def _render_section(section: str, raw_lines: list, entries: list, append_rest: bool) -> list:
+    """Replay raw_lines, keeping each entry on the line it was parsed from.
+
+    An entry-line whose entry is no longer in `entries` (expired, deduped, promoted)
+    is skipped; later entries stay under their own section header. Entries that
+    did not come from this section (promoted, or built in code) are appended after
+    the last raw line when append_rest is set.
+    """
+    by_line = {e.slot[1]: e for e in entries if e.slot and e.slot[0] == section}
+    out = []
+    for i, line in enumerate(raw_lines):
+        if parse_entry(line) is not None:
+            if i in by_line:
+                out.append(render_entry(by_line[i]))
+        else:
+            out.append(line)
+    if append_rest:
+        out.extend(render_entry(e) for e in entries
+                   if not (e.slot and e.slot[0] == section))
+    return out
+
+
 def parse_file_content(content: str) -> MemoryFile:
     """Parse full file content into a MemoryFile. Splits at the first '---' line."""
     lines = content.split("\n")
@@ -139,8 +174,8 @@ def parse_file_content(content: str) -> MemoryFile:
     prov_raw = lines[split_idx:] if split_idx is not None else []
 
     # auth_entries: MemoryEntry objects in original order (one per entry-line in auth_raw_lines)
-    auth_entries = [e for line in auth_raw_lines for e in [parse_entry(line)] if e is not None]
-    prov_entries = [e for line in prov_raw for e in [parse_entry(line)] if e is not None]
+    auth_entries = _parse_section("auth", auth_raw_lines)
+    prov_entries = _parse_section("prov", prov_raw)
 
     return MemoryFile(
         auth_raw_lines=auth_raw_lines,
@@ -154,43 +189,13 @@ def render_file(mf: MemoryFile) -> str:
     """
     Render a MemoryFile back to its full markdown string.
 
-    Auth section: replay auth_raw_lines, replacing each entry-line with the
-    next MemoryEntry from auth_entries. Removed entries (fewer auth_entries than
-    raw entry-lines) cause the raw line to be skipped. Promoted entries that have
-    no raw line counterpart are appended after the last raw auth line.
-    Non-entry lines (section headers, blanks) are kept in place.
-
-    Prov section: same positional strategy over prov_lines / prov_entries.
+    Each section replays its raw lines; a surviving entry is rendered on the line
+    it was parsed from, a removed entry's line is skipped, and non-entry lines
+    (section headers, blanks) stay in place. Promoted entries, which have no auth
+    raw line, are appended after the last raw auth line.
     """
-    out_lines = []
-    auth_list = list(mf.auth_entries)
-    auth_idx = 0
-
-    for line in mf.auth_raw_lines:
-        if parse_entry(line) is not None:
-            if auth_idx < len(auth_list):
-                out_lines.append(render_entry(auth_list[auth_idx]))
-                auth_idx += 1
-            # else: entry removed (expired/deduped) — skip this raw line
-        else:
-            out_lines.append(line)
-
-    # Append promoted entries that have no corresponding raw line
-    while auth_idx < len(auth_list):
-        out_lines.append(render_entry(auth_list[auth_idx]))
-        auth_idx += 1
-
-    prov_list = list(mf.prov_entries)
-    prov_idx = 0
-    for line in mf.prov_lines:
-        if parse_entry(line) is not None:
-            if prov_idx < len(prov_list):
-                out_lines.append(render_entry(prov_list[prov_idx]))
-                prov_idx += 1
-            # else: entry removed (expired/promoted) — skip
-        else:
-            out_lines.append(line)
-
+    out_lines = _render_section("auth", mf.auth_raw_lines, mf.auth_entries, True)
+    out_lines += _render_section("prov", mf.prov_lines, mf.prov_entries, False)
     return "\n".join(out_lines)
 
 
@@ -250,17 +255,21 @@ def _strip_meta(body: str) -> str:
 def op_dedup(entries: list) -> DedupResult:
     """
     Pure function. Compare each pair of non-INVALID entries by body similarity.
-    If ratio >= 0.90, tag the older entry (by date:) as INVALID: superseded.
-    Returns all entries with INVALID tags applied.
+    If ratio >= 0.90, drop the older entry (by date:) and keep the newer one.
+
+    The older entry is removed, not retagged: supersession is not invalidation
+    (memory contract section 2). The older claim was never wrong, so it must not
+    be tombstoned as INVALID; in the flat file it is implicitly superseded by
+    removal. Returns the surviving entries in their original order.
     """
     working = [copy.copy(e) for e in entries]
-    deduped = 0
+    dropped = set()
 
     for i in range(len(working)):
-        if working[i].tag.startswith("INVALID"):
+        if i in dropped or working[i].tag.startswith("INVALID"):
             continue
         for j in range(i + 1, len(working)):
-            if working[j].tag.startswith("INVALID"):
+            if j in dropped or working[j].tag.startswith("INVALID"):
                 continue
             a_body = _strip_meta(working[i].body)
             b_body = _strip_meta(working[j].body)
@@ -269,16 +278,13 @@ def op_dedup(entries: list) -> DedupResult:
                 a_date = working[i].date_val or date.min
                 b_date = working[j].date_val or date.min
                 if a_date <= b_date:
-                    newer_date = working[j].meta.get("date", "unknown")
-                    working[i].tag = f"INVALID: superseded by identical entry added {newer_date}"
-                    deduped += 1
-                    break  # working[i] is now INVALID; outer loop guard catches it
+                    dropped.add(i)
+                    break  # entry i is gone; move on to the next outer entry
                 else:
-                    newer_date = working[i].meta.get("date", "unknown")
-                    working[j].tag = f"INVALID: superseded by identical entry added {newer_date}"
-                    deduped += 1
+                    dropped.add(j)
 
-    return DedupResult(entries=working, deduped_count=deduped)
+    survivors = [e for k, e in enumerate(working) if k not in dropped]
+    return DedupResult(entries=survivors, deduped_count=len(dropped))
 
 
 def invalidate_content(content: str, match: str, reason: str) -> str:
@@ -330,8 +336,7 @@ def apply_ops_to_content(content: str, today: date, scope: Optional[str]) -> tup
 
     # Expire auth entries in-place, preserving original relative order.
     # Out-of-scope entries are kept unconditionally; scope only gates expiry.
-    # Preserving order is critical: render_file uses positional replay against
-    # auth_raw_lines, so reordering would map entries to wrong section headers.
+    # render_file places each surviving entry back on its own raw line (entry.slot).
     new_auth_entries = []
     for e in mf.auth_entries:
         if _in_scope(e):

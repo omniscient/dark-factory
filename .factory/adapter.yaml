@@ -5,9 +5,8 @@
 # with dark-factory-appropriate ones.
 schema_version: 1
 
-# No ARCHITECTURE.md in this repo yet — an empty map makes architecture
-# slicing fall back to full-doc/no-doc behavior instead of resolving
-# MarketHawk section names.
+# No ARCHITECTURE.md in this repo yet. A declared components map replaces the
+# built-in (MarketHawk) map, so this empty map means no component slicing.
 components: {}
 
 safety:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thin CLI entry points for the Tracker/CodeHost providers (parent spec §4.2,
-illustrative surface). New, additive surface — nothing existing calls into it yet
-(bash/YAML call sites are rewired in a later, separate ticket).
+illustrative surface). scheduler.sh, entrypoint.sh, the smoke gate and the run DAG call
+it for the tracker/code-host verbs; the few remaining direct `gh` call sites are tracked in #507.
 
 Invocation mirrors this repo's existing scripts/factory_core/cli.py convention
 (direct script path + subcommands), not `-m factory_core.tracker` — see this
@@ -82,6 +82,75 @@ def _tracker_comment(args):
     get_tracker().upsert_comment(args.id, args.marker, body)
 
 
+def _body_from_args(args):
+    """Body text from --body-file (read verbatim) or --body (exactly one is required)."""
+    if (args.body is None) == (args.body_file is None):
+        print("ERROR: exactly one of --body / --body-file is required", file=sys.stderr)
+        sys.exit(2)
+    if args.body_file is not None:
+        return Path(args.body_file).read_text(encoding="utf-8")
+    return args.body
+
+
+def _tracker_add_comment(args):
+    # Append-only post. Exit 1 on failure so callers keep their `|| true` / `|| echo WARNING`
+    # tolerance exactly as with the former inline `gh issue comment`.
+    try:
+        ok = get_tracker().add_comment(args.id, _body_from_args(args))
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ok:
+        sys.exit(1)
+
+
+def _tracker_find_comment(args):
+    # Prints the comment id (nothing when there is none / the lookup failed; exit 0 either
+    # way, matching the entrypoint's former `|| true`). --body-out receives the body.
+    try:
+        found = get_tracker().find_comment(args.id, args.marker)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        found = None
+    if not found:
+        return
+    if args.body_out:
+        Path(args.body_out).write_text(found["body"], encoding="utf-8")
+    print(found["id"])
+
+
+def _tracker_update_comment(args):
+    try:
+        ok = get_tracker().update_comment(args.id, args.comment_id, _body_from_args(args))
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not ok:
+        sys.exit(1)
+
+
+def _tracker_board_items(args):
+    # indent=2 / ensure_ascii=False matches what the scheduler's former `jq '{items: ...}'`
+    # printed; the scheduler only pipes it into further jq filters.
+    try:
+        snapshot = get_tracker().list_board_items()
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(snapshot, indent=2, ensure_ascii=False))
+
+
+def _tracker_list_items(args):
+    # Compact `[{"number":N},...]` = what `gh issue list --json number` printed.
+    try:
+        ids = get_tracker().list_items(args.label, limit=args.limit)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    rows = [{"number": int(i) if str(i).isdigit() else i} for i in ids]
+    print(json.dumps(rows, separators=(",", ":"), ensure_ascii=False))
+
+
 def _tracker_create(args):
     body = Path(args.body_file).read_text(encoding="utf-8")
     labels = args.labels.split(",") if args.labels else None
@@ -113,6 +182,12 @@ def _codehost_open_change(args):
     body = Path(args.body_file).read_text(encoding="utf-8")
     _print(get_codehost().open_change(
         args.source, args.target, args.title, body, draft=args.draft, repo=args.repo))
+
+
+def _codehost_close_keyword(args):
+    # Prints the snippet verbatim ("" when tracker != host). _print() emits a trailing
+    # newline, which shell command substitution strips.
+    _print(get_codehost().close_keyword(args.id))
 
 
 def _codehost_mark_ready(args):
@@ -198,6 +273,33 @@ def main():
     tc.add_argument("--body-file", required=True)
     tc.set_defaults(func=_tracker_comment)
 
+    tac = tsub.add_parser("add-comment")
+    tac.add_argument("--id", required=True)
+    tac.add_argument("--body")
+    tac.add_argument("--body-file")
+    tac.set_defaults(func=_tracker_add_comment)
+
+    tfc = tsub.add_parser("find-comment")
+    tfc.add_argument("--id", required=True)
+    tfc.add_argument("--marker", required=True)
+    tfc.add_argument("--body-out")
+    tfc.set_defaults(func=_tracker_find_comment)
+
+    tuc = tsub.add_parser("update-comment")
+    tuc.add_argument("--id", required=True)
+    tuc.add_argument("--comment-id", required=True)
+    tuc.add_argument("--body")
+    tuc.add_argument("--body-file")
+    tuc.set_defaults(func=_tracker_update_comment)
+
+    tbi = tsub.add_parser("board-items")
+    tbi.set_defaults(func=_tracker_board_items)
+
+    tli = tsub.add_parser("list-items")
+    tli.add_argument("--label", required=True)
+    tli.add_argument("--limit", type=int, default=200)
+    tli.set_defaults(func=_tracker_list_items)
+
     tcr = tsub.add_parser("create")
     tcr.add_argument("--title", required=True)
     tcr.add_argument("--body-file", required=True)
@@ -238,6 +340,10 @@ def main():
     coc.add_argument("--draft", action="store_true")
     coc.add_argument("--repo")
     coc.set_defaults(func=_codehost_open_change)
+
+    cck = csub.add_parser("close-keyword")
+    cck.add_argument("--id", required=True)
+    cck.set_defaults(func=_codehost_close_keyword)
 
     cmr = csub.add_parser("mark-ready")
     cmr.add_argument("--id", required=True)
