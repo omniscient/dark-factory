@@ -101,6 +101,22 @@ def test_open_change_matches_run_dag_push_and_pr(monkeypatch):
     assert new_id == "9"
 
 
+def test_open_change_reports_gh_error_when_no_pr_is_created(monkeypatch, capsys):
+    failed = subprocess.CompletedProcess(
+        [], 1, stdout="", stderr="pull request create failed: GraphQL: Body is too long\n")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: failed)
+    assert GitHubCodeHost().open_change(None, None, "t", "b", draft=True) == ""
+    err = capsys.readouterr().err
+    assert "rc=1" in err and "Body is too long" in err
+
+
+def test_open_change_returns_empty_id_when_gh_fails_with_stdout(monkeypatch, capsys):
+    failed = subprocess.CompletedProcess([], 1, stdout="Creating draft pull request\n", stderr="boom")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: failed)
+    assert GitHubCodeHost().open_change(None, None, "t", "b") == ""
+    assert "boom" in capsys.readouterr().err
+
+
 def test_open_change_matches_main_red_fixer_open_pr(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout="https://github.com/o/r/pull/11\n"))[1])
