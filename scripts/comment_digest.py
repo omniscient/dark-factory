@@ -100,6 +100,7 @@ def _feedback_sections(human_comments: list[dict], reviews: list[dict], inline: 
 _GATE_VERDICT_HEADINGS = (
     "## Code Review — Blocked",
     "## Spec Conformance — Blocked",
+    "## Docs Conformance (Gate 2.5) — Blocked",
 )
 
 

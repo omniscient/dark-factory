@@ -616,3 +616,16 @@ def test_gate_verdict_headings_cover_all_command_templates():
         f"Found '— Blocked' heading(s) not covered by _GATE_VERDICT_HEADINGS: {uncovered} "
         "— register the new heading in comment_digest._GATE_VERDICT_HEADINGS."
     )
+
+
+def test_docs_conformance_blocked_comment_is_a_gate_verdict(monkeypatch):
+    """#535: Gate 2.5's enforce-mode comment leads with its heading (the upsert marker is on
+    the next line), so a Continue run's digest surfaces it as the action-required verdict."""
+    import importlib, comment_digest as cd
+    monkeypatch.delenv("FACTORY_PRODUCT_NAME", raising=False)
+    importlib.reload(cd)  # an earlier test reloads the module under another product name
+    body = ("## Docs Conformance (Gate 2.5) — Blocked\n<!-- df-docs-conformance-blocked -->\n\n"
+            "- [MATERIAL] `docs/x.md`#y — wrong\n\n---\n*Posted by MarketHawk Dark Factory*")
+    assert cd._is_gate_verdict(body)
+    observed = body.replace("— Blocked", "— Mismatch observed (informational)")
+    assert not cd._is_gate_verdict(observed), "observe-mode comments are informational, not verdicts"
