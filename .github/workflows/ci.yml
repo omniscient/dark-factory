@@ -65,6 +65,14 @@ jobs:
         run: |
           sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone || true
           docker run --rm --network none --security-opt seccomp=unconfined --security-opt apparmor=unconfined --entrypoint bash dark-factory:pr -c 'id; bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev -- /bin/true; echo "probe_rc=$?"'
+      - name: bwrap probe (unconfined + systempaths=unconfined)
+        if: always()
+        run: |
+          docker run --rm --network none --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined --entrypoint bash dark-factory:pr -c 'bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev -- /bin/true; echo "probeB_rc=$?"' || true
+      - name: bwrap probe (unconfined, no fresh proc, no pid namespace)
+        if: always()
+        run: |
+          docker run --rm --network none --security-opt seccomp=unconfined --security-opt apparmor=unconfined --entrypoint bash dark-factory:pr -c 'bwrap --unshare-user --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --dev /dev -- /bin/true; echo "probeC_rc=$?"; bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --dev /dev -- /bin/true; echo "probeD_rc=$?"' || true
       - name: bwrap probe (default confinement, expected to fail)
         if: always()
         run: |
