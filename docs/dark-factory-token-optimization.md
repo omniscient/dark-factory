@@ -22,7 +22,7 @@ As of T3b (#733), the enforcement flags are on for conformance, code-review, ref
 | Architecture slicing | `token_optimization.architecture.enabled` | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` | Computes the component-relevant slice of ARCHITECTURE.md | **Telemetry only.** `context_budget.py` measures the slice, but no DAG node produces the context pack that would deliver it, so phase commands still read the full file ([#487](https://github.com/omniscient/dark-factory/issues/487)) |
 | Memory top-k | `token_optimization.memory.enabled` | `TOKEN_OPTIMIZATION_MEMORY_ENABLED` | Caps memory retrieval to the top 8 highest-scored entries (≤ 1 500 tokens) | Applies on both the index path and the markdown fallback path (the path in use for the self-target); on the markdown path entries are ranked by `path:` tag specificity, label boost and `date:` recency ([#486](https://github.com/omniscient/dark-factory/issues/486)) |
 | Comment digesting | *(none read in a run — see below)* | `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` | Collapses raw comment history into a single human-feedback digest | Active for `continue` runs |
-| Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap | Active in conformance and code-review |
+| Diff ranking | `token_optimization.diff.enabled` | `TOKEN_OPTIMIZATION_DIFF_ENABLED` | Ranks and truncates the review diff by risk tier; critical files bypass the cap | Active in conformance, docs-conformance and code-review |
 | Budget enforcement | `token_optimization.enforce_budgets` + `enforce.<scenario>` | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | Kill-only: `false`/`0`/`no` (case-insensitive) forces observe in all 5 nodes; unset or any other value defers to config | In enforce mode the gate writes `export VAR=N` lines to the caps file; the consumers source it, so the derived memory cap (`memory_retrieve.py`) and diff cap (`diff_rank.py`) reach the optimizers ([#511](https://github.com/omniscient/dark-factory/issues/511); see Budget Enforcement) |
 
 ---
@@ -112,7 +112,7 @@ switches.
 Only these change what a phase sees, each at its **config default cap** (not a
 budget-derived one, see below):
 
-- **Diff cap** (`diff.*`): conformance and code-review receive the ranked, truncated diff.
+- **Diff cap** (`diff.*`): conformance, docs-conformance and code-review receive the ranked, truncated diff.
 - **Memory cap** (`memory.*`): memory retrieval is cut to the top entries / token cap.
 - **Comment digest**: `continue` runs get a digest instead of raw comments.
 

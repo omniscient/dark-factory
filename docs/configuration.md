@@ -78,7 +78,7 @@ Two consequences worth knowing:
 
 ## Layer 1: `config/config.yaml`
 
-The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 95 leaf keys,
+The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 99 leaf keys,
 documented below section by section. `_set_cfg` is `scheduler.sh:49-64`; the list of exported
 keys is `scheduler.sh:66-98`.
 
@@ -138,18 +138,30 @@ All keys here are read by phase agents following the command files, from the run
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:53`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1463` (report text only) | none | no |
+| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:53`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1550` (report text only) | none | no |
 | `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:61`, `commands/dark-factory-plan.md:179` (agent-read) | none | no |
 | `conformance.block_on_material` | `true` | material findings block | `commands/dark-factory-conformance.md:62` (agent-read) | none | no |
 | `conformance.scope_enforcement` | `true` | detect out-of-scope changes | `commands/dark-factory-conformance.md:63` (agent-read) | none | no |
 | `conformance.excise_out_of_scope` | `true` | revert out-of-scope changes (false = file a ticket only) | `commands/dark-factory-conformance.md:64` (agent-read) | none | no |
 | `conformance.backlog_label` | `scope-spillover` | label on auto-created spillover tickets | `commands/dark-factory-conformance.md:65` (agent-read) | none | no |
 | `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:69-70`, `commands/dark-factory-plan.md:186-187` (agent-read, python reads the clone's config; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`) | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
-| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1504` (report text) | none | no |
+| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1591` (report text) | none | no |
 | `code_review.block_threshold` | `high` | severity at or above which findings block | `commands/dark-factory-code-review.md:57`; `scripts/code_review_payload.py:152-155,200-206` | none | no |
 | `code_review.fail_open` | `true` | reviewer error becomes advisory | `commands/dark-factory-code-review.md:58` (agent-read) | none | no |
 | `code_review.max_findings` | `50` | cap on inline comments | `commands/dark-factory-code-review.md:59`; `scripts/code_review_payload.py:152,167` | none | no |
 | `code_review.severity_order` | `low, medium, high, critical` | ascending severity ranking | `commands/dark-factory-code-review.md:60-64` (`yq`), passed as `--severity-order` to `scripts/code_review_payload.py:200` | none | no |
+
+### `docs_conformance`
+
+Gate 2.5 (#535). Read from the run's config (`.claude/skills/refinement/config.yaml` in the
+clone) by the `docs-conformance` command and, for `mode`, also by the
+`docs-conformance-gate` node. An unreadable config, a missing block, or any `mode` other
+than `enforce` means `enabled: true` and `observe`.
+
+| Key | Default | Controls | Reader | Env override (scope) | Adapter |
+|---|---|---|---|---|---|
+| `docs_conformance.enabled` | `true` | false = the command writes `STATUS: SKIPPED`, which passes in both modes | `commands/dark-factory-docs-conformance.md:68,72-75` (agent-read) | none | no |
+| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch, never block. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1217-1218` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
 
 ### `preview`, `conflict_resolution`
 
@@ -261,8 +273,9 @@ nothing; set the variable in `.archon/.env` for it to matter.
 them, and the cost report aggregates them); they are run artifacts, not settings. The caps
 file is what the later phases source
 (`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:201`,
-`commands/dark-factory-code-review.md:110`). Scenarios are `refine`, `plan`, `implement`,
-`conformance`, `code-review` (`workflows/archon-dark-factory.yaml:402,442,716,1115,1351`).
+`commands/dark-factory-docs-conformance.md:97`, `commands/dark-factory-code-review.md:110`).
+Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`
+(`workflows/archon-dark-factory.yaml:402,442,716,1115,1196,1438`).
 
 | Key | Default | Controls | Reader | Env override (scope) |
 |---|---|---|---|---|
@@ -273,11 +286,13 @@ file is what the later phases source
 | `token_optimization.budgets.implement` | `30000` | same | `scripts/budget_gate.sh:46` | none |
 | `token_optimization.budgets.conformance` | `22000` | same | `scripts/budget_gate.sh:46` | none |
 | `token_optimization.budgets.code-review` | `22000` | same | `scripts/budget_gate.sh:46` | none |
+| `token_optimization.budgets.docs-conformance` | `22000` | same | `scripts/budget_gate.sh:46` | none |
 | `token_optimization.enforce.refine` | `true` | enforce for the scenario | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
 | `token_optimization.enforce.plan` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
 | `token_optimization.enforce.conformance` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
 | `token_optimization.enforce.code-review` | `true` | same | `scripts/budget_gate.sh:45` | none (only the global kill-switch above) |
 | `token_optimization.enforce.implement` | `false` | same | `scripts/budget_gate.sh:45` | none |
+| `token_optimization.enforce.docs-conformance` | `false` | same | `scripts/budget_gate.sh:45` | none |
 | `token_optimization.issue_context.reserve_tokens` | `2000` | floor reserved for issue context | `scripts/budget_enforce.py:137,183` | none |
 | `token_optimization.architecture.enabled` | `true` | false = skip slicing, load full ARCHITECTURE.md | `scripts/architecture_slice.py:152-162` (env, then config) | `TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED` (run) |
 | `token_optimization.architecture.mode` | `slice` | **unread** | none | none |
@@ -298,10 +313,10 @@ file is what the later phases source
 | `token_optimization.escalation.opus_only_for` | `security, trading, auth, high_blast_radius, material_conformance_uncertainty` | **unread** (the YAML comment already says reserved) | none | none |
 
 Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 7, `code_review` 5,
-`preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3, `epic_autopilot` 11,
-`main_red_autofix` 5, `side_effect.phase_levels` 9, `token_optimization` 30 (`enforce_budgets`,
-`default_budget_tokens`, 5 budgets, 5 enforce, `issue_context` 1, `architecture` 4, `memory` 5,
-`comments` 4, `diff` 3, `escalation` 1): 95 leaf keys.
+`docs_conformance` 2, `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3,
+`epic_autopilot` 11, `main_red_autofix` 5, `side_effect.phase_levels` 9, `token_optimization` 32
+(`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
+`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 99 leaf keys.
 
 ### Unread keys (summary)
 
@@ -425,7 +440,7 @@ containers (`run-compose.yml:31-47`).
 |---|---|---|---|
 | `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:374` (adds the `factory-model-proxy` compose profile) | `instance.env` |
 | `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:39`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
-| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1182` (stubs preview and PR creation) | `.archon/.env` / bench harness |
+| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1269` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:50` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:214` | `.archon/.env` |
@@ -563,15 +578,15 @@ and [#532](https://github.com/omniscient/dark-factory/issues/532) (MarketHawk-sp
 | # | Where | The comment says | The code does |
 |---|---|---|---|
 | D1 | `config/config.yaml:10-12` (`session_window_*`), `:6` (`factory_wip_limit`); `entrypoint.sh:43` | env overrides config; config supplies the container's value | `entrypoint.sh:33-38` sets bootstrap defaults before `_epcfg` runs, and `_epcfg` (`entrypoint.sh:56-65`) treats any bootstrap value that differs from config as an "env/bootstrap override" and keeps it. So config can never change `FACTORY_WIP_LIMIT`, `CONFLICT_RESOLUTION_AI_TIER` or `SESSION_WINDOW_*` in a run container, and I confirmed the logic with a replica (config 10 vs default 5 stays 5). For `FACTORY_WIP_LIMIT` it is moot anyway: the container guard at `entrypoint.sh:200-206` runs before the clone and before `_epcfg` (`:838`), and the scheduler does not forward the variable, so the container limit is `.archon/.env` or 1. A scheduler limit above 1 without the same value in `.archon/.env` makes the second concurrent run exit with an error |
-| D2 | `config/config.yaml:59` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:34,69` only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:746` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
-| D3 | `config/config.yaml:119,120,122` (`main_red_autofix.model/max_attempts/ci_wait_minutes`: "container default") | the config value is the container default | `main_red_fixer.py:288-290` reads env then hardcoded defaults; no code path carries the config value into a run container. `_set_cfg` exports `MAIN_RED_AUTOFIX_MODEL`/`MAX_ATTEMPTS` (`scheduler.sh:92-93`) into the scheduler, where nothing reads them. `ci_wait_minutes` is not exported at all. The values match today only by coincidence |
-| D4 | `config/config.yaml:170` | `comments.enabled` "NOT consulted ... scheduler.sh exports this value into its own process, which does not reach run containers" | accurate. Also true of `architecture.enabled`, `memory.enabled`, `diff.enabled`, whose exports (`scheduler.sh:95-98`) reach nothing, but for those the readers also consult config in the clone, so the keys still work |
+| D2 | `config/config.yaml:64` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:34,69` only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:746` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
+| D3 | `config/config.yaml:124,125,127` (`main_red_autofix.model/max_attempts/ci_wait_minutes`: "container default") | the config value is the container default | `main_red_fixer.py:288-290` reads env then hardcoded defaults; no code path carries the config value into a run container. `_set_cfg` exports `MAIN_RED_AUTOFIX_MODEL`/`MAX_ATTEMPTS` (`scheduler.sh:92-93`) into the scheduler, where nothing reads them. `ci_wait_minutes` is not exported at all. The values match today only by coincidence |
+| D4 | `config/config.yaml:177` | `comments.enabled` "NOT consulted ... scheduler.sh exports this value into its own process, which does not reach run containers" | accurate. Also true of `architecture.enabled`, `memory.enabled`, `diff.enabled`, whose exports (`scheduler.sh:95-98`) reach nothing, but for those the readers also consult config in the clone, so the keys still work |
 | D5 | `commands/ceiling-revisit.md:88-108` | the revisit writes `ABOVE_CEILING_KEYWORDS` into `.archon/.env` as the effective override | the scheduler reads `ABOVE_CEILING_KEYWORDS` from its own environment (`instance.env`) or config (`_set_cfg`, `scheduler_lib.sh:50`) and never sources `.archon/.env` (`scheduler.sh:112-115` only copies it). The recorded override does not affect dispatch |
 | D6 | `config/config.yaml:15-26` (`refine.skip_labels`, `plan.skip_labels`, `min_issue_body_length`) | present as config | no reader; real lists are hardcoded (`scheduler.sh:9,21`) |
-| D7 | `config/config.yaml:55` (`preview.model: haiku`) | model for the preview classifier | no reader; `workflows/archon-dark-factory.yaml:847` hardcodes `haiku` |
-| D8 (partly resolved by [PR #524](https://github.com/omniscient/dark-factory/pull/524)) | `config/config.yaml:90-93` (`epic_autopilot.hard_exclude_paths` "Kept byte-identical to adapter_defaults") | the config list is what autopilot uses | `epic_autopilot.py:409-428` tries the adapter first and `adapter.get` always returns a list (the defaults if no adapter file), so the config list is only reached if the adapter import fails. The scheduler-side half is fixed: `main_once` now takes the adapter directory from `_target_dir()` (`CLONE_DIR`, else `/workspace/project` when it holds `.factory/adapter.yaml`, else `.`), so the target's adapter is read, and `_effective_exclude_paths` unions in what the cwd lookup gave. What remains is the config-list point above: with an adapter present the `config.yaml` list is still dead. The directory choice is covered by `tests/test_epic_autopilot.py`; not exercised in a live scheduler |
-| D9 | `config/config.yaml:161,172` | `architecture.max_tokens`, `comments.max_tokens` "derivation input, not a live cap" | accurate. Listed to flag that `memory.max_tokens` and `diff.max_review_tokens` are different: they are live caps read directly (`memory_retrieve.py:163-190`, `diff_rank.py:133`) |
-| D10 | `config/config.yaml:166` (`memory.max_entries`: "baked — no env override") | baked | no env override is right, but it is read from the run's config chain (clone's file, then baked: `memory_retrieve.py:100-107,157-160`), so a target-committed or adapter-overlaid value takes effect |
+| D7 | `config/config.yaml:60` (`preview.model: haiku`) | model for the preview classifier | no reader; `workflows/archon-dark-factory.yaml:847` hardcodes `haiku` |
+| D8 (partly resolved by [PR #524](https://github.com/omniscient/dark-factory/pull/524)) | `config/config.yaml:95-98` (`epic_autopilot.hard_exclude_paths` "Kept byte-identical to adapter_defaults") | the config list is what autopilot uses | `epic_autopilot.py:409-428` tries the adapter first and `adapter.get` always returns a list (the defaults if no adapter file), so the config list is only reached if the adapter import fails. The scheduler-side half is fixed: `main_once` now takes the adapter directory from `_target_dir()` (`CLONE_DIR`, else `/workspace/project` when it holds `.factory/adapter.yaml`, else `.`), so the target's adapter is read, and `_effective_exclude_paths` unions in what the cwd lookup gave. What remains is the config-list point above: with an adapter present the `config.yaml` list is still dead. The directory choice is covered by `tests/test_epic_autopilot.py`; not exercised in a live scheduler |
+| D9 | `config/config.yaml:168,179` | `architecture.max_tokens`, `comments.max_tokens` "derivation input, not a live cap" | accurate. Listed to flag that `memory.max_tokens` and `diff.max_review_tokens` are different: they are live caps read directly (`memory_retrieve.py:163-190`, `diff_rank.py:133`) |
+| D10 | `config/config.yaml:173` (`memory.max_entries`: "baked — no env override") | baked | no env override is right, but it is read from the run's config chain (clone's file, then baked: `memory_retrieve.py:100-107,157-160`), so a target-committed or adapter-overlaid value takes effect |
 | D11 | `deploy/instance.env.example:89-96` | optional tuning with "safe defaults" | uncommented `FACTORY_WIP_LIMIT=1` and `POLL_INTERVAL=60` in the template pin those two knobs over any later config change |
 
 ## Things I could not determine from the code
