@@ -7,6 +7,7 @@ _COMMAND_FILES = [
     "commands/dark-factory-plan.md",
     "commands/dark-factory-conformance.md",
     "commands/dark-factory-code-review.md",
+    "commands/dark-factory-docs-conformance.md",
 ]
 
 
@@ -32,6 +33,7 @@ _INLINE_PIN_COUNTS = {
     "commands/dark-factory-plan.md": 2,
     "commands/dark-factory-conformance.md": 1,
     "commands/dark-factory-code-review.md": 1,
+    "commands/dark-factory-docs-conformance.md": 1,
 }
 
 
