@@ -1187,13 +1187,15 @@ nodes:
         --diff-file "$DIFF_TMP" \
         --out "$ARTIFACTS_DIR/context-budget.docs-conformance.json" || true
       rm -f "$DIFF_TMP"
-      # Record the Gate-2-passed HEAD and `git status` so docs-conformance-gate can detect a
-      # commit or a tree change made during the (nominally read-only) docs-conformance
+      # Record the Gate-2-passed HEAD, index tree and `git status` so docs-conformance-gate
+      # can detect a commit, a staged change or a tree change made during the (nominally read-only) docs-conformance
       # node, which would reach push-and-pr without Gate 2 ever having seen it (#535). The
       # status is a baseline, not a cleanliness check: regen-codeindex always leaves the
       # tree dirty (codeindex.json, symbolindex.json, .codeindex/, the hotspots file).
       git rev-parse HEAD > "$ARTIFACTS_DIR/docs-conformance-pre-head.txt" 2>/dev/null || true
       git status --porcelain > "$ARTIFACTS_DIR/docs-conformance-pre-status.txt" 2>/dev/null || true
+      # write-tree fails on an unmerged index: then write no baseline (the gate skips that one comparison).
+      git write-tree > "$ARTIFACTS_DIR/docs-conformance-pre-index.txt" 2>/dev/null || rm -f "$ARTIFACTS_DIR/docs-conformance-pre-index.txt"
     depends_on: [conformance-gate]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000
@@ -1218,7 +1220,7 @@ nodes:
   # conformance.md (#212, #271), but through docs_verdict_gate_check.sh, whose enforce mode
   # fails closed on ERROR too. docs_conformance.mode selects observe (default: log, never
   # block) or enforce; any read failure or other value is observe. One thing is outside
-  # the mode: a commit made during the docs-conformance node stops the push always.
+  # the mode: a commit or a staged change made during the docs-conformance node stops the push always.
   - id: docs-conformance-gate
     bash: |
       _CLONE="${CLONE_DIR:-.}"
@@ -1227,18 +1229,24 @@ nodes:
       # ever reviewing it. Compare HEAD and `git status` with the baseline
       # budget-docs-conformance recorded (a tree that was already dirty then is not a
       # violation). No baseline (the budget node could not write it) = nothing to compare.
-      # The note goes to docs_verdict_gate_check.sh. HEAD moved (kind "head") blocks in
-      # every mode: it protects Gate 2 and is not a docs verdict. A status-only change
-      # (kind "status") follows the mode: enforce blocks, observe logs.
+      # The note goes to docs_verdict_gate_check.sh. HEAD moved (kind "head") and a changed
+      # index tree (kind "index": push-and-pr's archive commit is a plain `git commit` and
+      # would include whatever is staged) block in every mode: they protect Gate 2 and are
+      # not a docs verdict. A status-only change (kind "status") follows the mode.
       PRE_HEAD=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-head.txt" 2>/dev/null)
       POST_HEAD=$(git rev-parse HEAD 2>/dev/null)
       PRE_STATUS=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-status.txt" 2>/dev/null)
       POST_STATUS=$(git status --porcelain 2>/dev/null)
+      PRE_INDEX=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-index.txt" 2>/dev/null)
+      POST_INDEX=$(git write-tree 2>/dev/null)
       CHANGED_NOTE=""
       CHANGED_KIND=""
       if [ -n "$PRE_HEAD" ] && [ "$PRE_HEAD" != "$POST_HEAD" ]; then
         CHANGED_NOTE="HEAD moved $PRE_HEAD -> $POST_HEAD"
         CHANGED_KIND="head"
+      elif [ -n "$PRE_HEAD" ] && [ -n "$PRE_INDEX" ] && [ -n "$POST_INDEX" ] && [ "$PRE_INDEX" != "$POST_INDEX" ]; then
+        CHANGED_NOTE="index changed (staged tree $PRE_INDEX -> $POST_INDEX)"
+        CHANGED_KIND="index"
       elif [ -n "$PRE_HEAD" ] && [ "$PRE_STATUS" != "$POST_STATUS" ]; then
         CHANGED_NOTE="git status changed"
         CHANGED_KIND="status"

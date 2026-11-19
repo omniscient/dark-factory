@@ -166,8 +166,9 @@ def test_script_is_not_verdict_gate_check():
 
 
 # ── optional 5th/6th arguments: the branch changed during the read-only docs-conformance
-# node. Kind "status" (or none) is governed by the mode like a verdict; kind "head" (a
-# commit Gate 2 never saw) blocks in every mode.
+# node. Kind "status" (or none) is governed by the mode like a verdict; kinds "head" (a
+# commit Gate 2 never saw) and "index" (a staged change push-and-pr's archive commit would
+# sweep up) block in every mode.
 _TAMPER = "git status changed"
 _HEAD_NOTE = "HEAD moved abc -> def"
 
@@ -178,11 +179,12 @@ def _run_tampered(tmp_path, content, mode, needs_discussion=False, note=_TAMPER,
     return _run(tmp_path, content, mode, needs_discussion=needs_discussion, extra_args=args)
 
 
+@pytest.mark.parametrize("kind", ["head", "index"])
 @pytest.mark.parametrize("mode", ["enforce", "observe", "", "bogus"])
-def test_head_moved_blocks_and_comments_in_every_mode(tmp_path, mode):
+def test_head_moved_blocks_and_comments_in_every_mode(tmp_path, mode, kind):
     rc, log, err = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], mode,
-                                 note=_HEAD_NOTE, kind="head")
-    assert rc == 1, "a commit Gate 2 never reviewed must not be pushed, whatever the mode"
+                                 note=_HEAD_NOTE, kind=kind)
+    assert rc == 1, "a change Gate 2 never reviewed must not be pushed, whatever the mode"
     assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
     assert _HEAD_NOTE in err
 
@@ -198,6 +200,12 @@ def test_head_moved_non_numeric_issue_fails_closed_without_tracker_call(tmp_path
     rc, log, _ = _run(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe",
                       extra_args=[str(verdict), "null", _LABEL, "observe", _HEAD_NOTE, "head"])
     assert rc == 1 and log == ""
+
+
+def test_index_changed_with_needs_discussion_blocks_quietly_in_observe(tmp_path):
+    rc, log, _ = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe",
+                               needs_discussion=True, note="index changed a -> b", kind="index")
+    assert rc == 1 and "tracker comment" not in log
 
 
 def test_kind_head_without_a_note_changes_nothing(tmp_path):

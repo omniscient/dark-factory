@@ -227,6 +227,7 @@ def test_budget_node_records_head_and_status_baseline(gitclone):
     assert (arts / "docs-conformance-pre-head.txt").read_text().strip() == _git(root, "rev-parse", "HEAD").strip()
     status = (arts / "docs-conformance-pre-status.txt").read_text()
     assert "codeindex.json" in status and "docs/codeindex-hotspots.md" in status
+    assert (arts / "docs-conformance-pre-index.txt").read_text().strip() == _git(root, "write-tree").strip()
 
 
 @pytest.mark.parametrize("cfg", [_OBSERVE, _ENFORCE])
@@ -277,6 +278,58 @@ def test_observe_logs_but_does_not_block_when_only_status_changed(gitclone):
     assert rc == 0, "HEAD did not move: governed by docs_conformance.mode like a verdict"
     assert log == "", "observe makes no tracker call"
     assert "git status changed" in err and "enforce would block" in err
+
+
+def _stage_change(root):
+    (root / "README.md").write_text("staged by the read-only node\n")
+    _git(root, "add", "README.md")
+
+
+@pytest.mark.parametrize("cfg", [_ENFORCE, _OBSERVE, "docs_conformance:\n  mode: bogus\n", "{}\n"])
+def test_staged_change_during_review_stops_the_push_in_every_mode(gitclone, cfg):
+    """push-and-pr's archive commit is a plain `git commit`: it would sweep a change the
+    node staged into a commit Gate 2 never saw, although HEAD has not moved yet."""
+    root, _ = gitclone
+    _record_baseline(gitclone)
+    _stage_change(root)
+    rc, log, err = _run_gate_err(gitclone, cfg, "STATUS: PASS\n")
+    assert rc == 1, "a staged change made after Gate 2 must never reach push-and-pr"
+    assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
+    assert "index changed" in err and "read-only" in err
+
+
+def test_missing_index_baseline_skips_only_the_index_comparison(gitclone):
+    """No pre-index file: the staged change is still seen as a status change, which
+    observe logs and enforce blocks — a missing baseline never blocks by itself."""
+    root, arts = gitclone
+    _record_baseline(gitclone)
+    (arts / "docs-conformance-pre-index.txt").unlink()
+    rc, log, _ = _run_gate_err(gitclone, _ENFORCE, "STATUS: PASS\n")
+    assert rc == 0 and log == "", "nothing changed: a missing baseline is not a violation"
+    _stage_change(root)
+    rc, log, err = _run_gate_err(gitclone, _OBSERVE, "STATUS: PASS\n")
+    assert rc == 0 and log == ""
+    assert "git status changed" in err and "index changed" not in err
+
+
+def test_unwritable_index_at_baseline_writes_no_index_baseline(gitclone):
+    """`git write-tree` fails on an unmerged index: write nothing, do not block."""
+    root, arts = gitclone
+    _git(root, "checkout", "--", "docs/codeindex-hotspots.md")
+    _git(root, "checkout", "-q", "-b", "other")
+    (root / "README.md").write_text("theirs\n")
+    _git(root, "commit", "-q", "-am", "theirs")
+    _git(root, "checkout", "-q", "main")
+    (root / "README.md").write_text("ours\n")
+    _git(root, "commit", "-q", "-am", "ours")
+    merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "other"],
+                           cwd=str(root), capture_output=True, text=True)
+    assert merge.returncode != 0, "fixture needs a conflicted (unmerged) index"
+    _record_baseline(gitclone)
+    assert (arts / "docs-conformance-pre-head.txt").read_text().strip()
+    assert not (arts / "docs-conformance-pre-index.txt").exists()
+    rc, log, _ = _run_gate_err(gitclone, _OBSERVE, "STATUS: PASS\n")
+    assert rc == 0 and log == ""
 
 
 def test_missing_baseline_skips_the_comparison(gitclone):

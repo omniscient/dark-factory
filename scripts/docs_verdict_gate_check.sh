@@ -10,19 +10,20 @@
 #   <gate-label>     human string for the comment, e.g. "Docs Conformance (Gate 2.5)"
 #   <mode>           docs_conformance.mode: "enforce", or anything else (including
 #                    omitted/blank) = "observe", the shipped default
-#   <changed-note>   non-empty when docs-conformance-gate found that HEAD or `git status`
-#                    changed during the read-only docs-conformance node; says what changed.
-#                    The decision is then "block" whatever STATUS: says.
-#   <changed-kind>   "head" when the note is about HEAD having moved: push-and-pr would
-#                    push a commit Gate 2 never saw, so this blocks in EVERY mode. It is
-#                    a tripwire protecting Gate 2, not a docs verdict. Anything else
-#                    (e.g. "status"): the note is governed by <mode>, like a verdict.
+#   <changed-note>   non-empty when docs-conformance-gate found that HEAD, the index or
+#                    `git status` changed during the read-only docs-conformance node; says
+#                    what changed. The decision is then "block" whatever STATUS: says.
+#   <changed-kind>   "head" (HEAD moved) or "index" (a change was staged): push-and-pr
+#                    would push a commit, or sweep the staged change into its archive
+#                    commit, without Gate 2 having seen it, so these block in EVERY mode.
+#                    They are a tripwire protecting Gate 2, not a docs verdict. Anything
+#                    else (e.g. "status"): the note is governed by <mode>, like a verdict.
 #
 # observe: the docs verdict never blocks — exit 0 for every STATUS: and for a note that is
-#   not kind "head". Log to stderr what enforce mode would have decided. No tracker
-#   call, no comment, no label check — the command's own Phase 6 already posted an
-#   informational comment for a BLOCKED verdict. A kind-"head" note takes the enforce
-#   path below instead.
+#   not kind "head" or "index". Log to stderr what enforce mode would have decided. No
+#   tracker call, no comment, no label check — the command's own Phase 6 already posted an
+#   informational comment for a BLOCKED verdict. A kind-"head"/"index" note takes the
+#   enforce path below instead.
 # enforce: exit 0 only for STATUS: PASS or SKIPPED. BLOCKED, ERROR, missing or
 #   unparseable exit 1. A live needs-discussion re-check decides messaging only:
 #     - BLOCKED with no <changed-note>, or needs-discussion present: exit 1 quietly (the
@@ -57,14 +58,14 @@ case "$STATUS" in
   *)            DECISION="block" ;;
 esac
 _WHY="STATUS=${STATUS:-missing}"
-HEAD_MOVED=0
+UNREVIEWED=""   # "head" or "index": would reach the push without Gate 2 — blocks in every mode
 if [ -n "$CHANGED_NOTE" ]; then
   DECISION="block"
   _WHY="${_WHY}; the branch changed during the read-only docs-conformance node: ${CHANGED_NOTE}"
-  [ "$CHANGED_KIND" = "head" ] && HEAD_MOVED=1
+  case "$CHANGED_KIND" in head|index) UNREVIEWED="$CHANGED_KIND" ;; esac
 fi
 
-if [ "$MODE" = "observe" ] && [ "$HEAD_MOVED" -eq 0 ]; then
+if [ "$MODE" = "observe" ] && [ -z "$UNREVIEWED" ]; then
   echo "docs_verdict_gate_check.sh: ${GATE_LABEL} observe mode — enforce would ${DECISION} issue #${ISSUE_NUM} (${_WHY}); proceeding." >&2
   exit 0
 fi
@@ -92,8 +93,10 @@ fi
 echo "docs_verdict_gate_check.sh: ${GATE_LABEL} blocks issue #${ISSUE_NUM} (${_WHY}) and no needs-discussion label — failing closed and posting failure comment." >&2
 _MODE_WHY="\`docs_conformance.mode\` is \`enforce\`, so this blocks the PR instead of advancing silently."
 _FAIL_WHY="No usable verdict was recorded for this run (\`${VERDICT_FILE}\` is missing, unparseable, or \`STATUS: ${STATUS:-missing}\`). ${_MODE_WHY}"
-if [ "$HEAD_MOVED" -eq 1 ]; then
+if [ "$UNREVIEWED" = "head" ]; then
   _FAIL_WHY="A commit was made during the read-only docs-conformance node (${CHANGED_NOTE}). Gate 2 never reviewed it, so the push is stopped whatever \`docs_conformance.mode\` is."
+elif [ "$UNREVIEWED" = "index" ]; then
+  _FAIL_WHY="A change was staged during the read-only docs-conformance node (${CHANGED_NOTE}). The push step's archive commit would include it without Gate 2 having reviewed it, so the push is stopped whatever \`docs_conformance.mode\` is."
 elif [ -n "$CHANGED_NOTE" ]; then
   _FAIL_WHY="The working tree changed during the read-only docs-conformance node (${CHANGED_NOTE}). ${_MODE_WHY}"
 fi
