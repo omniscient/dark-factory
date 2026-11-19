@@ -76,3 +76,10 @@ def test_verifier_contract_documents_shadow_verdict_mapping():
     for token in ("SHADOW_MODEL", "SHADOW_STATUS", "SHADOW_FINDINGS_COUNT", "SHADOW_SEVERITY"):
         assert token in content
     assert "Material divergence" in content and "BLOCKED" in content
+
+
+def test_verifier_contract_covers_docs_conformance_gate():
+    content = (REPO_ROOT / "refinement-skills/VERIFIER-CONTRACT.md").read_text(encoding="utf-8")
+    assert "| `docs-conformance`'s reviewer (Gate 2.5, #535) | `claude-opus-5-5` | — |" in content
+    assert "scripts/docs_verdict_gate_check.sh" in content
+    assert "by all five commands" in content

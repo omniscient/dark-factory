@@ -2,7 +2,7 @@
 
 Shared by every checker subagent spawn (`refine`'s product-owner, `plan`'s architect
 and Phase 3.5 conformance reviewer, `conformance`'s reviewer, `code-review`'s
-reviewer) and by every target-registered check-only verifier (`verification.verifier`
+reviewer, `docs-conformance`'s reviewer) and by every target-registered check-only verifier (`verification.verifier`
 on a `.factory/adapter.yaml` `loops:` entry, #301). See
 `docs/superpowers/specs/2026-08-28-verifier-abstraction-a3-design.md` for the full
 design; this doc is the operational reference command authors and target-repo authors
@@ -17,6 +17,7 @@ read directly.
 | `plan`'s Phase 3.5 conformance reviewer | `claude-opus-5-5` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
 | `conformance`'s Phase 3 conformance reviewer | `claude-opus-5-5` | `${CONFORMANCE_SHADOW_MODEL-claude-fable-5-1}` (skipped if empty) |
 | `code-review`'s reviewer | `claude-opus-5-5` | — |
+| `docs-conformance`'s reviewer (Gate 2.5, #535) | `claude-opus-5-5` | — |
 
 Pin strings are documentary identities. The Agent tool's `model` parameter is an
 alias-only enum (`sonnet|opus|haiku|fable`); call sites pass `opus` for
@@ -42,16 +43,22 @@ tier, not the exact snapshot.
   step 7), consuming a reconcile cycle and ending in BLOCKED + `needs-discussion` if it
   persists. **Exception:** `code-review` under `code_review.fail_open: true` (the
   default) deliberately writes `STATUS: ERROR`, which `scripts/verdict_gate_check.sh`
-  passes — that is a documented fail-open, not a silent `PASS`. A shadow checker maps to
+  passes — that is a documented fail-open, not a silent `PASS`. `docs-conformance` is
+  single-pass: `UNCERTAIN` is written straight to `STATUS: BLOCKED` (no reconcile cycle to
+  consume), and it never writes `ERROR`. Whether that BLOCKED stops `push-and-pr` is
+  `docs_conformance.mode`'s call (`scripts/docs_verdict_gate_check.sh`): `enforce` blocks,
+  `observe` (the default) records it and proceeds. A shadow checker maps to
   `SHADOW_STATUS: UNCERTAIN` (see below) and never blocks, delays, or retries the
   gating flow.
 - **Read access:** the checker subagent needs `Glob`, `Grep`, and `Read` to explore
   the codebase it is reviewing — including the shadow subagent. No tool restriction
   is introduced or documented as existing beyond this — tool allow/deny changes are
   a separate, reviewed concern (CLAUDE.md).
-- **Clone-live-first resolution (rubric docs only):** `conformance`'s and
-  `code-review`'s reviewer rubrics, and `plan`'s Phase 3.5 conformance rubric, read
-  the live clone first (e.g. `.claude/skills/conformance/RUBRIC.md`), falling back to
+- **Clone-live-first resolution (rubric docs only):** `conformance`'s,
+  `code-review`'s and `docs-conformance`'s reviewer rubrics, and `plan`'s Phase 3.5
+  conformance rubric, read the live clone first (e.g.
+  `.claude/skills/conformance/RUBRIC.md`; no `docs-conformance` skill is shipped, so that
+  one resolves to its baked copy unless a target adds one), falling back to
   the baked copy under `/opt/refinement-skills/*.md` only if the clone-live file is
   absent — this lets a target repo override a rubric without a factory image
   rebuild. The shadow subagent reads the identical resolved rubric text the gating
@@ -60,7 +67,7 @@ tier, not the exact snapshot.
   this pattern: they keep reading their baked `/opt/refinement-
   skills/{product-owner,architect}-prompt.md` copies as-is. This contract doc itself
   (`VERIFIER-CONTRACT.md`) is always read at its fixed baked path,
-  `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all four commands — it is not
+  `/opt/refinement-skills/VERIFIER-CONTRACT.md`, by all five commands — it is not
   itself subject to clone-live-first resolution.
 - **Model-value note (Task 0, #394):** Task 0 confirmed the literal `claude-fable-5-1`
   is rejected by the Agent tool and `fable` is accepted; the same is true of every
@@ -100,7 +107,9 @@ when adjudicating a divergence.
 `scripts/factory_core/verdict.py` (`parse_verdict`/`format_verdict`) and
 `scripts/gate_lib.sh::emit_verdict` (bash). `STATUS` is a free token; its *gating*
 values (per `scripts/verdict_gate_check.sh`) are `PASS`/`SKIPPED`/`ERROR` (proceed)
-and `BLOCKED` (block). `HUMAN_REQUIRED` and `FAIL` are documented legacy tokens
+and `BLOCKED` (block). `scripts/docs_verdict_gate_check.sh` (Gate 2.5) is stricter in
+`enforce` mode — only `PASS`/`SKIPPED` proceed; `ERROR`, `BLOCKED`, missing and
+unparseable all block — and proceeds on everything in `observe` mode. `HUMAN_REQUIRED` and `FAIL` are documented legacy tokens
 returned verbatim, never rejected or normalized. `GATE_TYPE`/`FINDINGS_COUNT`/
 `SEVERITY` are optional on parse, required on emit. `SEVERITY` ∈
 `{none, low, medium, high, critical}`.
