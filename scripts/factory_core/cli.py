@@ -304,9 +304,12 @@ def _docs_conformance_config(args):
     try:
         doc = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
     except Exception:
-        print("true observe")
-        return
-    cfg = doc.get("docs_conformance") or {}
+        doc = {}
+    # A non-mapping document or block is a config-read failure like any other: the
+    # shipped default, never a crash the caller has to paper over.
+    cfg = doc.get("docs_conformance") if isinstance(doc, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = {}
     enabled = str(cfg.get("enabled", True)).lower()
     mode = cfg.get("mode", "observe")
     mode = mode if mode == "enforce" else "observe"

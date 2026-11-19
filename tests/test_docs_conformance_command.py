@@ -123,3 +123,55 @@ def test_rubric_resolves_clone_live_first_then_baked():
     baked = p3.index('RUBRIC_FILE="/opt/refinement-skills/docs-conformance-reviewer-prompt.md"')
     assert live < baked
     assert not (_REPO_ROOT / ".claude" / "skills" / "docs-conformance").exists()
+
+
+
+# ── executing the Phase 4–5 block: a verdict line that disagrees with its findings ──────
+
+def _run_phase45(tmp_path, review):
+    import os
+    import shutil
+    import subprocess
+
+    import pytest
+    if os.name != "posix" or any(shutil.which(t) is None for t in ("bash", "git")):
+        pytest.skip("needs a POSIX host with bash and git")
+    root = tmp_path / "clone"
+    (root / "dark-factory").mkdir(parents=True)
+    (root / "dark-factory" / "scripts").symlink_to(_REPO_ROOT / "scripts")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    arts = tmp_path / "artifacts"
+    arts.mkdir()
+    (arts / "docs_conformance_review.md").write_text(review, encoding="utf-8")
+    (arts / "doc-impact.md").write_text("- `x` -> UPDATED `README.md#y`\n\nOVERALL: UPDATED\n")
+    block = _phase("Phase 4").split("```bash\n", 1)[1].split("\n```", 1)[0]
+    proc = subprocess.run(["bash", "-c", block], cwd=str(root),
+                          env=dict(os.environ, ARTIFACTS_DIR=str(arts)),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    head = (arts / "docs-conformance.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    return dict(line.split(": ", 1) for line in head.strip().splitlines())
+
+
+_MATERIAL_BULLETS = ("- [MATERIAL] `docs/a.md#b` — false claim\n"
+                     "- [MATERIAL] `docs/c.md#d` — missing\n"
+                     "- [MINOR] `docs/e.md#f` — wording\n")
+
+
+def test_material_verdict_with_material_findings_has_no_contradiction_reason(tmp_path):
+    v = _run_phase45(tmp_path, "**Verdict:** ⛔ Material divergence\n\n" + _MATERIAL_BULLETS)
+    assert v["STATUS"] == "BLOCKED" and v["VERDICT"] == "MATERIAL"
+    assert v["FINDINGS_COUNT"] == "3"
+    assert "REASON" not in v, "a consistent ⛔ verdict must not be reported as a contradiction"
+
+
+def test_conforms_verdict_with_material_findings_is_blocked_with_recomputed_count(tmp_path):
+    v = _run_phase45(tmp_path, "**Verdict:** ✅ Conforms\n\n" + _MATERIAL_BULLETS)
+    assert v["STATUS"] == "BLOCKED" and v["VERDICT"] == "MATERIAL" and v["SEVERITY"] == "high"
+    assert v["FINDINGS_COUNT"] == "3"
+    assert v["REASON"] == "verdict line contradicts [MATERIAL] findings"
+
+
+def test_conforms_verdict_without_findings_passes(tmp_path):
+    v = _run_phase45(tmp_path, "**Verdict:** ✅ Conforms\n\nNo deviations found.\n")
+    assert v["STATUS"] == "PASS" and v["FINDINGS_COUNT"] == "0" and "REASON" not in v

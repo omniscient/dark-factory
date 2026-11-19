@@ -162,3 +162,46 @@ def test_script_is_not_verdict_gate_check():
     text = _GATE.read_text(encoding="utf-8")
     assert "PASS|SKIPPED)" in text
     assert "PASS|SKIPPED|ERROR" not in text
+
+
+
+# ── optional 5th argument: the branch changed during the read-only docs-conformance node ──
+_TAMPER = "HEAD moved abc -> def"
+
+
+def _run_tampered(tmp_path, content, mode, needs_discussion=False):
+    verdict = tmp_path / "docs-conformance.md"
+    return _run(tmp_path, content, mode, needs_discussion=needs_discussion,
+                extra_args=[str(verdict), "535", _LABEL, mode, _TAMPER])
+
+
+def test_enforce_tamper_note_blocks_a_pass_verdict_and_comments(tmp_path):
+    rc, log, err = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "enforce")
+    assert rc == 1
+    assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
+    assert _TAMPER in err
+
+
+def test_enforce_tamper_note_comments_even_for_a_blocked_verdict(tmp_path):
+    """The command's own BLOCKED comment says nothing about the branch having changed."""
+    rc, log, _ = _run_tampered(tmp_path, SCENARIOS["misleading-but-present-doc-update"], "enforce")
+    assert rc == 1 and "tracker comment" in log
+
+
+def test_enforce_tamper_note_with_needs_discussion_blocks_quietly(tmp_path):
+    rc, log, _ = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "enforce",
+                               needs_discussion=True)
+    assert rc == 1 and "tracker comment" not in log
+
+
+def test_observe_tamper_note_logs_would_block_and_proceeds(tmp_path):
+    rc, log, err = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe")
+    assert rc == 0 and log == ""
+    assert "enforce would block" in err and _TAMPER in err
+
+
+def test_empty_tamper_note_changes_nothing(tmp_path):
+    verdict = tmp_path / "docs-conformance.md"
+    rc, log, _ = _run(tmp_path, SCENARIOS["policy-markdown-change-documented"], "enforce",
+                      extra_args=[str(verdict), "535", _LABEL, "enforce", ""])
+    assert rc == 0 and log == ""

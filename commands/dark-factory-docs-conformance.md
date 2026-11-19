@@ -224,7 +224,7 @@ case "$VERDICT_LINE" in
   *)      VERDICT=UNCERTAIN; STATUS=BLOCKED; COUNT=1;                   SEV=high
           REASON="no parseable **Verdict:** line (refusal, timeout, tool error or bad output)" ;;
 esac
-[ "$MATERIAL" -gt 0 ] && { VERDICT=MATERIAL; STATUS=BLOCKED; SEV=high; REASON="verdict line contradicts [MATERIAL] findings"; }
+[ "$MATERIAL" -gt 0 ] && [ "$VERDICT" != MATERIAL ] && { VERDICT=MATERIAL; STATUS=BLOCKED; SEV=high; COUNT=$((MATERIAL + MINOR)); REASON="verdict line contradicts [MATERIAL] findings"; }
 DOC_IMPACT=present
 if ! { [ -s "$ARTIFACTS_DIR/doc-impact.md" ] && grep -qE '^OVERALL: (UPDATED|NO_IMPACT: .+)' "$ARTIFACTS_DIR/doc-impact.md"; }; then
   DOC_IMPACT=missing

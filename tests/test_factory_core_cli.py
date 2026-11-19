@@ -169,3 +169,33 @@ def test_board_add_passes_issue_and_url(monkeypatch):
     ])
     cli_mod.main()
     assert calls == [(42, "https://github.com/o/r/issues/42")]
+
+
+
+# ── docs-conformance-config (#535): one normalizer for docs_conformance.{enabled,mode} ──
+
+def _docs_cfg(monkeypatch, capsys, tmp_path, text):
+    cli_mod = _cli(monkeypatch)
+    cfg = tmp_path / "config.yaml"
+    if text is not None:
+        cfg.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["cli.py", "docs-conformance-config", "--config", str(cfg)])
+    cli_mod.main()
+    return capsys.readouterr().out.strip()
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("docs_conformance:\n  enabled: true\n  mode: enforce\n", "true enforce"),
+    ("docs_conformance:\n  enabled: false\n  mode: enforce\n", "false enforce"),
+    ("docs_conformance:\n  mode: Enforce\n", "true observe"),      # only the literal value enforces
+    ("docs_conformance:\n  enabled: true\n", "true observe"),      # missing mode
+    ("token_optimization: {}\n", "true observe"),                  # missing block
+    ("", "true observe"),                                          # empty file
+    ("- 1\n- 2\n", "true observe"),                                # non-dict document
+    ("docs_conformance: enforce\n", "true observe"),               # non-dict block
+    ("docs_conformance:\n  mode: [enforce]\n", "true observe"),    # non-string mode
+    (": not yaml [\n", "true observe"),                            # unparseable
+    (None, "true observe"),                                        # unreadable / missing file
+])
+def test_docs_conformance_config_normalizes(monkeypatch, capsys, tmp_path, text, expected):
+    assert _docs_cfg(monkeypatch, capsys, tmp_path, text) == expected

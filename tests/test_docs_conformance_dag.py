@@ -164,3 +164,111 @@ def test_observe_default_never_blocks(clone, cfg):
     rc, log = _run_gate(clone, cfg, "STATUS: BLOCKED\n")
     assert rc == 0, "observe (and every config-read failure) must not withhold the PR"
     assert log == ""
+
+
+
+# ── read-only baseline: HEAD and `git status` before vs after the docs-conformance node ──
+# budget-docs-conformance records both; docs-conformance-gate compares them. A tree that was
+# already dirty before the node (regen-codeindex leaves codeindex.json, symbolindex.json,
+# .codeindex/ and a modified hotspots file behind on every run) is the baseline, not a
+# violation.
+
+def _git(root, *args):
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          cwd=str(root), capture_output=True, text=True, check=True).stdout
+
+
+@pytest.fixture()
+def gitclone(clone):
+    if shutil.which("git") is None:
+        pytest.skip("needs git")
+    root, arts = clone
+    _git(root, "init", "-q", "-b", "main")
+    (root / "docs").mkdir()
+    (root / "docs" / "codeindex-hotspots.md").write_text("old\n")
+    (root / "README.md").write_text("x\n")
+    # entrypoint.sh git-excludes what it stages into the clone.
+    with open(root / ".git" / "info" / "exclude", "a") as fh:
+        fh.write("dark-factory/scripts\n.claude/skills/refinement/config.yaml\n")
+    _git(root, "add", "README.md", "docs/codeindex-hotspots.md")
+    _git(root, "commit", "-q", "-m", "base")
+    # What regen-codeindex leaves behind before Gate 2.5 runs.
+    (root / "codeindex.json").write_text("{}\n")
+    (root / "symbolindex.json").write_text("{}\n")
+    (root / "docs" / "codeindex-hotspots.md").write_text("regenerated\n")
+    return root, arts
+
+
+def _record_baseline(gitclone):
+    root, arts = gitclone
+    env = dict(os.environ, CLONE_DIR=str(root), ARTIFACTS_DIR=str(arts))
+    bash = _nodes()["budget-docs-conformance"]["bash"]
+    proc = subprocess.run(["bash", "-c", bash], cwd=str(root), env=env,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _run_gate_err(clone, mode_yaml, verdict):
+    root, arts = clone
+    (root / ".claude" / "skills" / "refinement" / "config.yaml").write_text(mode_yaml)
+    (arts / "docs-conformance.md").write_text(verdict)
+    log = arts / "pcli.log"
+    log.write_text("")
+    env = dict(os.environ, CLONE_DIR=str(root), ARTIFACTS_DIR=str(arts), PCLI_LOG=str(log))
+    bash = _nodes()["docs-conformance-gate"]["bash"]
+    proc = subprocess.run(["bash", "-c", _PRELUDE + "\n" + bash], cwd=str(root),
+                          env=env, capture_output=True, text=True)
+    return proc.returncode, log.read_text(), proc.stderr
+
+
+def test_budget_node_records_head_and_status_baseline(gitclone):
+    root, arts = gitclone
+    _record_baseline(gitclone)
+    assert (arts / "docs-conformance-pre-head.txt").read_text().strip() == _git(root, "rev-parse", "HEAD").strip()
+    status = (arts / "docs-conformance-pre-status.txt").read_text()
+    assert "codeindex.json" in status and "docs/codeindex-hotspots.md" in status
+
+
+@pytest.mark.parametrize("cfg", [_OBSERVE, _ENFORCE])
+def test_pre_existing_dirty_tree_is_the_baseline_not_a_violation(gitclone, cfg):
+    _record_baseline(gitclone)
+    rc, log, err = _run_gate_err(gitclone, cfg, "STATUS: PASS\n")
+    assert rc == 0, f"a tree that was dirty before docs-conformance must not block: {err}"
+    assert log == ""
+
+
+def _move_head(root):
+    (root / "README.md").write_text("changed by the read-only node\n")
+    _git(root, "commit", "-q", "-am", "unreviewed")
+
+
+def _change_status(root):
+    (root / "stray.txt").write_text("left by the read-only node\n")
+
+
+@pytest.mark.parametrize("tamper", [_move_head, _change_status])
+def test_enforce_blocks_and_comments_when_branch_changed_during_review(gitclone, tamper):
+    root, _ = gitclone
+    _record_baseline(gitclone)
+    tamper(root)
+    rc, log, err = _run_gate_err(gitclone, _ENFORCE, "STATUS: PASS\n")
+    assert rc == 1, "a commit made after Gate 2 must not reach push-and-pr in enforce mode"
+    assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
+    assert "read-only" in err
+
+
+@pytest.mark.parametrize("tamper", [_move_head, _change_status])
+def test_observe_logs_but_never_blocks_when_branch_changed_during_review(gitclone, tamper):
+    root, _ = gitclone
+    _record_baseline(gitclone)
+    tamper(root)
+    rc, log, err = _run_gate_err(gitclone, _OBSERVE, "STATUS: PASS\n")
+    assert rc == 0, "Requirement 13: observe never blocks"
+    assert log == "", "observe makes no tracker call"
+    assert "read-only" in err and "enforce would block" in err
+
+
+def test_missing_baseline_skips_the_comparison(gitclone):
+    """No pre-head file (budget node failed to write it): nothing to compare against."""
+    rc, log, _ = _run_gate_err(gitclone, _ENFORCE, "STATUS: PASS\n")
+    assert rc == 0 and log == ""
