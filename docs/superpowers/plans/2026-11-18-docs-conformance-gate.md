@@ -1822,8 +1822,9 @@ print(f"patched {p}: {len(EDITS)} edits")
 `docs/dark-factory-token-optimization.md`, `README.md`.
 
 Why the citation edits: these docs cite `path:line`. Task 6 inserts 59 lines after
-`workflows/archon-dark-factory.yaml:1140`, so every workflow citation ≥ 1141 moves by +59
-(verified line-by-line on a scratch copy). Task 3 inserts 5 lines at `config/config.yaml:53`
+the `conformance-gate` node (line 1168 on main f457c2c), so every workflow citation after it
+moves by +59 — and by a further +28 relative to the numbers the docs carry today, because main
+already moved those lines without a doc update (see the rebase note before Step 3). Task 3 inserts 5 lines at `config/config.yaml:53`
 and 1 line each after the `code-review` budget/enforce entries, so `config.yaml` citations
 ≥ 53 move by +5 and those ≥ 156 by +7. Task 2 moves `context_budget.py` citations ≥ 33 by
 +1 / ≥ 55 by +2 / ≥ 220 by +3; Task 4 moves `comment_digest.py` citations ≥ 104 by +1; Task 7
@@ -1871,15 +1872,14 @@ def test_features_lists_the_gate():
 
 - [ ] **Step 2: Run.** `PYTHONPATH=scripts python -m pytest tests/test_docs_conformance_reference_docs.py -q` → `3 failed`.
 
-  **Rebase note (main f457c2c) — apply to the saved script before running it.** main moved
-  `workflows/archon-dark-factory.yaml` by +28 lines (a80266f, at lines 482–641) without updating
-  these docs, so the docs still carry the older numbers and the script's `old` strings still
-  match. Keep every `old` string exactly as written. In every `new` string and in `D25`, add 28
-  to each workflow line number ≥ 1145 (for example `:1175` → `:1203`, `:1224-1381` →
-  `:1252-1409`, `:1468-1643` → `:1496-1671`). Leave workflow numbers below 1145 alone — that
-  drift is pre-existing on main and is not this ticket's to fix. Citations of other files
-  (`config.yaml`, the command files, `context_budget.py`, `comment_digest.py`) are already
-  correct for main. The path .claude/skills/docs-conformance/RUBRIC.md is written without
+  **Rebase note (main f457c2c).** main moved `workflows/archon-dark-factory.yaml` by +28 lines
+  (a80266f, at lines 482–641) without updating these docs, so the docs still carry the older
+  numbers and the script's `old` strings match them. The `new` strings and `D25` below already
+  carry the main-f457c2c numbers (old number + 28 + this ticket's 59 inserted lines): apply the
+  script exactly as written and compute nothing by hand. Workflow numbers below 1145 that
+  appear in a `new` string are left as main has them — that drift is pre-existing on main and
+  is not this ticket's to fix. Citations of other files (`config.yaml`, the command files,
+  `context_budget.py`, `comment_digest.py`) are correct for main. The path .claude/skills/docs-conformance/RUBRIC.md is written without
   backticks in the doc text on purpose: `scripts/docs_refs_check.py` fails on a backtick path
   that is not in the repo — do not backtick it and do not add it to `NON_REPO_PATHS`.
 
@@ -1943,7 +1943,7 @@ pass and read-only by instruction: one reviewer, no reconcile loop, no commits.
 | BLOCKED (`:247-307`) | "Docs Conformance (Gate 2.5) — Mismatch observed (informational)" comment (marker `df-docs-conformance-observed`); no label, no board move | "Docs Conformance (Gate 2.5) — Blocked" comment (marker `df-docs-conformance-blocked`) with the evidence and next steps; board to **Blocked**; `needs-discussion` label |
 
 **The `docs-conformance-gate` node enforces the result** with
-`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1186-1199`), not
+`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1214-1227`), not
 `verdict_gate_check.sh`, because `ERROR` must not pass:
 
 | First `STATUS:` line | `observe` | `enforce` |
@@ -1976,28 +1976,28 @@ patch("docs/run-lifecycle.md", [
     ("""comment_digest.py:41-50,100-146,163-263`""", """comment_digest.py:41-50,100-147,164-264`"""),
     ("""Non-zero exit blocks everything downstream (`:1131-1140`) | `conformance.md` → exit code, possibly a marker comment |
 """, """Non-zero exit blocks everything downstream (`:1131-1140`) | `conformance.md` → exit code, possibly a marker comment |
-| `budget-docs-conformance` | bash, 30 s | `new` or `continue` | `conformance-gate` | Takes `git diff main...HEAD` after Gate 2, runs `context_budget.py --scenario docs-conformance`; failure ignored (`:1145-1164`) | `doc-impact.md`, diff → `context-budget.docs-conformance.json` |
-| `enforce-budget-docs-conformance` | bash, 30 s | `new` or `continue` | `budget-docs-conformance` | `budget_gate.sh docs-conformance`; failure ignored (`:1166-1171`) | → `token-opt-caps.env` |
-| `docs-conformance` | command `dark-factory-docs-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-docs-conformance`, `conformance-gate` | Gate 2.5: one reviewer checks the docs against the final diff (`:1175-1180`) | `doc-impact.md`, diff, doc files → `docs-conformance.md`, `docs-conformance-baseline/`, `docs_conformance_*` working files, `diff-ranking.json`, possibly a comment; in `enforce` mode also a label and board move |
-| `docs-conformance-gate` | bash, 30 s | `new` or `continue` | `docs-conformance` | Reads `docs_conformance.mode`, then `scripts/docs_verdict_gate_check.sh docs-conformance.md <N> "Docs Conformance (Gate 2.5)" <mode>`. `observe` always exits 0; in `enforce` a non-zero exit blocks everything downstream (`:1186-1199`) | `docs-conformance.md`, config → exit code, possibly a marker comment |
+| `budget-docs-conformance` | bash, 30 s | `new` or `continue` | `conformance-gate` | Takes `git diff main...HEAD` after Gate 2, runs `context_budget.py --scenario docs-conformance`; failure ignored (`:1173-1192`) | `doc-impact.md`, diff → `context-budget.docs-conformance.json` |
+| `enforce-budget-docs-conformance` | bash, 30 s | `new` or `continue` | `budget-docs-conformance` | `budget_gate.sh docs-conformance`; failure ignored (`:1194-1199`) | → `token-opt-caps.env` |
+| `docs-conformance` | command `dark-factory-docs-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-docs-conformance`, `conformance-gate` | Gate 2.5: one reviewer checks the docs against the final diff (`:1203-1208`) | `doc-impact.md`, diff, doc files → `docs-conformance.md`, `docs-conformance-baseline/`, `docs_conformance_*` working files, `diff-ranking.json`, possibly a comment; in `enforce` mode also a label and board move |
+| `docs-conformance-gate` | bash, 30 s | `new` or `continue` | `docs-conformance` | Reads `docs_conformance.mode`, then `scripts/docs_verdict_gate_check.sh docs-conformance.md <N> "Docs Conformance (Gate 2.5)" <mode>`. `observe` always exits 0; in `enforce` a non-zero exit blocks everything downstream (`:1214-1227`) | `docs-conformance.md`, config → exit code, possibly a marker comment |
 """),
     ("""| `push-and-pr` | bash, 30 s | `new` or `continue` | `conformance-gate` | Archives the spec and plan, pushes, creates or updates the draft PR (below) (`:1165-1322`) |""",
-     """| `push-and-pr` | bash, 30 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` | Archives the spec and plan, pushes, creates or updates the draft PR (below) (`:1224-1381`) |"""),
-    ("""looks up the PR number (`:1143-1162`)""", """looks up the PR number (`:1202-1221`)"""),
-    ("""without pushing (`:1182-1186`).""", """without pushing (`:1241-1245`)."""),
-    ("""`docs: archive spec/plan for issue #N` (`:1193-1212`).""", """`docs: archive spec/plan for issue #N` (`:1252-1271`)."""),
-    ("""   origin afterwards (`:1216-1225`).""", """   origin afterwards (`:1275-1284`)."""),
-    ("""   "Blast radius" section in the PR body (`:1228-1237`).""", """   "Blast radius" section in the PR body (`:1287-1296`)."""),
-    ("""   for the issue (`:1257-1277`).""", """   for the issue (`:1316-1336`)."""),
-    ("""   back (`:1278-1319`).""", """   back (`:1337-1378`)."""),
-    ("""failure ignored (`:1325-1347`)""", """failure ignored (`:1384-1406`)"""),
-    ("""failure ignored (`:1349-1354`)""", """failure ignored (`:1408-1413`)"""),
-    ("""at or above the threshold block (`:1357-1362`)""", """at or above the threshold block (`:1416-1421`)"""),
-    ("""the command commits and pushes (`:1365-1370`)""", """the command commits and pushes (`:1424-1429`)"""),
-    ("""Non-zero exit blocks `status-in-review` (`:1374-1383`)""", """Non-zero exit blocks `status-in-review` (`:1433-1442`)"""),
-    ("""No-op for `resolve` (`:1386-1407`)""", """No-op for `resolve` (`:1445-1466`)"""),
-    ("""Posts the run summary comment (`:1409-1584`)""", """Posts the run summary comment (`:1468-1643`)"""),
-    ("""`Continue`/`Close` commands (`:1431-1576`).""", """`Continue`/`Close` commands (`:1490-1635`)."""),
+     """| `push-and-pr` | bash, 30 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` | Archives the spec and plan, pushes, creates or updates the draft PR (below) (`:1252-1409`) |"""),
+    ("""looks up the PR number (`:1143-1162`)""", """looks up the PR number (`:1230-1249`)"""),
+    ("""without pushing (`:1182-1186`).""", """without pushing (`:1269-1273`)."""),
+    ("""`docs: archive spec/plan for issue #N` (`:1193-1212`).""", """`docs: archive spec/plan for issue #N` (`:1280-1299`)."""),
+    ("""   origin afterwards (`:1216-1225`).""", """   origin afterwards (`:1303-1312`)."""),
+    ("""   "Blast radius" section in the PR body (`:1228-1237`).""", """   "Blast radius" section in the PR body (`:1315-1324`)."""),
+    ("""   for the issue (`:1257-1277`).""", """   for the issue (`:1344-1364`)."""),
+    ("""   back (`:1278-1319`).""", """   back (`:1365-1406`)."""),
+    ("""failure ignored (`:1325-1347`)""", """failure ignored (`:1412-1434`)"""),
+    ("""failure ignored (`:1349-1354`)""", """failure ignored (`:1436-1441`)"""),
+    ("""at or above the threshold block (`:1357-1362`)""", """at or above the threshold block (`:1444-1449`)"""),
+    ("""the command commits and pushes (`:1365-1370`)""", """the command commits and pushes (`:1452-1457`)"""),
+    ("""Non-zero exit blocks `status-in-review` (`:1374-1383`)""", """Non-zero exit blocks `status-in-review` (`:1461-1470`)"""),
+    ("""No-op for `resolve` (`:1386-1407`)""", """No-op for `resolve` (`:1473-1494`)"""),
+    ("""Posts the run summary comment (`:1409-1584`)""", """Posts the run summary comment (`:1496-1671`)"""),
+    ("""`Continue`/`Close` commands (`:1431-1576`).""", """`Continue`/`Close` commands (`:1518-1663`)."""),
     ("""- **Document** (`:218-254`): update the architecture docs that map to the changed paths.
 - **Memory** (`:256-443`): see [dark-factory-memory-v2.md](dark-factory-memory-v2.md).
 - **Report** (`:445-461`): `implementation.md`.""",
@@ -2047,13 +2047,13 @@ Gate 2.5, between Gate 2 and `push-and-pr`; described in
 | Code review | "Code Review — Blocked" (draft PR and its review remain) | Blocked | `needs-discussion` |
 | Verdict file missing | "Conformance (Gate 2) — Blocked" or "Code Review (Gate 3) — Blocked": no verdict was recorded; "Docs Conformance (Gate 2.5) — Blocked" (enforce mode only) also for `STATUS: ERROR` | unchanged by the gate | none |"""),
     ("""the only reader is `report` (`workflows/archon-dark-factory.yaml:1471-1489`).""",
-     """the only reader is `report` (`workflows/archon-dark-factory.yaml:1530-1548`)."""),
+     """the only reader is `report` (`workflows/archon-dark-factory.yaml:1558-1576`)."""),
     ("""   When `conformance-gate` or `review-gate` exits 1 it is unknown""",
      """   When `conformance-gate`, `docs-conformance-gate` or `review-gate` exits 1 it is unknown"""),
     ("""   `scripts/comment_digest.py:123-134` records""", """   `scripts/comment_digest.py:124-135` records"""),
-    ("""(`workflows/archon-dark-factory.yaml:1500-1502`)""", """(`workflows/archon-dark-factory.yaml:1559-1561`)"""),
-    ("""    (`:916`, `:1181`) but no code""", """    (`:916`, `:1240`) but no code"""),
-    ("""      (`workflows/archon-dark-factory.yaml:1501`).""", """      (`workflows/archon-dark-factory.yaml:1560`)."""),
+    ("""(`workflows/archon-dark-factory.yaml:1500-1502`)""", """(`workflows/archon-dark-factory.yaml:1587-1589`)"""),
+    ("""    (`:916`, `:1181`) but no code""", """    (`:916`, `:1268`) but no code"""),
+    ("""      (`workflows/archon-dark-factory.yaml:1501`).""", """      (`workflows/archon-dark-factory.yaml:1588`)."""),
     ("""`config/config.yaml:59` documents""", """`config/config.yaml:64` documents"""),
 ])
 
@@ -2062,22 +2062,22 @@ patch("docs/features.md", [
     ("""| **Implementation.** The implement agent (Opus) works the plan test-first, self-reviews, updates docs and memory, and commits. |""",
      """| **Implementation.** The implement agent (Opus) works the plan test-first, self-reviews, updates docs (mapped paths plus a diff-content behavior scan) and memory, writes `doc-impact.md` for Gate 2.5, and commits. |"""),
     ("""Node `push-and-pr` (`workflow:1165`): `codehost close-keyword` (`:1253`), `open-change` (`:1310`), `update-body` (`:1269`).""",
-     """Node `push-and-pr` (`workflow:1224`): `codehost close-keyword` (`:1312`), `open-change` (`:1369`), `update-body` (`:1328`)."""),
-    ("""Nodes `status-in-review` (`workflow:1386`), `report` (`:1409`).""", """Nodes `status-in-review` (`workflow:1445`), `report` (`:1468`)."""),
+     """Node `push-and-pr` (`workflow:1252`): `codehost close-keyword` (`:1340`), `open-change` (`:1397`), `update-body` (`:1356`)."""),
+    ("""Nodes `status-in-review` (`workflow:1386`), `report` (`:1409`).""", """Nodes `status-in-review` (`workflow:1473`), `report` (`:1496`)."""),
     ("""Nodes `code-review` (`workflow:1357`) and `review-gate` (`:1374`, `verdict_gate_check.sh` at `:1377`).""",
-     """Nodes `code-review` (`workflow:1416`) and `review-gate` (`:1433`, `verdict_gate_check.sh` at `:1436`)."""),
-    ("""Node `revise-advisory` (`workflow:1365`).""", """Node `revise-advisory` (`workflow:1424`)."""),
+     """Nodes `code-review` (`workflow:1444`) and `review-gate` (`:1461`, `verdict_gate_check.sh` at `:1464`)."""),
+    ("""Node `revise-advisory` (`workflow:1365`).""", """Node `revise-advisory` (`workflow:1452`)."""),
     ("""| `conformance.enabled` (true), `.max_reconcile_cycles` (3), `.block_on_material` (true) | [`run-lifecycle.md`](run-lifecycle.md) | none |
 """, """| `conformance.enabled` (true), `.max_reconcile_cycles` (3), `.block_on_material` (true) | [`run-lifecycle.md`](run-lifecycle.md) | none |
-| **Docs conformance gate (Gate 2.5).** After Gate 2, a reviewer subagent (Opus) checks that the branch's docs are true of the final diff, that no affected behavior is undocumented, and that implement's `doc-impact.md` no-impact claims hold. Single pass, read-only by instruction. In `observe` mode a mismatch is recorded and posted as an informational comment; in `enforce` mode a mismatch, a missing or unparseable verdict, or `ERROR` blocks the PR. | **Measured only** (ships in `observe` mode). Nodes `docs-conformance` (`workflow:1175`) and `docs-conformance-gate` (`:1186`, `docs_verdict_gate_check.sh` at `:1192`). Tests: `tests/test_docs_verdict_gate_check.py`, `tests/test_docs_conformance_dag.py`, `tests/test_docs_conformance_command.py`. | `commands/dark-factory-docs-conformance.md`; rubric `refinement-skills/docs-conformance-reviewer-prompt.md` (a clone-live .claude/skills/docs-conformance/RUBRIC.md wins if a target adds one, `:174`-`:178`); `scripts/docs_verdict_gate_check.sh` | `docs_conformance.enabled` (true), `.mode` (`observe`) | [`run-lifecycle.md`](run-lifecycle.md) | [#536](https://github.com/omniscient/dark-factory/issues/536): enforce-mode flip, breaker accounting, tool restriction |
+| **Docs conformance gate (Gate 2.5).** After Gate 2, a reviewer subagent (Opus) checks that the branch's docs are true of the final diff, that no affected behavior is undocumented, and that implement's `doc-impact.md` no-impact claims hold. Single pass, read-only by instruction. In `observe` mode a mismatch is recorded and posted as an informational comment; in `enforce` mode a mismatch, a missing or unparseable verdict, or `ERROR` blocks the PR. | **Measured only** (ships in `observe` mode). Nodes `docs-conformance` (`workflow:1203`) and `docs-conformance-gate` (`:1214`, `docs_verdict_gate_check.sh` at `:1220`). Tests: `tests/test_docs_verdict_gate_check.py`, `tests/test_docs_conformance_dag.py`, `tests/test_docs_conformance_command.py`. | `commands/dark-factory-docs-conformance.md`; rubric `refinement-skills/docs-conformance-reviewer-prompt.md` (a clone-live .claude/skills/docs-conformance/RUBRIC.md wins if a target adds one, `:174`-`:178`); `scripts/docs_verdict_gate_check.sh` | `docs_conformance.enabled` (true), `.mode` (`observe`) | [`run-lifecycle.md`](run-lifecycle.md) | [#536](https://github.com/omniscient/dark-factory/issues/536): enforce-mode flip, breaker accounting, tool restriction |
 """),
     ("""used at `dark-factory-conformance.md:546` and `:694`. Test: `tests/test_verdict_gate_check.sh` (CI). | `scripts/factory_core/verdict.py` `parse_verdict` (`:20`); `scripts/verdict_gate_check.sh` |""",
      """used at `dark-factory-conformance.md:546` and `:694` and `dark-factory-docs-conformance.md:236`. Tests: `tests/test_verdict_gate_check.sh` (CI), `tests/test_docs_verdict_gate_check.py`. | `scripts/factory_core/verdict.py` `parse_verdict` (`:20`); `scripts/verdict_gate_check.sh`; `scripts/docs_verdict_gate_check.sh` (Gate 2.5: `ERROR` blocks in `enforce` mode) |"""),
-    ("""`budget-conformance` (`:1082`), `budget-code-review` (`:1325`).""", """`budget-conformance` (`:1082`), `budget-docs-conformance` (`:1145`), `budget-code-review` (`:1384`)."""),
+    ("""`budget-conformance` (`:1082`), `budget-code-review` (`:1325`).""", """`budget-conformance` (`:1082`), `budget-docs-conformance` (`:1173`), `budget-code-review` (`:1412`)."""),
     ("""Each writes its own `context-budget.<scenario>.json` (`refine`, `plan`, `implement`, `conformance`, `code-review`; `continue` runs use `implement`).""",
      """Each writes its own `context-budget.<scenario>.json` (`refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`; `continue` runs use `implement`)."""),
     ("""| **Live** for refine, plan, conformance and code-review; observe-only for implement. `budget_gate.sh` runs in the five `enforce-budget-*` nodes (`workflow:402`, `:442`, `:716`, `:1115`, `:1351`)""",
-     """| **Live** for refine, plan, conformance and code-review; observe-only for implement and docs-conformance. `budget_gate.sh` runs in the six `enforce-budget-*` nodes (`workflow:402`, `:442`, `:716`, `:1115`, `:1168`, `:1410`)"""),
+     """| **Live** for refine, plan, conformance and code-review; observe-only for implement and docs-conformance. `budget_gate.sh` runs in the six `enforce-budget-*` nodes (`workflow:402`, `:442`, `:716`, `:1115`, `:1196`, `:1438`)"""),
     ("""`dark-factory-conformance.md:201`, `dark-factory-code-review.md:110`. Test: `tests/test_budget_gate.sh` (CI).""",
      """`dark-factory-conformance.md:201`, `dark-factory-docs-conformance.md:97`, `dark-factory-code-review.md:110`. Test: `tests/test_budget_gate.sh` (CI)."""),
     ("""| `token_optimization.enforce_budgets` (true) and `token_optimization.enforce.<scenario>` (implement false, others true);""",
@@ -2087,8 +2087,8 @@ patch("docs/features.md", [
     ("""(`context_budget.py:240`) and never injected into a prompt; the code says so at `context_budget.py:45`-`:47`.""",
      """(`context_budget.py:243`) and never injected into a prompt; the code says so at `context_budget.py:46`-`:48`."""),
     ("""`dark-factory-code-review.md:181`, `dark-factory-refine.md:132`.""", """`dark-factory-code-review.md:181`, `dark-factory-refine.md:132`, `dark-factory-docs-conformance.md:182`."""),
-    ("""`workflow:185`, `:197`, `:251`, `:264`, `:900`, `:1253`, `:1310`, `:1546`)""", """`workflow:185`, `:197`, `:251`, `:264`, `:900`, `:1312`, `:1369`, `:1605`)"""),
-    ("""the `gh pr view` reads in the workflow (`:114`, `:1262`)""", """the `gh pr view` reads in the workflow (`:114`, `:1321`)"""),
+    ("""`workflow:185`, `:197`, `:251`, `:264`, `:900`, `:1253`, `:1310`, `:1546`)""", """`workflow:185`, `:197`, `:251`, `:264`, `:900`, `:1340`, `:1397`, `:1633`)"""),
+    ("""the `gh pr view` reads in the workflow (`:114`, `:1262`)""", """the `gh pr view` reads in the workflow (`:114`, `:1349`)"""),
     ("""| **Claude skills: review rubrics.** The conformance and code-review rubrics are skills in the target repo, so a target can tune them; the gate commands read them from the clone and fall back to the baked prompt. |""",
      """| **Claude skills: review rubrics.** The conformance and code-review rubrics are skills in the target repo, so a target can tune them; the gate commands read them from the clone and fall back to the baked prompt. The docs-conformance command (Gate 2.5) does the same lookup for .claude/skills/docs-conformance/RUBRIC.md (`dark-factory-docs-conformance.md:174`), but no such skill is shipped: it uses the baked `refinement-skills/docs-conformance-reviewer-prompt.md`. |"""),
     ("""(`config.yaml:170`""", """(`config.yaml:177`"""),
@@ -2097,8 +2097,8 @@ patch("docs/features.md", [
 
 # ── docs/configuration.md ────────────────────────────────────────────────────
 patch("docs/configuration.md", [
-    ("""`workflows/archon-dark-factory.yaml:1463` (report text only)""", """`workflows/archon-dark-factory.yaml:1522` (report text only)"""),
-    ("""`workflows/archon-dark-factory.yaml:1504` (report text)""", """`workflows/archon-dark-factory.yaml:1563` (report text)"""),
+    ("""`workflows/archon-dark-factory.yaml:1463` (report text only)""", """`workflows/archon-dark-factory.yaml:1550` (report text only)"""),
+    ("""`workflows/archon-dark-factory.yaml:1504` (report text)""", """`workflows/archon-dark-factory.yaml:1591` (report text)"""),
     ("""| `code_review.severity_order` | `low, medium, high, critical` | ascending severity ranking | `commands/dark-factory-code-review.md:60-64` (`yq`), passed as `--severity-order` to `scripts/code_review_payload.py:200` | none | no |
 """, """| `code_review.severity_order` | `low, medium, high, critical` | ascending severity ranking | `commands/dark-factory-code-review.md:60-64` (`yq`), passed as `--severity-order` to `scripts/code_review_payload.py:200` | none | no |
 
@@ -2112,13 +2112,13 @@ than `enforce` means `enabled: true` and `observe`.
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `docs_conformance.enabled` | `true` | false = the command writes `STATUS: SKIPPED`, which passes in both modes | `commands/dark-factory-docs-conformance.md:68,72-75` (agent-read) | none | no |
-| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch, never block. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1189-1190` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
+| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch, never block. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1217-1218` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
 """),
     ("""`commands/dark-factory-code-review.md:110`). Scenarios are `refine`, `plan`, `implement`,
 `conformance`, `code-review` (`workflows/archon-dark-factory.yaml:402,442,716,1115,1351`).""",
      """`commands/dark-factory-docs-conformance.md:97`, `commands/dark-factory-code-review.md:110`).
 Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`
-(`workflows/archon-dark-factory.yaml:402,442,716,1115,1168,1410`)."""),
+(`workflows/archon-dark-factory.yaml:402,442,716,1115,1196,1438`)."""),
     ("""| `token_optimization.budgets.code-review` | `22000` | same | `scripts/budget_gate.sh:46` | none |
 """, """| `token_optimization.budgets.code-review` | `22000` | same | `scripts/budget_gate.sh:46` | none |
 | `token_optimization.budgets.docs-conformance` | `22000` | same | `scripts/budget_gate.sh:46` | none |
@@ -2138,7 +2138,7 @@ Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, 
 `epic_autopilot` 11, `main_red_autofix` 5, `side_effect.phase_levels` 9, `token_optimization` 32
 (`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
 `architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 99 leaf keys."""),
-    ("""`workflows/archon-dark-factory.yaml:803,917,1182`""", """`workflows/archon-dark-factory.yaml:803,917,1241`"""),
+    ("""`workflows/archon-dark-factory.yaml:803,917,1182`""", """`workflows/archon-dark-factory.yaml:803,917,1269`"""),
     ("""`config/config.yaml:59`""", """`config/config.yaml:64`"""),
     ("""`config/config.yaml:119,120,122`""", """`config/config.yaml:124,125,127`"""),
     ("""`config/config.yaml:170`""", """`config/config.yaml:177`"""),
