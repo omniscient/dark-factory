@@ -84,7 +84,10 @@ def test_disabled_writes_skipped():
 
 
 def test_mode_parse_defaults_to_observe():
-    assert _cmd().count("m if m == 'enforce' else 'observe'") == 2
+    # Both read sites (Phase 1, Phase 4-5) delegate to the single shared normalizer
+    # (factory_core/cli.py docs-conformance-config, #535) instead of duplicating the
+    # enabled/mode parsing inline, so the two call sites can't drift from each other.
+    assert _cmd().count("docs-conformance-config") == 2
     assert _cmd().count('|| echo "true observe"') == 2
 
 

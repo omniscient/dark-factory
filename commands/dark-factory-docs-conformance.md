@@ -65,7 +65,7 @@ always builds the diff, spawns the reviewer and writes a real verdict in both mo
 REPO_ROOT=$(git rev-parse --show-toplevel)
 source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
-read -r DOCS_ENABLED DOCS_MODE < <(python3 -c "import yaml; d = yaml.safe_load(open('.claude/skills/refinement/config.yaml')) or {}; c = d.get('docs_conformance') or {}; m = c.get('mode', 'observe'); print(str(c.get('enabled', True)).lower(), m if m == 'enforce' else 'observe')" 2>/dev/null || echo "true observe")
+read -r DOCS_ENABLED DOCS_MODE < <(python3 dark-factory/scripts/factory_core/cli.py docs-conformance-config --config ".claude/skills/refinement/config.yaml" 2>/dev/null || echo "true observe")  # TARGET-PATH
 echo "docs-conformance: enabled=${DOCS_ENABLED} mode=${DOCS_MODE}"
 ```
 
@@ -210,7 +210,7 @@ reviewer said.
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
 source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
-read -r _EN DOCS_MODE < <(python3 -c "import yaml; d = yaml.safe_load(open('.claude/skills/refinement/config.yaml')) or {}; c = d.get('docs_conformance') or {}; m = c.get('mode', 'observe'); print(str(c.get('enabled', True)).lower(), m if m == 'enforce' else 'observe')" 2>/dev/null || echo "true observe")
+read -r _EN DOCS_MODE < <(python3 dark-factory/scripts/factory_core/cli.py docs-conformance-config --config ".claude/skills/refinement/config.yaml" 2>/dev/null || echo "true observe")  # TARGET-PATH
 REVIEW="$ARTIFACTS_DIR/docs_conformance_review.md"
 VERDICT_LINE=$(grep -m1 '^\*\*Verdict:\*\*' "$REVIEW" 2>/dev/null || true)
 MATERIAL=$(grep -c '^- \[MATERIAL\]' "$REVIEW" 2>/dev/null || true)
@@ -224,6 +224,7 @@ case "$VERDICT_LINE" in
   *)      VERDICT=UNCERTAIN; STATUS=BLOCKED; COUNT=1;                   SEV=high
           REASON="no parseable **Verdict:** line (refusal, timeout, tool error or bad output)" ;;
 esac
+[ "$MATERIAL" -gt 0 ] && { VERDICT=MATERIAL; STATUS=BLOCKED; SEV=high; REASON="verdict line contradicts [MATERIAL] findings"; }
 DOC_IMPACT=present
 if ! { [ -s "$ARTIFACTS_DIR/doc-impact.md" ] && grep -qE '^OVERALL: (UPDATED|NO_IMPACT: .+)' "$ARTIFACTS_DIR/doc-impact.md"; }; then
   DOC_IMPACT=missing

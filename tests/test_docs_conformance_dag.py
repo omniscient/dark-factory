@@ -63,7 +63,10 @@ def test_gate_node_calls_strict_script_not_shared_one():
     assert "docs_verdict_gate_check.sh" in bash
     assert "/verdict_gate_check.sh" not in bash, "verdict_gate_check.sh passes ERROR (Requirement 3)"
     assert "docs-conformance.md" in bash and "Docs Conformance (Gate 2.5)" in bash
-    assert "docs_conformance" in bash and "'observe'" in bash
+    # Mode read delegates to the single shared normalizer (factory_core/cli.py
+    # docs-conformance-config, #535) instead of duplicating the enabled/mode parsing
+    # inline — the same helper the command file's two read sites call.
+    assert "docs-conformance-config" in bash and 'echo "true observe"' in bash
     assert "|| true" not in bash, "the gate script's exit code IS the gate signal"
     assert _nodes()["docs-conformance-gate"]["timeout"] == 30000
 

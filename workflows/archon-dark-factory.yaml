@@ -1187,6 +1187,10 @@ nodes:
         --diff-file "$DIFF_TMP" \
         --out "$ARTIFACTS_DIR/context-budget.docs-conformance.json" || true
       rm -f "$DIFF_TMP"
+      # Record the Gate-2-passed HEAD so docs-conformance-gate can detect a commit made
+      # during the (nominally read-only) docs-conformance node, which would reach
+      # push-and-pr without Gate 2 ever having seen it (#535).
+      git rev-parse HEAD > "$ARTIFACTS_DIR/docs-conformance-pre-head.txt" 2>/dev/null || true
     depends_on: [conformance-gate]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000
@@ -1214,8 +1218,21 @@ nodes:
   - id: docs-conformance-gate
     bash: |
       _CLONE="${CLONE_DIR:-.}"
-      DOCS_MODE=$(python3 -c "import sys, yaml; d = yaml.safe_load(open(sys.argv[1])) or {}; print((d.get('docs_conformance') or {}).get('mode', 'observe'))" \
-        "$_CLONE/.claude/skills/refinement/config.yaml" 2>/dev/null || echo observe)
+      # docs-conformance is read-only by instruction only (tool restriction deferred to
+      # #536); if it committed anyway, that commit would reach push-and-pr without Gate 2
+      # ever reviewing it. Fail closed on HEAD moving or a dirty tree, in both modes —
+      # this is a bypass check, not a policy decision docs_conformance.mode should gate.
+      PRE_HEAD=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-head.txt" 2>/dev/null)
+      POST_HEAD=$(git rev-parse HEAD 2>/dev/null)
+      DIRTY=$(git status --porcelain 2>/dev/null)
+      if [ -n "$PRE_HEAD" ] && { [ "$PRE_HEAD" != "$POST_HEAD" ] || [ -n "$DIRTY" ]; }; then
+        echo "docs-conformance-gate: HEAD moved ($PRE_HEAD -> $POST_HEAD) or working tree is dirty during the read-only docs-conformance node — failing closed, this would bypass Gate 2." >&2
+        exit 1
+      fi
+      # Shared with dark-factory-docs-conformance.md Phase 1 and Phase 4-5 (#535): one
+      # normalization of docs_conformance.{enabled,mode} so the three copies can't drift.
+      read -r _DC_EN DOCS_MODE < <(python3 "$_CLONE/dark-factory/scripts/factory_core/cli.py" docs-conformance-config \
+        --config "$_CLONE/.claude/skills/refinement/config.yaml" 2>/dev/null || echo "true observe")
       # TARGET-PATH: docs_verdict_gate_check.sh resolves under dark-factory/ in the clone.
       bash "$_CLONE/dark-factory/scripts/docs_verdict_gate_check.sh" \
         "$ARTIFACTS_DIR/docs-conformance.md" \
