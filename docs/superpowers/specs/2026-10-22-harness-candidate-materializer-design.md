@@ -651,7 +651,17 @@ and owns the proof.
 - **CI spike (Decision 1: "verify with one real CI run before implementation").** The operator ran
   the F4-style probe step (the `docker run` shape of "Live tests and CI step") on a throwaway PR
   on 2026-11-19 before approving this spec; result:
-  <RESULT-PLACEHOLDER>
+  **partly works** (draft PR #543, runs 44502970621 and 44503860571, `ubuntu-latest`,
+  `kernel.apparmor_restrict_unprivileged_userns = 1`). With seccomp and apparmor unconfined,
+  `bwrap` creates the user, pid, ipc and net namespaces, but the probe as specified exits 1 with
+  `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` (Docker's masked `/proc`
+  paths block a fresh procfs mount). The same probe exits 0 when the `docker run` also carries
+  `--security-opt systempaths=unconfined`, and it exits 0 without that option when the argv has
+  no `--proc /proc`. With default confinement it fails at namespace creation, as expected.
+  Consequence for Phase B only (Phase A needs no namespaces and is unaffected): the CI step as
+  written in "Live tests and CI step" does not pass. The Phase B issue must choose between adding
+  `systempaths=unconfined` to that one CI `docker run` (a third relaxation that Decision 1 did
+  not name, so it needs the owner's confirmation) and a sandbox argv without a fresh `/proc`.
   If that step ever fails closed on a hosted runner, the Phase B item returns to
   `needs-discussion`. A runner-side change such as a sysctl is outside what Decision 1 named, and a
   weaker fallback is never the answer (see Alternatives).
