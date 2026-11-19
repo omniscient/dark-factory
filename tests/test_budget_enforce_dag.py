@@ -100,6 +100,7 @@ def test_config_enforce_t6_state():
     "enforce-budget-implement",
     "enforce-budget-conformance",
     "enforce-budget-code-review",
+    "enforce-budget-docs-conformance",
 ])
 def test_enforce_budget_node_exists(node_id):
     nodes = _workflow_nodes()
@@ -114,6 +115,7 @@ def test_enforce_budget_node_exists(node_id):
     ("enforce-budget-implement",   "budget-implement"),
     ("enforce-budget-conformance", "budget-conformance"),
     ("enforce-budget-code-review", "budget-code-review"),
+    ("enforce-budget-docs-conformance", "budget-docs-conformance"),
 ])
 def test_enforce_budget_node_depends_on_budget(node_id, expected_dep):
     nodes = _workflow_nodes()
@@ -131,6 +133,7 @@ def test_enforce_budget_node_depends_on_budget(node_id, expected_dep):
     "enforce-budget-implement",
     "enforce-budget-conformance",
     "enforce-budget-code-review",
+    "enforce-budget-docs-conformance",
 ])
 def test_enforce_budget_node_no_trigger_rule(node_id):
     nodes = _workflow_nodes()
@@ -147,6 +150,7 @@ def test_enforce_budget_node_no_trigger_rule(node_id):
     "enforce-budget-implement",
     "enforce-budget-conformance",
     "enforce-budget-code-review",
+    "enforce-budget-docs-conformance",
 ])
 def test_enforce_budget_node_nonfatal(node_id):
     nodes = _workflow_nodes()
@@ -163,6 +167,7 @@ def test_enforce_budget_node_nonfatal(node_id):
     "enforce-budget-implement",
     "enforce-budget-conformance",
     "enforce-budget-code-review",
+    "enforce-budget-docs-conformance",
 ])
 def test_enforce_budget_node_clone_dir_fallback(node_id):
     nodes = _workflow_nodes()
@@ -179,6 +184,7 @@ def test_enforce_budget_node_clone_dir_fallback(node_id):
     "enforce-budget-implement",
     "enforce-budget-conformance",
     "enforce-budget-code-review",
+    "enforce-budget-docs-conformance",
 ])
 def test_enforce_budget_node_timeout(node_id):
     nodes = _workflow_nodes()
@@ -224,6 +230,13 @@ def test_enforce_budget_code_review_when():
         "enforce-budget-code-review must be gated on new|continue intent"
 
 
+def test_enforce_budget_docs_conformance_when():
+    nodes = _workflow_nodes()
+    when = nodes.get("enforce-budget-docs-conformance", {}).get("when", "")
+    assert "new" in when and "continue" in when, \
+        "enforce-budget-docs-conformance must be gated on new|continue intent"
+
+
 # ── T3-D8: command nodes updated to depend on enforce-budget-* ───────────────
 
 @pytest.mark.parametrize("cmd_node,enforce_dep,budget_dep", [
@@ -232,6 +245,7 @@ def test_enforce_budget_code_review_when():
     ("implement",   "enforce-budget-implement",    "budget-implement"),
     ("conformance", "enforce-budget-conformance",  "budget-conformance"),
     ("code-review", "enforce-budget-code-review",  "budget-code-review"),
+    ("docs-conformance", "enforce-budget-docs-conformance", "budget-docs-conformance"),
 ])
 def test_command_node_depends_on_enforce_not_budget(cmd_node, enforce_dep, budget_dep):
     nodes = _workflow_nodes()

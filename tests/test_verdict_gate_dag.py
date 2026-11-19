@@ -49,7 +49,7 @@ class TestVerdictGateNodes:
 
 def test_push_and_pr_depends_on_conformance_gate():
     node = _workflow_nodes()["push-and-pr"]
-    assert node["depends_on"] == ["conformance-gate"]
+    assert node["depends_on"] == ["conformance-gate", "docs-conformance-gate"]  # #535 adds Gate 2.5
 
 
 def test_status_in_review_depends_on_is_additive():
