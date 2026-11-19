@@ -2,6 +2,8 @@
 
 **Issue:** #426
 
+**Revised:** 2026-11-19 (operator amendment after spec-gate review: YAML-aware "referenced" check, synthetic failing-path tests, per-file run-derived reasons, doc follow-through)
+
 ## Overview / Problem statement
 
 `.github/workflows/ci.yml`'s `tests` job lists shell tests one `- run: bash tests/X.sh`
@@ -29,7 +31,7 @@ A shell test that never runs is indistinguishable, in every artifact the factory
 (the PR diff, the conformance gate, a green CI run), from one that runs and passes. Three
 recent tickets (#201, #395, #418) each independently tripped over an instance of this —
 #395's plan had to discover and separately wire in `test_entrypoint_preflight.sh`; #418
-deliberately left a new 175-line test unwired, correctly but uncomfortably citing this gap
+deliberately left a new test (196 lines on `main` today) unwired, correctly but uncomfortably citing this gap
 as "existing project convention." This ticket closes the class, not another instance of it.
 
 This ticket owns only the "tests not in CI" line item of umbrella issue #531; #531's other
@@ -47,14 +49,15 @@ out of scope here.
    `tests/test_adapter.py`'s drift-tests), and keeps every exemption visible in the PR
    diff and reachable by the conformance/code-review gates, rather than in a side file
    those gates would have to be taught to look at.
-3. "Referenced in `ci.yml`" is a whole-file regex match of `tests/[a-z_0-9]+\.sh` against
-   `ci.yml`'s text — the same pattern the issue's own reproduce command uses — not
-   restricted to `- run:` step lines specifically. `ci.yml` carries no comments today and
-   every current mention of a `tests/*.sh` path is already a `- run: bash tests/...` line,
-   so the narrower match would only protect against a case that doesn't exist yet, at the
-   cost of the allowlist-seeding command and the test's own enforcement using two
-   different patterns that could silently drift apart. Accepted limitation, stated
-   explicitly: a future comment-only mention of a filename would also count as "covered."
+3. "Referenced in `ci.yml`" means the path matches `tests/[a-z_0-9]+\.sh` inside the
+   `run:` string of a step under `jobs.*.steps`, obtained with `yaml.safe_load` (pyyaml is
+   installed at `ci.yml:12`). A step carrying an `if:` key whose value is the literal
+   `false` does not count. YAML comments therefore never count — in particular a test
+   disabled as `# - run: bash tests/test_x.sh` is *not* covered and must be either
+   re-enabled or moved to the allowlist with a reason. The allowlist-seeding command stays
+   the issue's grep; the two agree on `main` today because `ci.yml` has no comments.
+   Residual limitation, stated explicitly: a shell comment *inside* a multi-line `run:`
+   block would still count; no such block exists today.
 4. The test additionally fails on any allowlisted filename that is now either referenced
    in `ci.yml` or no longer present under `tests/*.sh` — a stale exemption is the same
    "looks resolved but isn't" failure mode this ticket exists to catch, just in the other
@@ -64,6 +67,23 @@ out of scope here.
    list is re-derived from the reproduce command against the implementation branch's HEAD
    at that time, not copied verbatim from this spec or the issue body (file additions,
    deletions, or new CI wiring may land on `main` between refinement and implementation).
+   The implement phase runs each seeded file once, in the run container, and writes the
+   reason as either `passes standalone — wire in follow-up` or
+   `fails: <first failing assertion or error>` (a timeout is `fails: timeout after 120s`).
+   A blanket reason such as "not yet triaged" is not acceptable: the issue asks for the
+   current state to be "recorded rather than silently blessed". A refinement-time sample
+   (factory image, offline) found `test_dispatch_ceiling.sh`,
+   `test_session_window_gate.sh` and `test_scheduler.sh` failing on `main` and
+   `test_memory_write_gate.sh` and `test_off_board_detection.sh` passing.
+   **Run them with credentials and scheduler state stripped** — never with the run's live
+   token:
+   `env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$(mktemp -d)" SCHEDULER_STATE_DIR="$(mktemp -d)" timeout 120 bash tests/X.sh`.
+   At least one seeded test (`test_dispatch_ceiling.sh`, which does
+   `export GH_TOKEN="${GH_TOKEN:-stub-token}"` at line 23) reaches the real `gh` binary and
+   attempts label operations on issues #70-#73; with a live token those would be real
+   writes.
+   Fixing or wiring the failing tests is **out of scope for #426**: the per-file reasons
+   are the hand-off to the follow-up work (issue option 3), nothing more.
 6. No change to `.github/workflows/ci.yml`. Because `ci.yml`'s `tests` job already runs
    `python -m pytest tests/ -v` (which auto-discovers every `.py` file under `tests/`),
    the new guard test starts running the moment it exists on disk — no new `- run:` line,
@@ -88,59 +108,109 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 #     <(git ls-tree HEAD tests/ --name-only | grep '\.sh$' | sed 's|tests/||' | sort) \
 #     <(git show HEAD:.github/workflows/ci.yml | grep -oE 'tests/[a-z_0-9]+\.sh' | sed 's|tests/||' | sort -u)
 # Re-derive this list from the command above at implementation time -- do not copy
-# verbatim from an older spec or issue body.
+# verbatim from an older spec or issue body. Reason format: Requirement 5.
 CI_EXEMPT_SHELL_TESTS = {
-    "test_scheduler.sh": "not yet triaged — #426 backlog",
-    # ... one entry per currently-unwired file, each with a short reason
+    "test_memory_write_gate.sh": "passes standalone — wire in follow-up",
+    "test_scheduler.sh": "fails: line 411: STATUS_REFINED: unbound variable",
+    # ... one entry per currently-unwired file, reason taken from an actual run
 }
 
 _SH_REF_PATTERN = re.compile(r"tests/[a-z_0-9]+\.sh")
 
-def _ci_yml_text() -> str:
-    return (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
-
 def _referenced_in_ci(ci_text: str) -> set[str]:
-    return {m.split("/", 1)[1] for m in _SH_REF_PATTERN.findall(ci_text)}
+    """Shell tests named in the run: string of a live step. YAML comments never count."""
+    refs = set()
+    for job in ((yaml.safe_load(ci_text) or {}).get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            if str(step.get("if", "")).strip().lower() == "false":
+                continue
+            for m in _SH_REF_PATTERN.findall(str(step.get("run") or "")):
+                refs.add(m.split("/", 1)[1])
+    return refs
 
-def test_every_shell_test_is_wired_or_exempt():
+def _violations(sh_files: set, referenced: set, exempt) -> tuple[set, set]:
+    """Pure: (unaccounted, stale). No filesystem access, so it is testable synthetically."""
+    unaccounted = sh_files - referenced - set(exempt)
+    stale = {name for name in exempt if name in referenced or name not in sh_files}
+    return unaccounted, stale
+
+def _live() -> tuple[set, set]:
     sh_files = {p.name for p in (_REPO_ROOT / "tests").glob("*.sh")}
-    referenced = _referenced_in_ci(_ci_yml_text())
-    unaccounted = sh_files - referenced - CI_EXEMPT_SHELL_TESTS.keys()
+    ci_text = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    referenced = _referenced_in_ci(ci_text)
+    # A wrong path or a parse that finds nothing must not pass vacuously.
+    assert sh_files, "no tests/*.sh found — wrong repo root?"
+    assert referenced, "no shell test found in any ci.yml run: step — parse broken?"
+    return sh_files, referenced
+
+# --- live-repo checks ---
+def test_every_shell_test_is_wired_or_exempt():
+    unaccounted, _ = _violations(*_live(), CI_EXEMPT_SHELL_TESTS)
     assert not unaccounted, (
         f"tests/*.sh not in ci.yml and not in CI_EXEMPT_SHELL_TESTS: {sorted(unaccounted)}"
     )
 
 def test_no_stale_exemptions():
-    sh_files = {p.name for p in (_REPO_ROOT / "tests").glob("*.sh")}
-    referenced = _referenced_in_ci(_ci_yml_text())
-    stale = {
-        name for name in CI_EXEMPT_SHELL_TESTS
-        if name in referenced or name not in sh_files
-    }
+    _, stale = _violations(*_live(), CI_EXEMPT_SHELL_TESTS)
     assert not stale, f"CI_EXEMPT_SHELL_TESTS entries now stale (wired or deleted): {sorted(stale)}"
 
 def test_exemptions_have_reasons():
     empty = [name for name, reason in CI_EXEMPT_SHELL_TESTS.items() if not reason.strip()]
     assert not empty, f"CI_EXEMPT_SHELL_TESTS entries missing a reason: {empty}"
+
+# --- synthetic checks: prove the guard can fail ---
+def test_new_unwired_file_is_unaccounted():
+    assert _violations({"a.sh", "new.sh"}, {"a.sh"}, {}) == ({"new.sh"}, set())
+
+def test_exempt_file_that_is_wired_is_stale():
+    assert _violations({"a.sh"}, {"a.sh"}, {"a.sh": "r"}) == (set(), {"a.sh"})
+
+def test_exempt_file_that_is_missing_is_stale():
+    assert _violations({"a.sh"}, {"a.sh"}, {"gone.sh": "r"}) == (set(), {"gone.sh"})
+
+def test_commented_out_or_disabled_step_is_not_referenced():
+    ci = (
+        "jobs:\n  tests:\n    steps:\n"
+        "      - run: bash tests/test_live.sh\n"
+        "      # - run: bash tests/test_commented.sh\n"
+        "      - run: bash tests/test_off.sh\n        if: false\n"
+    )
+    assert _referenced_in_ci(ci) == {"test_live.sh"}
 ```
 
 This is illustrative, not a literal diff to apply verbatim — the implement phase writes
 the real file, seeds `CI_EXEMPT_SHELL_TESTS` from a fresh run of the reproduce command
 against its own branch HEAD (not this spec's snapshot), and follows existing repo
-formatting/import conventions (e.g. wherever `re` and `Path` are already imported
+formatting/import conventions (e.g. wherever `re`, `yaml` and `Path` are already imported
 elsewhere in `tests/`).
 
 No production code changes. No `ci.yml` changes. The new test file is picked up by the
 existing `python -m pytest tests/ -v` step with zero additional CI wiring.
 
-**Out of scope, flagged as a non-blocking follow-up, not an action item here:**
+The set logic lives in a pure helper `_violations(sh_files, referenced, exempt) ->
+(unaccounted, stale)`, unit-tested with synthetic inputs: a new unwired file is
+unaccounted; an exempt file that is wired is stale; an exempt file that is missing is
+stale; a commented-out `run:` line (and a step under `if: false`) is not referenced. The
+live-repo tests also assert `sh_files` and `referenced` are non-empty, so a wrong path
+cannot pass vacuously. Without the synthetic cases the issue's first acceptance item ("a
+test fails when…") would be asserted only by inspection, since every live-repo test is
+green by construction on the day it lands.
+
+**What runs where:** all of the above is pure Python and runs in CI's `tests` job via
+pytest (`ci.yml:13`); it also runs unchanged on a developer's Windows host. No shell test
+is added, so nothing here depends on the per-file `- run:` list.
+
+**Doc follow-through (implement phase):**
 `docs/factory-target-boundary.md`'s "Known gaps" section (~line 309) carries a note that
 "`tests/test_scheduler.sh` exists but is not in `.github/workflows/ci.yml`'s bash-test
 list." Once this guard test ships, that line becomes either resolved (if
 `test_scheduler.sh` is later wired) or redundant with the new allowlist (while it stays
-exempt) — either way it's stale prose, but refine's scope boundary for this ticket is
-`docs/superpowers/specs/` and `.archon/memory/` only, so updating that doc is left for the
-implement phase or a separate ticket.
+exempt) — either way it's stale prose. Refine's scope boundary for this ticket is
+`docs/superpowers/specs/` and `.archon/memory/` only, so refine does not touch it; the
+implement phase updates that Known-gaps bullet to point at `CI_EXEMPT_SHELL_TESTS` and
+records it in `doc-impact.md` (the artifact implement Phase 4 writes once PR #542's
+docs-conformance gate is on `main`; if it has not merged, the doc edit is still made).
+This is the only file other than the new test that the implementation touches.
 
 ## Alternatives considered
 
@@ -174,7 +244,3 @@ implement phase or a separate ticket.
   the current (refinement-time) state and must be re-derived from the reproduce command
   against the implementation branch's actual HEAD, per the issue's scope note — the 23
   files listed in this spec's Overview are not a committed, final allowlist.
-- `ci.yml` has no comment lines mentioning a `tests/*.sh` path today (verified by
-  inspection during refinement); if that ever changes, Requirement 3's accepted limitation
-  (a comment-only mention counts as "covered") would need revisiting, but that is not the
-  current state and is not addressed by this ticket.
