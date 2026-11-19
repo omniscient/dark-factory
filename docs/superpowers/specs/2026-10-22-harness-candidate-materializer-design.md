@@ -4,7 +4,7 @@
 **Depends on:** #464 (closed/merged — `scripts/factory_core/mechanism_candidate.py`)
 **Revised:** 2026-11-19 (operator amendment after second spec-gate review: Phase A/Phase B split per owner Decision 2, runnable preflight probe and CI step, write_paths containment, live attack fixtures, bind order, snapshot source)
 **Scope of #465:** Phase A (materialize) only. Phase B (run) is specified here as the design of
-record and is implemented under the Phase B follow-up issue (filed by the operator at spec approval;
+record and is implemented under the Phase B follow-up issue #544 (filed by the operator at spec approval;
 `Depends on: #465`). See "Implementation sequencing".
 
 ---
@@ -78,7 +78,7 @@ decisions (issue comment, 2026-11-19) resolve both:
   `run()` accepts H0–H1 only, needs the real `bwrap` boundary, and refuses H2 with a `BLOCKED`
   verdict pending #467's quarantine design. The ticket is split on that seam: **#465 is the
   materialize half (Phase A)**; the run half (Phase B) is implemented under the Phase B follow-up
-  issue (filed by the operator at spec approval; `Depends on: #465`). See "Implementation
+  issue #544 (filed by the operator at spec approval; `Depends on: #465`). See "Implementation
   sequencing".
 
 This document therefore specifies two things and #465 implements one of them: **Phase A**, the
@@ -573,7 +573,7 @@ to the four reference docs must exist.
 
 Per Decision 2 the ticket is split on the `materialize()`/`run()` seam. **#465 is Phase A only.**
 Phase B is specified in this document as the design of record and is implemented under the Phase B
-follow-up issue (filed by the operator at spec approval; `Depends on: #465`), with parent epic
+follow-up issue #544 (filed by the operator at spec approval; `Depends on: #465`), with parent epic
 #463. The plan and the conformance gate for #465 cover Phase A only; Phase B work appearing in a
 #465 change is out of scope.
 
