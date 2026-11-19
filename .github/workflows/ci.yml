@@ -60,3 +60,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f Dockerfile -t dark-factory:pr .
+      # SPIKE for #465 (do not merge): can bwrap create user namespaces inside the PR image on this runner?
+      - name: bwrap probe (seccomp/apparmor unconfined)
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone || true
+          docker run --rm --network none --security-opt seccomp=unconfined --security-opt apparmor=unconfined --entrypoint bash dark-factory:pr -c 'id; bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev -- /bin/true; echo "probe_rc=$?"'
+      - name: bwrap probe (default confinement, expected to fail)
+        if: always()
+        run: |
+          docker run --rm --network none --entrypoint bash dark-factory:pr -c 'bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --die-with-parent --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev -- /bin/true; echo "probe_rc=$?"' || true
