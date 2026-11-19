@@ -727,3 +727,48 @@ class TestDeliveredVsMeasuredOnlySavings:
         for f in ("savings_tokens", "savings_pct", "measured_only_savings_tokens",
                   "measured_only_sections"):
             assert f in result
+
+
+# ── docs-conformance scenario (#535) ─────────────────────────────────────────
+
+class TestDocsConformanceScenario:
+    def test_registry_entry(self):
+        assert cb._SECTION_REGISTRY["docs-conformance"] == ["skill_prompts", "diff", "doc_impact_md"]
+        assert cb._DELIVERED_SAVINGS["docs-conformance"] == frozenset({"diff"})
+
+    def test_doc_impact_included_and_hashed(self, tmp_path):
+        doc_impact = tmp_path / "doc-impact.md"
+        doc_impact.write_text("- `scripts/x.sh` -> NO_IMPACT: internal refactor\nOVERALL: NO_IMPACT: internal\n")
+        result = run_budget(tmp_path, "docs-conformance",
+                            diff_file=make_diff_file(tmp_path),
+                            doc_impact_file=str(doc_impact))
+        assert result["scenario"] == "docs-conformance"
+        assert result["sections"]["doc_impact_md"]["status"] == "included"
+        assert "doc-impact.md" in result["source_file_hashes"]
+        assert result["sections"]["diff"]["status"] in ("included", "included_partial")
+
+    def test_missing_doc_impact_is_dropped_not_fatal(self, tmp_path):
+        result = run_budget(tmp_path, "docs-conformance",
+                            diff_file=make_diff_file(tmp_path),
+                            doc_impact_file=str(tmp_path / "absent.md"))
+        assert result["sections"]["doc_impact_md"]["status"] == "dropped"
+        assert "doc_impact_md" in result["dropped_sections"]
+
+    def test_other_scenarios_unchanged(self):
+        assert "doc_impact_md" not in cb._SECTION_REGISTRY["conformance"]
+        assert "doc_impact_md" not in cb._SECTION_REGISTRY["code-review"]
+
+    def test_cli_accepts_scenario_and_doc_impact_flag(self, tmp_path):
+        import subprocess
+        doc_impact = tmp_path / "doc-impact.md"
+        doc_impact.write_text("OVERALL: UPDATED\n")
+        out = tmp_path / "context-budget.docs-conformance.json"
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts" / "context_budget.py"),
+             "--scenario", "docs-conformance", "--issue-num", "535", "--run-id", "r1",
+             "--artifacts-dir", str(tmp_path), "--clone-dir", str(tmp_path),
+             "--doc-impact-file", str(doc_impact), "--diff-file", make_diff_file(tmp_path),
+             "--out", str(out)],
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(out.read_text())["sections"]["doc_impact_md"]["status"] == "included"

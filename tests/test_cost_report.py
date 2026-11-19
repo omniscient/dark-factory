@@ -634,7 +634,7 @@ def test_delivered_sets_in_sync_with_context_budget():
     mem = {s for s, secs in cb._DELIVERED_SAVINGS.items() if "memory_context" in secs}
     diff = {s for s, secs in cb._DELIVERED_SAVINGS.items() if "diff" in secs}
     assert mem == set(cr.DELIVERED_MEMORY_PHASES)
-    assert diff == {"conformance", "code-review"}
+    assert diff == {"conformance", "code-review", "docs-conformance"}
 
 
 def test_architecture_stays_measured_only_across_scenarios():

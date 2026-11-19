@@ -30,12 +30,13 @@ _SECTION_REGISTRY: dict[str, list[str]] = {
     "continue":    ["claude_md", "architecture_md", "issue_context", "memory_context", "comment_digest"],
     "conformance": ["skill_prompts", "spec", "implementation_md", "diff"],
     "code-review": ["skill_prompts", "issue_context", "diff"],
+    "docs-conformance": ["skill_prompts", "diff", "doc_impact_md"],
 }
 
 # Sections whose optimised output is actually delivered to the phase's prompt today,
 # per scenario. Only these count toward the headline savings_tokens; every other
 # section with a baseline is measured-only telemetry (#487).
-#   diff (conformance, code-review): the commands run diff_rank.py with the exported
+#   diff (conformance, code-review, docs-conformance): the commands run diff_rank.py with the exported
 #     TOKEN_OPTIMIZATION_DIFF_MAX_REVIEW_TOKENS cap and review the ranked diff.
 #   memory_context (refine, plan, implement, continue): these phases load memory with
 #     load_memory_context.sh, which runs memory_retrieve.py; since #486 the retriever
@@ -52,6 +53,7 @@ _DELIVERED_SAVINGS: dict[str, frozenset[str]] = {
     "continue": frozenset({"memory_context"}),
     "conformance": frozenset({"diff"}),
     "code-review": frozenset({"diff"}),
+    "docs-conformance": frozenset({"diff"}),
 }
 
 _SKILL_PROMPT_DIR = "/opt/refinement-skills"
@@ -217,6 +219,7 @@ def build_budget(
     labels: list[str] | None = None,
     comment_digest_file: str | None = None,
     issue_text: str | None = None,
+    doc_impact_file: str | None = None,
 ) -> None:
     active = _SECTION_REGISTRY.get(scenario, [])
     sections: dict[str, dict] = {}
@@ -322,6 +325,15 @@ def build_budget(
                 if h:
                     source_hashes["implementation.md"] = h
 
+        elif sec == "doc_impact_md":
+            # Measured-only, like implementation_md: the docs-conformance command reads
+            # doc-impact.md in full (#535).
+            sections[sec] = _included(_read_text(doc_impact_file), doc_impact_file)
+            if doc_impact_file and sections[sec]["status"] == "included":
+                h = te.hash_file(doc_impact_file)
+                if h:
+                    source_hashes["doc-impact.md"] = h
+
         elif sec == "diff":
             sections[sec] = _probe_diff(diff_file)
             if diff_file and sections[sec]["status"] in ("included", "included_partial"):
@@ -408,6 +420,8 @@ def main() -> None:
     parser.add_argument("--issue-json")
     parser.add_argument("--impl-file")
     parser.add_argument("--diff-file")
+    parser.add_argument("--doc-impact-file",
+                        help="Path to doc-impact.md (used for docs-conformance scenario)")
     parser.add_argument("--spec-component",
                         help="Explicit component for architecture slicing "
                              "(backend|frontend|dark-factory|infrastructure); inferred if omitted")
@@ -438,6 +452,7 @@ def main() -> None:
         changed_files=args.changed_files,
         labels=args.labels,
         comment_digest_file=args.comment_digest_file,
+        doc_impact_file=args.doc_impact_file,
     )
     print(f"context-budget.json written to {args.out}", file=sys.stderr)
 
