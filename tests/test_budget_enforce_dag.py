@@ -44,7 +44,7 @@ def test_config_budgets_has_all_scenarios():
     # Kept alongside test_config_budgets_t6_state as independent scenario-presence guard:
     # catches a missing key even if the exact-value dict comparison changes in the future.
     budgets = _tok_opt().get("budgets", {})
-    for scenario in ("refine", "plan", "implement", "conformance", "code-review"):
+    for scenario in ("refine", "plan", "implement", "conformance", "code-review", "docs-conformance"):
         assert scenario in budgets, f"budgets map must include '{scenario}'"
 
 
@@ -56,6 +56,7 @@ def test_config_budgets_t6_state():
         "implement": 30000,
         "conformance": 22000,
         "code-review": 22000,
+        "docs-conformance": 22000,
     }
     assert budgets == expected, (
         f"budgets must match the T6 intended state {expected}, got {budgets}"
@@ -72,7 +73,7 @@ def test_config_enforce_has_all_scenarios():
     # Kept alongside test_config_enforce_t6_state as independent scenario-presence guard:
     # catches a missing key even if the exact-value dict comparison changes in the future.
     enforce = _tok_opt().get("enforce", {})
-    for scenario in ("refine", "plan", "implement", "conformance", "code-review"):
+    for scenario in ("refine", "plan", "implement", "conformance", "code-review", "docs-conformance"):
         assert scenario in enforce, f"enforce map must include '{scenario}'"
 
 
@@ -84,6 +85,7 @@ def test_config_enforce_t6_state():
         "implement": False,
         "conformance": True,
         "code-review": True,
+        "docs-conformance": False,
     }
     assert enforce == expected, (
         f"enforce must match the T3b intended state {expected}, got {enforce}"

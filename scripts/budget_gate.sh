@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Budget gate — reads token_optimization config, derives enforce/observe mode,
 # applies the TOKEN_OPTIMIZATION_ENFORCE_BUDGETS kill-switch, and invokes
-# budget_enforce.py. One script backs all 5 enforce-budget-* workflow nodes
-# (refine/plan/implement/conformance/code-review) — a faithful extraction of
+# budget_enforce.py. One script backs all 6 enforce-budget-* workflow nodes
+# (refine/plan/implement/conformance/docs-conformance/code-review) — a faithful extraction of
 # logic that used to be duplicated inline per scenario (#183).
 #
 # Usage: budget_gate.sh <scenario>
