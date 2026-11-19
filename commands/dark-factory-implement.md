@@ -217,8 +217,13 @@ have not confirmed.
 
 ## Phase 4: DOCUMENT
 
-1. Read the file list from `$ARTIFACTS_DIR/implementation.md` (all files created/modified in Phase 3).
-   Cross-check: `git diff main...HEAD --name-only` for completeness.
+Documentation is part of the change. Gate 2.5 (`dark-factory-docs-conformance`, after Gate 2
+and before `push-and-pr`) independently checks the branch's docs against the final diff and
+audits the `doc-impact.md` you write here — so a skipped or hand-waved assessment is caught,
+not trusted.
+
+1. Get the authoritative changed-file list: `git diff main...HEAD --name-only`. Cross-check
+   against the file list in your Phase 3 notes; the git list wins.
 2. Classify each path against this mapping to produce the list of `(doc_file, section)` pairs to update:
 
    | Changed file pattern | Documentation target | Section |
@@ -235,23 +240,55 @@ have not confirmed.
    | `CLAUDE.md`-affecting changes (new port, command, pattern) | `CLAUDE.md` | Relevant section |
 
    Rules:
-   - If a path matches no pattern, skip it.
+   - A path that matches no row is **not** evidence of no impact — step 3 still covers it.
    - If a file was modified but nothing added/removed (e.g. only existing model fields changed), still read the current doc row and update it if the description is now inaccurate.
    - If a file was deleted, remove the corresponding doc row.
    - `CLAUDE.md` is only touched if the change adds/removes a developer-facing command, port, or architectural pattern. This is rare and requires explicit judgment.
-   - `docs/database-schema.md` is auto-generated — never edit it.
-
-3. If no pairs matched, skip this phase entirely (no docs commit needed).
-4. For each `(doc_file, section)` pair:
+   - `docs/database-schema.md` is auto-generated — never edit it. The same holds for any other
+     doc that says it is generated.
+3. **Behavior scan — read the diff content, not just the paths.** Run `git diff main...HEAD`
+   and list every operator- or developer-visible behavior the change adds, removes or alters:
+   a workflow node or its order, a gate's pass/block rule, a config key or default, an env
+   var, an artifact file, a label, a board status, a comment marker, a command's phase
+   behavior (policy Markdown under `commands/**`, `.claude/skills/**`, `refinement-skills/**`
+   is behavior), a CLI flag, a script's exit-code contract, scheduler timing. For each one,
+   find the docs that describe that area — Grep `README.md`, `docs/`, `ARCHITECTURE.md`,
+   `PROJECT_STRUCTURE.md`, `ENV_VARIABLES.md`, `CLAUDE.md`, and, where the repo has them, the
+   reference docs `docs/run-lifecycle.md`, `docs/scheduler.md`, `docs/features.md`,
+   `docs/configuration.md` — and add a `(doc_file, section)` pair for every doc that is now
+   false or incomplete. A touched doc that cites line numbers of a file you changed must have
+   those citations re-derived from the changed file.
+   - On `continue`, also read the latest "Docs Conformance (Gate 2.5)" comment on the issue
+     (marker `df-docs-conformance-blocked` or `df-docs-conformance-observed`), if any, and
+     treat each `[MATERIAL]` item in it as a pair to fix — after checking it against the
+     current diff: these comments are upserted, so one can predate later commits.
+4. For each `(doc_file, section)` pair from steps 2 and 3:
    a. Read the current section in full
    b. Read the changed source file(s) that triggered this pair
    c. Write the updated section content: add a new row, update an existing row, or remove a deleted entry. Read surrounding entries and match their style (inline comments, column widths, etc.)
-5. Commit all doc changes: `git commit -m "docs: update architecture map for <feature-slug>"` — derive `<feature-slug>` from the branch name (e.g. `feat/issue-12-new-router` → `new-router`).
+5. Write `$ARTIFACTS_DIR/doc-impact.md` — always, even when nothing needed a doc change. One
+   entry per changed behavior from steps 2–3, then exactly one `OVERALL:` line:
+   ```markdown
+   # Documentation impact — issue #<N>
+
+   - `<changed file or behavior>` -> UPDATED `<doc file>#<section>` — <what the doc now says>
+   - `<changed file or behavior>` -> NO_IMPACT: <why no existing doc describes it or became false>
+
+   OVERALL: UPDATED
+   ```
+   Use `OVERALL: UPDATED` when any doc changed, otherwise `OVERALL: NO_IMPACT: <reason that
+   covers the whole diff>`. A `NO_IMPACT` reason must say why no existing doc is now false or
+   incomplete; "no mapping row matched" or "internal change" alone is not a reason. A missing
+   file or a missing `OVERALL:` line makes Gate 2.5 block. This file is a run artifact — do not
+   commit it.
+6. If any doc changed, commit the doc changes: `git commit -m "docs: update architecture map for <feature-slug>"` — derive `<feature-slug>` from the branch name (e.g. `feat/issue-12-new-router` → `new-router`).
 
 ### PHASE_4_CHECKPOINT
-- [ ] `git diff main...HEAD --name-only` run and classified against the mapping table
-- [ ] All matched doc sections updated
-- [ ] `docs:` commit created (or phase explicitly skipped — no matches)
+- [ ] `git diff main...HEAD --name-only` classified against the mapping table
+- [ ] Diff content scanned for behavior changes, including ones no mapping row covers
+- [ ] All affected doc sections updated
+- [ ] `$ARTIFACTS_DIR/doc-impact.md` written with one entry per changed behavior and an `OVERALL:` line
+- [ ] `docs:` commit created, or `OVERALL: NO_IMPACT: <reason>` recorded
 
 ## Phase 5: MEMORY UPDATE
 
@@ -449,13 +486,14 @@ Write a summary of what was implemented to `$ARTIFACTS_DIR/implementation.md`:
 - Tests added
 - Migrations created (if any)
 - Any decisions or trade-offs made
+- Documentation impact: the `OVERALL:` line from `$ARTIFACTS_DIR/doc-impact.md` (the full assessment stays in that file)
 
 ### Report discipline
 
-Keep a green-path report to the 4 bullets above (files, tests, migrations, decisions) — no restated
+Keep a green-path report to the 5 bullets above (files, tests, migrations, decisions, documentation impact) — no restated
 issue text, no process narration ("first I explored...", "then I decided..."), and no questions per
 the Headless Execution Contract above ("never end your turn on a question"); this run is headless.
 
 If anything went sideways, surface it prominently at the **top** of `implementation.md`, before the
-4 standard bullets: entries in `$ARTIFACTS_DIR/out-of-scope.md`, unresolved reservations about the
+5 standard bullets: entries in `$ARTIFACTS_DIR/out-of-scope.md`, unresolved reservations about the
 approach taken, and the contents of `$ARTIFACTS_DIR/failure-diagnosis.md` if one was written.
