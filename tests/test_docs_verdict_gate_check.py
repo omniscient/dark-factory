@@ -165,14 +165,52 @@ def test_script_is_not_verdict_gate_check():
 
 
 
-# ── optional 5th argument: the branch changed during the read-only docs-conformance node ──
-_TAMPER = "HEAD moved abc -> def"
+# ── optional 5th/6th arguments: the branch changed during the read-only docs-conformance
+# node. Kind "status" (or none) is governed by the mode like a verdict; kind "head" (a
+# commit Gate 2 never saw) blocks in every mode.
+_TAMPER = "git status changed"
+_HEAD_NOTE = "HEAD moved abc -> def"
 
 
-def _run_tampered(tmp_path, content, mode, needs_discussion=False):
+def _run_tampered(tmp_path, content, mode, needs_discussion=False, note=_TAMPER, kind="status"):
     verdict = tmp_path / "docs-conformance.md"
-    return _run(tmp_path, content, mode, needs_discussion=needs_discussion,
-                extra_args=[str(verdict), "535", _LABEL, mode, _TAMPER])
+    args = [str(verdict), "535", _LABEL, mode, note] + ([] if kind is None else [kind])
+    return _run(tmp_path, content, mode, needs_discussion=needs_discussion, extra_args=args)
+
+
+@pytest.mark.parametrize("mode", ["enforce", "observe", "", "bogus"])
+def test_head_moved_blocks_and_comments_in_every_mode(tmp_path, mode):
+    rc, log, err = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], mode,
+                                 note=_HEAD_NOTE, kind="head")
+    assert rc == 1, "a commit Gate 2 never reviewed must not be pushed, whatever the mode"
+    assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
+    assert _HEAD_NOTE in err
+
+
+def test_head_moved_with_needs_discussion_blocks_quietly_in_observe(tmp_path):
+    rc, log, _ = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe",
+                               needs_discussion=True, note=_HEAD_NOTE, kind="head")
+    assert rc == 1 and "tracker comment" not in log
+
+
+def test_head_moved_non_numeric_issue_fails_closed_without_tracker_call(tmp_path):
+    verdict = tmp_path / "docs-conformance.md"
+    rc, log, _ = _run(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe",
+                      extra_args=[str(verdict), "null", _LABEL, "observe", _HEAD_NOTE, "head"])
+    assert rc == 1 and log == ""
+
+
+def test_kind_head_without_a_note_changes_nothing(tmp_path):
+    verdict = tmp_path / "docs-conformance.md"
+    rc, log, _ = _run(tmp_path, SCENARIOS["misleading-but-present-doc-update"], "observe",
+                      extra_args=[str(verdict), "535", _LABEL, "observe", "", "head"])
+    assert rc == 0 and log == ""
+
+
+def test_note_without_a_kind_is_governed_by_the_mode(tmp_path):
+    rc, log, _ = _run_tampered(tmp_path, SCENARIOS["policy-markdown-change-documented"], "observe",
+                               kind=None)
+    assert rc == 0 and log == ""
 
 
 def test_enforce_tamper_note_blocks_a_pass_verdict_and_comments(tmp_path):

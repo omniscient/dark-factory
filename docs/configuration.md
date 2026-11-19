@@ -138,14 +138,14 @@ All keys here are read by phase agents following the command files, from the run
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:53`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1581` (report text only) | none | no |
+| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:53`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1586` (report text only) | none | no |
 | `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:61`, `commands/dark-factory-plan.md:179` (agent-read) | none | no |
 | `conformance.block_on_material` | `true` | material findings block | `commands/dark-factory-conformance.md:62` (agent-read) | none | no |
 | `conformance.scope_enforcement` | `true` | detect out-of-scope changes | `commands/dark-factory-conformance.md:63` (agent-read) | none | no |
 | `conformance.excise_out_of_scope` | `true` | revert out-of-scope changes (false = file a ticket only) | `commands/dark-factory-conformance.md:64` (agent-read) | none | no |
 | `conformance.backlog_label` | `scope-spillover` | label on auto-created spillover tickets | `commands/dark-factory-conformance.md:65` (agent-read) | none | no |
 | `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:69-70`, `commands/dark-factory-plan.md:186-187` (agent-read, python reads the clone's config; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`) | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
-| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1622` (report text) | none | no |
+| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1627` (report text) | none | no |
 | `code_review.block_threshold` | `high` | severity at or above which findings block | `commands/dark-factory-code-review.md:57`; `scripts/code_review_payload.py:152-155,200-206` | none | no |
 | `code_review.fail_open` | `true` | reviewer error becomes advisory | `commands/dark-factory-code-review.md:58` (agent-read) | none | no |
 | `code_review.max_findings` | `50` | cap on inline comments | `commands/dark-factory-code-review.md:59`; `scripts/code_review_payload.py:152,167` | none | no |
@@ -161,7 +161,7 @@ than `enforce` means `enabled: true` and `observe`.
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `docs_conformance.enabled` | `true` | false = the command writes `STATUS: SKIPPED`, which passes in both modes | `commands/dark-factory-docs-conformance.md:68,72-75` (agent-read) | none | no |
-| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch, never block. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`; it also blocks when HEAD or `git status` changed during the `docs-conformance` node, which `observe` only logs. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1247-1248` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
+| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch; the docs verdict never blocks. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`; it also blocks when `git status` changed during the `docs-conformance` node, which `observe` only logs. Outside this key: a commit made during that node stops the push in every mode. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1251-1252` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
 
 ### `preview`, `conflict_resolution`
 
@@ -275,7 +275,7 @@ file is what the later phases source
 (`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:201`,
 `commands/dark-factory-docs-conformance.md:97`, `commands/dark-factory-code-review.md:110`).
 Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`
-(`workflows/archon-dark-factory.yaml:402,442,716,1115,1203,1469`).
+(`workflows/archon-dark-factory.yaml:402,442,716,1115,1203,1474`).
 
 | Key | Default | Controls | Reader | Env override (scope) |
 |---|---|---|---|---|
@@ -440,7 +440,7 @@ containers (`run-compose.yml:31-47`).
 |---|---|---|---|
 | `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:374` (adds the `factory-model-proxy` compose profile) | `instance.env` |
 | `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:39`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
-| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1300` (stubs preview and PR creation) | `.archon/.env` / bench harness |
+| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1305` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:50` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:214` | `.archon/.env` |

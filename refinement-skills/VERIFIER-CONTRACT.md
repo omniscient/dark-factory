@@ -109,7 +109,7 @@ when adjudicating a divergence.
 values (per `scripts/verdict_gate_check.sh`) are `PASS`/`SKIPPED`/`ERROR` (proceed)
 and `BLOCKED` (block). `scripts/docs_verdict_gate_check.sh` (Gate 2.5) is stricter in
 `enforce` mode — only `PASS`/`SKIPPED` proceed; `ERROR`, `BLOCKED`, missing and
-unparseable all block — and proceeds on everything in `observe` mode. `HUMAN_REQUIRED` and `FAIL` are documented legacy tokens
+unparseable all block — and proceeds on every verdict in `observe` mode (a commit made during the node stops the push in either mode). `HUMAN_REQUIRED` and `FAIL` are documented legacy tokens
 returned verbatim, never rejected or normalized. `GATE_TYPE`/`FINDINGS_COUNT`/
 `SEVERITY` are optional on parse, required on emit. `SEVERITY` ∈
 `{none, low, medium, high, critical}`.

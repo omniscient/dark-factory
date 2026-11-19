@@ -246,26 +246,37 @@ def _change_status(root):
     (root / "stray.txt").write_text("left by the read-only node\n")
 
 
-@pytest.mark.parametrize("tamper", [_move_head, _change_status])
-def test_enforce_blocks_and_comments_when_branch_changed_during_review(gitclone, tamper):
+@pytest.mark.parametrize("cfg", [_ENFORCE, _OBSERVE, "docs_conformance:\n  mode: bogus\n", "{}\n"])
+def test_commit_during_review_stops_the_push_in_every_mode(gitclone, cfg):
+    """A tripwire protecting Gate 2, not a docs verdict: push-and-pr would push a commit
+    Gate 2 never saw, so docs_conformance.mode does not get a say."""
     root, _ = gitclone
     _record_baseline(gitclone)
-    tamper(root)
-    rc, log, err = _run_gate_err(gitclone, _ENFORCE, "STATUS: PASS\n")
-    assert rc == 1, "a commit made after Gate 2 must not reach push-and-pr in enforce mode"
+    _move_head(root)
+    rc, log, err = _run_gate_err(gitclone, cfg, "STATUS: PASS\n")
+    assert rc == 1, "a commit made after Gate 2 must never reach push-and-pr"
     assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
-    assert "read-only" in err
+    assert "HEAD moved" in err and "read-only" in err
 
 
-@pytest.mark.parametrize("tamper", [_move_head, _change_status])
-def test_observe_logs_but_never_blocks_when_branch_changed_during_review(gitclone, tamper):
+def test_enforce_blocks_and_comments_when_status_changed_during_review(gitclone):
     root, _ = gitclone
     _record_baseline(gitclone)
-    tamper(root)
+    _change_status(root)
+    rc, log, err = _run_gate_err(gitclone, _ENFORCE, "STATUS: PASS\n")
+    assert rc == 1
+    assert "tracker comment" in log and "--marker <!-- df-push-gate-failure -->" in log
+    assert "git status changed" in err
+
+
+def test_observe_logs_but_does_not_block_when_only_status_changed(gitclone):
+    root, _ = gitclone
+    _record_baseline(gitclone)
+    _change_status(root)
     rc, log, err = _run_gate_err(gitclone, _OBSERVE, "STATUS: PASS\n")
-    assert rc == 0, "Requirement 13: observe never blocks"
+    assert rc == 0, "HEAD did not move: governed by docs_conformance.mode like a verdict"
     assert log == "", "observe makes no tracker call"
-    assert "read-only" in err and "enforce would block" in err
+    assert "git status changed" in err and "enforce would block" in err
 
 
 def test_missing_baseline_skips_the_comparison(gitclone):

@@ -1217,8 +1217,8 @@ nodes:
   # Verdict gate for Gate 2.5: reads docs-conformance.md like conformance-gate reads
   # conformance.md (#212, #271), but through docs_verdict_gate_check.sh, whose enforce mode
   # fails closed on ERROR too. docs_conformance.mode selects observe (default: log, never
-  # block) or enforce; any read failure or other value is observe. That holds for the
-  # read-only baseline comparison below as well: observe logs it, enforce blocks.
+  # block) or enforce; any read failure or other value is observe. One thing is outside
+  # the mode: a commit made during the docs-conformance node stops the push always.
   - id: docs-conformance-gate
     bash: |
       _CLONE="${CLONE_DIR:-.}"
@@ -1227,17 +1227,21 @@ nodes:
       # ever reviewing it. Compare HEAD and `git status` with the baseline
       # budget-docs-conformance recorded (a tree that was already dirty then is not a
       # violation). No baseline (the budget node could not write it) = nothing to compare.
-      # The note goes to docs_verdict_gate_check.sh, which blocks on it in enforce mode
-      # and only logs it in observe mode.
+      # The note goes to docs_verdict_gate_check.sh. HEAD moved (kind "head") blocks in
+      # every mode: it protects Gate 2 and is not a docs verdict. A status-only change
+      # (kind "status") follows the mode: enforce blocks, observe logs.
       PRE_HEAD=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-head.txt" 2>/dev/null)
       POST_HEAD=$(git rev-parse HEAD 2>/dev/null)
       PRE_STATUS=$(cat "$ARTIFACTS_DIR/docs-conformance-pre-status.txt" 2>/dev/null)
       POST_STATUS=$(git status --porcelain 2>/dev/null)
       CHANGED_NOTE=""
+      CHANGED_KIND=""
       if [ -n "$PRE_HEAD" ] && [ "$PRE_HEAD" != "$POST_HEAD" ]; then
         CHANGED_NOTE="HEAD moved $PRE_HEAD -> $POST_HEAD"
+        CHANGED_KIND="head"
       elif [ -n "$PRE_HEAD" ] && [ "$PRE_STATUS" != "$POST_STATUS" ]; then
         CHANGED_NOTE="git status changed"
+        CHANGED_KIND="status"
       fi
       if [ -n "$CHANGED_NOTE" ]; then
         echo "docs-conformance-gate: $CHANGED_NOTE during the read-only docs-conformance node — this would bypass Gate 2." >&2
@@ -1252,7 +1256,8 @@ nodes:
         "$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")" \
         "Docs Conformance (Gate 2.5)" \
         "$DOCS_MODE" \
-        "$CHANGED_NOTE"
+        "$CHANGED_NOTE" \
+        "$CHANGED_KIND"
     depends_on: [docs-conformance]
     when: "$parse-intent.output.intent == 'new' || $parse-intent.output.intent == 'continue'"
     timeout: 30000
