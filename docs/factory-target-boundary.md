@@ -306,5 +306,9 @@ writing:
   `hard_exclude_paths` row carried the phrasing "matched diff paths abort the run" until
   #415 corrected it; both files now describe the candidate-ticket filter this key actually
   implements.
-- **CI coverage** — `tests/test_scheduler.sh` exists but is not in
-  `.github/workflows/ci.yml`'s bash-test list.
+- **CI coverage** — `.github/workflows/ci.yml` wires shell tests one `- run:` step at a
+  time, so a `tests/*.sh` file runs nowhere until someone adds its step. Every shell test
+  not yet wired in is listed, with its observed standalone result, in
+  `tests/test_ci_covers_shell_tests.py::CI_EXEMPT_SHELL_TESTS` (#426); that guard test fails
+  on any new unwired file and on any stale exemption. Wiring the listed tests in is open
+  follow-up work.
