@@ -3,8 +3,16 @@
 Merge order (lowest→highest): baked config/config.yaml ← clone
 .claude/skills/refinement/config.yaml (transition) ← target-tunable blocks from
 .factory/adapter.yaml (today: token_optimization).
+
+#180: also the single writer of the run-config artifacts — run-config.json (the whole
+tree) and run-config.env (the ENV_WHITELIST projection bash reads through
+scripts/run_config_env.sh) — for two call sites:
+  scheduler mode (scheduler.sh, no --clone-dir): the first existing SCHEDULER_CANDIDATES
+      file, whole-file, no clone and no adapter; fail-closed.
+  run mode (entrypoint.sh, --clone-dir): a committed clone copy alone, else the
+      baked ← adapter merge materialize() also writes into the clone; fail-open.
 """
-import argparse, os, sys
+import argparse, json, os, sys
 from . import adapter
 from .adapter import _deep_merge
 
@@ -13,6 +21,64 @@ TARGET_TUNABLE_BLOCKS = ("token_optimization",)
 
 _BAKED_PATH = "/opt/dark-factory/config/config.yaml"
 _CLONE_REL = ".claude/skills/refinement/config.yaml"
+
+RUN_CONFIG_JSON = "run-config.json"
+RUN_CONFIG_ENV = "run-config.env"
+# entrypoint.sh exports the path of its run-config.json under this name: archon gives every
+# bash node its own $ARTIFACTS_DIR (the workflow run's directory, not the entrypoint's).
+RUN_CONFIG_JSON_ENV = "FACTORY_RUN_CONFIG_JSON"
+
+# Scheduler mode: first existing file wins, whole-file (scheduler.sh's former
+# resolve_config_yaml): bind-mounted target checkout → baked image → legacy baked path.
+SCHEDULER_CANDIDATES = (
+    "/workspace/project/config/config.yaml",
+    _BAKED_PATH,
+    "/opt/refinement-skills/config.yaml",
+)
+
+# The single owner of the bash projection (run-config.env): (ENV_VAR, dotted.path, readers).
+# "scheduler" rows are scheduler.sh read_config's knobs, "entrypoint" rows entrypoint.sh's;
+# order is apply (and log) order. New bash-consumed knob = one row here.
+_S, _E = "scheduler", "entrypoint"
+ENV_WHITELIST = (
+    ("POLL_INTERVAL", "scheduler.poll_interval", (_S,)),
+    ("MAX_RETRIES", "scheduler.max_retries", (_S,)),
+    ("RATE_LIMIT_FLOOR", "scheduler.rate_limit_floor", (_S,)),
+    ("FACTORY_WIP_LIMIT", "scheduler.factory_wip_limit", (_S, _E)),
+    ("MAIN_RED_RECHECK_ENABLED", "scheduler.main_red_recheck_enabled", (_S,)),
+    ("MAIN_RED_RECHECK_MINUTES", "scheduler.main_red_recheck_minutes", (_S,)),
+    ("BLOCKED_RESCUE_ENABLED", "scheduler.blocked_rescue_enabled", (_S,)),
+    ("REFINE_WIP_LIMIT", "refine.wip_limit", (_S,)),
+    ("DIRECT_TO_PR_LABEL", "direct_to_pr.label", (_S,)),
+    ("SPEC_GRACE_MINUTES", "direct_to_pr.spec_grace_minutes", (_S,)),
+    ("PLAN_GRACE_MINUTES", "direct_to_pr.plan_grace_minutes", (_S,)),
+    ("CONFLICT_RESOLUTION_ENABLED", "conflict_resolution.enabled", (_S,)),
+    ("DISPATCH_CEILING_ENABLED", "dispatch_ceiling.enabled", (_S,)),
+    ("ABOVE_CEILING_LABEL", "dispatch_ceiling.label", (_S,)),
+    ("ABOVE_CEILING_KEYWORDS", "dispatch_ceiling.keywords", (_S,)),
+    ("EPIC_AUTOPILOT_ENABLED", "epic_autopilot.enabled", (_S,)),
+    ("EPIC_AUTOPILOT_MODEL", "epic_autopilot.model", (_S,)),
+    ("EPIC_AUTOPILOT_DAILY_CAP", "epic_autopilot.daily_cap", (_S,)),
+    ("EPIC_AUTOPILOT_CONFIDENCE_FLOOR", "epic_autopilot.confidence_floor", (_S,)),
+    ("EPIC_AUTOPILOT_OPT_OUT_LABEL", "epic_autopilot.opt_out_label", (_S,)),
+    ("EPIC_AUTOPILOT_HOLD_TTL_HOURS", "epic_autopilot.hold_ttl_hours", (_S,)),
+    ("EPIC_AUTOPILOT_SIZE_CEILING", "epic_autopilot.size_ceiling", (_S,)),
+    ("EPIC_AUTOPILOT_START_EPICS", "epic_autopilot.start_epics", (_S,)),
+    ("EPIC_AUTOPILOT_SENSITIVE_KEYWORDS", "epic_autopilot.sensitive_keywords", (_S,)),
+    ("EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT", "epic_autopilot.allow_self_improvement", (_S,)),
+    ("MAIN_RED_AUTOFIX_ENABLED", "main_red_autofix.enabled", (_S,)),
+    ("MAIN_RED_AUTOFIX_MODEL", "main_red_autofix.model", (_S,)),
+    ("MAIN_RED_AUTOFIX_MAX_ATTEMPTS", "main_red_autofix.max_attempts", (_S,)),
+    ("MAIN_RED_AUTOFIX_THROTTLE_MIN", "main_red_autofix.throttle_minutes", (_S,)),
+    ("TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED", "token_optimization.architecture.enabled", (_S,)),
+    ("TOKEN_OPTIMIZATION_MEMORY_ENABLED", "token_optimization.memory.enabled", (_S,)),
+    ("TOKEN_OPTIMIZATION_COMMENTS_ENABLED", "token_optimization.comments.enabled", (_S,)),
+    ("TOKEN_OPTIMIZATION_DIFF_ENABLED", "token_optimization.diff.enabled", (_S,)),
+    ("CONFLICT_RESOLUTION_AI_TIER", "conflict_resolution.ai_tier", (_E,)),
+    ("SESSION_WINDOW_BACKOFF_ENABLED", "scheduler.session_window_backoff_enabled", (_E,)),
+    ("SESSION_WINDOW_BUFFER_MINUTES", "scheduler.session_window_buffer_minutes", (_E,)),
+    ("SESSION_WINDOW_FALLBACK_MINUTES", "scheduler.session_window_fallback_minutes", (_E,)),
+)
 
 
 def _load_yaml(path: str) -> dict:
@@ -92,13 +158,140 @@ def _git_exclude(clone_dir: str, rel: str) -> None:
         f.write(rel + "\n")
 
 
-def materialize(clone_dir: str, baked_path: str = _BAKED_PATH) -> str:
+def _get(cfg, dotted: str):
+    """Value at dotted path, or None when any segment is missing or not a mapping."""
+    node = cfg
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _env_value(var: str, value):
+    """yq-style rendering of one whitelisted scalar; None = null (written as a bare name)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        # A `>` / `|` block scalar ends in a newline that the former `$(yq ...)` read stripped.
+        value = value.rstrip("\n")
+    if isinstance(value, (int, float, str)) and "\n" not in str(value):
+        return str(value)
+    print(f"effective-config: {var} is not a single-line scalar — emitted as null",
+          file=sys.stderr)
+    return None
+
+
+def render_env(cfg: dict, reader: str, source: str) -> str:
+    """run-config.env text: `VAR=value` (raw, unquoted) or bare `VAR` (null), whitelist order."""
+    lines = ["# run-config.env (factory_core.effective_config, #180). Parsed line by line by",
+             "# scripts/run_config_env.sh -- never source it: values are raw and unquoted.",
+             f"# source: {source}"]
+    for var, dotted, readers in ENV_WHITELIST:
+        if reader in readers:
+            val = _env_value(var, _get(cfg, dotted))
+            lines.append(var if val is None else f"{var}={val}")
+    return "\n".join(lines) + "\n"
+
+
+def _atomic_write(path: str, text: str) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def write_run_artifacts(cfg: dict, out_dir: str, reader: str, source: str) -> None:
+    """Write run-config.json (whole tree), then run-config.env (reader's projection). Raises."""
+    os.makedirs(out_dir, exist_ok=True)
+    _atomic_write(os.path.join(out_dir, RUN_CONFIG_JSON),
+                  json.dumps(cfg, indent=2, default=str) + "\n")
+    _atomic_write(os.path.join(out_dir, RUN_CONFIG_ENV), render_env(cfg, reader, source))
+
+
+def resolve_scheduler(candidates=SCHEDULER_CANDIDATES):
+    """Scheduler mode: (config, path) of the first existing candidate, or (None, None).
+
+    Whole-file, no merge, no adapter overlay, never a clone: the bind-mounted target
+    checkout's file replaces the baked one entirely, keys it omits resolve empty.
+    """
+    for path in candidates:
+        if os.path.isfile(path):
+            return _load_yaml(path), path
+    return None, None
+
+
+def run_config(clone_dir, baked_path: str = _BAKED_PATH):
+    """Run mode content of run-config.json, as (config, source).
+
+    A committed clone copy is used alone (today's "clone file wins": every run-side reader
+    reads only that file); otherwise resolve()'s baked ← adapter merge, the tree
+    materialize() writes into the clone. clone_dir=None (standalone caller) = baked only.
+    """
+    if clone_dir is None:
+        return (_load_yaml(baked_path) if os.path.isfile(baked_path) else {}), baked_path
+    clone_cfg_path = os.path.join(clone_dir, _CLONE_REL)
+    if os.path.isfile(clone_cfg_path):
+        return _load_yaml(clone_cfg_path), clone_cfg_path
+    merged, sources = resolve(clone_dir, baked_path)
+    return merged, _merged_source(sources)
+
+
+def _merged_source(sources: dict) -> str:
+    return "baked <- adapter (" + ", ".join(f"{b} source: {s}" for b, s in sources.items()) + ")"
+
+
+def load_run_config(clone_dir=None, baked_path: str = _BAKED_PATH) -> dict:
+    """Config for run-side Python readers: entrypoint.sh's run-config.json
+    ($FACTORY_RUN_CONFIG_JSON), else run_config()'s resolver (standalone/pre-materialization)."""
+    path = os.environ.get(RUN_CONFIG_JSON_ENV)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            print(f"effective-config: {path} is not a mapping — resolving instead",
+                  file=sys.stderr)
+        except Exception as exc:
+            print(f"effective-config: cannot read {path}: {exc} — resolving instead",
+                  file=sys.stderr)
+    return run_config(clone_dir, baked_path)[0]
+
+
+def first_match_list(candidates, dotted: str) -> list:
+    """Items of the first candidate file whose `dotted` key is a non-empty list; [] if none.
+
+    No merge and no clone/adapter layer: replaces epic_autopilot's former per-file
+    `yq '.<dotted>[]'` loop with the same candidate order (#180 R5).
+    """
+    import yaml
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            continue
+        val = _get(data, dotted)
+        if isinstance(val, list):
+            items = [str(v).strip().strip('"') for v in val if v is not None and str(v).strip()]
+            if items:
+                return items
+    return []
+
+
+def materialize(clone_dir: str, baked_path: str = _BAKED_PATH, out_dir: str | None = None) -> str:
     """Entrypoint-facing operation; returns a one-line human summary.
 
-    Transition period (clone config.yaml exists): write NOTHING — the committed
-    clone file wins byte-identically; warn on adapter drift. Post-cleanup (no
-    clone config): write the merged config into the clone and git-exclude it so
-    the materialized artifact can never be committed back to the target repo.
+    Transition period (clone config.yaml exists): write NOTHING into the clone — the
+    committed clone file wins byte-identically; warn on adapter drift. Post-cleanup (no
+    clone config): write the merged config into the clone and git-exclude it so the
+    materialized artifact can never be committed back to the target repo.
+    With out_dir (#180), also write run-config.{json,env} there from the same content.
     """
     merged, sources = resolve(clone_dir, baked_path)
     clone_cfg_path = os.path.join(clone_dir, _CLONE_REL)
@@ -113,6 +306,7 @@ def materialize(clone_dir: str, baked_path: str = _BAKED_PATH) -> str:
                       " re-sync .factory/adapter.yaml", file=sys.stderr)
         srcs = ", ".join(f"{b} source: {'clone' if b in clone_cfg else 'baked'}"
                          for b in TARGET_TUNABLE_BLOCKS)
+        _write_run_artifacts_fail_open(clone_cfg, out_dir, clone_cfg_path)
         return f"effective-config: clone config present — left in place ({srcs})"
     import yaml
     # Exclude BEFORE writing: if the exclude append fails, better to have no
@@ -121,24 +315,68 @@ def materialize(clone_dir: str, baked_path: str = _BAKED_PATH) -> str:
     os.makedirs(os.path.dirname(clone_cfg_path), exist_ok=True)
     with open(clone_cfg_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(merged, f, sort_keys=False)
+    _write_run_artifacts_fail_open(merged, out_dir, _merged_source(sources))
     srcs = ", ".join(f"{b} source: {sources[b]}" for b in TARGET_TUNABLE_BLOCKS)
     return f"effective-config: materialized from baked defaults ({srcs})"
 
 
+def _write_run_artifacts_fail_open(cfg: dict, out_dir: str | None, source: str) -> None:
+    """Run mode: a run-config write failure warns and never blocks the clone-side file."""
+    if not out_dir:
+        return
+    try:
+        write_run_artifacts(cfg, out_dir, "entrypoint", source)
+    except Exception as exc:
+        print(f"effective-config: cannot write run-config artifacts to {out_dir}: {exc}",
+              file=sys.stderr)
+
+
+def _scheduler_main(args) -> int:
+    """Scheduler mode (no --clone-dir). Fail-closed: non-zero and nothing written on error."""
+    candidates = tuple(args.candidate) if args.candidate else SCHEDULER_CANDIDATES
+    cfg, path = resolve_scheduler(candidates)
+    if path is None:
+        print("effective-config: ERROR — config.yaml not found — searched: "
+              + " ".join(candidates), file=sys.stderr)
+        return 1
+    if args.print_merged:
+        import yaml
+        print(yaml.safe_dump(cfg, sort_keys=False))
+        return 0
+    if not args.out_dir:
+        print("effective-config: scheduler mode --materialize needs --out-dir", file=sys.stderr)
+        return 2
+    try:
+        write_run_artifacts(cfg, args.out_dir, "scheduler", path)
+    except Exception as exc:
+        print(f"effective-config: cannot write run-config artifacts: {exc}", file=sys.stderr)
+        return 1
+    print(f"effective-config: scheduler mode — resolved {path}")
+    return 0
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
+    p.add_argument("--clone-dir", default=None,
+                   help="run mode (entrypoint.sh); omitted = scheduler mode (scheduler.sh)")
     p.add_argument("--baked", default=_BAKED_PATH)
+    p.add_argument("--out-dir", default=None,
+                   help="also write run-config.json + run-config.env here"
+                        " (required for scheduler-mode --materialize)")
+    p.add_argument("--candidate", action="append", default=None,
+                   help="scheduler mode: replace SCHEDULER_CANDIDATES (tests only)")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--materialize", action="store_true",
-                   help="Materialize the effective config into the clone; print summary")
+                   help="Materialize the effective config; print summary")
     g.add_argument("--print", dest="print_merged", action="store_true",
                    help="Dump merged YAML to stdout (debugging/tests)")
     args = p.parse_args()
-    # Fail-open: a config-resolution bug must never kill a run — always exit 0.
+    if args.clone_dir is None:
+        sys.exit(_scheduler_main(args))
+    # Run mode. Fail-open: a config-resolution bug must never kill a run — always exit 0.
     try:
         if args.materialize:
-            print(materialize(args.clone_dir, args.baked))
+            print(materialize(args.clone_dir, args.baked, args.out_dir))
         else:
             import yaml
             merged, _ = resolve(args.clone_dir, args.baked)

@@ -3,10 +3,16 @@
 # applies the TOKEN_OPTIMIZATION_ENFORCE_BUDGETS kill-switch, and invokes
 # budget_enforce.py. One script backs all 6 enforce-budget-* workflow nodes
 # (refine/plan/implement/conformance/docs-conformance/code-review) — a faithful extraction of
-# logic that used to be duplicated inline per scenario (#183).
+# logic that used to be duplicated inline per scenario (#183). Mode and budget come from
+# the run's materialized run-config.json (#180) — the same tree entrypoint.sh writes to the
+# clone-side config.yaml that budget_enforce.py still reads via --config.
 #
 # Usage: budget_gate.sh <scenario>
 # Env:   ARTIFACTS_DIR (required) — same contract as context_budget.py/budget_enforce.py
+#        FACTORY_RUN_CONFIG_JSON (optional, default $ARTIFACTS_DIR/run-config.json) —
+#                   exported by entrypoint.sh: archon gives bash nodes their own
+#                   ARTIFACTS_DIR, so in a run this is the path that resolves. Missing or
+#                   unparseable → observe mode
 #        CLONE_DIR (optional, default ".") — clone root; CWD is the clone root in
 #                   bash workflow nodes, so "." is the correct default there
 #        TOKEN_OPTIMIZATION_ENFORCE_BUDGETS (optional) — kill-switch override;
@@ -33,18 +39,18 @@ fi
 _CLONE="${CLONE_DIR:-.}"
 _CFG="${_CLONE}/.claude/skills/refinement/config.yaml"
 _SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+_RUN_CFG="${FACTORY_RUN_CONFIG_JSON:-$ARTIFACTS_DIR/run-config.json}"
+[ -f "$_RUN_CFG" ] || echo "budget_gate.sh: WARNING — ${_RUN_CFG} not found; observe mode" >&2
 
-# Single parse — avoids mode/budget desync if config is partially malformed.
-# Scenario is passed as a python argv (not string-interpolated) so the only
-# shell-interpolated string is the config path, same as the old inline blocks.
-read -r _EB _ES _BUD < <(python3 -c "
-import sys, yaml
-to = yaml.safe_load(open('${_CFG}')).get('token_optimization', {})
-s = sys.argv[1]
-print(str(to.get('enforce_budgets', False)).lower(),
-      str(to.get('enforce', {}).get(s, False)).lower(),
-      to.get('budgets', {}).get(s, to.get('default_budget_tokens', 30000)))
-" "$SCENARIO" 2>/dev/null || echo "false false 30000")
+# Single parse — avoids mode/budget desync if config is partially malformed. Same
+# defaults as the #183 python reader: enforce_budgets/enforce.<s> false, budget
+# budgets.<s> → default_budget_tokens → 30000. Scenario is a jq --arg, never interpolated.
+read -r _EB _ES _BUD < <(jq -r --arg s "$SCENARIO" '
+  (.token_optimization // {}) as $to
+  | [ ($to.enforce_budgets // false | tostring | ascii_downcase),
+      (($to.enforce // {})[$s] // false | tostring | ascii_downcase),
+      (($to.budgets // {})[$s] // $to.default_budget_tokens // 30000 | tostring) ]
+  | join(" ")' "$_RUN_CFG" 2>/dev/null || echo "false false 30000")
 
 if [ "$_EB" = "true" ] && [ "$_ES" = "true" ]; then _MODE="enforce"; else _MODE="observe"; fi
 _EENV="${TOKEN_OPTIMIZATION_ENFORCE_BUDGETS:-}"

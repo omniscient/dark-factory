@@ -14,6 +14,8 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/scheduler_lib.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/provider_env.sh"
+SCHEDULER_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts" && pwd)"
+source "${SCHEDULER_SCRIPTS_DIR}/run_config_env.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 
@@ -21,83 +23,22 @@ FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factor
 REFINE_SKIP_LABELS="needs-discussion,epic,ready-for-human,spec-pending-review,plan-pending-review"
 REFINE_MAX_RETRIES="${REFINE_MAX_RETRIES:-3}"
 
-# --- Config YAML resolution ---
-# Ordered search: bind-mounted repo (canonical new location) → baked image (config/) →
-# baked image legacy (refinement-skills/, compat fallback for P2 transition).
-CONFIG_YAML_PATHS=(
-  "/workspace/project/config/config.yaml"
-  "/opt/dark-factory/config/config.yaml"
-  "/opt/refinement-skills/config.yaml"
-)
-
-resolve_config_yaml() {
-  local p
-  for p in "${CONFIG_YAML_PATHS[@]}"; do
-    [ -f "$p" ] && echo "$p" && return 0
-  done
-  echo "ERROR: config.yaml not found — searched: ${CONFIG_YAML_PATHS[*]}" >&2
-  return 1
-}
-
-# Read all policy knobs from config.yaml; log when an env var overrides the config value.
+# --- Config resolution (#180) ---
+# factory_core.effective_config's scheduler mode owns the candidate search: the first
+# existing of /workspace/project/config/config.yaml (bind-mounted target checkout), the
+# baked /opt/dark-factory/config/config.yaml, the legacy /opt/refinement-skills/config.yaml
+# -- whole-file, no merge, never a clone -- written to $SCHEDULER_STATE_DIR/run-config.{json,env}.
+# apply_run_config_env (scripts/run_config_env.sh) then sets each whitelisted knob and logs
+# when an env var overrides the config value. Fail-closed: no config means exit 1.
 # Must be called in the main exec path (after SCHEDULER_SOURCE_ONLY guard) — not at source
 # time — so test sourcing never triggers config resolution.
 read_config() {
-  local cfg
-  cfg=$(resolve_config_yaml) || { echo "FATAL: cannot read config.yaml" >&2; exit 1; }
-
-  _set_cfg() {
-    local var="$1" yq_expr="$2"
-    local cfg_val
-    cfg_val=$(yq "$yq_expr" "$cfg" 2>/dev/null || true)
-    [ "${cfg_val:-null}" = "null" ] && cfg_val=""
-    # ${!var+x} expands to "x" if var is set (even empty), empty if unset — safe under set -u
-    if [ -n "${!var+x}" ]; then
-      local env_val="${!var}"
-      if [ "$env_val" != "$cfg_val" ]; then
-        echo "[config] ${var}=${env_val} (env override; config has '${cfg_val}')" >&2
-      fi
-      # Keep existing env value
-    else
-      export "${var}=${cfg_val}"
-    fi
-  }
-
-  _set_cfg POLL_INTERVAL              '.scheduler.poll_interval'
-  _set_cfg MAX_RETRIES                '.scheduler.max_retries'
-  _set_cfg RATE_LIMIT_FLOOR           '.scheduler.rate_limit_floor'
-  _set_cfg FACTORY_WIP_LIMIT          '.scheduler.factory_wip_limit'
-  _set_cfg MAIN_RED_RECHECK_ENABLED   '.scheduler.main_red_recheck_enabled'
-  _set_cfg MAIN_RED_RECHECK_MINUTES   '.scheduler.main_red_recheck_minutes'
-  _set_cfg BLOCKED_RESCUE_ENABLED     '.scheduler.blocked_rescue_enabled'
-  _set_cfg REFINE_WIP_LIMIT           '.refine.wip_limit'
-  _set_cfg DIRECT_TO_PR_LABEL         '.direct_to_pr.label'
-  _set_cfg SPEC_GRACE_MINUTES         '.direct_to_pr.spec_grace_minutes'
-  _set_cfg PLAN_GRACE_MINUTES         '.direct_to_pr.plan_grace_minutes'
-  _set_cfg CONFLICT_RESOLUTION_ENABLED '.conflict_resolution.enabled'
-  _set_cfg DISPATCH_CEILING_ENABLED   '.dispatch_ceiling.enabled'
-  _set_cfg ABOVE_CEILING_LABEL        '.dispatch_ceiling.label'
-  _set_cfg ABOVE_CEILING_KEYWORDS     '.dispatch_ceiling.keywords'
-  _set_cfg EPIC_AUTOPILOT_ENABLED          '.epic_autopilot.enabled'
-  _set_cfg EPIC_AUTOPILOT_MODEL            '.epic_autopilot.model'
-  _set_cfg EPIC_AUTOPILOT_DAILY_CAP        '.epic_autopilot.daily_cap'
-  _set_cfg EPIC_AUTOPILOT_CONFIDENCE_FLOOR '.epic_autopilot.confidence_floor'
-  _set_cfg EPIC_AUTOPILOT_OPT_OUT_LABEL    '.epic_autopilot.opt_out_label'
-  _set_cfg EPIC_AUTOPILOT_HOLD_TTL_HOURS    '.epic_autopilot.hold_ttl_hours'
-  _set_cfg EPIC_AUTOPILOT_SIZE_CEILING      '.epic_autopilot.size_ceiling'
-  _set_cfg EPIC_AUTOPILOT_START_EPICS       '.epic_autopilot.start_epics'
-  _set_cfg EPIC_AUTOPILOT_SENSITIVE_KEYWORDS '.epic_autopilot.sensitive_keywords'
-  _set_cfg EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT '.epic_autopilot.allow_self_improvement'
-  _set_cfg MAIN_RED_AUTOFIX_ENABLED        '.main_red_autofix.enabled'
-  _set_cfg MAIN_RED_AUTOFIX_MODEL          '.main_red_autofix.model'
-  _set_cfg MAIN_RED_AUTOFIX_MAX_ATTEMPTS   '.main_red_autofix.max_attempts'
-  _set_cfg MAIN_RED_AUTOFIX_THROTTLE_MIN   '.main_red_autofix.throttle_minutes'
-  _set_cfg TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED '.token_optimization.architecture.enabled'
-  _set_cfg TOKEN_OPTIMIZATION_MEMORY_ENABLED       '.token_optimization.memory.enabled'
-  _set_cfg TOKEN_OPTIMIZATION_COMMENTS_ENABLED     '.token_optimization.comments.enabled'
-  _set_cfg TOKEN_OPTIMIZATION_DIFF_ENABLED         '.token_optimization.diff.enabled'
-
-  echo "[config] loaded from ${cfg}"
+  local env_file="${SCHEDULER_STATE_DIR}/run-config.env"
+  # A file left by a previous start must never stand in for a failed resolution.
+  rm -f "$env_file" "${SCHEDULER_STATE_DIR}/run-config.json"
+  PYTHONPATH="$SCHEDULER_SCRIPTS_DIR" python3 -m factory_core.effective_config \
+    --materialize --out-dir "$SCHEDULER_STATE_DIR" || true
+  apply_run_config_env "$env_file" scheduler || { echo "FATAL: cannot read config.yaml" >&2; exit 1; }
 }
 
 # --- Validate required environment (provider-aware; parent spec §4) ---

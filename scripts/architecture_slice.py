@@ -92,13 +92,6 @@ _DEFAULT_EXCLUDE_PATHS = [
     "app/routers/auth",
 ]
 
-_CONFIG_PATHS = [
-    "/workspace/project/.claude/skills/refinement/config.yaml",
-    "/opt/dark-factory/config/config.yaml",
-    "/opt/refinement-skills/config.yaml",  # legacy parity — absent in the extracted image
-]
-
-
 # ── SliceResult ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -116,22 +109,15 @@ class SliceResult:
 # ── Config loading ─────────────────────────────────────────────────────────────
 
 def _load_config(clone_dir: str | None) -> dict:
-    """Load config.yaml from known paths; return parsed dict or {}."""
-    candidates = list(_CONFIG_PATHS)
-    if clone_dir:
-        candidates.insert(0, os.path.join(clone_dir, ".claude", "skills", "refinement", "config.yaml"))
-    for path in candidates:
-        if not os.path.exists(path):
-            continue
-        try:
-            import yaml  # type: ignore[import]
-            with open(path, encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    return {}
+    """Run config (#180): entrypoint.sh's materialized run-config.json
+    ($FACTORY_RUN_CONFIG_JSON), else effective_config's run-mode resolver — a committed
+    clone copy alone, else baked ← adapter token_optimization. {} on any failure.
+    When FACTORY_RUN_CONFIG_JSON is set it wins over clone_dir (a run has one clone)."""
+    try:
+        from factory_core import effective_config
+        return effective_config.load_run_config(clone_dir)
+    except Exception:
+        return {}
 
 
 def _get_safety_keywords(cfg: dict) -> str:

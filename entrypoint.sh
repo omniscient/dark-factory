@@ -29,7 +29,8 @@ echo "GitHub auth: $(gh auth status 2>&1 | head -2 | tail -1 || echo 'using GH_T
 
 # --- Project board constants (provided by identity.sh above) ---
 
-# Bootstrap defaults for pre-clone concurrency guard — overridden by _entrypoint_cfg_apply post-clone.
+# Bootstrap defaults for pre-clone concurrency guard — post-clone, apply_run_config_env keeps
+# them and logs any config value that differs (scripts/run_config_env.sh, entrypoint mode).
 FACTORY_WIP_LIMIT="${FACTORY_WIP_LIMIT:-1}"
 CONFLICT_RESOLUTION_AI_TIER="${CONFLICT_RESOLUTION_AI_TIER:-true}"
 SCHEDULER_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
@@ -37,41 +38,8 @@ SESSION_WINDOW_BACKOFF_ENABLED="${SESSION_WINDOW_BACKOFF_ENABLED:-true}"
 SESSION_WINDOW_BUFFER_MINUTES="${SESSION_WINDOW_BUFFER_MINUTES:-5}"
 SESSION_WINDOW_FALLBACK_MINUTES="${SESSION_WINDOW_FALLBACK_MINUTES:-30}"
 # env-only by design, mirroring REFINE_MAX_RETRIES (scheduler.sh:17) — not threaded through
-# _entrypoint_cfg_apply()/config.yaml; see Task 3's callout in the #33 plan for why.
+# run-config.env/config.yaml; see Task 3's callout in the #33 plan for why.
 DELIVERY_FAILURE_MAX_SECONDS="${DELIVERY_FAILURE_MAX_SECONDS:-30}"
-
-# Read FACTORY_WIP_LIMIT and CONFLICT_RESOLUTION_AI_TIER from config.yaml post-clone.
-# Env overrides are kept and logged; bootstrap defaults above handle pre-clone use.
-_entrypoint_cfg_apply() {
-  local cfg
-  for cfg in "${CLONE_DIR}/.claude/skills/refinement/config.yaml" "/opt/refinement-skills/config.yaml"; do
-    [ -f "$cfg" ] && break
-    cfg=""
-  done
-  if [ -z "$cfg" ]; then
-    echo "WARNING: config.yaml not found post-clone — keeping bootstrap defaults" >&2
-    return 0
-  fi
-
-  _epcfg() {
-    local var="$1" yq_expr="$2"
-    local cfg_val
-    cfg_val=$(yq "$yq_expr" "$cfg" 2>/dev/null || true)
-    [ "${cfg_val:-null}" = "null" ] && return 0
-    if [ "${!var}" != "$cfg_val" ]; then
-      echo "[entrypoint-config] ${var}=${!var} (env/bootstrap override; config has '${cfg_val}')" >&2
-    else
-      export "${var}=${cfg_val}"
-    fi
-  }
-
-  _epcfg FACTORY_WIP_LIMIT          '.scheduler.factory_wip_limit'
-  _epcfg CONFLICT_RESOLUTION_AI_TIER '.conflict_resolution.ai_tier'
-  _epcfg SESSION_WINDOW_BACKOFF_ENABLED   '.scheduler.session_window_backoff_enabled'
-  _epcfg SESSION_WINDOW_BUFFER_MINUTES    '.scheduler.session_window_buffer_minutes'
-  _epcfg SESSION_WINDOW_FALLBACK_MINUTES  '.scheduler.session_window_fallback_minutes'
-  echo "[entrypoint-config] loaded from ${cfg}"
-}
 
 # Compute and export the container's effective side-effect level (#196/R3) + prepend
 # the git/gh shim onto PATH (#196/R5). Single source of truth: side_effect.py.
@@ -82,10 +50,10 @@ _entrypoint_cfg_apply() {
 # block), the materialized effective config -- is never consulted here: a stale target
 # copy must not resolve a run to level 1, and a target must not be able to raise its own
 # level or replace the shim. This is the first fail-CLOSED consumer of config in this
-# file, so it cannot share _entrypoint_cfg_apply's clone-first lookup (whose knobs all
+# file, so it cannot share the clone-aware effective config the other knobs read (they all
 # fail open). The two env overrides exist for tests/test_entrypoint_current_run.sh (same
 # pattern as IDENTITY_SH / FACTORY_PROVIDERS_CLI at the top) and are never set in the image.
-# Runs post-clone (keeps the same call site as _entrypoint_cfg_apply) and before
+# Runs post-clone (right after the effective-config knobs are applied) and before
 # `archon workflow run`, so the export and the PATH prepend reach every node's subprocess
 # -- and, deliberately, the rest of this script (deconflict.py / main_red_fixer.py's
 # `claude -p` sessions; spec R3).
@@ -829,14 +797,21 @@ if [ ! -d "$CLONE_DIR/.archon/commands" ]; then
 fi
 
 # --- Effective config: adapter token_optimization > clone config.yaml > baked defaults (df#14) ---
-# Transition (clone config.yaml committed): no-op, clone file wins byte-identically.
-# Post-cleanup: materializes baked←adapter config at the clone path all readers expect,
-# git-excluded so it can never be committed back. Fail-open: never kills the run.
+# Transition (clone config.yaml committed): the clone file is left in place byte-identically
+# and run-config.{json,env} are that file alone. Post-cleanup: materializes baked←adapter
+# config at the clone path the unmigrated readers expect, git-excluded so it can never be
+# committed back, and the same tree as $ARTIFACTS_DIR/run-config.{json,env} (#180).
+# Fail-open: never kills the run.
 PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.effective_config \
-  --clone-dir "$CLONE_DIR" --materialize || true
+  --clone-dir "$CLONE_DIR" --materialize --out-dir "$ARTIFACTS_DIR" || true
+# Archon gives every bash node its own $ARTIFACTS_DIR (the workflow run's directory, not this
+# one), so budget_gate.sh and architecture_slice.py find run-config.json through this export.
+export FACTORY_RUN_CONFIG_JSON="$ARTIFACTS_DIR/run-config.json"
 
-# --- Apply config.yaml policy knobs post-clone (env overrides logged when active) ---
-_entrypoint_cfg_apply
+# --- Apply config.yaml policy knobs post-clone (env/bootstrap values kept and logged) ---
+source /opt/dark-factory/scripts/run_config_env.sh
+apply_run_config_env "$ARTIFACTS_DIR/run-config.env" entrypoint \
+  || echo "WARNING: run-config.env missing or empty post-clone — keeping bootstrap defaults" >&2
 
 # --- Compute effective side-effect level + PATH shim (#196/R3, R5) ---
 _compute_side_effect_level
