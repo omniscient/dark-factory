@@ -842,11 +842,11 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     `deploy/docker-compose.yml` sets `CLONE_DIR`, so the lookup found no adapter and the
     built-in defaults replaced the target's `safety.sensitive_keywords` and
     `safety.hard_exclude_paths`. Now `main_once` calls `_target_dir()`
-    (`epic_autopilot.py:394`, `:625`): `CLONE_DIR` if set, else `/workspace/project` when
+    (`epic_autopilot.py:420`, `:651`): `CLONE_DIR` if set, else `/workspace/project` when
     that holds `.factory/adapter.yaml`, else `.`. `_effective_sensitive_keywords` unions
     the config/env pattern with the adapter's, and `_effective_exclude_paths` unions the
     exclusions found from `CLONE_DIR` or the cwd with the target adapter's
-    (`:350`, `:364`), so reading the target's adapter cannot drop an exclusion. What is
+    (`:376`, `:390`), so reading the target's adapter cannot drop an exclusion. What is
     left: a target with no `.factory/adapter.yaml` at the mount still gets the built-in
     defaults, and the `config.yaml` `epic_autopilot.hard_exclude_paths` fallback in
     `_load_exclude_paths` is still reached only if loading the adapter raises, since a
