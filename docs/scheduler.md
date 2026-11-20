@@ -605,7 +605,8 @@ true (`scheduler.sh:1389-1395`). One pass (`epic_autopilot.py` `run_once`):
    `confidence >= EPIC_AUTOPILOT_CONFIDENCE_FLOOR`; anything unparseable is a `HOLD`.
    - Advance: add the `direct-to-pr` label, comment, count against the daily cap, cache
      `ADVANCE`. The grace timer then moves the ticket on later polls.
-   - Hold: comment "parked (HOLD)" and cache it. Not counted against the cap.
+   - Hold: comment "parked (HOLD)" unless the stored HOLD is unchanged (same spec and
+     review input), and cache it. Not counted against the cap. A skipped comment reports `hold_unchanged`.
 7. **No candidates.** If `EPIC_AUTOPILOT_START_EPICS` is true, pick the next Ready epic
    (`pick_next_epic`: `must-have` before `should-have`, then board order, skipping titles
    or labels matching the exclude regex), move it to In progress, add `ready-for-agent`
@@ -693,7 +694,7 @@ A poll that hits the capacity guard prints only
 | Line | Meaning | Source |
 |------|---------|--------|
 | `probe=image_check\|image_ok\|image_missing\|image_pulled image=…` | Boot image check. With `IMAGE_REF` set, the image shown is the pinned reference | `scheduler.sh:1475-1489` |
-| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1391-1392` |
+| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `hold_unchanged` (a repeat HOLD whose comment was skipped), `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1391-1392` |
 | `dispatch command="…"` / `dispatch_error command="…" exit=N` | A run was started / `docker compose run` failed | `:377`, `:384` |
 | `rate_limit remaining=… sleeping=…s until_reset` | Rate guard is sleeping | `:140` |
 | `ci_gate issue=#N pr=#P failing=K action=move_to_blocked` | CI gate | `:967` |
