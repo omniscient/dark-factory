@@ -439,7 +439,6 @@ def test_first_match_list_first_nonempty_file_wins_without_merge(tmp_path):
     assert ec.first_match_list([str(a)], "epic_autopilot.hard_exclude_paths") == []
 
 
-@pytest.mark.xfail(strict=True, reason="#180: green after Task 6")
 def test_scheduler_and_entrypoint_have_no_per_knob_yq_reads():
     """Acceptance criteria: read_config / the entrypoint reader no longer call yq per knob."""
     for rel in ("scheduler.sh", "entrypoint.sh"):
@@ -450,7 +449,6 @@ def test_scheduler_and_entrypoint_have_no_per_knob_yq_reads():
         assert not re.search(r"\byq\b", text), f"{rel} still runs yq"
 
 
-@pytest.mark.xfail(strict=True, reason="#180: green after Task 6")
 def test_entrypoint_wires_run_config_after_materialize():
     ep = (REPO / "entrypoint.sh").read_text(encoding="utf-8")
     order = ['--materialize --out-dir "$ARTIFACTS_DIR"',
