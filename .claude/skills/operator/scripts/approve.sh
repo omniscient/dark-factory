@@ -41,7 +41,7 @@ added=$(git -C "$DF_REPO_DIR" diff --name-only "origin/main...$REF" -- "docs/sup
 [ -n "$added" ] || die "the branch adds no docs/superpowers/${kind}s/*.md relative to main; the gate label is stranded"
 echo "$kind file(s) on the branch:"; echo "$added" | sed 's/^/  /'
 for f in $added; do
-  git -C "$DF_REPO_DIR" show "$REF:$f" | grep -qE "#$n\b" || echo "WARNING: $f does not mention #$n; downstream SPEC_FILE/PLAN_FILE resolution may go blind (see #382)"
+  git -C "$DF_REPO_DIR" show "$REF:$f" | grep -E "#$n\b" >/dev/null || echo "WARNING: $f does not mention #$n; downstream SPEC_FILE/PLAN_FILE resolution may go blind (see #382)"
 done
 
 item=$(set_board_status "$n" "$to") || exit 1
