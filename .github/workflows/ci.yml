@@ -41,6 +41,7 @@ jobs:
       - run: bash tests/test_entrypoint_cost_report_regression.sh
       - run: bash tests/test_entrypoint_cost_report_comment.sh
       - run: bash tests/test_budget_gate.sh
+      - run: bash tests/test_run_config_env.sh
       - run: bash tests/test_verdict_gate_check.sh
       - run: bash tests/test_budget_context.sh
       - run: bash tests/test_scheduler_lib.sh
