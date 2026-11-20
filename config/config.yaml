@@ -126,6 +126,21 @@ main_red_autofix:
   throttle_minutes: 15        # min minutes between fixer dispatches (scheduler; env MAIN_RED_AUTOFIX_THROTTLE_MIN)
   ci_wait_minutes: 20         # bounded wait for branch CI (container default; env MAIN_RED_AUTOFIX_CI_WAIT_MINUTES)
 
+deps_audit:
+  # Dependency-health loop (#484): daily .factory/hooks/deps-audit run → tracking issue →
+  # deterministic .factory/hooks/deps-fix → one bounded claude -p pass → PR for approval.
+  # kill-switch — ships OFF, and this key is documentation only (no code reads it). To ENABLE
+  # set DEPS_AUDIT_ENABLED=true in BOTH environments: deploy/instance.env (the scheduler, which
+  # dispatches "Audit deps" and never loads .archon/.env) AND .archon/.env (the run container).
+  # DEPS_AUDIT_INTERVAL_HOURS is scheduler-side (instance.env); the other four are run-side.
+  # Targets without a deps-audit hook stay inactive even when enabled.
+  enabled: false
+  interval_hours: 24          # min hours between "Audit deps" dispatches (scheduler; env DEPS_AUDIT_INTERVAL_HOURS)
+  model: claude-opus-5-5      # fix-agent model (container default; env DEPS_AUDIT_MODEL)
+  max_attempts: 3             # fix attempts per advisory set before ready-for-human (container default; env DEPS_AUDIT_MAX_ATTEMPTS)
+  ci_wait_minutes: 20         # bounded wait for the deps PR's CI (container default; env DEPS_AUDIT_CI_WAIT_MINUTES)
+  auto_merge: false           # merge the deps PR on green only when true (container default; env DEPS_AUDIT_AUTO_MERGE); direct-to-pr on the tracking issue also allows it
+
 side_effect:
   # Side-effect level each factory phase runs at (#196). 1..5; 6 is never valid here
   # (adapter.py/handoff.py reject 6 outright — see side_effect.py). All phases start at
@@ -142,6 +157,7 @@ side_effect:
     revise_advisory: 5  # #196 plan-level addition (revise-advisory node) — see Architecture note
     deconflict: 5  # entrypoint.sh's own $INTENT=deconflict flow — inline, never through archon; deconflict.py:143 runs a claude -p session
     fix_main: 5  # entrypoint.sh's $INTENT=fix-main -- a standalone `claude -p` session (main_red_fixer.py), not a DAG node
+    audit_deps: 5  # entrypoint.sh's $INTENT=audit-deps -- a standalone `claude -p` session (deps_fixer.py), not a DAG node
 
 token_optimization:
   enforce_budgets: true       # true = enforce budgets for per-scenario enforce: true scenarios; env: TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false|0|no is a kill-only override read by scripts/budget_gate.sh (forces observe; can never force enforce on); other rollback is a git commit to main (see runbook)

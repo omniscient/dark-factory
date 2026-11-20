@@ -104,6 +104,7 @@ INTENT=$(echo "$ARGUMENTS" | grep -oiP '^\s*\K(fix|continue|close|refine|plan|de
 INTENT=${INTENT:-fix}
 case "$ARGUMENTS" in
   "Fix main"|"fix main") INTENT="fix-main" ;;
+  "Audit deps"|"audit deps") INTENT="audit-deps" ;;
 esac
 
 # --- Canonical run identity and artifact directory ---
@@ -151,7 +152,7 @@ _check_ledger_writable || true
 # workflow's node style, so "unknown" is the honest, investigated answer for those two
 # intents, not an assumption. ---
 case "${INTENT:-unknown}" in
-  refine|plan|deconflict|close|fix-main|recheck) RUN_STAGE="${INTENT}" ;;
+  refine|plan|deconflict|close|fix-main|audit-deps|recheck) RUN_STAGE="${INTENT}" ;;
   *) RUN_STAGE="unknown" ;;
 esac
 CURRENT_RUN_DIR="${CURRENT_RUN_DIR:-/var/lib/dark-factory}"
@@ -875,6 +876,22 @@ if [ "$INTENT" = "fix-main" ]; then
     exit 0
   fi
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" main-red-fix --once || true  # TARGET-PATH
+  exit 0
+fi
+
+# --- Dependency-health loop (#484): audit → fix → PR for approval, then exit ---
+# Like fix-main, routed BEFORE the smoke gate: a red main must not stop the audit, and
+# this run has no ticket. Run-side half of the kill-switch: DEPS_AUDIT_ENABLED in .archon/.env
+# (the scheduler checks its own copy from deploy/instance.env and does not forward it).
+if [ "$INTENT" = "audit-deps" ]; then
+  echo "[audit-deps] dispatched dependency-health loop; repo cloned at ${CLONE_DIR}"
+  if [ "${DEPS_AUDIT_ENABLED:-false}" != "true" ]; then
+    echo "[audit-deps] disabled (DEPS_AUDIT_ENABLED != true); exiting"
+    exit 0
+  fi
+  # Baked copy, not the clone's: a target may track its own (stale) dark-factory/ subtree,
+  # which entrypoint.sh then leaves in place, and it would not know `deps-fix`.
+  CLONE_DIR="$CLONE_DIR" python3 /opt/dark-factory/scripts/factory_core/cli.py deps-fix --once || true
   exit 0
 fi
 

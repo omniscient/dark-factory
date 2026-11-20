@@ -139,6 +139,11 @@ or because a test needs a browser or an external service (skip it in the hook wi
 `.factory/hooks/validate` (optional) runs after merges in the deconflict flow. The
 template reuses the same commands.
 
+`.factory/hooks/deps-audit` (optional) is the check for the dependency-health loop
+(#484). The template copies a pip-audit + npm audit stub; edit it to mirror your CI
+audit steps (same files, same ignore list), or delete it to keep the loop inactive.
+The loop ships off on the factory side either way; see the README hooks table.
+
 ### 3c. Make the hooks executable and LF
 
 A hook without the executable bit still runs, but only through `bash hook`, so its

@@ -34,6 +34,10 @@ def test_detection_patterns_covers_all_footer_variants(monkeypatch):
     assert "Updated by MarketHawk Dark Factory" in patterns
     assert "dark-factory-cost-report" in patterns
 
+def test_deps_audit_marker(monkeypatch):
+    ident = _fresh(monkeypatch)
+    assert ident.marker("deps_audit") == "*MarketHawk Dependency-Health Loop*"
+
 def test_detection_patterns_excludes_main_red(monkeypatch):
     ident = _fresh(monkeypatch)
     assert not any("Main-Red" in p for p in ident.detection_patterns())

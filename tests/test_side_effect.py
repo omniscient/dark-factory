@@ -125,6 +125,7 @@ def test_target_definable_max_level():
     ("continue", ["implement", "validate", "conformance", "code-review", "revise-advisory"]),
     ("deconflict", ["deconflict"]),
     ("fix-main", ["fix-main"]),
+    ("audit-deps", ["audit-deps"]),  # deps_fixer.py's claude -p pass (#484)
     ("close", []),
     ("recheck", []),  # entrypoint.sh:713: exits after the smoke-gate check, never reaches archon
     ("unknown-intent", []),
@@ -198,5 +199,5 @@ def test_config_yaml_has_side_effect_phase_levels():
     cfg = _yaml.safe_load((_REPO_ROOT / "config/config.yaml").read_text())
     levels = cfg["side_effect"]["phase_levels"]
     for phase in ("refine", "plan", "implement", "validate", "conformance",
-                  "code_review", "revise_advisory", "deconflict", "fix_main"):
+                  "code_review", "revise_advisory", "deconflict", "fix_main", "audit_deps"):
         assert levels[phase] == 5, f"{phase} must start at level 5 (no v1 regression)"

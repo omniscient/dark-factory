@@ -39,7 +39,7 @@ comes from mixing them up.
 | Process | Config file it reads | Env file it gets | Source |
 |---|---|---|---|
 | Scheduler (`backlog-scheduler`) | first existing of `/workspace/project/config/config.yaml` (the bind-mounted target checkout), `/opt/dark-factory/config/config.yaml` (baked), `/opt/refinement-skills/config.yaml` (legacy). One file, no merging. Resolved by `factory_core.effective_config`'s scheduler mode into `$SCHEDULER_STATE_DIR/run-config.{json,env}`. | `deploy/instance.env` via compose `env_file:` | `scripts/factory_core/effective_config.py:33-37`, `scheduler.sh:35-42` (`read_config`), `deploy/docker-compose.yml` |
-| Run container (`entrypoint.sh` and everything it starts) | `<clone>/.claude/skills/refinement/config.yaml`: the target's committed copy if it has one, otherwise a copy materialised from the baked file plus the adapter's `token_optimization` block. Side-effect levels and the blast-radius gate additionally read the baked file directly. The same resolution is also written to `$ARTIFACTS_DIR/run-config.{json,env}`; `budget_gate.sh` and `architecture_slice.py` read `run-config.json` through `FACTORY_RUN_CONFIG_JSON`, the entrypoint knobs come from `run-config.env`. | `<PROJECT_DIR>/.archon/.env` (copied by the scheduler to `/opt/dark-factory/.archon/.env`), plus `run-compose.yml` `environment:`, plus `-e NAME` flags from `dispatch()` | `entrypoint.sh:61,804`, `scripts/factory_core/effective_config.py`, `scheduler.sh:47-59,311-328` |
+| Run container (`entrypoint.sh` and everything it starts) | `<clone>/.claude/skills/refinement/config.yaml`: the target's committed copy if it has one, otherwise a copy materialised from the baked file plus the adapter's `token_optimization` block. Side-effect levels and the blast-radius gate additionally read the baked file directly. The same resolution is also written to `$ARTIFACTS_DIR/run-config.{json,env}`; `budget_gate.sh` and `architecture_slice.py` read `run-config.json` through `FACTORY_RUN_CONFIG_JSON`, the entrypoint knobs come from `run-config.env`. | `<PROJECT_DIR>/.archon/.env` (copied by the scheduler to `/opt/dark-factory/.archon/.env`), plus `run-compose.yml` `environment:`, plus `-e NAME` flags from `dispatch()` | `entrypoint.sh:61,805`, `scripts/factory_core/effective_config.py`, `scheduler.sh:47-59,363-380` |
 
 ```
 SCHEDULER PROCESS                                RUN CONTAINER (one per dispatch)
@@ -78,7 +78,7 @@ Two consequences worth knowing:
 
 ## Layer 1: `config/config.yaml`
 
-The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 99 leaf keys,
+The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 106 leaf keys,
 documented below section by section. The scheduler's env projection is `apply_run_config_env`
 (`scripts/run_config_env.sh`); the list of exported keys is `ENV_WHITELIST`
 (`scripts/factory_core/effective_config.py:43-80`).
@@ -100,22 +100,22 @@ keys, which are read by the run container (see Discrepancies D1).
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `scheduler.poll_interval` | `60` | seconds between board polls | `scheduler.sh:1469,1498,1574` | `POLL_INTERVAL` (scheduler) | no |
-| `scheduler.max_retries` | `3` | per-issue retry ceiling for implement and conflict-resolve before the breaker trips to Blocked (refine and plan use the env-only `REFINE_MAX_RETRIES`, see Layer 4) | `scheduler.sh:1002,1014,1021,1158,1169` | `MAX_RETRIES` (scheduler) | no |
+| `scheduler.poll_interval` | `60` | seconds between board polls | `scheduler.sh:1521,1550,1632` | `POLL_INTERVAL` (scheduler) | no |
+| `scheduler.max_retries` | `3` | per-issue retry ceiling for implement and conflict-resolve before the breaker trips to Blocked (refine and plan use the env-only `REFINE_MAX_RETRIES`, see Layer 4) | `scheduler.sh:1054,1066,1073,1210,1221` | `MAX_RETRIES` (scheduler) | no |
 | `scheduler.rate_limit_floor` | `200` | pause polling while the GraphQL remaining budget is at or below this | `scheduler.sh:70-76` (`check_rate_limit`) | `RATE_LIMIT_FLOOR` (scheduler) | no |
-| `scheduler.factory_wip_limit` | `1` | max concurrent run containers (scheduler dispatch guard) | `scheduler.sh:126-127,1492-1497` | `FACTORY_WIP_LIMIT` (scheduler). The run container has its own guard at `entrypoint.sh:168-174` that reads `FACTORY_WIP_LIMIT` from env only, default 1; set it in `.archon/.env` too or a second concurrent run exits with an error | no |
+| `scheduler.factory_wip_limit` | `1` | max concurrent run containers (scheduler dispatch guard) | `scheduler.sh:126-127,1544-1549` | `FACTORY_WIP_LIMIT` (scheduler). The run container has its own guard at `entrypoint.sh:169-175` that reads `FACTORY_WIP_LIMIT` from env only, default 1; set it in `.archon/.env` too or a second concurrent run exits with an error | no |
 | `scheduler.main_red_recheck_enabled` | `true` | periodically dispatch "Recheck main" so a red-main latch can clear | `scheduler.sh:154` | `MAIN_RED_RECHECK_ENABLED` (scheduler) | no |
 | `scheduler.main_red_recheck_minutes` | `20` | throttle between recheck dispatches | `scheduler.sh:144,160` | `MAIN_RED_RECHECK_MINUTES` (scheduler) | no |
-| `scheduler.blocked_rescue_enabled` | `true` | promote a Blocked ticket whose PR is green and mergeable instead of re-running it | `scheduler.sh:939` (code default `true`) | `BLOCKED_RESCUE_ENABLED` (scheduler) | no |
-| `scheduler.session_window_backoff_enabled` | `true` | pause and resume around Claude session-window exhaustion instead of sleeping | `entrypoint.sh:279` (bootstrap default `:37`) | `SESSION_WINDOW_BACKOFF_ENABLED` (run, via `.archon/.env`); the config value cannot change it (D1) | no |
-| `scheduler.session_window_buffer_minutes` | `5` | minutes added to the parsed reset time | `entrypoint.sh:287` (bootstrap default `:38`) | `SESSION_WINDOW_BUFFER_MINUTES` (run); config value inert (D1) | no |
-| `scheduler.session_window_fallback_minutes` | `30` | pause length when the reset time cannot be parsed | `entrypoint.sh:288` (bootstrap default `:39`) | `SESSION_WINDOW_FALLBACK_MINUTES` (run); config value inert (D1) | no |
+| `scheduler.blocked_rescue_enabled` | `true` | promote a Blocked ticket whose PR is green and mergeable instead of re-running it | `scheduler.sh:991` (code default `true`) | `BLOCKED_RESCUE_ENABLED` (scheduler) | no |
+| `scheduler.session_window_backoff_enabled` | `true` | pause and resume around Claude session-window exhaustion instead of sleeping | `entrypoint.sh:280` (bootstrap default `:37`) | `SESSION_WINDOW_BACKOFF_ENABLED` (run, via `.archon/.env`); the config value cannot change it (D1) | no |
+| `scheduler.session_window_buffer_minutes` | `5` | minutes added to the parsed reset time | `entrypoint.sh:288` (bootstrap default `:38`) | `SESSION_WINDOW_BUFFER_MINUTES` (run); config value inert (D1) | no |
+| `scheduler.session_window_fallback_minutes` | `30` | pause length when the reset time cannot be parsed | `entrypoint.sh:289` (bootstrap default `:39`) | `SESSION_WINDOW_FALLBACK_MINUTES` (run); config value inert (D1) | no |
 
 ### `refine` and `plan`
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `refine.wip_limit` | `2` | max concurrent refine and plan runs | `scheduler.sh:1203,1211,1267,1278` | `REFINE_WIP_LIMIT` (scheduler) | no |
+| `refine.wip_limit` | `2` | max concurrent refine and plan runs | `scheduler.sh:1255,1263,1319,1330` | `REFINE_WIP_LIMIT` (scheduler) | no |
 | `refine.skip_labels` | `needs-discussion, epic, spec-pending-review` | nothing: **unread**. The real list is the hardcoded `REFINE_SKIP_LABELS` (`scheduler.sh:23`) | none | none | no |
 | `refine.min_issue_body_length` | `20` | **unread** | none | none | no |
 | `plan.skip_labels` | `needs-discussion, epic, plan-pending-review` | **unread**; see `REFINE_SKIP_LABELS` | none | none | no |
@@ -125,8 +125,8 @@ keys, which are read by the run container (see Discrepancies D1).
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `direct_to_pr.label` | `direct-to-pr` | label that enables grace-timer auto-advance and end-gate auto-merge | `scripts/scheduler_lib.sh:32` (matched with `grep -qi`, so it is a regex); also `scripts/factory_core/handoff.py:401` (plain substring, only in a process that imports `handoff`; nothing in `scheduler.sh`/`entrypoint.sh` does) | `DIRECT_TO_PR_LABEL` (scheduler) | no |
-| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:219-225`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:231`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
-| `direct_to_pr.plan_grace_minutes` | `30` | same for `plan-pending-review` | `scheduler.sh:260-266`; `commands/dark-factory-plan.md:298` (agent-read) | `PLAN_GRACE_MINUTES` (scheduler only) | no |
+| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:271-277`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:231`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
+| `direct_to_pr.plan_grace_minutes` | `30` | same for `plan-pending-review` | `scheduler.sh:312-318`; `commands/dark-factory-plan.md:298` (agent-read) | `PLAN_GRACE_MINUTES` (scheduler only) | no |
 
 The `direct-to-pr` literal is also hardcoded in `commands/dark-factory-refine.md:230` and
 `commands/dark-factory-plan.md:297`, so renaming the label in config does not change those checks.
@@ -170,8 +170,8 @@ than `enforce` means `enabled: true` and `observe`.
 |---|---|---|---|---|---|
 | `preview.enabled` | `true` | false = always build the preview | `workflows/archon-dark-factory.yaml:818-819` (the `classify-preview` prompt tells the agent to read it; agent-read) | none | no |
 | `preview.model` | `haiku` | **unread**. The classifier model is hardcoded `model: haiku` at `workflows/archon-dark-factory.yaml:847` | none | none | no |
-| `conflict_resolution.enabled` | `true` | false = disable the P1.5 conflict scanner | `scheduler.sh:987` (code default `true`) | `CONFLICT_RESOLUTION_ENABLED` (scheduler) | no |
-| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable and that bootstrap value always wins (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is only compared with it and logged when it differs, see D1), but nothing consumes it: the only call (`entrypoint.sh:714`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,359`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
+| `conflict_resolution.enabled` | `true` | false = disable the P1.5 conflict scanner | `scheduler.sh:1039` (code default `true`) | `CONFLICT_RESOLUTION_ENABLED` (scheduler) | no |
+| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable and that bootstrap value always wins (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is only compared with it and logged when it differs, see D1), but nothing consumes it: the only call (`entrypoint.sh:715`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,364`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
 
 ### `blast_radius`
 
@@ -191,13 +191,13 @@ It never reads the working tree, so a PR cannot loosen its own gate. No env over
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `dispatch_ceiling.enabled` | `true` | kill-switch | `scheduler.sh:254,1102` | `DISPATCH_CEILING_ENABLED` (scheduler) | no |
-| `dispatch_ceiling.label` | `above-ceiling` | label applied when parked | `scheduler.sh:1106,1118`; `scripts/scheduler_lib.sh:57` | `ABOVE_CEILING_LABEL` (scheduler) | no |
+| `dispatch_ceiling.enabled` | `true` | kill-switch | `scheduler.sh:306,1154` | `DISPATCH_CEILING_ENABLED` (scheduler) | no |
+| `dispatch_ceiling.label` | `above-ceiling` | label applied when parked | `scheduler.sh:1158,1170`; `scripts/scheduler_lib.sh:57` | `ABOVE_CEILING_LABEL` (scheduler) | no |
 | `dispatch_ceiling.keywords` | `migration\|migrate\|performance\|perf\|architectur\|refactor` | title regex that parks `size: M` tickets (`size: XL` always parks, `L`/`S`/unlabelled never) | `scripts/scheduler_lib.sh:41-52`; also `scripts/architecture_slice.py:123-124,299` (from the clone's config; the adapter's `safety.dispatch_ceiling_keywords` only supplies the fallback there, via `adapter_defaults`, not via the adapter file) | `ABOVE_CEILING_KEYWORDS` (scheduler only; writing it to `.archon/.env` does not reach the scheduler, see D5) | no |
 
 ### `epic_autopilot`
 
-Runs in the scheduler process (`stage_epic_autopilot`, `scheduler.sh:1330-1336`, which calls
+Runs in the scheduler process (`stage_epic_autopilot`, `scheduler.sh:1382-1388`, which calls
 `factory_core/cli.py epic-autopilot --once` -> `scripts/factory_core/epic_autopilot.py:main_once`,
 lines 582-607). `main_once` reads **only env vars** (the code defaults below), which `read_config`
 fills from config. So all env overrides are scheduler-scoped and the only way a config value
@@ -205,7 +205,7 @@ reaches the reader is through `read_config`.
 
 | Key | YAML default | Code default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|---|
-| `epic_autopilot.enabled` | `false` | `false` | master kill-switch | `scheduler.sh:1331` | `EPIC_AUTOPILOT_ENABLED` (scheduler) | no |
+| `epic_autopilot.enabled` | `false` | `false` | master kill-switch | `scheduler.sh:1383` | `EPIC_AUTOPILOT_ENABLED` (scheduler) | no |
 | `epic_autopilot.model` | `claude-opus-5-5` | same | reviewer model | `epic_autopilot.py:663` | `EPIC_AUTOPILOT_MODEL` (scheduler) | no |
 | `epic_autopilot.daily_cap` | `5` | `5` | max autonomous advances per UTC day | `epic_autopilot.py:662` | `EPIC_AUTOPILOT_DAILY_CAP` (scheduler) | no |
 | `epic_autopilot.confidence_floor` | `0.7` | `0.7` | minimum confidence to ADVANCE | `epic_autopilot.py:661` | `EPIC_AUTOPILOT_CONFIDENCE_FLOOR` (scheduler) | no |
@@ -221,7 +221,7 @@ reaches the reader is through `read_config`.
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `main_red_autofix.enabled` | `false` | kill-switch for the auto-fixer | two readers with separate env: the scheduler dispatches "Fix main" only if `MAIN_RED_AUTOFIX_ENABLED=true` (`scheduler.sh:180`), and the run container exits at once unless **its** `MAIN_RED_AUTOFIX_ENABLED` is `true` (`entrypoint.sh:873`) | `MAIN_RED_AUTOFIX_ENABLED` (both; the run side only from `.archon/.env`, it is not forwarded) | no |
+| `main_red_autofix.enabled` | `false` | kill-switch for the auto-fixer | two readers with separate env: the scheduler dispatches "Fix main" only if `MAIN_RED_AUTOFIX_ENABLED=true` (`scheduler.sh:180`), and the run container exits at once unless **its** `MAIN_RED_AUTOFIX_ENABLED` is `true` (`entrypoint.sh:874`) | `MAIN_RED_AUTOFIX_ENABLED` (both; the run side only from `.archon/.env`, it is not forwarded) | no |
 | `main_red_autofix.model` | `claude-opus-5-5` | fixer model | `scripts/factory_core/main_red_fixer.py:289` (env, then code default `claude-opus-5-5`); the config value never reaches it (D3) | `MAIN_RED_AUTOFIX_MODEL` (run only) | no |
 | `main_red_autofix.max_attempts` | `3` | fix to CI cycles per red event | `main_red_fixer.py:288` (env, code default `3`); config value never reaches it (D3) | `MAIN_RED_AUTOFIX_MAX_ATTEMPTS` (run only) | no |
 | `main_red_autofix.throttle_minutes` | `15` | minimum minutes between fixer dispatches | `scheduler.sh:176` (code default 15) | `MAIN_RED_AUTOFIX_THROTTLE_MIN` (scheduler) | no |
@@ -229,21 +229,36 @@ reaches the reader is through `read_config`.
 
 `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` (`main_red_fixer.py:291`, default 1200 s) has no config key.
 
+### `deps_audit`
+
+Dependency-health loop (#484). Every key in this block is **documentation only**: no code path
+reads `config/config.yaml` for it, and none of the variables is in `ENV_WHITELIST` (`effective_config.py`). The
+loop has two halves with separate environments, and both must be set to turn it on.
+
+| Key | Default | Controls | Reader | Env override (scope) | Adapter |
+|---|---|---|---|---|---|
+| `deps_audit.enabled` | `false` | kill-switch for the loop | **unread**. The scheduler dispatches `Audit deps` only if `DEPS_AUDIT_ENABLED=true` in its own environment (`deps_audit_check` in `scheduler.sh`), and the run container exits at once unless **its** `DEPS_AUDIT_ENABLED` is `true` (`entrypoint.sh`, the `audit-deps` branch) | `DEPS_AUDIT_ENABLED` (scheduler: `deploy/instance.env`; run: `.archon/.env`; neither side forwards it, set both) | no |
+| `deps_audit.interval_hours` | `24` | minimum hours between `Audit deps` dispatches | **unread**; `deps_audit_due` in `scheduler.sh` (env, code default 24; an empty, non-numeric, zero or longer-than-4-digit value also means 24; the value is read as base 10, so `08` is 8) | `DEPS_AUDIT_INTERVAL_HOURS` (scheduler, `deploy/instance.env`) | no |
+| `deps_audit.model` | `claude-opus-5-5` | fix-agent model | **unread**; `scripts/factory_core/deps_fixer.py` `main_once` (env, code default) | `DEPS_AUDIT_MODEL` (run only) | no |
+| `deps_audit.max_attempts` | `3` | fix attempts per advisory set before `ready-for-human` | **unread**; `deps_fixer.py` `main_once` (env, code default `3`) | `DEPS_AUDIT_MAX_ATTEMPTS` (run only) | no |
+| `deps_audit.ci_wait_minutes` | `20` | bounded wait for the deps PR's CI | **unread**; `deps_fixer.py` `main_once` (env, code default `20`) | `DEPS_AUDIT_CI_WAIT_MINUTES` (run only) | no |
+| `deps_audit.auto_merge` | `false` | merge the deps PR on green CI without approval | **unread**; `deps_fixer.py` `main_once` (env, code default `false`) | `DEPS_AUDIT_AUTO_MERGE` (run only) | `safety.deps_allowed_paths` bounds what the fix may touch |
+
 ### `side_effect.phase_levels`
 
-Each phase starts at `5`. Reader: `scripts/factory_core/side_effect.py:208-230` (`phase_level`), called
+Each phase starts at `5`. Reader: `scripts/factory_core/side_effect.py:209-231` (`phase_level`), called
 by `entrypoint.sh:61-66` (`_compute_side_effect_level`) against the **baked** config only
 (`FACTORY_CONFIG_PATH`, default `/opt/dark-factory/config/config.yaml`): never the clone's
 copy or the adapter, by design. The container's level is the **maximum** over the phases its
-intent runs (`side_effect.py:272-276`, with the intent to phase map at `:192-205`); a missing,
+intent runs (`side_effect.py:273-277`, with the intent to phase map at `:192-206`); a missing,
 bool, non-int or out-of-range value falls back to level 1 (`side_effect.py:161-166`).
 
 Env override: `SIDE_EFFECT_LEVEL_<PHASE>` (phase upper-cased, hyphens to underscores, e.g.
-`SIDE_EFFECT_LEVEL_CODE_REVIEW`), honoured in **run** containers (`side_effect.py:214-221`) via
+`SIDE_EFFECT_LEVEL_CODE_REVIEW`), honoured in **run** containers (`side_effect.py:215-222`) via
 `.archon/.env`; not in the scheduler. An invalid value is ignored with a warning. Adapter:
 no (`loops[].side_effect_level` in the adapter is a separate setting for adapter-declared loops).
 
-| Keys | Default | Phase run by intent (`side_effect.py:192-203`) |
+| Keys | Default | Phase run by intent (`side_effect.py:192-204`) |
 |---|---|---|
 | `side_effect.phase_levels.refine` | `5` | `refine` |
 | `side_effect.phase_levels.plan` | `5` | `plan` |
@@ -254,6 +269,7 @@ no (`loops[].side_effect_level` in the adapter is a separate setting for adapter
 | `side_effect.phase_levels.revise_advisory` | `5` | `fix`, `continue` |
 | `side_effect.phase_levels.deconflict` | `5` | `deconflict` |
 | `side_effect.phase_levels.fix_main` | `5` | `fix-main` |
+| `side_effect.phase_levels.audit_deps` | `5` | `audit-deps` |
 
 ### `token_optimization`
 
@@ -315,9 +331,9 @@ Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, 
 
 Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 7, `code_review` 5,
 `docs_conformance` 2, `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3,
-`epic_autopilot` 11, `main_red_autofix` 5, `side_effect.phase_levels` 9, `token_optimization` 32
+`epic_autopilot` 11, `main_red_autofix` 5, `deps_audit` 6, `side_effect.phase_levels` 10, `token_optimization` 32
 (`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
-`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 99 leaf keys.
+`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 106 leaf keys.
 
 ### Unread keys (summary)
 
@@ -367,7 +383,7 @@ Rules that follow from the code:
    MAIN_RED_AUTOFIX_MAX_ATTEMPTS MAIN_RED_AUTOFIX_THROTTLE_MIN`, and
    `TOKEN_OPTIMIZATION_{ARCHITECTURE,MEMORY,COMMENTS,DIFF}_ENABLED`. The variables are exported
    into the scheduler process only; they are **not** forwarded to run containers.
-3. **`dispatch()` forwards** (`scheduler.sh:311-328`): `--profile factory`, plus `--profile
+3. **`dispatch()` forwards** (`scheduler.sh:363-380`): `--profile factory`, plus `--profile
    factory-model-proxy` when `FACTORY_MODEL_PROXY_ENABLED=true`, plus one `-e NAME` for each
    variable in `PROVIDER_PASSTHROUGH_VARS` (`scripts/provider_env.sh:26-40`) that is set and
    non-empty in the scheduler. A forwarded value beats `.archon/.env`; unset or empty leaves
@@ -431,7 +447,7 @@ effective.
 | `FACTORY_STATUS_FIELD`, `FACTORY_STATUS_{READY,IN_PROGRESS,IN_REVIEW,BLOCKED,DONE,BACKLOG,REFINED}` | MarketHawk ids | column option ids |
 | `FACTORY_PRODUCT_NAME` | `MarketHawk` | also read at `scripts/comment_digest.py`, `scripts/ceiling_revisit.py`, `entrypoint.sh:20` |
 | `FACTORY_CLONE_DIR` | `/workspace/${FACTORY_REPO}` | clone path in the run container (`entrypoint.sh:19`) |
-| `FACTORY_RUN_PREFIX` | `${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-` | WIP guard greps `docker ps` for this (`scheduler.sh:122`, `entrypoint.sh:171`) |
+| `FACTORY_RUN_PREFIX` | `${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-` | WIP guard greps `docker ps` for this (`scheduler.sh:122`, `entrypoint.sh:172`) |
 | `FACTORY_INSTANCE` | `dark-factory` | compose project and state volume name (`deploy/docker-compose.yml`, `run-compose.yml:18,114`); must also be in `instance.env` |
 | `FACTORY_IMAGE`, `IMAGE_TAG`, `IMAGE_REF` | `ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}` | `identity.sh:23`, `deploy/docker-compose.yml`; `IMAGE_REF` pins a digest |
 | `PROJECT_DIR` | parent of `deploy/` | host path bind-mounted at `/workspace/project` (read-only) |
@@ -443,12 +459,12 @@ containers (`run-compose.yml:31-47`).
 
 | Variable | Default | Reader | File |
 |---|---|---|---|
-| `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:315` (adds the `factory-model-proxy` compose profile) | `instance.env` |
+| `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:367` (adds the `factory-model-proxy` compose profile) | `instance.env` |
 | `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:39`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
 | `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1313` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:56` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
-| `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:214` | `.archon/.env` |
+| `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:215` | `.archon/.env` |
 | `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:70` | `.archon/.env` |
 
 (The config-derived switches such as `EPIC_AUTOPILOT_ENABLED` are in the Layer 1 tables.)
@@ -460,10 +476,10 @@ containers (`run-compose.yml:31-47`).
 | `SCHEDULER_STATE_DIR` | `/var/lib/dark-factory` | `scheduler.sh:10`, `entrypoint.sh:36`, `breaker.py`, `epic_autopilot.py:641`, `main_red_fixer.py:279` | shared state volume; do not change independently of the volume mount |
 | `STATE_FILE` | `${SCHEDULER_STATE_DIR}/scheduler-state.json` | `scripts/factory_core/breaker.py:15`, `scripts/factory_core/cli.py:47` | breaker state |
 | `CLONE_DIR` | `.` | `epic_autopilot.py:383,427` (`_effective_exclude_paths`, `_target_dir`), `main_red_fixer.py:278-292`, `adapter.py:306`, `diff_rank.py`, `budget_gate.sh:39` | set by `entrypoint.sh` in runs. The scheduler does not set it; epic autopilot then uses `/workspace/project` if that holds an adapter (`_SCHEDULER_TARGET_DIR`, [PR #524](https://github.com/omniscient/dark-factory/pull/524)) |
-| `ARTIFACTS_DIR` | per run | `entrypoint.sh:114`; `budget_gate.sh:31` (required) | |
+| `ARTIFACTS_DIR` | per run | `entrypoint.sh:115`; `budget_gate.sh:31` (required) | |
 | `FACTORY_CORE_CLI`, `FACTORY_PROVIDERS_CLI` | baked paths | `scheduler.sh:19-20`, `entrypoint.sh:9` | override seams |
 | `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:60,69` | "never set in the image"; test seams |
-| `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1388`, `entrypoint.sh:89,752` | tests only |
+| `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1440`, `entrypoint.sh:89,753` | tests only |
 | `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:26-41`; `run_record.py:27,483` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
 | `FACTORY_EDITS_LABEL`, `FACTORY_REGRESSION_LABEL`, `FACTORY_EMAIL` | `merged-with-edits`, `factory-regression`, `factory@<repo>` | `scripts/fetch_scorecard.py:26-28` | scorecard tooling |
 | `MEM0_SPIKE_STORE_PATH`, `AGENTMEMORY_*` | none | `scripts/mem0_retrieve_adapter.py:46`, `scripts/eval_agentmemory.sh` | memory spike tooling, not part of runs |
@@ -473,8 +489,8 @@ containers (`run-compose.yml:31-47`).
 | Variable | Default | Reader | File |
 |---|---|---|---|
 | `REFINE_MAX_RETRIES` | `3` | `scheduler.sh:24` (refine and plan breaker ceiling) | `instance.env` |
-| `STALE_PREVIEW_WARN_COUNT` | `3` | `scheduler.sh:1434-1442` (non-numeric resets to 3) | `instance.env` |
-| `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:42,428`; env-only by design | `.archon/.env` |
+| `STALE_PREVIEW_WARN_COUNT` | `3` | `scheduler.sh:1486-1494` (non-numeric resets to 3) | `instance.env` |
+| `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:42,429`; env-only by design | `.archon/.env` |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` | `1200` | `main_red_fixer.py:291` | `.archon/.env` |
 | `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:978`; set via `run-compose.yml:56-57` | `instance.env` |
 | `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:110` | `instance.env` |
@@ -490,7 +506,7 @@ the table below only says how those keys relate to configuration.
 `adapter_defaults.DEFAULTS` (MarketHawk's constants); a file is validated and then
 `_deep_merge`d over the defaults (`adapter.py:209-216`), then the factory-owned boundary floor is
 unioned into `safety.critical_diff_paths` and `safety.migration_seed_auth_patterns`
-(`adapter.py:218-239`, `adapter_defaults.py:116-140`), which no adapter can remove. `adapter.get`
+(`adapter.py:218-239`, `adapter_defaults.py:122-146`), which no adapter can remove. `adapter.get`
 (`:296-302`) resolves a dotted path against the result. Consumers call it at use time and fall
 back to defaults on any error.
 
@@ -528,11 +544,11 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 
 | Value | Where | What it does |
 |---|---|---|
-| `SKIP_LABELS="needs-discussion,epic,ready-for-human"` | `scheduler.sh:9` (used at `:568`) | labels that exclude a ticket from dispatch, retry, rescue and the orphan sweep |
+| `SKIP_LABELS="needs-discussion,epic,ready-for-human"` | `scheduler.sh:9` (used at `:620`) | labels that exclude a ticket from dispatch, retry, rescue and the orphan sweep |
 | `REFINE_SKIP_LABELS="needs-discussion,epic,ready-for-human,spec-pending-review,plan-pending-review"` | `scheduler.sh:23`; matched in `scripts/scheduler_lib.sh:10-20` | refine/plan skip list; replaces the unread `refine.skip_labels` and `plan.skip_labels` |
 | `REFINE_MAX_RETRIES` default `3` | `scheduler.sh:24` | env-only retry ceiling for refine and plan |
-| `ready-for-agent` opt-in label | `scripts/scheduler_lib.sh:26-27`; `scheduler.sh:548` (`--limit 200`), `:1274`; `epic_autopilot.py:619` | opt-in to refinement; also applied to epic children |
-| `spec-pending-review`, `plan-pending-review` | `scheduler.sh:203,222,239,263` | gate labels removed on approval or grace expiry |
+| `ready-for-agent` opt-in label | `scripts/scheduler_lib.sh:26-27`; `scheduler.sh:600` (`--limit 200`), `:1326`; `epic_autopilot.py:619` | opt-in to refinement; also applied to epic children |
+| `spec-pending-review`, `plan-pending-review` | `scheduler.sh:255,274,291,315` | gate labels removed on approval or grace expiry |
 | size labels `size: XL/L/M/S` | `scripts/scheduler_lib.sh:37-52` | dispatch ceiling classification |
 | `direct-to-pr` literal | `commands/dark-factory-refine.md:230`, `commands/dark-factory-plan.md:297` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
 | `MAX_SESSION_WINDOW_HOURS = 5` | `scripts/factory_core/session_window.py:137` | cap on a session-window pause |
@@ -552,7 +568,7 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 
 | Goal | Right mechanism | Takes effect |
 |---|---|---|
-| Change a scheduler policy knob (poll, WIP, grace, ceiling, autopilot) | Set the env var in `deploy/instance.env` (listed in Layer 2 rule 2), or edit `config/config.yaml` in the checkout bind-mounted at `/workspace/project`, or edit the baked file and publish an image | **Recreate the scheduler container** (`docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d`). `read_config` runs once at startup (`scheduler.sh:1393`), and `instance.env` is read only at container creation. A restart of the same container re-reads the config file but not a changed `instance.env`. |
+| Change a scheduler policy knob (poll, WIP, grace, ceiling, autopilot) | Set the env var in `deploy/instance.env` (listed in Layer 2 rule 2), or edit `config/config.yaml` in the checkout bind-mounted at `/workspace/project`, or edit the baked file and publish an image | **Recreate the scheduler container** (`docker compose --env-file deploy/instance.env -f deploy/docker-compose.yml up -d`). `read_config` runs once at startup (`scheduler.sh:1445`), and `instance.env` is read only at container creation. A restart of the same container re-reads the config file but not a changed `instance.env`. |
 | Change a run-container knob that has an env override (session window, `SIDE_EFFECT_LEVEL_*`, `TOKEN_OPTIMIZATION_*`, `MAIN_RED_AUTOFIX_ENABLED`, `FACTORY_WIP_LIMIT`) | Put it in `<PROJECT_DIR>/.archon/.env` | The scheduler copies that file at **startup** (`scheduler.sh:53-56`), so recreate or restart the scheduler, then the next dispatched run uses it |
 | Change a run-side config key with no env override (conformance, code review, blast radius, side-effect levels, preview, budgets) | Edit `config/config.yaml` on `main`, rebuild and publish the image (`COPY config/` at `Dockerfile:152`). A target can override most by committing its own `.claude/skills/refinement/config.yaml` (blast radius reads it from the base ref) | The next run started from the new image. The scheduler also needs recreating to pick up the new image tag |
 | Tune token budgets for one target | `token_optimization` in the target's `.factory/adapter.yaml` (only effective if the target has no committed run config, Layer 3) | Next run |
@@ -582,16 +598,16 @@ and [#532](https://github.com/omniscient/dark-factory/issues/532) (MarketHawk-sp
 
 | # | Where | The comment says | The code does |
 |---|---|---|---|
-| D1 | `config/config.yaml:10-12` (`session_window_*`), `:6` (`factory_wip_limit`); `entrypoint.sh:32-33` | env overrides config; config supplies the container's value | `entrypoint.sh:34-39` sets bootstrap defaults before `apply_run_config_env … entrypoint` runs, and it (`scripts/run_config_env.sh:40-46`) treats any bootstrap value that differs from config as an "env/bootstrap override" and keeps it. So config can never change `FACTORY_WIP_LIMIT`, `CONFLICT_RESOLUTION_AI_TIER` or `SESSION_WINDOW_*` in a run container, and I confirmed the logic with a replica (config 10 vs default 5 stays 5). For `FACTORY_WIP_LIMIT` it is moot anyway: the container guard at `entrypoint.sh:168-174` runs before the clone and before `apply_run_config_env` (`entrypoint.sh:812`), and the scheduler does not forward the variable, so the container limit is `.archon/.env` or 1. A scheduler limit above 1 without the same value in `.archon/.env` makes the second concurrent run exit with an error |
-| D2 | `config/config.yaml:64` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:35` and `run-config.env` (`effective_config.py:77`) only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:714` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
+| D1 | `config/config.yaml:10-12` (`session_window_*`), `:6` (`factory_wip_limit`); `entrypoint.sh:32-33` | env overrides config; config supplies the container's value | `entrypoint.sh:34-39` sets bootstrap defaults before `apply_run_config_env … entrypoint` runs, and it (`scripts/run_config_env.sh:40-46`) treats any bootstrap value that differs from config as an "env/bootstrap override" and keeps it. So config can never change `FACTORY_WIP_LIMIT`, `CONFLICT_RESOLUTION_AI_TIER` or `SESSION_WINDOW_*` in a run container, and I confirmed the logic with a replica (config 10 vs default 5 stays 5). For `FACTORY_WIP_LIMIT` it is moot anyway: the container guard at `entrypoint.sh:169-175` runs before the clone and before `apply_run_config_env` (`entrypoint.sh:813`), and the scheduler does not forward the variable, so the container limit is `.archon/.env` or 1. A scheduler limit above 1 without the same value in `.archon/.env` makes the second concurrent run exit with an error |
+| D2 | `config/config.yaml:64` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:35` and `run-config.env` (`effective_config.py:77`) only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:715` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
 | D3 | `config/config.yaml:124,125,127` (`main_red_autofix.model/max_attempts/ci_wait_minutes`: "container default") | the config value is the container default | `main_red_fixer.py:288-290` reads env then hardcoded defaults; no code path carries the config value into a run container. `read_config` exports `MAIN_RED_AUTOFIX_MODEL`/`MAX_ATTEMPTS` (`effective_config.py:70-71`) into the scheduler, where nothing reads them. `ci_wait_minutes` is not exported at all. The values match today only by coincidence |
-| D4 | `config/config.yaml:177` | `comments.enabled` "NOT consulted ... scheduler.sh exports this value into its own process, which does not reach run containers" | accurate. Also true of `architecture.enabled`, `memory.enabled`, `diff.enabled`, whose exports (`effective_config.py:73-76`) reach nothing, but for those the readers also consult config in the clone, so the keys still work |
+| D4 | `config/config.yaml:193` | `comments.enabled` "NOT consulted ... scheduler.sh exports this value into its own process, which does not reach run containers" | accurate. Also true of `architecture.enabled`, `memory.enabled`, `diff.enabled`, whose exports (`effective_config.py:73-76`) reach nothing, but for those the readers also consult config in the clone, so the keys still work |
 | D5 | `commands/ceiling-revisit.md:88-108` | the revisit writes `ABOVE_CEILING_KEYWORDS` into `.archon/.env` as the effective override | the scheduler reads `ABOVE_CEILING_KEYWORDS` from its own environment (`instance.env`) or config (`read_config`, `scheduler_lib.sh:50`) and never sources `.archon/.env` (`scheduler.sh:53-56` only copies it). The recorded override does not affect dispatch |
 | D6 | `config/config.yaml:15-26` (`refine.skip_labels`, `plan.skip_labels`, `min_issue_body_length`) | present as config | no reader; real lists are hardcoded (`scheduler.sh:9,23`) |
 | D7 | `config/config.yaml:60` (`preview.model: haiku`) | model for the preview classifier | no reader; `workflows/archon-dark-factory.yaml:847` hardcodes `haiku` |
 | D8 (partly resolved by [PR #524](https://github.com/omniscient/dark-factory/pull/524)) | `config/config.yaml:95-98` (`epic_autopilot.hard_exclude_paths` "Kept byte-identical to adapter_defaults") | the config list is what autopilot uses | `epic_autopilot.py:435-455` tries the adapter first and `adapter.get` always returns a list (the defaults if no adapter file), so the config list is only reached if the adapter import fails. The scheduler-side half is fixed: `main_once` now takes the adapter directory from `_target_dir()` (`CLONE_DIR`, else `/workspace/project` when it holds `.factory/adapter.yaml`, else `.`), so the target's adapter is read, and `_effective_exclude_paths` unions in what the cwd lookup gave. What remains is the config-list point above: with an adapter present the `config.yaml` list is still dead. The directory choice is covered by `tests/test_epic_autopilot.py`; not exercised in a live scheduler |
-| D9 | `config/config.yaml:168,179` | `architecture.max_tokens`, `comments.max_tokens` "derivation input, not a live cap" | accurate. Listed to flag that `memory.max_tokens` and `diff.max_review_tokens` are different: they are live caps read directly (`memory_retrieve.py:163-190`, `diff_rank.py:133`) |
-| D10 | `config/config.yaml:173` (`memory.max_entries`: "baked — no env override") | baked | no env override is right, but it is read from the run's config chain (clone's file, then baked: `memory_retrieve.py:100-107,157-160`), so a target-committed or adapter-overlaid value takes effect |
+| D9 | `config/config.yaml:184,195` | `architecture.max_tokens`, `comments.max_tokens` "derivation input, not a live cap" | accurate. Listed to flag that `memory.max_tokens` and `diff.max_review_tokens` are different: they are live caps read directly (`memory_retrieve.py:163-190`, `diff_rank.py:133`) |
+| D10 | `config/config.yaml:189` (`memory.max_entries`: "baked — no env override") | baked | no env override is right, but it is read from the run's config chain (clone's file, then baked: `memory_retrieve.py:100-107,157-160`), so a target-committed or adapter-overlaid value takes effect |
 | D11 | `deploy/instance.env.example:89-96` | optional tuning with "safe defaults" | uncommented `FACTORY_WIP_LIMIT=1` and `POLL_INTERVAL=60` in the template pin those two knobs over any later config change |
 
 ## Things I could not determine from the code

@@ -96,6 +96,12 @@ DEFAULTS = {
             r"^\.factory/hooks/",
         ],
         "main_red_allowed_paths": ["backend/", "frontend/", "alembic/", "dark-factory/smoke_gate.sh"],
+        # Globs (fnmatch) the dependency-health loop's fix may touch (#484) — manifests
+        # and lockfiles only; deps_fixer.BLOCKED_PATHS still dominates.
+        "deps_allowed_paths": [
+            "**/requirements*.txt", "**/pyproject.toml", "**/package.json",
+            "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+        ],
     },
     "memory_routing": {
         "backend/app/*": ".archon/memory/backend-patterns.md",

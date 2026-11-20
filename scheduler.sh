@@ -187,6 +187,58 @@ main_red_fixer_check() {
   fi
 }
 
+# --- Dependency-health loop: throttled "Audit deps" dispatch (#484) ---
+# Independent of the main-is-red sentinel (an advisory on an unchanged lockfile never
+# latches it). Callers guarantee a free factory slot and no session-window pause.
+# The scheduler-side controls (DEPS_AUDIT_ENABLED, DEPS_AUDIT_INTERVAL_HOURS) come from the
+# scheduler's own environment (deploy/instance.env) -- it never loads .archon/.env, which only
+# feeds run containers. config.yaml's deps_audit: block is docs only.
+DEPS_AUDIT_STAMP_FILE="${SCHEDULER_STATE_DIR}/deps-audit-last-run"
+
+is_deps_audit_running() {
+  # Names + Command, filtered on this instance's run prefix first: `docker ps` is host-wide and
+  # another instance's audit must not hold this one back (same filter as count_factory_running).
+  docker ps --no-trunc --format '{{.Names}} {{.Command}}' 2>/dev/null \
+    | grep -F -- "${FACTORY_RUN_PREFIX}" | grep -q 'Audit deps' && return 0
+  return 1
+}
+
+deps_audit_due() {
+  [ -f "$DEPS_AUDIT_STAMP_FILE" ] || return 0
+  local last now hours="${DEPS_AUDIT_INTERVAL_HOURS:-24}"
+  last=$(stat -c %Y "$DEPS_AUDIT_STAMP_FILE" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  # Empty, non-numeric or over 4 digits (overflow = always due) -> 24. Base 10 is forced: a
+  # leading zero (08) is an octal error that ends the poll loop. 0 dispatches every poll -> 24.
+  case "$hours" in ''|*[!0-9]*|?????*) hours=24 ;; esac
+  hours=$((10#$hours)); [ "$hours" -ge 1 ] || hours=24
+  [ $(( now - last )) -ge $(( hours * 3600 )) ]
+}
+
+# Open deps PR = an open PR whose head branch starts with deps/audit- (the branch
+# deps_fixer.py always opens from). find-change prints "" when there is none.
+has_open_deps_pr() {
+  local pr
+  pr=$(python3 "$FACTORY_PROVIDERS_CLI" codehost find-change \
+    --branch "deps/audit-" --repo "$FACTORY_REPO_SLUG" 2>/dev/null || true)
+  [ -n "$pr" ]
+}
+
+deps_audit_check() {
+  [ "${DEPS_AUDIT_ENABLED:-false}" = "true" ] || return 0
+  is_deps_audit_running && return 0
+  deps_audit_due || return 0
+  if has_open_deps_pr; then
+    echo "[$(date -u +%FT%TZ)] deps_audit=skip reason=open_deps_pr"
+    return 0
+  fi
+  if dispatch "Audit deps"; then
+    DISPATCHED="Audit deps"
+    touch "$DEPS_AUDIT_STAMP_FILE"
+    echo "[$(date -u +%FT%TZ)] deps_audit=dispatched interval=${DEPS_AUDIT_INTERVAL_HOURS:-24}h"
+  fi
+}
+
 count_refine_running() {
   docker ps --no-trunc --format '{{.Command}}' 2>/dev/null | grep -cE 'Refine issue|Plan issue' || true
 }
@@ -1541,6 +1593,12 @@ while true; do
       main_red_recheck_check
       main_red_fixer_check
     fi
+  fi
+
+  # --- Dependency-health loop (#484): daily "Audit deps", independent of main-is-red.
+  # Same slot/pause discipline as the fixer above, and never a second dispatch this cycle. ---
+  if [ "$SESSION_WINDOW_PAUSED" = "false" ] && [ -z "$DISPATCHED" ]; then
+    deps_audit_check
   fi
 
   # --- Priorities 1.5/1/2/3/4/5: guard-table-driven dispatch (see dispatch_stage) ---

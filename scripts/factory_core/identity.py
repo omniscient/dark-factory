@@ -25,6 +25,7 @@ _MARKERS = {
     "refinement": "*Posted by {} Refinement Pipeline*",
     "autopilot": "*Posted by {} Epic Autopilot*",
     "main_red": "*{} Main-Red Auto-Fix*",
+    "deps_audit": "*{} Dependency-Health Loop*",
 }
 
 
