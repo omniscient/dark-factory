@@ -298,6 +298,36 @@ def test_render_env_non_scalar_is_null_with_warning(capsys):
     assert "POLL_INTERVAL is not a single-line scalar" in capsys.readouterr().err
 
 
+def test_render_env_normalises_yaml_boolean_spellings():
+    """Pins a deliberate difference from the pre-#180 `yq` read, which passed the literal
+    text through (`True`, `yes`, `on`, ...): PyYAML parses every YAML 1.1 boolean spelling
+    to a bool, so the knob is exported as `true` / `false`."""
+    import yaml
+    cfg = yaml.safe_load(
+        "epic_autopilot:\n"
+        "  enabled: True\n"
+        "  start_epics: False\n"
+        "  allow_self_improvement: No\n"
+        "main_red_autofix:\n"
+        "  enabled: TRUE\n"
+        "dispatch_ceiling:\n"
+        "  enabled: yes\n"
+        "conflict_resolution:\n"
+        "  enabled: on\n"
+        "scheduler:\n"
+        "  blocked_rescue_enabled: off\n"
+        "  main_red_recheck_enabled: 'True'\n")
+    env = _parse_env(ec.render_env(cfg, "scheduler", "x"))
+    assert env["EPIC_AUTOPILOT_ENABLED"] == "true"                  # True
+    assert env["MAIN_RED_AUTOFIX_ENABLED"] == "true"                # TRUE
+    assert env["DISPATCH_CEILING_ENABLED"] == "true"                # yes
+    assert env["CONFLICT_RESOLUTION_ENABLED"] == "true"             # on
+    assert env["EPIC_AUTOPILOT_START_EPICS"] == "false"             # False
+    assert env["EPIC_AUTOPILOT_ALLOW_SELF_IMPROVEMENT"] == "false"  # No
+    assert env["BLOCKED_RESCUE_ENABLED"] == "false"                 # off
+    assert env["MAIN_RED_RECHECK_ENABLED"] == "True"                # quoted string: literal
+
+
 def test_render_env_block_scalar_trailing_newline_is_stripped(capsys):
     """A folded/literal block scalar keeps its text, as the former `$(yq ...)` read did;
     a value with an interior newline is still emitted as null with a warning."""

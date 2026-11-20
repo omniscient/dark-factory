@@ -171,7 +171,7 @@ than `enforce` means `enabled: true` and `observe`.
 | `preview.enabled` | `true` | false = always build the preview | `workflows/archon-dark-factory.yaml:818-819` (the `classify-preview` prompt tells the agent to read it; agent-read) | none | no |
 | `preview.model` | `haiku` | **unread**. The classifier model is hardcoded `model: haiku` at `workflows/archon-dark-factory.yaml:847` | none | none | no |
 | `conflict_resolution.enabled` | `true` | false = disable the P1.5 conflict scanner | `scheduler.sh:987` (code default `true`) | `CONFLICT_RESOLUTION_ENABLED` (scheduler) | no |
-| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is applied over it), but nothing consumes it: the only call (`entrypoint.sh:714`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,359`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
+| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable and that bootstrap value always wins (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is only compared with it and logged when it differs, see D1), but nothing consumes it: the only call (`entrypoint.sh:714`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,359`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
 
 ### `blast_radius`
 
@@ -354,6 +354,10 @@ Rules that follow from the code:
 2. **`read_config` → `apply_run_config_env` (`scripts/run_config_env.sh`)**: for each of 33 config keys, if the variable is set in
    the scheduler's environment at all (`${!var+x}`), the env value wins and is only logged when it
    differs; otherwise the config value is exported. An absent YAML key exports an empty string.
+   Since #180 the file is parsed by PyYAML, so every unquoted YAML boolean spelling (`True`,
+   `TRUE`, `yes`, `on`; `False`, `No`, `off`) is exported as `true` or `false`. Before #180 the
+   `yq` read passed the literal text through, and the scheduler's `= "true"` comparisons
+   matched only the literal `true`.
    The list: `POLL_INTERVAL MAX_RETRIES RATE_LIMIT_FLOOR FACTORY_WIP_LIMIT MAIN_RED_RECHECK_ENABLED
    MAIN_RED_RECHECK_MINUTES BLOCKED_RESCUE_ENABLED REFINE_WIP_LIMIT DIRECT_TO_PR_LABEL
    SPEC_GRACE_MINUTES PLAN_GRACE_MINUTES CONFLICT_RESOLUTION_ENABLED DISPATCH_CEILING_ENABLED
