@@ -407,7 +407,7 @@ def _target_dir() -> str:
 
 
 def _load_exclude_paths(clone_dir: str | None = None) -> list:
-    """Read hard_exclude_paths from adapter, then config.yaml (via yq); fall back to defaults."""
+    """Read hard_exclude_paths from adapter, then config.yaml; fall back to defaults."""
     # Try adapter first (use-time read, fail-open)
     try:
         from . import adapter
@@ -416,18 +416,16 @@ def _load_exclude_paths(clone_dir: str | None = None) -> list:
             return val
     except Exception:
         pass
-    # Legacy: yq from config.yaml
-    for cfg in _CONFIG_PATHS:
-        if not os.path.exists(cfg):
-            continue
-        try:
-            p = subprocess.run(["yq", ".epic_autopilot.hard_exclude_paths[]", cfg],
-                               capture_output=True, text=True, timeout=15)
-            paths = [ln.strip().strip('"') for ln in p.stdout.splitlines() if ln.strip()]
-            if paths:
-                return paths
-        except Exception:
-            pass
+    # Legacy: the first _CONFIG_PATHS file yielding a non-empty list, no merge (#180: was a
+    # yq subprocess per file). Never a clone dir and never effective_config.resolve(): its
+    # list-replacing deep-merge would let a target's clone-side copy replace this list.
+    try:
+        from .effective_config import first_match_list
+        paths = first_match_list(_CONFIG_PATHS, "epic_autopilot.hard_exclude_paths")
+    except Exception:
+        paths = []
+    if paths:
+        return paths
     return list(_DEFAULT_EXCLUDE)
 
 
