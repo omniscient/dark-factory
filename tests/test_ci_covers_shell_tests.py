@@ -42,6 +42,66 @@ def _live() -> tuple:
     return sh_files, referenced
 
 
+# tests/*.sh not yet wired into .github/workflows/ci.yml, each with a reason.
+# Seeded 2026-11-20 (#426) from:
+#   comm -23 \
+#     <(git ls-tree HEAD tests/ --name-only | grep '\.sh$' | sed 's|tests/||' | sort) \
+#     <(git show HEAD:.github/workflows/ci.yml | grep -oE 'tests/[a-z_0-9]+\.sh' | sed 's|tests/||' | sort -u)
+# Each reason is the observed result of one standalone run with credentials stripped:
+#   env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$(mktemp -d)" \
+#     SCHEDULER_STATE_DIR="$(mktemp -d)" timeout 120 bash tests/X.sh
+# either "passes standalone — wire in follow-up" or "fails: <first failure>".
+# Wiring a test into ci.yml means deleting its entry here (test_no_stale_exemptions).
+CI_EXEMPT_SHELL_TESTS = {
+    "test_159_regression.sh": "fails: set_board_status called (→ Blocked) — expected='1' got='0\\n0'",
+    "test_431_telemetry_isolation.sh": "passes standalone — wire in follow-up",
+    "test_close_preview_teardown.sh": "passes standalone — wire in follow-up",
+    "test_codeindex_config.sh": "fails: implement depends on update-codeindex — pattern not found in workflows/archon-dark-factory.yaml",
+    "test_config_deletion.sh": "passes standalone — wire in follow-up",
+    "test_conformance_memory_write.sh": "passes standalone — wire in follow-up",
+    "test_dispatch_ceiling.sh": "fails: L → always above — expected='0' got='1'",
+    "test_entrypoint_fix_main.sh": "fails: fix-main route (896) not before smoke gate (679)",
+    "test_epic_autopilot_config.sh": "passes standalone — wire in follow-up",
+    "test_failing_checks_for_pr.sh": "passes standalone — wire in follow-up",
+    "test_has_new_comment_after_report.sh": "passes standalone — wire in follow-up",
+    "test_load_memory.sh": "passes standalone — wire in follow-up",
+    "test_memory_integration.sh": "passes standalone — wire in follow-up",
+    "test_memory_write_gate.sh": "passes standalone — wire in follow-up",
+    "test_off_board_detection.sh": "passes standalone — wire in follow-up",
+    "test_preview_differentiator.sh": "passes standalone — wire in follow-up",
+    "test_restore_drill.sh": "fails: R2: no-backup exits 2 (expected 0); spec requires exit 0 on fresh-deploy skip",
+    "test_scheduler.sh": "fails: line 411: STATUS_REFINED: unbound variable",
+    "test_scheduler_autopilot_guard.sh": "passes standalone — wire in follow-up",
+    "test_scheduler_ceiling.sh": "passes standalone — wire in follow-up",
+    "test_scheduler_main_red_fixer.sh": "passes standalone — wire in follow-up",
+    "test_scheduler_pagination.sh": "passes standalone — wire in follow-up",
+    "test_session_window_gate.sh": "fails: 'Priority 1.5:' gate (351) does not precede breaker calls (33)",
+}
+
+
+# --- live-repo checks ---
+
+def test_every_shell_test_is_wired_or_exempt():
+    unaccounted, _ = _violations(*_live(), CI_EXEMPT_SHELL_TESTS)
+    assert not unaccounted, (
+        f"tests/*.sh not in ci.yml and not in CI_EXEMPT_SHELL_TESTS: {sorted(unaccounted)} — "
+        "add a `- run: bash tests/<file>` step to .github/workflows/ci.yml, or exempt it "
+        "here with a reason"
+    )
+
+
+def test_no_stale_exemptions():
+    _, stale = _violations(*_live(), CI_EXEMPT_SHELL_TESTS)
+    assert not stale, (
+        f"CI_EXEMPT_SHELL_TESTS entries now stale (wired into ci.yml or deleted): {sorted(stale)}"
+    )
+
+
+def test_exemptions_have_reasons():
+    empty = [name for name, reason in CI_EXEMPT_SHELL_TESTS.items() if not reason.strip()]
+    assert not empty, f"CI_EXEMPT_SHELL_TESTS entries missing a reason: {empty}"
+
+
 # --- synthetic checks: prove the guard can fail ---
 
 def test_new_unwired_file_is_unaccounted():
