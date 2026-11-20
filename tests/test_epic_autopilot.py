@@ -570,3 +570,65 @@ def test_exclude_paths_never_narrower_than_before(tmp_path, monkeypatch):
     assert "deploy/instances/" in merged
     for p in before:
         assert p in merged
+
+
+# ── #180: _load_exclude_paths fallback characterization (behavior fix is #205) ──
+
+def _write_exclude_cfg(path, paths):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("epic_autopilot:\n  hard_exclude_paths:\n"
+                    + "".join(f'    - "{p}"\n' for p in paths), encoding="utf-8")
+
+
+def _adapter_unavailable(*_a, **_k):
+    raise RuntimeError("adapter unavailable")
+
+
+def _no_yq(*_a, **_k):
+    raise AssertionError("the yq subprocess fallback is gone (#180)")
+
+
+def test_exclude_paths_adapter_list_wins(tmp_path, monkeypatch):
+    """(a) adapter present -> adapter list (today's shadowing; #205 owns the fix)."""
+    monkeypatch.setattr("factory_core.adapter.get", lambda _d, _k: ["adapter/only/"])
+    baked = tmp_path / "baked.yaml"
+    _write_exclude_cfg(baked, ["baked/"])
+    monkeypatch.setattr(ap, "_CONFIG_PATHS", [str(tmp_path / "missing.yaml"), str(baked)])
+    assert ap._load_exclude_paths(str(tmp_path)) == ["adapter/only/"]
+
+
+def test_exclude_paths_fallback_ignores_clone_side_config(tmp_path, monkeypatch):
+    """(b) adapter.get raising -> the baked list, even with clone-side copies that differ:
+    the scheduler-side clone-side entry (3rd) never beats baked (2nd), and the clone_dir
+    argument is never read for config."""
+    monkeypatch.setattr("factory_core.adapter.get", _adapter_unavailable)
+    monkeypatch.setattr(ap.subprocess, "run", _no_yq)
+    baked = tmp_path / "baked.yaml"
+    _write_exclude_cfg(baked, ["baked/"])
+    clone_side = tmp_path / "project" / ".claude" / "skills" / "refinement" / "config.yaml"
+    _write_exclude_cfg(clone_side, ["clone-side/"])
+    monkeypatch.setattr(ap, "_CONFIG_PATHS", [str(tmp_path / "project-config.yaml"),
+                                              str(baked), str(clone_side),
+                                              str(tmp_path / "legacy.yaml")])
+    clone = tmp_path / "clone"
+    _write_exclude_cfg(clone / ".claude" / "skills" / "refinement" / "config.yaml", ["clone/"])
+    assert ap._load_exclude_paths(str(clone)) == ["baked/"]
+
+
+def test_exclude_paths_fallback_first_nonempty_file_wins(tmp_path, monkeypatch):
+    monkeypatch.setattr("factory_core.adapter.get", _adapter_unavailable)
+    project = tmp_path / "project-config.yaml"
+    project.write_text("epic_autopilot:\n  hard_exclude_paths: []\n", encoding="utf-8")
+    baked = tmp_path / "baked.yaml"
+    _write_exclude_cfg(baked, ["baked/"])
+    monkeypatch.setattr(ap, "_CONFIG_PATHS", [str(project), str(baked)])
+    assert ap._load_exclude_paths(None) == ["baked/"]
+    _write_exclude_cfg(project, ["project/"])
+    assert ap._load_exclude_paths(None) == ["project/"]
+
+
+def test_exclude_paths_no_config_falls_back_to_default(tmp_path, monkeypatch):
+    """(c) no config file -> _DEFAULT_EXCLUDE."""
+    monkeypatch.setattr("factory_core.adapter.get", _adapter_unavailable)
+    monkeypatch.setattr(ap, "_CONFIG_PATHS", [str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml")])
+    assert ap._load_exclude_paths(None) == list(ap._DEFAULT_EXCLUDE)

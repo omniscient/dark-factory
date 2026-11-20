@@ -1,6 +1,7 @@
 """Tests for architecture_slice.py — 12 slicer unit tests."""
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -524,3 +525,36 @@ def test_empty_components_map_means_full_doc(arch_file, tmp_path):
     assert result.fallback_reason == "unknown_component:frontend"
     assert "Service Topology" in result.included_sections
     assert "Frontend Architecture" in result.included_sections
+
+
+# ── #180: _load_config reads the materialized run-config.json ─────────────────
+
+def _clone_copy(tmp_path, keywords):
+    cfg_dir = tmp_path / ".claude" / "skills" / "refinement"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.yaml").write_text(f'dispatch_ceiling:\n  keywords: "{keywords}"\n',
+                                         encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_load_config_prefers_materialized_run_config_json(tmp_path, monkeypatch):
+    clone_dir = _clone_copy(tmp_path, "clone-only")
+    rc = tmp_path / "run-config.json"
+    rc.write_text(json.dumps({"dispatch_ceiling": {"keywords": "from-run-config"}}),
+                  encoding="utf-8")
+    monkeypatch.setenv("FACTORY_RUN_CONFIG_JSON", str(rc))
+    assert aslice._get_safety_keywords(aslice._load_config(clone_dir)) == "from-run-config"
+
+
+def test_load_config_without_run_config_uses_committed_clone_copy_alone(tmp_path, monkeypatch):
+    monkeypatch.delenv("FACTORY_RUN_CONFIG_JSON", raising=False)
+    clone_dir = _clone_copy(tmp_path, "clone-only")
+    assert aslice._load_config(clone_dir) == {"dispatch_ceiling": {"keywords": "clone-only"}}
+
+
+def test_load_config_unreadable_run_config_falls_back_to_resolver(tmp_path, monkeypatch):
+    clone_dir = _clone_copy(tmp_path, "clone-only")
+    rc = tmp_path / "run-config.json"
+    rc.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("FACTORY_RUN_CONFIG_JSON", str(rc))
+    assert aslice._get_safety_keywords(aslice._load_config(clone_dir)) == "clone-only"

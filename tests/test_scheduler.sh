@@ -2205,5 +2205,9 @@ _SHIM_OUT=$("$_REAL_PY3" -c 'import subprocess; r = subprocess.run(["gh", "proje
 assert_eq "python-spawned gh returns the stub's rc 0 and no output" "0 " "$_SHIM_OUT"
 assert_eq "python-spawned gh call landed in SHIM_LOG" "1" "$(grep -c '^gh project item-list 1 --format json$' "$SHIM_LOG")"
 
+# ---- #180: config resolution moved to effective_config + scripts/run_config_env.sh ----
+assert_eq "#180: apply_run_config_env is sourced with scheduler.sh" "function" "$(type -t apply_run_config_env)"
+assert_eq "#180: resolve_config_yaml is retired" "" "$(type -t resolve_config_yaml || true)"
+
 echo "Results: ${PASSED} passed, ${FAILED} failed"
 [ "$FAILED" -eq 0 ]

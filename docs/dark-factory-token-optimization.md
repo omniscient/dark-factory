@@ -75,7 +75,9 @@ the full block.
 ### How a run resolves its config
 
 Scripts inside a run read `<clone>/.claude/skills/refinement/config.yaml`. `entrypoint.sh`
-prepares that path through `factory_core.effective_config`:
+prepares that path through `factory_core.effective_config`. The same resolution is also
+written to `run-config.json`, which `scripts/budget_gate.sh` and `scripts/architecture_slice.py`
+read through `FACTORY_RUN_CONFIG_JSON` (#180):
 
 1. If the target repo **commits** `.claude/skills/refinement/config.yaml`, that file is used
    as is. A `token_optimization` block in the adapter that disagrees with it only produces a
@@ -141,7 +143,7 @@ path the run compose file loads **once, at startup**, so an edit to that file re
 only after the scheduler is restarted.
 
 `scheduler.sh` also exports the four per-feature flags from config into its own process
-(`_set_cfg`), but dispatch does not pass them to run containers; that export has no effect on
+(`read_config`), but dispatch does not pass them to run containers; that export has no effect on
 a run.
 
 ---

@@ -1,5 +1,6 @@
 """Tests for per-feature token optimization flags (R1) — T1, T2, T6."""
 import pathlib
+import sys
 
 import pytest
 import yaml
@@ -33,34 +34,31 @@ def test_diff_enabled_flag_exists():
         "diff sub-section must have an 'enabled' key"
 
 
-# ── T2: scheduler.sh env var wiring ──────────────────────────────────────────
+# ── T2: scheduler.sh env var wiring (#180: via effective_config.ENV_WHITELIST) ──
 
-def _scheduler_content():
-    return (pathlib.Path(__file__).resolve().parents[1] / "scheduler.sh").read_text()
+def _scheduler_wired(var, dotted):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+    from factory_core import effective_config as ec
+    return (var, dotted) in {(v, d) for v, d, readers in ec.ENV_WHITELIST
+                             if "scheduler" in readers}
 
 
 def test_scheduler_wires_architecture_enabled():
-    content = _scheduler_content()
-    assert "TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED" in content
-    assert ".token_optimization.architecture.enabled" in content
+    assert _scheduler_wired("TOKEN_OPTIMIZATION_ARCHITECTURE_ENABLED",
+                            "token_optimization.architecture.enabled")
 
 
 def test_scheduler_wires_memory_enabled():
-    content = _scheduler_content()
-    assert "TOKEN_OPTIMIZATION_MEMORY_ENABLED" in content
-    assert ".token_optimization.memory.enabled" in content
+    assert _scheduler_wired("TOKEN_OPTIMIZATION_MEMORY_ENABLED", "token_optimization.memory.enabled")
 
 
 def test_scheduler_wires_comments_enabled():
-    content = _scheduler_content()
-    assert "TOKEN_OPTIMIZATION_COMMENTS_ENABLED" in content
-    assert ".token_optimization.comments.enabled" in content
+    assert _scheduler_wired("TOKEN_OPTIMIZATION_COMMENTS_ENABLED",
+                            "token_optimization.comments.enabled")
 
 
 def test_scheduler_wires_diff_enabled():
-    content = _scheduler_content()
-    assert "TOKEN_OPTIMIZATION_DIFF_ENABLED" in content
-    assert ".token_optimization.diff.enabled" in content
+    assert _scheduler_wired("TOKEN_OPTIMIZATION_DIFF_ENABLED", "token_optimization.diff.enabled")
 
 
 # ── T6: workflow YAML comment digest gate ─────────────────────────────────────
