@@ -213,6 +213,14 @@ assert_eq "S6: M-size spec advance unaffected by ceiling" \
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
+# ---- #180: the ceiling knobs reach read_config through effective_config.ENV_WHITELIST ----
+EC_PY="$SCRIPT_DIR/../scripts/factory_core/effective_config.py"
+for row in '"DISPATCH_CEILING_ENABLED", "dispatch_ceiling.enabled"' \
+           '"ABOVE_CEILING_LABEL", "dispatch_ceiling.label"' \
+           '"ABOVE_CEILING_KEYWORDS", "dispatch_ceiling.keywords"'; do
+  assert_eq "#180: ENV_WHITELIST row ${row%%,*}" "1" "$(grep -cF "$row" "$EC_PY")"
+done
+
 rm -rf "$SCHEDULER_STATE_DIR"
 echo ""
 echo "Results: ${PASSED} passed, ${FAILED} failed"
