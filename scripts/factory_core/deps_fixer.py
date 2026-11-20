@@ -214,3 +214,71 @@ is not committed) and leave that advisory red for a human decision.
 
 Make the minimal change, then stop. Do not commit, push, or open a PR — the harness does that.
 """
+
+
+def run_once(cfg: dict, io, state: dict) -> dict:
+    """One bounded audit → fix → PR pass. Outcomes: inactive | error | held | clean |
+    escalated (reason cap | no-fix | scope:<s>) | fixed-deterministically | fixed-by-agent."""
+    if not io.audit_hook_present():
+        return {"outcome": "inactive", "issue": None, "pr": None}
+    branch = io.start_branch()  # pristine origin/main checkout — the audit runs on it too
+    advisories = read_audit(*io.run_audit())
+    if advisories is None:
+        return {"outcome": "error", "issue": None, "pr": None, "reason": "audit-unparseable"}
+    if not advisories:
+        closed = io.open_tracking_issues()
+        for n in closed:
+            io.set_done(n)  # before closing: a closed issue left In review holds a slot forever
+            io.close_issue(n, clean_comment())
+        return {"outcome": "clean", "issue": closed[0] if closed else None, "pr": None}
+
+    h = advisory_set_hash(advisories)
+    issue = io.find_or_create_tracking_issue(advisories, h)
+    if issue is None:
+        return {"outcome": "error", "issue": None, "pr": None, "reason": "tracking-issue"}
+    if io.is_halted(issue):  # needs-discussion halts ALL automation, this loop included
+        return {"outcome": "held", "issue": issue, "pr": None, "reason": "needs-discussion"}
+    if attempts_for(state, h) >= cfg["max_attempts"]:
+        if not cap_escalated(state, h):
+            io.escalate(issue, "cap", h)
+            mark_cap_escalated(state, h)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": "cap"}
+    record_attempt(state, h)
+
+    io.run_deterministic_fix()
+    remaining = read_audit(*io.run_audit())
+    remaining = advisories if remaining is None else remaining  # unparseable → still red
+    fix_path, notes = "fixed-deterministically", ""
+    if remaining:
+        notes = io.apply_agent_fix(build_fix_prompt(remaining, cfg["allowed_paths"],
+                                                    cfg["blocked_paths"])) or ""
+        after = read_audit(*io.run_audit())
+        remaining = remaining if after is None else after
+        fix_path = "fixed-by-agent"
+
+    changed = io.changed_paths()
+    if not changed:
+        io.escalate(issue, "no-fix", h)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": "no-fix"}
+    scope = classify_deps_scope(changed, cfg["allowed_paths"], cfg["blocked_paths"])
+    if scope != "allowed":
+        io.escalate(issue, f"scope:{scope}", h)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": f"scope:{scope}"}
+
+    tests = io.run_tests()
+    pr = io.open_pr(branch, pr_title(advisories),
+                    pr_body(issue, advisories, remaining, changed, fix_path, tests, notes))
+    # SKIP_LABELS member, applied BEFORE the In review move: keeps scheduler.sh's In-review
+    # stages — notably stage_review_triage's comment classifier — off the tracking issue while
+    # a human decides on the PR (a "looks good" comment must not dispatch Close/Continue).
+    io.add_label(issue, "ready-for-human")
+    io.move_to_in_review(issue)
+    ci = io.poll_ci(pr)
+    merged = False
+    if ci == "green" and (cfg["auto_merge"] or io.has_direct_to_pr(issue)):
+        merged = bool(io.merge(pr))
+        if not merged:
+            io.escalate(issue, "merge-failed", h, pr=pr)
+    io.comment(issue, ci_comment(pr, ci, merged))
+    return {"outcome": fix_path, "issue": issue, "pr": pr, "ci": ci, "merged": merged,
+            "remaining": len(remaining)}
