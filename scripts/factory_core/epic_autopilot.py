@@ -154,11 +154,31 @@ def cached_verdict(state: dict, issue: int, spec_hash_: str, now_iso=None, ttl_h
     return entry.get("verdict")
 
 
-def record_verdict(state: dict, issue: int, spec_hash_: str, verdict: str, now_iso=None) -> None:
+def record_verdict(state: dict, issue: int, spec_hash_: str, verdict: str,
+                   now_iso=None, *, input_digest=None) -> None:
     entry = {"spec_hash": spec_hash_, "verdict": verdict}
     if now_iso:
         entry["ts"] = now_iso
+    if input_digest is not None:
+        entry["input_digest"] = input_digest
     state.setdefault("verdicts", {})[str(issue)] = entry
+
+
+def hold_unchanged(state: dict, issue: int, spec_hash_: str, input_digest_) -> bool:
+    """True when the issue's last stored verdict was HOLD for the same spec and review input.
+
+    Deliberately ignores ttl_hours (unlike cached_verdict): this runs *after* a fresh
+    re-review has already happened (triggered by TTL expiry or a changed spec), to
+    decide whether posting a comment would tell the user anything new — TTL expiry
+    alone must not cause a repeat comment. A None digest on either side never matches,
+    so legacy entries and unparseable reviews always comment.
+    """
+    entry = (state.get("verdicts") or {}).get(str(issue))
+    return bool(entry
+                and input_digest_ is not None
+                and entry.get("verdict") == "HOLD"
+                and entry.get("spec_hash") == spec_hash_
+                and entry.get("input_digest") == input_digest_)
 
 
 # ── Epic selector (pure; used by epic-starter workflow) ──────────────────────
@@ -278,7 +298,8 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
         return {"outcome": "no_candidates", "issue": None, "reason": "empty"}
 
     cand = candidates[0]
-    verdict = parse_verdict(io.review(build_review_prompt(cand, allow_self), cfg["model"]))
+    prompt = build_review_prompt(cand, allow_self)
+    verdict = parse_verdict(io.review(prompt, cfg["model"]))
     h = spec_hash(cand.get("spec_text", ""))
     if should_advance(verdict, cfg["confidence_floor"]):
         io.advance(cand["number"])
@@ -293,10 +314,15 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
         return {"outcome": "advanced", "issue": cand["number"], "reason": reason}
 
     concerns = "; ".join(verdict.get("concerns", [])) or "not low-risk / low confidence"
-    io.comment(cand["number"],
-               f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}")
-    record_verdict(state, cand["number"], h, "HOLD", now_iso)
-    return {"outcome": "hold", "issue": cand["number"], "reason": concerns}
+    unparseable = verdict.get("reasons") == ["unparseable"]  # parse_verdict's _HOLD sentinel
+    input_digest = None if unparseable else spec_hash(prompt)
+    unchanged = hold_unchanged(state, cand["number"], h, input_digest)
+    if not unchanged:
+        io.comment(cand["number"],
+                   f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}")
+    record_verdict(state, cand["number"], h, "HOLD", now_iso, input_digest=input_digest)
+    return {"outcome": "hold_unchanged" if unchanged else "hold",
+            "issue": cand["number"], "reason": concerns}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -270,6 +270,123 @@ def test_cached_verdict_backward_compatible_without_timestamps():
     assert ap.cached_verdict(st, 402, h) == "HOLD"  # no ttl args → unconditional
 
 
+# ── #456: HOLD comment dedup on TTL re-review ────────────────────────────────
+
+TS0 = "2026-06-20T00:00:00+00:00"
+NOW = "2026-06-21T01:00:00+00:00"      # 25h after TS0 → the cached HOLD has expired
+LATER = "2026-06-22T02:00:00+00:00"    # 25h after NOW
+HOLD_REVIEW = '{"decision":"HOLD","risk":"medium","confidence":0.5,"reasons":[],"concerns":["%s"]}'
+TTL_CFG = dict(CFG, hold_ttl_hours=24)
+
+
+def _digest(cand, allow_self=False):
+    return ap.spec_hash(ap.build_review_prompt(cand, allow_self))
+
+
+def test_hold_unchanged_predicate():
+    st = {}
+    h, d = ap.spec_hash("spec A"), ap.spec_hash("prompt A")
+    assert not ap.hold_unchanged(st, 402, h, d)                       # no entry
+    ap.record_verdict(st, 402, h, "HOLD", TS0)
+    assert not ap.hold_unchanged(st, 402, h, d)                       # entry without digest
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=d)
+    assert ap.hold_unchanged(st, 402, h, d)                           # all three match
+    assert not ap.hold_unchanged(st, 402, h, None)                    # None digest argument
+    assert not ap.hold_unchanged(st, 402, ap.spec_hash("spec B"), d)  # spec hash differs
+    assert not ap.hold_unchanged(st, 402, h, ap.spec_hash("prompt B"))  # digest differs
+    assert not ap.hold_unchanged(st, 403, h, d)                       # other issue
+    ap.record_verdict(st, 402, h, "ADVANCE", TS0, input_digest=d)
+    assert not ap.hold_unchanged(st, 402, h, d)                       # stored verdict not HOLD
+
+
+def test_record_verdict_digest_survives_json_roundtrip():
+    import json
+    st = {}
+    h, d = ap.spec_hash("spec A"), ap.spec_hash("prompt A")
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=d)
+    st2 = json.loads(json.dumps(st))
+    assert st2["verdicts"]["402"]["input_digest"] == d
+    assert ap.hold_unchanged(st2, 402, h, d)
+
+
+def test_run_suppresses_unchanged_hold_comment():
+    cand = c(number=402)
+    h, d = ap.spec_hash(cand["spec_text"]), _digest(cand)
+    st = {}
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=d)
+    io = FakeIO([cand], HOLD_REVIEW % "worded differently this time")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert io.comments == []
+    assert out["outcome"] == "hold_unchanged" and out["issue"] == 402
+    entry = st["verdicts"]["402"]
+    assert entry["ts"] == NOW and entry["input_digest"] == d
+    assert entry["verdict"] == "HOLD" and entry["spec_hash"] == h
+
+
+def test_run_comments_on_changed_ticket():
+    h = ap.spec_hash(c(number=402)["spec_text"])
+    d = _digest(c(number=402))
+    st = {}
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=d)
+    changed = c(number=402, labels=["ready-for-agent", "bug"])   # same spec text → same h
+    io = FakeIO([changed], HOLD_REVIEW % "still risky")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert len(io.comments) == 1 and io.comments[0][0] == 402
+    assert "parked (HOLD)" in io.comments[0][1]
+    assert out["outcome"] == "hold"
+    entry = st["verdicts"]["402"]
+    assert entry["input_digest"] != d and entry["input_digest"] == _digest(changed)
+    assert entry["spec_hash"] == h and entry["ts"] == NOW
+
+
+def test_run_comments_once_on_legacy_hold_entry():
+    cand = c(number=402)
+    h, d = ap.spec_hash(cand["spec_text"]), _digest(cand)
+    st = {}
+    ap.record_verdict(st, 402, h, "HOLD", TS0)                   # pre-#456 entry: no digest
+    io = FakeIO([cand], HOLD_REVIEW % "risky")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert len(io.comments) == 1 and out["outcome"] == "hold"
+    assert st["verdicts"]["402"]["input_digest"] == d
+    io2 = FakeIO([c(number=402)], HOLD_REVIEW % "risky, reworded")
+    out2 = ap.run_once(TTL_CFG, io2, st, "2026-06-22", LATER)
+    assert io2.comments == [] and out2["outcome"] == "hold_unchanged"
+
+
+def test_unparseable_review_is_never_suppressed():
+    cand = c(number=402)
+    h, d = ap.spec_hash(cand["spec_text"]), _digest(cand)
+    st = {}
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=d)
+    io = FakeIO([cand], "garbage")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert len(io.comments) == 1 and out["outcome"] == "hold"
+    assert "input_digest" not in st["verdicts"]["402"]
+    assert ap.cached_verdict(st, 402, h, NOW, 24) == "HOLD"     # TTL caching as before
+    io2 = FakeIO([c(number=402)], HOLD_REVIEW % "risky")
+    out2 = ap.run_once(TTL_CFG, io2, st, "2026-06-22", LATER)
+    assert len(io2.comments) == 1 and out2["outcome"] == "hold"
+
+
+def test_hold_dedup_does_not_change_selection():
+    c402, c403 = c(number=402), c(number=403)
+    h = ap.spec_hash(c402["spec_text"])
+    st = {}
+    ap.record_verdict(st, 402, h, "HOLD", TS0, input_digest=_digest(c402))
+    io = FakeIO([c402, c403], HOLD_REVIEW % "reworded")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert out["outcome"] == "hold_unchanged" and out["issue"] == 402
+    assert io.advanced == [] and io.comments == []
+    assert ap.daily_remaining(st, 5, "2026-06-21") == 5
+    assert ap.cached_verdict(st, 402, h, NOW, 24) == "HOLD"
+    # next poll inside the TTL: 402 is cache-skipped, 403 is reviewed — same order a
+    # posted HOLD would have produced
+    io2 = FakeIO([c(number=402), c(number=403)], HOLD_REVIEW % "risky")
+    out2 = ap.run_once(TTL_CFG, io2, st, "2026-06-21", "2026-06-21T02:00:00+00:00")
+    assert out2["issue"] == 403 and out2["outcome"] == "hold"
+    assert io2.advanced == [] and len(io2.comments) == 1
+
+
 # ── Task 4: pick_next_epic selector ─────────────────────────────────────────
 
 def _e(number, title="epic", labels=None, board_order=0):
