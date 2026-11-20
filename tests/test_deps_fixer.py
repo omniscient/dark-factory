@@ -37,6 +37,27 @@ def test_advisory_fields_are_sanitised():
     assert "<1.7.4 \\|\\| >=2.0.0" in df.advisory_table(rng)         # pipes escaped in the table
 
 
+def test_advisory_table_cells_are_code_spans():
+    # operator review F3: a scoped npm name must not @-mention an account, and a tag that
+    # survives _clean must not render, in the issue body, the PR body or the prompt
+    adv = df.parse_advisories(
+        "npm\t@types/node\t1.0\t<a href=https://evil.example>fix here</a>\tGHSA-1 @octocat\thigh\n"
+        + NOFIX)
+    table = df.advisory_table(adv)
+    assert table.splitlines()[2] == (
+        "| `npm` | `@types/node` | `1.0` | `<a href=https://evil.example>fix here</a>` "
+        "| `GHSA-1 @octocat` | `high` |")
+    assert table.splitlines()[3] == (
+        "| `pip` | `python-jose` | `3.3.0` | — | `PYSEC-2026-4298` | `unknown` |")
+    for body in (df.tracking_issue_body(adv, "h"),
+                 df.pr_body(7, adv, adv, ["package.json"], "p", "ok", "")):
+        for line in body.splitlines():
+            if "@" in line or "<a " in line:
+                assert line.count("`") % 2 == 0
+                outside = "".join(line.split("`")[::2])      # text outside every code span
+                assert "@" not in outside and "<a " not in outside
+
+
 def test_read_audit_rc_contract():
     assert df.read_audit(0, RED) == []          # exit 0 = clean, whatever stdout says
     assert len(df.read_audit(1, RED)) == 2

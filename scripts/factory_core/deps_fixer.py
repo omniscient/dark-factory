@@ -132,7 +132,10 @@ def advisory_table(advisories: list) -> str:
     rows = ["| Ecosystem | Package | Installed | Fixed in | Advisory | Severity |",
             "|---|---|---|---|---|---|"]
     for a in advisories:
-        rows.append("| " + " | ".join((a[f] or "—").replace("|", "\\|") for f in FIELDS) + " |")
+        # Code spans: a scoped npm name (@types/node) must not @-mention an account and a
+        # leftover <tag> must not render. _clean has already removed every backtick.
+        rows.append("| " + " | ".join(
+            ("`" + a[f].replace("|", "\\|") + "`") if a[f] else "—" for f in FIELDS) + " |")
     return "\n".join(rows)
 
 
