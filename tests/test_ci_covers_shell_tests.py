@@ -11,17 +11,29 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CI_YML = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
-_SH_REF_PATTERN = re.compile(r"tests/[a-z_0-9]+\.sh")
+_SH_RUN_PATTERN = re.compile(r"bash\s+(?:\./)?(tests/[A-Za-z0-9_.-]+\.sh)")
+
+
+def _is_disabled(if_value) -> bool:
+    """True when an `if:` condition is the literal false, incl. `${{ false }}` form."""
+    if if_value is None:
+        return False
+    normalized = str(if_value).replace("${{", "").replace("}}", "").strip().lower()
+    return normalized == "false"
 
 
 def _referenced_in_ci(ci_text: str) -> set:
-    """Shell tests named in the run: string of a live step. YAML comments never count."""
+    """Shell tests actually run (via `bash tests/X.sh`) in a live step of a live job.
+    YAML comments never count, nor do disabled steps/jobs or paths merely mentioned
+    (e.g. `echo tests/x.sh`)."""
     refs = set()
     for job in ((yaml.safe_load(ci_text) or {}).get("jobs") or {}).values():
+        if _is_disabled(job.get("if")):
+            continue
         for step in job.get("steps") or []:
-            if str(step.get("if", "")).strip().lower() == "false":
+            if _is_disabled(step.get("if")):
                 continue
-            for m in _SH_REF_PATTERN.findall(str(step.get("run") or "")):
+            for m in _SH_RUN_PATTERN.findall(str(step.get("run") or "")):
                 refs.add(m.split("/", 1)[1])
     return refs
 
