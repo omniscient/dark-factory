@@ -38,13 +38,20 @@ token_optimization:
   enforce:
     refine: ${3}
 CFG
+  # The run-config.json entrypoint.sh materializes from the same resolve() (#180).
+  _yaml_to_run_config "${dir}/.claude/skills/refinement/config.yaml" "${dir}/run-config.json"
+}
+
+# $1 = YAML config, $2 = run-config.json to write (same tree, JSON-encoded)
+_yaml_to_run_config() {
+  python3 -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), open(sys.argv[2], "w"))' "$1" "$2"
 }
 
 # $1 = fake clone-root dir, $2.. = extra env assignments (e.g. kill-switch override)
 _run_gate() {
   local dir="$1"; shift
   local rc=0
-  env "$@" ARTIFACTS_DIR="$dir" CLONE_DIR="$dir" bash "$GATE" refine \
+  env -u FACTORY_RUN_CONFIG_JSON "$@" ARTIFACTS_DIR="$dir" CLONE_DIR="$dir" bash "$GATE" refine \
     > "${dir}/stdout.log" 2> "${dir}/stderr.log" || rc=$?
   echo "$rc"
 }
@@ -79,6 +86,47 @@ _make_case "$CASE4" true true 30000
 RC=$(_run_gate "$CASE4" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false)
 [ "$RC" = "0" ] || { echo "FAIL case4 exit code: $RC"; cat "${CASE4}/stderr.log"; exit 1; }
 [ ! -s "${CASE4}/token-opt-caps.env" ] || { echo "FAIL case4 expected empty token-opt-caps.env (kill-switch forces observe despite enforce:true)"; exit 1; }
+
+# --- Case 6: run-config.json missing — observe even though the clone-side YAML says enforce
+CASE6="${WORK}/case6"
+_make_case "$CASE6" true true 30000
+rm "${CASE6}/run-config.json"
+RC=$(_run_gate "$CASE6" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=)
+[ "$RC" = "0" ] || { echo "FAIL case6 exit code: $RC"; cat "${CASE6}/stderr.log"; exit 1; }
+[ ! -s "${CASE6}/token-opt-caps.env" ] || { echo "FAIL case6 expected observe (no run-config.json)"; exit 1; }
+grep -q "run-config.json not found; observe mode" "${CASE6}/stderr.log" || { echo "FAIL case6 expected a not-found warning"; cat "${CASE6}/stderr.log"; exit 1; }
+
+# --- Case 7: unparseable run-config.json — observe ------------------------
+CASE7="${WORK}/case7"
+_make_case "$CASE7" true true 30000
+printf '{not json' > "${CASE7}/run-config.json"
+RC=$(_run_gate "$CASE7" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=)
+[ "$RC" = "0" ] || { echo "FAIL case7 exit code: $RC"; cat "${CASE7}/stderr.log"; exit 1; }
+[ ! -s "${CASE7}/token-opt-caps.env" ] || { echo "FAIL case7 expected observe (unparseable run-config.json)"; exit 1; }
+
+# --- Case 8: FACTORY_RUN_CONFIG_JSON (entrypoint.sh's export) beats $ARTIFACTS_DIR ---
+CASE8="${WORK}/case8"
+_make_case "$CASE8" true false 30000            # $ARTIFACTS_DIR/run-config.json says observe
+mkdir -p "${CASE8}/entrypoint-artifacts"
+cat > "${CASE8}/enforce.yaml" <<'CFG'
+token_optimization:
+  enforce_budgets: true
+  budgets:
+    refine: 30000
+  enforce:
+    refine: true
+CFG
+_yaml_to_run_config "${CASE8}/enforce.yaml" "${CASE8}/entrypoint-artifacts/run-config.json"
+RC=$(_run_gate "$CASE8" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS= FACTORY_RUN_CONFIG_JSON="${CASE8}/entrypoint-artifacts/run-config.json")
+[ "$RC" = "0" ] || { echo "FAIL case8 exit code: $RC"; cat "${CASE8}/stderr.log"; exit 1; }
+[ -s "${CASE8}/token-opt-caps.env" ] || { echo "FAIL case8 expected enforce mode from FACTORY_RUN_CONFIG_JSON"; cat "${CASE8}/stderr.log"; exit 1; }
+
+# --- Case 9: kill-switch is kill-only — env "true" cannot force enforce on ----
+CASE9="${WORK}/case9"
+_make_case "$CASE9" true false 30000
+RC=$(_run_gate "$CASE9" TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=true)
+[ "$RC" = "0" ] || { echo "FAIL case9 exit code: $RC"; cat "${CASE9}/stderr.log"; exit 1; }
+[ ! -s "${CASE9}/token-opt-caps.env" ] || { echo "FAIL case9 kill-switch must never force enforce on"; exit 1; }
 
 # --- Case 5: usage errors -----------------------------------------------
 RC=0

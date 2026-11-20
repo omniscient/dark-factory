@@ -4,7 +4,7 @@
 # the report row + gate verdict for variants[1] (the candidate). The spec's worked example
 # evaluates enforcement ON as the candidate, so OFF is listed first.
 # The OFF arm is the only reachable "disabled" arm — TOKEN_OPTIMIZATION_ENFORCE_BUDGETS is a
-# kill-only override (scripts/budget_gate.sh:50-51); it cannot force enforcement on, so the ON
+# kill-only override (scripts/budget_gate.sh:56-57); it cannot force enforcement on, so the ON
 # arm is unset env / committed config as-is, not a second explicit override.
 #
 # Fixture-health caveat (spec Architecture §Tier A item 5): ~6/10 bench/suite.json tasks
