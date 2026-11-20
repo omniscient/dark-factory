@@ -209,4 +209,24 @@ fi
 [ "$(grep -c "smoke-gate-hook-missing" "$WARN_LOG" || true)" = "$MISSING_LINES" ] \
   || { echo "FAIL: non-exec smoke-gate hook must not write a smoke-gate-hook-missing line"; exit 1; }
 [ ! -s "$DEFAULT_CHECKS" ] || { echo "FAIL: non-exec smoke-gate hook must not run the built-in check"; exit 1; }
+# 12) #484 deps-audit: an OPTIONAL hook. Absent → feature inactive: rc 0 even with --gate,
+#     no smoke-gate-style refusal, nothing written to state. Present + red → --gate
+#     propagates the rc, the advisory report reaches stdout, and no main-red state is set.
+WARN_LINES=$(wc -l < "$WARN_LOG")
+rm -f "$SCHEDULER_STATE_DIR/main-is-red"
+RC=0; OUT=$(run_hook --gate deps-audit 2> "$TMP/stderr-12a") || RC=$?
+[ "$RC" = "0" ] || { echo "FAIL: absent deps-audit hook must be inactive (rc 0), got ${RC}"; exit 1; }
+[ -z "$OUT" ] || { echo "FAIL: absent deps-audit hook must print nothing"; exit 1; }
+if grep -q "hook-missing" "$TMP/stderr-12a"; then echo "FAIL: absent deps-audit hook must not be refused"; exit 1; fi
+[ "$(wc -l < "$WARN_LOG")" = "$WARN_LINES" ] || { echo "FAIL: absent deps-audit hook must not write $WARN_LOG"; exit 1; }
+printf '#!/usr/bin/env bash\nprintf "pip\\trequests\\t2.31.0\\t2.32.0\\tGHSA-9wx4-h78v-vm56\\thigh\\n"\nexit 1\n' \
+  > "$TMP/.factory/hooks/deps-audit"
+chmod +x "$TMP/.factory/hooks/deps-audit"
+RC=0; OUT=$(run_hook --gate deps-audit) || RC=$?
+[ "$RC" = "1" ] || { echo "FAIL: red deps-audit hook rc must propagate with --gate, got ${RC}"; exit 1; }
+[ "$OUT" = "$(printf 'pip\trequests\t2.31.0\t2.32.0\tGHSA-9wx4-h78v-vm56\thigh')" ] \
+  || { echo "FAIL: deps-audit report must reach stdout unchanged, got: ${OUT}"; exit 1; }
+[ ! -f "$SCHEDULER_STATE_DIR/main-is-red" ] || { echo "FAIL: red deps-audit must not latch main-is-red"; exit 1; }
+# 12b) absent deps-fix (the optional deterministic pass) is a silent no-op too
+run_hook deps-fix || { echo "FAIL: absent deps-fix hook must be a no-op"; exit 1; }
 echo PASS
