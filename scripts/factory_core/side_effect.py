@@ -196,6 +196,7 @@ _INTENT_PHASES = {
     "continue": ["implement", "validate", "conformance", "code-review", "revise-advisory"],
     "deconflict": ["deconflict"],
     "fix-main": ["fix-main"],
+    "audit-deps": ["audit-deps"],  # deps_fixer.py's claude -p fix pass (#484) -- same shape as fix-main
     "close": [],
 }
 

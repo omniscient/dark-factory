@@ -138,6 +138,11 @@ def _main_red_fix(args):
     main_once()
 
 
+def _deps_fix(args):
+    from factory_core.deps_fixer import main_once
+    main_once()
+
+
 def _rescue_blocked(args):
     from factory_core.rescue import rescue_blocked
     print(rescue_blocked(args.issue))
@@ -409,6 +414,10 @@ def main():
     mr = sub.add_parser("main-red-fix")
     mr.add_argument("--once", action="store_true")
     mr.set_defaults(func=_main_red_fix)
+
+    dfx = sub.add_parser("deps-fix")
+    dfx.add_argument("--once", action="store_true")
+    dfx.set_defaults(func=_deps_fix)
 
     rb = sub.add_parser("rescue-blocked")
     rb.add_argument("--issue", type=int, required=True)
