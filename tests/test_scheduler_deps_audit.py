@@ -106,9 +106,23 @@ def test_other_instance_audit_container_does_not_block(tmp_path):
 def test_invalid_interval_falls_back_to_24h(tmp_path):
     # non-numeric would abort the scheduler under `set -u`; 0 would dispatch on every poll
     _stamp(tmp_path).touch()
-    for bad in ("abc", "0.5", "0"):
+    # 08 / 010: a leading zero is an octal arithmetic error that ends the poll loop;
+    # 20 digits overflows to "always due" (operator review F1)
+    for bad in ("abc", "0.5", "0", "00", "08", "010", "99999999999999999999"):
         out = _run(tmp_path, DEPS_AUDIT_ENABLED="true", DEPS_AUDIT_INTERVAL_HOURS=bad)
         assert "DISPATCH:" not in out and "DISPATCHED=" in out, bad
+
+
+def test_leading_zero_interval_is_base_10(tmp_path):
+    stamp = _stamp(tmp_path)
+    stamp.touch()
+    nine_hours_ago = stamp.stat().st_mtime - 9 * 3600
+    os.utime(stamp, (nine_hours_ago, nine_hours_ago))
+    out = _run(tmp_path, DEPS_AUDIT_ENABLED="true", DEPS_AUDIT_INTERVAL_HOURS="08")
+    assert "DISPATCH:Audit deps" in out
+    os.utime(stamp, (nine_hours_ago, nine_hours_ago))  # the dispatch re-touched it
+    out = _run(tmp_path, DEPS_AUDIT_ENABLED="true", DEPS_AUDIT_INTERVAL_HOURS="010")
+    assert "DISPATCH:" not in out and "DISPATCHED=" in out
 
 
 def test_call_site_outside_main_red_block_and_pause_guarded():

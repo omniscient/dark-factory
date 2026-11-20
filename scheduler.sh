@@ -264,13 +264,13 @@ is_deps_audit_running() {
 
 deps_audit_due() {
   [ -f "$DEPS_AUDIT_STAMP_FILE" ] || return 0
-  local last now
+  local last now hours="${DEPS_AUDIT_INTERVAL_HOURS:-24}"
   last=$(stat -c %Y "$DEPS_AUDIT_STAMP_FILE" 2>/dev/null || echo 0)
   now=$(date +%s)
-  # A non-numeric value would abort the scheduler under `set -u`, and 0 would dispatch on
-  # every poll and starve every ticket stage: both fall back to 24.
-  local hours="${DEPS_AUDIT_INTERVAL_HOURS:-24}"
-  case "$hours" in ''|*[!0-9]*|0) hours=24 ;; esac
+  # Empty, non-numeric or over 4 digits (overflow = always due) -> 24. Base 10 is forced: a
+  # leading zero (08) is an octal error that ends the poll loop. 0 dispatches every poll -> 24.
+  case "$hours" in ''|*[!0-9]*|?????*) hours=24 ;; esac
+  hours=$((10#$hours)); [ "$hours" -ge 1 ] || hours=24
   [ $(( now - last )) -ge $(( hours * 3600 )) ]
 }
 
