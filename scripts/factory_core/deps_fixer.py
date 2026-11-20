@@ -282,3 +282,205 @@ def run_once(cfg: dict, io, state: dict) -> dict:
     io.comment(issue, ci_comment(pr, ci, merged))
     return {"outcome": fix_path, "issue": issue, "pr": pr, "ci": ci, "merged": merged,
             "remaining": len(remaining)}
+
+
+# ── Live IO (fixture-tested for the hook path; the rest exercised in manual validation) ──
+OWNER = identity.SLUG
+
+
+def _hooks_sh() -> str:
+    """FACTORY_HOOKS_SH override, else the baked image copy entrypoint.sh sources, else
+    the copy beside this package (repo checkout / tests)."""
+    env = os.environ.get("FACTORY_HOOKS_SH")
+    if env:
+        return env
+    baked = "/opt/dark-factory/scripts/hooks.sh"
+    if os.path.isfile(baked):
+        return baked
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks.sh")
+
+
+class LiveIO(_MainRedLiveIO):
+    """Reuses main_red_fixer.LiveIO's poll_ci / merge / notify; overrides the rest."""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.clone_dir = os.path.abspath(cfg.get("clone_dir") or identity.CLONE_DIR)
+
+    def _sh(self, cmd, timeout=600, stdin=None):
+        return subprocess.run(cmd, cwd=self.clone_dir, input=stdin, capture_output=True,
+                              text=True, timeout=timeout,
+                              env={**os.environ, "CLONE_DIR": self.clone_dir})
+
+    def _hook(self, name, gate):
+        flag = "--gate " if gate else ""
+        r = self._sh(["bash", "-c", f'source "$1" && run_hook {flag}{name}', "_", _hooks_sh()],
+                     timeout=1800)
+        return r.returncode, r.stdout or "", r.stderr or ""
+
+    def _hook_present(self, name):
+        p = os.path.join(self.clone_dir, ".factory", "hooks", name)
+        return os.path.isfile(p) and os.path.getsize(p) > 0  # same "present" test as run_hook
+
+    def audit_hook_present(self):
+        return self._hook_present("deps-audit")
+
+    def run_audit(self):
+        rc, out, _ = self._hook("deps-audit", gate=True)
+        return rc, out
+
+    def run_deterministic_fix(self):
+        self._hook("deps-fix", gate=False)  # absent hook → run_hook's default no-op
+
+    def start_branch(self):
+        branch = f"deps/audit-{time.strftime('%Y%m%d', time.gmtime())}"
+        self._sh(["git", "fetch", "origin", "main"], timeout=120)
+        self._sh(["git", "checkout", "-B", branch, "origin/main"])
+        # entrypoint.sh's pre-route `npm install` / `pip install` can rewrite a tracked
+        # lockfile; without this the audit (and changed_paths) would see that drift as a fix.
+        # Untracked, git-excluded run-time files survive a hard reset.
+        self._sh(["git", "reset", "--hard", "origin/main"])
+        return branch
+
+    def apply_agent_fix(self, prompt):
+        r = self._sh(["claude", "-p", "--model", self.cfg["model"],
+                      "--allowedTools", "Edit,Write,Read,Bash,Grep,Glob"],
+                     stdin=prompt, timeout=self.cfg.get("agent_timeout", 1200))
+        if r.returncode != 0:
+            # A dead session (usage window, auth, crash) is not "no fix exists": do not
+            # label the issue ready-for-human for it. main_once still saves the attempt.
+            raise RuntimeError(f"fix agent exited {r.returncode}: {(r.stderr or '')[-300:].strip()}")
+        path = os.path.join(self.clone_dir, NOTES_FILE)
+        try:
+            with open(path) as f:
+                notes = f.read()
+            os.remove(path)
+        except OSError:
+            notes = ""
+        return notes
+
+    def changed_paths(self):
+        self._sh(["git", "add", "-A"])
+        # --no-renames: a rename must list BOTH paths, or `git mv <ci workflow> <allowed name>`
+        # would pass the scope check as a single allowed path.
+        r = self._sh(["git", "diff", "--cached", "--name-only", "--no-renames", "origin/main", "--"])
+        return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+    def run_tests(self):
+        if not self._hook_present("validate"):
+            return "No .factory/hooks/validate hook — no local test run; CI is the gate."
+        rc, out, err = self._hook("validate", gate=True)
+        return f"validate hook exit={rc}\n{(out + err).strip()}"
+
+    def _list_open(self, extra):
+        r = self._sh(["gh", "issue", "list", "--repo", OWNER, "--state", "open", *extra,
+                      "--limit", "500", "--json", "number,body"], timeout=60)
+        try:
+            items = json.loads(r.stdout or "[]")
+        except Exception:
+            items = []
+        # startswith, not `in`: an issue that merely quotes the marker is not ours to edit or close
+        return sorted(i["number"] for i in items if (i.get("body") or "").startswith(TRACKING_MARKER))
+
+    def open_tracking_issues(self):
+        # Cheap labelled lookup first; the unfiltered fallback still finds an issue that was
+        # created without labels (repo lacked them — see find_or_create_tracking_issue).
+        return self._list_open(["--label", "dependencies"]) or self._list_open([])
+
+    def find_or_create_tracking_issue(self, advisories, h):
+        from .providers import get_tracker
+        body = tracking_issue_body(advisories, h)
+        open_ = self.open_tracking_issues()
+        if open_:
+            n = open_[0]
+            self._sh(["gh", "issue", "edit", str(n), "--repo", OWNER, "--body", body], timeout=60)
+            return n
+        title = f"deps: {len(advisories)} dependency advisories on main"
+        num = (get_tracker().create_item(title, body, ["dependencies", "security"])
+               or get_tracker().create_item(title, body))  # labels missing in repo → retry bare
+        return int(num) if str(num).isdigit() else None
+
+    def set_done(self, issue):
+        from .providers import get_tracker
+        get_tracker().set_status(str(issue), "done")  # not on the board → logged no-op
+
+    def close_issue(self, issue, comment):
+        from .providers import get_tracker
+        get_tracker().resolve_item(str(issue), comment=comment)
+
+    def open_pr(self, branch, title, body):
+        from .providers import get_codehost
+        self._sh(["git", "add", "-A"])
+        commit = self._sh(["git", "commit", "-m", title])
+        if commit.returncode != 0:
+            raise RuntimeError(f"git commit failed on {branch}: {(commit.stderr or commit.stdout).strip()}")
+        push = self._sh(["git", "push", "-u", "origin", branch, "--force-with-lease"])
+        if push.returncode != 0:
+            raise RuntimeError(f"git push failed for {branch}: {push.stderr.strip()}")
+        pr_str = get_codehost().open_change(branch, "main", title, body, draft=False, repo=OWNER)
+        if not pr_str.isdigit():
+            raise RuntimeError(f"could not parse PR number from gh output: {pr_str}")
+        return int(pr_str)
+
+    def move_to_in_review(self, issue):
+        from . import board
+        from .providers import get_tracker
+        board.add_to_board(issue, f"https://github.com/{OWNER}/issues/{issue}")
+        get_tracker().set_status(str(issue), "in_review")
+
+    def _labels(self, issue):
+        r = self._sh(["gh", "issue", "view", str(issue), "--repo", OWNER,
+                      "--json", "labels", "--jq", ".labels[].name"], timeout=60)
+        return (r.stdout or "").split()
+
+    def has_direct_to_pr(self, issue):
+        return "direct-to-pr" in self._labels(issue)
+
+    def is_halted(self, issue):
+        return "needs-discussion" in self._labels(issue)
+
+    def add_label(self, issue, label):
+        from .providers import get_tracker
+        get_tracker().add_label(str(issue), label)
+
+    def comment(self, issue, body):
+        self._sh(["gh", "issue", "comment", str(issue), "--repo", OWNER, "--body", body],
+                 timeout=60)
+
+    def escalate(self, issue, reason, h, pr=None):
+        pr_txt = f" PR #{pr} left open for review." if pr else ""
+        self.add_label(issue, "ready-for-human")
+        self.comment(issue, f"\U0001f6e1️ **Dependency-Health Loop** — escalating to a human "
+                            f"(reason: {reason}).{pr_txt}\n\n{footer()}")
+        self.notify("Dependency-health loop needs a human",
+                    f"Tracking issue #{issue}: {reason}.{pr_txt}", "warning", f"deps-audit-{h}")
+
+
+def main_once() -> int:
+    state_dir = os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory")
+    path = os.path.join(state_dir, "deps-fixer-state.json")
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+    clone_dir = os.path.abspath(os.environ.get("CLONE_DIR") or identity.CLONE_DIR)
+    cfg = dict(
+        clone_dir=clone_dir,
+        max_attempts=int(os.environ.get("DEPS_AUDIT_MAX_ATTEMPTS", "3")),
+        model=os.environ.get("DEPS_AUDIT_MODEL", "claude-opus-5-5"),
+        ci_wait_minutes=int(os.environ.get("DEPS_AUDIT_CI_WAIT_MINUTES", "20")),
+        auto_merge=os.environ.get("DEPS_AUDIT_AUTO_MERGE", "false") == "true",
+        agent_timeout=1200,
+        allowed_paths=_deps_allowed_paths(clone_dir),
+        blocked_paths=list(BLOCKED_PATHS))
+    try:
+        out = run_once(cfg, LiveIO(cfg), state)
+    finally:
+        try:
+            with open(path, "w") as f:
+                json.dump(state, f)
+        except Exception:
+            pass
+    print(f"deps_fixer={out['outcome']} issue=#{out.get('issue')} pr=#{out.get('pr')}")
+    return 0

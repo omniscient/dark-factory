@@ -373,3 +373,90 @@ def test_lifecycle_red_pr_not_merged_then_clean_closes():
     io2 = FakeIO(audits=("",))
     second = df.run_once(CFG, io2, st)
     assert second["outcome"] == "clean" and io2.closed == [42] and "done:42" in io2.calls
+
+
+# ── fixture integration: LiveIO's hook path through the real scripts/hooks.sh ──
+
+def test_liveio_reuses_main_red_liveio():
+    from factory_core import main_red_fixer as mf
+    assert issubclass(df.LiveIO, mf.LiveIO)      # poll_ci (→ ci_status) / merge / notify reused
+
+
+def _fixture_io(tmp_path, monkeypatch, hook_body=None):
+    clone = tmp_path / "clone"
+    (clone / ".factory" / "hooks").mkdir(parents=True)
+    monkeypatch.setenv("FACTORY_HOOKS_SH", str(REPO_ROOT / "scripts" / "hooks.sh"))
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path / "state"))
+    (tmp_path / "state").mkdir()
+    if hook_body is not None:
+        hook = clone / ".factory" / "hooks" / "deps-audit"
+        hook.write_text(hook_body)
+        hook.chmod(0o755)
+    return df.LiveIO(dict(clone_dir=str(clone), model="x")), clone
+
+
+def test_fixture_seeded_red_hook_flows_through_run_hook(tmp_path, monkeypatch):
+    body = "#!/usr/bin/env bash\necho 'auditing...'\nprintf '" + RED.replace("\t", "\\t").replace("\n", "\\n") + "'\nexit 1\n"
+    io, _ = _fixture_io(tmp_path, monkeypatch, body)
+    assert io.audit_hook_present() is True
+    rc, out = io.run_audit()
+    assert rc == 1
+    assert [a["id"] for a in df.read_audit(rc, out)] == ["GHSA-9wx4-h78v-vm56", "GHSA-xxxx-yyyy-zzzz"]
+    assert not (tmp_path / "state" / "main-is-red").exists()   # never touches smoke-gate state
+
+
+def test_fixture_absent_hook_is_inactive_no_refusal(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    assert io.audit_hook_present() is False
+    assert io.run_audit() == (0, "")                 # run_hook default arm: no-op, rc 0
+    io.run_deterministic_fix()                       # absent deps-fix: silent no-op
+    assert df.run_once(CFG, io, {})["outcome"] == "inactive"
+
+
+def test_liveio_clone_dir_is_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    clone_dir = df.LiveIO(dict(clone_dir=".", model="x")).clone_dir
+    assert os.path.isabs(clone_dir) and os.path.realpath(clone_dir) == os.path.realpath(tmp_path)
+
+
+def test_changed_paths_lists_both_sides_of_a_rename(tmp_path, monkeypatch):
+    # moving a CI workflow onto an allowed filename must not look like an allowed change
+    io, clone = _fixture_io(tmp_path, monkeypatch)
+
+    def git(*a):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                       cwd=clone, check=True, capture_output=True)
+    git("init", "-q")
+    (clone / ".github" / "workflows").mkdir(parents=True)
+    (clone / ".github" / "workflows" / "ci.yml").write_text("on: pull_request\njobs: {}\n" * 5)
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    git("mv", ".github/workflows/ci.yml", "yarn.lock")
+    changed = io.changed_paths()
+    assert ".github/workflows/ci.yml" in changed
+    assert df.classify_deps_scope(changed, GLOBS, BLOCKED) == "protected"
+
+
+def _stub(tmp_path, monkeypatch, name, script):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir(exist_ok=True)
+    (bin_ / name).write_text(script)
+    (bin_ / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
+
+
+def test_agent_failure_raises_instead_of_escalating_no_fix(tmp_path, monkeypatch):
+    import pytest
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    _stub(tmp_path, monkeypatch, "claude", "#!/bin/sh\necho 'usage limit reached' >&2\nexit 1\n")
+    with pytest.raises(RuntimeError, match="fix agent exited 1"):
+        io.apply_agent_fix("prompt")
+
+
+def test_tracking_marker_must_open_the_body(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    _stub(tmp_path, monkeypatch, "gh",
+          "#!/bin/sh\necho '[{\"number\":7,\"body\":\"quoting <!-- df-deps-audit --> in prose\"},"
+          "{\"number\":42,\"body\":\"<!-- df-deps-audit --> real\"}]'\n")
+    assert io.open_tracking_issues() == [42]
