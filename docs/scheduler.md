@@ -205,18 +205,18 @@ so one poll normally starts one run.
 | Order | Stage function | Board status | Guard | Acts on an item when | What it does | Skips | Limits |
 |-------|----------------|--------------|-------|----------------------|--------------|-------|--------|
 | P0 | `stage_ci_gate` (`scheduler.sh:895-925`) | In review | None. Runs before the capacity guard, so even while the factory is full | An open PR exists for `feat/issue-N-` and at least one check has `bucket == "fail"` | Moves the ticket to Blocked, comments with the failing checks, adds it to `CI_BLOCKED`. No dispatch | Global skip | None; every red ticket is gated in the same poll |
-| P0.6 | `stage_rescue_blocked` (`:996-1013`, `rescue.py`) | Blocked | `BLOCKED_RESCUE_ENABLED` (default true). Runs before the capacity guard | No run container for the issue, and its PR has at least one check, none failing, none pending, and `mergeable == MERGEABLE` | Marks a draft PR ready, moves the ticket to In review, upserts a "Rescued from Blocked" comment, resets retry key `N`, adds it to `RESCUED`. Never merges. No dispatch | Global skip; `above-ceiling` label | None |
-| — | Capacity guard (`:1554-1559`) | — | — | Running containers whose name contains `FACTORY_RUN_PREFIX` ≥ `FACTORY_WIP_LIMIT` | Logs `skip=factory_at_capacity running=a/b`, sleeps, starts the next poll. Nothing below runs and no summary line is printed | — | `FACTORY_WIP_LIMIT` |
-| — | Session-window sentinel (`:1568-1583`) | — | — | `session-window-paused` exists and its epoch is in the future | Sets `SESSION_WINDOW_PAUSED=true`. An expired or corrupt sentinel is deleted | — | — |
-| sweep | `stage_orphan_sweep` (`:1023-1038`) | In progress | `paused_only` | No container command contains `#N` | Moves the ticket to Blocked and comments "Orphaned Run Recovered". No dispatch | Global skip | None |
-| — | Main-red sentinel (`:1593-1603`) | — | — | `main-is-red` exists | Sets `MAIN_IS_RED=true`. Unless paused, may dispatch `Recheck main` and `Fix main` (see [Main-red](#main-red-detection-recheck-and-autofix)) | — | Recheck and fixer throttles |
-| P1.5 | `stage_conflict_resolve` (`:1045-1109`) | In review | `red_or_paused`; `CONFLICT_RESOLUTION_ENABLED` | Not in `CI_BLOCKED`, not running, breaker checks pass, PR exists and mergeability is `CONFLICTING`. `UNKNOWN` is logged and skipped | Dispatches `Deconflict issue #N` | Global skip | Retry key `N:resolve`, ceiling `MAX_RETRIES` |
-| P1 | `stage_review_triage` (`:1112-1145`) | In review | `none` | Not in `CI_BLOCKED`. First `end_gate_check`; if that does not act, new comments since the last factory comment are classified | End gate or verdict `MERGE` → `Close issue #N`. `CHANGES_REQUESTED` or verdict `CONTINUE` → `Continue issue #N` (only if not already running) and reset retry key `N`. `SKIP` → nothing | Global skip | None |
-| P2 | `stage_ready_implement` (`:1148-1194`) | Ready | `red_or_paused` | In progress and In review columns are under their WIP limits, dependencies are met, not running, not above the dispatch ceiling | Dispatches `Fix issue #N`. Above-ceiling items are labelled, moved to Blocked and commented on instead | Global skip | `MAX_IN_PROGRESS`, `MAX_IN_REVIEW` (stage stops), dependency gate, dispatch ceiling |
-| P3 | `stage_blocked_retry` (`:1197-1251`) | Blocked | `red_or_paused` | Not rescued this poll, no `above-ceiling` label, not running, breaker checks pass | Dispatches `Continue issue #N` if a `feat/issue-N-*` branch or an open PR exists, else `Fix issue #N` | Global skip; `above-ceiling` label; `RESCUED` | Retry key `N`, ceiling `MAX_RETRIES` |
-| P4 | `stage_plan` (`:1254-1315`) | Refined | `paused_only` | Not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `plan-pending-review` **and** `direct-to-pr` go to `plan_advance_check` instead | Comments "Starting plan generation" and dispatches `Plan issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:plan`, ceiling `REFINE_MAX_RETRIES` |
-| P5 | `stage_refine` (`:1318-1382`) | Backlog | `paused_only` | Carries `ready-for-agent` or `direct-to-pr`, not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `spec-pending-review` go to `spec_advance_check` instead | Comments "Starting brainstorming" and dispatches `Refine issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:refine`, ceiling `REFINE_MAX_RETRIES` |
-| P6 | `stage_epic_autopilot` (`:1389-1395`) | (its own queries) | Own condition: nothing dispatched this poll, main green, not paused, `EPIC_AUTOPILOT_ENABLED=true` | See [Epic autopilot](#epic-autopilot) | Runs `cli.py epic-autopilot --once` in the scheduler process. May add `direct-to-pr` to one child or start one epic. Starts no container itself | Its own eligibility rules | Daily cap |
+| P0.6 | `stage_rescue_blocked` (`:937-954`, `rescue.py`) | Blocked | `BLOCKED_RESCUE_ENABLED` (default true). Runs before the capacity guard | No run container for the issue, and its PR has at least one check, none failing, none pending, and `mergeable == MERGEABLE` | Marks a draft PR ready, moves the ticket to In review, upserts a "Rescued from Blocked" comment, resets retry key `N`, adds it to `RESCUED`. Never merges. No dispatch | Global skip; `above-ceiling` label | None |
+| — | Capacity guard (`:1495-1500`) | — | — | Running containers whose name contains `FACTORY_RUN_PREFIX` ≥ `FACTORY_WIP_LIMIT` | Logs `skip=factory_at_capacity running=a/b`, sleeps, starts the next poll. Nothing below runs and no summary line is printed | — | `FACTORY_WIP_LIMIT` |
+| — | Session-window sentinel (`:1509-1524`) | — | — | `session-window-paused` exists and its epoch is in the future | Sets `SESSION_WINDOW_PAUSED=true`. An expired or corrupt sentinel is deleted | — | — |
+| sweep | `stage_orphan_sweep` (`:964-979`) | In progress | `paused_only` | No container command contains `#N` | Moves the ticket to Blocked and comments "Orphaned Run Recovered". No dispatch | Global skip | None |
+| — | Main-red sentinel (`:1534-1544`) | — | — | `main-is-red` exists | Sets `MAIN_IS_RED=true`. Unless paused, may dispatch `Recheck main` and `Fix main` (see [Main-red](#main-red-detection-recheck-and-autofix)) | — | Recheck and fixer throttles |
+| P1.5 | `stage_conflict_resolve` (`:986-1050`) | In review | `red_or_paused`; `CONFLICT_RESOLUTION_ENABLED` | Not in `CI_BLOCKED`, not running, breaker checks pass, PR exists and mergeability is `CONFLICTING`. `UNKNOWN` is logged and skipped | Dispatches `Deconflict issue #N` | Global skip | Retry key `N:resolve`, ceiling `MAX_RETRIES` |
+| P1 | `stage_review_triage` (`:1053-1086`) | In review | `none` | Not in `CI_BLOCKED`. First `end_gate_check`; if that does not act, new comments since the last factory comment are classified | End gate or verdict `MERGE` → `Close issue #N`. `CHANGES_REQUESTED` or verdict `CONTINUE` → `Continue issue #N` (only if not already running) and reset retry key `N`. `SKIP` → nothing | Global skip | None |
+| P2 | `stage_ready_implement` (`:1089-1135`) | Ready | `red_or_paused` | In progress and In review columns are under their WIP limits, dependencies are met, not running, not above the dispatch ceiling | Dispatches `Fix issue #N`. Above-ceiling items are labelled, moved to Blocked and commented on instead | Global skip | `MAX_IN_PROGRESS`, `MAX_IN_REVIEW` (stage stops), dependency gate, dispatch ceiling |
+| P3 | `stage_blocked_retry` (`:1138-1192`) | Blocked | `red_or_paused` | Not rescued this poll, no `above-ceiling` label, not running, breaker checks pass | Dispatches `Continue issue #N` if a `feat/issue-N-*` branch or an open PR exists, else `Fix issue #N` | Global skip; `above-ceiling` label; `RESCUED` | Retry key `N`, ceiling `MAX_RETRIES` |
+| P4 | `stage_plan` (`:1195-1256`) | Refined | `paused_only` | Not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `plan-pending-review` **and** `direct-to-pr` go to `plan_advance_check` instead | Comments "Starting plan generation" and dispatches `Plan issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:plan`, ceiling `REFINE_MAX_RETRIES` |
+| P5 | `stage_refine` (`:1259-1323`) | Backlog | `paused_only` | Carries `ready-for-agent` or `direct-to-pr`, not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `spec-pending-review` go to `spec_advance_check` instead | Comments "Starting brainstorming" and dispatches `Refine issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:refine`, ceiling `REFINE_MAX_RETRIES` |
+| P6 | `stage_epic_autopilot` (`:1330-1336`) | (its own queries) | Own condition: nothing dispatched this poll, main green, not paused, `EPIC_AUTOPILOT_ENABLED=true` | See [Epic autopilot](#epic-autopilot) | Runs `cli.py epic-autopilot --once` in the scheduler process. May add `direct-to-pr` to one child or start one epic. Starts no container itself | Its own eligibility rules | Daily cap |
 
 Items are processed in the order the board query returns them; the scheduler applies no
 priority ordering of its own within a status (`get_items_by_status`, `scheduler.sh:557-562`).
@@ -226,8 +226,8 @@ Status names are compared case-insensitively.
 
 **"Running" means a container, not a board status.** `is_issue_running`
 (`scheduler.sh:115-119`) greps the command column of `docker ps` for `#N`.
-`count_refine_running` (`:249-251`) counts commands containing `Refine issue` or
-`Plan issue`. `count_factory_running` (`:180-182`) counts container names containing
+`count_refine_running` (`:190-192`) counts commands containing `Refine issue` or
+`Plan issue`. `count_factory_running` (`:121-123`) counts container names containing
 `FACTORY_RUN_PREFIX`.
 
 **Breaker checks** (P1.5, P3, P4, P5 share this sequence; see
@@ -247,10 +247,10 @@ Status names are compared case-insensitively.
   (`providers/codehost/github.py` `get_change_reviews()`). `APPROVED` dispatches
   `Close issue #N`; `CHANGES_REQUESTED` dispatches `Continue issue #N`. Any other state
   falls through to comment classification.
-- `get_new_comments` (`:743-766`) returns the issue comments after the last one matching
+- `get_new_comments` (`:684-707`) returns the issue comments after the last one matching
   `Posted by <product> Dark Factory`; if there is no such comment, all comments.
-- `classify_comments` (`:832-920`) asks `claude -p --model haiku` for one word.
-  `parse_comment_verdict` (`:768-830`) accepts `MERGE` only when it is the whole reply
+- `classify_comments` (`:773-861`) asks `claude -p --model haiku` for one word.
+  `parse_comment_verdict` (`:709-771`) accepts `MERGE` only when it is the whole reply
   (ignoring punctuation other than `?`), accepts `CONTINUE` / `SKIP` as the leading
   token, and treats a reply containing two different all-caps verdict tokens as
   unparseable. An API error or unparseable reply becomes `SKIP` and is not cached.
@@ -346,7 +346,7 @@ Changing a board limit needs a scheduler restart, because the limits are cached 
 ### Dependency gating
 
 `dependencies_met` (`scheduler.sh:644-681`) is called only by `stage_ready_implement`.
-It reads the issue body and `_scan_body_for_deps` (`:667-701`) collects issue numbers
+It reads the issue body and `_scan_body_for_deps` (`:608-642`) collects issue numbers
 from:
 
 - any line containing `Depends on:` (case-insensitive; `*` emphasis is stripped first;
@@ -389,9 +389,9 @@ issue number for the implement phase and `N:<phase>` otherwise (`breaker.py` `_m
 | Key | Counted when | Ceiling | Reset when |
 |-----|--------------|---------|------------|
 | `N` | Each `stage_blocked_retry` attempt (`evaluate_stop`, `scheduler.sh:1169`) | `MAX_RETRIES` | `Continue` dispatched from In review (`:294`, `:1079`); blocked rescue (`:950`); breaker trip |
-| `N:plan` | Each `stage_plan` attempt (`:1295`) | `REFINE_MAX_RETRIES` | Re-plan on feedback (`:296`); breaker trip |
-| `N:refine` | Each `stage_refine` attempt (`:1362`) | `REFINE_MAX_RETRIES` | Re-refine on feedback (`:260`); breaker trip |
-| `N:resolve` | Each `Deconflict` dispatch (`:1098`); the ceiling check itself is a `--peek` (`:1080`) | `MAX_RETRIES` | Breaker trip |
+| `N:plan` | Each `stage_plan` attempt (`:1236`) | `REFINE_MAX_RETRIES` | Re-plan on feedback (`:237`); breaker trip |
+| `N:refine` | Each `stage_refine` attempt (`:1303`) | `REFINE_MAX_RETRIES` | Re-refine on feedback (`:201`); breaker trip |
+| `N:resolve` | Each `Deconflict` dispatch (`:1039`); the ceiling check itself is a `--peek` (`:1021`) | `MAX_RETRIES` | Breaker trip |
 | `<key>:delivery` | A delivery-failure attempt that was exempted from `<key>` | same ceiling as `<key>` | With `<key>` |
 | `<key>:sig` | Last failure signature seen for `<key>` | — | With `<key>` |
 
@@ -419,8 +419,8 @@ the named volume `<FACTORY_INSTANCE>-scheduler-state` mounted into both the sche
 | `session-window-paused` | Run container (`session_window.py` `write_pause_sentinel`) | Scheduler (`scheduler.sh:1509-1524`) | Resume epoch for the session-window pause |
 | `main-is-red` | Run container (`smoke_gate.sh` `_smoke_on_red`); removed by `_smoke_on_green` | Scheduler (`:1594`) | Main-red latch |
 | `main-is-red-issue` | Run container (`smoke_gate.sh`) | `main_red_fixer.py` | Regression ticket number |
-| `main-red-last-recheck` | Scheduler (`:218`) and `smoke_gate.sh` on red; removed on green | Scheduler `recheck_due` | Recheck throttle (file mtime) |
-| `main-red-fixer-last-run` | Scheduler (`:244`) | Scheduler `fixer_due` | Fixer throttle (file mtime) |
+| `main-red-last-recheck` | Scheduler (`:159`) and `smoke_gate.sh` on red; removed on green | Scheduler `recheck_due` | Recheck throttle (file mtime) |
+| `main-red-fixer-last-run` | Scheduler (`:185`) | Scheduler `fixer_due` | Fixer throttle (file mtime) |
 | `main-red-fixer-state.json` | `main_red_fixer.py` in the `Fix main` run | Same | Attempts per regression ticket |
 | `autopilot-state.json` | `epic_autopilot.py` in the scheduler process | Same | Daily advance count, cached verdicts |
 | `runs.jsonl` | Run containers (`entrypoint.sh`); scheduler appends a `stop_condition` row when `evaluate_stop` reports a stop (`breaker.py` `_append_stop_audit_row`) | Reporting | Run ledger |
@@ -447,7 +447,7 @@ What trips it (all in the four breaker-checked stages):
    charged to the normal counter; a shadow counter `<key>:delivery` is. When the shadow
    counter reaches the ceiling the normal counter is back-filled and the breaker trips
    (`retry_or_skip_delivery_failure`, `scheduler.sh:394-410`; the conflict stage does the
-   same inline, `:1070-1078`, `:1094-1096`).
+   same inline, `:1011-1019`, `:1035-1037`).
 
 What it does (`breaker.py` `trip_to_blocked`): moves the ticket to Blocked, adds the
 labels `needs-discussion` and `factory-regression`, posts "Circuit-Breaker Tripped
@@ -475,7 +475,7 @@ In the scheduler (`scheduler.sh:1509-1524`), while the epoch is in the future:
 - still running: CI gate, blocked rescue, and review triage (guard `none`).
 
 Once the time passes the sentinel is deleted on the next poll. The attempt that was
-interrupted is not charged: `rollback_paused_retry` (`:425-433`) decrements the counter
+interrupted is not charged: `rollback_paused_retry` (`:366-374`) decrements the counter
 when it sees the pause signature, and the next plan/refine "Starting…" comment says so.
 The orphan sweep is deferred during a pause so that a run which ended by pausing is not
 reclassified as orphaned.
@@ -493,12 +493,12 @@ While the file exists (`scheduler.sh:1534-1544`):
   refine are not; epic autopilot does not run;
 - **Recheck**: if `MAIN_RED_RECHECK_ENABLED`, no `Recheck main` container is running and
   `main-red-last-recheck` is older than `MAIN_RED_RECHECK_MINUTES`, dispatch
-  `Recheck main` and touch the stamp (`main_red_recheck_check`, `:212-221`). This is the
+  `Recheck main` and touch the stamp (`main_red_recheck_check`, `:153-162`). This is the
   only way the latch clears without a human, because the runs that could clear it are
   the ones being skipped;
 - **Autofix**: if `MAIN_RED_AUTOFIX_ENABLED` (ships off), no `Fix main` container is
   running and `main-red-fixer-last-run` is older than `MAIN_RED_AUTOFIX_THROTTLE_MIN`
-  (default 15), dispatch `Fix main` (`main_red_fixer_check`, `:238-247`). The run
+  (default 15), dispatch `Fix main` (`main_red_fixer_check`, `:179-188`). The run
   (`main_red_fixer.py` `run_once`) reproduces the failure, lets a `claude -p` agent edit
   within allowed paths, escalates to a human on an empty diff, an out-of-scope diff or
   after `MAIN_RED_AUTOFIX_MAX_ATTEMPTS`, and otherwise opens a PR and merges it only if
@@ -540,7 +540,7 @@ stages of the same poll.
 ### Grace-timer auto-advance for the spec and plan gates
 
 Gate-labelled items are handled by `spec_advance_check` (`scheduler.sh:194-228`) and
-`plan_advance_check` (`:289-328`). Both first return if the item has a global skip
+`plan_advance_check` (`:230-269`). Both first return if the item has a global skip
 label. Then:
 
 1. **Feedback re-run.** If any comment after the last `Posted by <product> Refinement
@@ -610,7 +610,8 @@ true (`scheduler.sh:1330-1336`). One pass (`epic_autopilot.py` `run_once`):
    `confidence >= EPIC_AUTOPILOT_CONFIDENCE_FLOOR`; anything unparseable is a `HOLD`.
    - Advance: add the `direct-to-pr` label, comment, count against the daily cap, cache
      `ADVANCE`. The grace timer then moves the ticket on later polls.
-   - Hold: comment "parked (HOLD)" and cache it. Not counted against the cap.
+   - Hold: comment "parked (HOLD)" unless the stored HOLD is unchanged (same spec and
+     review input), and cache it. Not counted against the cap. A skipped comment reports `hold_unchanged`.
 7. **No candidates.** If `EPIC_AUTOPILOT_START_EPICS` is true, pick the next Ready epic
    (`pick_next_epic`: `must-have` before `should-have`, then board order, skipping titles
    or labels matching the exclude regex), move it to In progress, add `ready-for-agent`
@@ -698,27 +699,27 @@ A poll that hits the capacity guard prints only
 | Line | Meaning | Source |
 |------|---------|--------|
 | `probe=image_check\|image_ok\|image_missing\|image_pulled image=…` | Boot image check. With `IMAGE_REF` set, the image shown is the pinned reference | `scheduler.sh:1416-1430` |
-| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1332-1333` |
-| `dispatch command="…"` / `dispatch_error command="…" exit=N` | A run was started / `docker compose run` failed | `:377`, `:384` |
-| `rate_limit remaining=… sleeping=…s until_reset` | Rate guard is sleeping | `:140` |
-| `ci_gate issue=#N pr=#P failing=K action=move_to_blocked` | CI gate | `:967` |
-| `blocked_rescue issue=#N action=promoted_to_in_review` | Rescue | `:1007` |
-| `sweep=orphaned_in_progress issue=#N action=move_to_blocked` | Orphan sweep | `:1028` |
-| `conflict_gate issue=#N pr=#P mergeable=CONFLICTING\|UNKNOWN action=…` | Conflict stage | `:1093`, `:1105` |
-| `end_gate issue=#N pr=#P state=… action=Close\|Continue` | End gate | `:342`, `:349` |
-| `classify_comments #N: verdict=…` / `cache hit …` / `fallback reason=api_error\|unparsed …` | Comment classifier | `:848`, `:889`, `:899`, `:905` |
-| `ceiling_gate issue=#N action=above_ceiling_blocked` | Dispatch ceiling | `:1163` |
-| `dep_gate issue=#N blocked_by=#M dep_status=…` / `… resolved=closed_off_board` | Dependency gate | `:724-735` |
-| `spec_auto_advance` / `spec_grace_window` / `plan_auto_advance` / `plan_grace_window` | Grace timer | `:279-284`, `:320-325` |
-| `circuit_breaker=trip issue=#N phase=…` | Breaker trip | `:400` |
-| `delivery_gate issue=#N phase=… action=delivery_failure_skip count=a/b` | Delivery failure exempted from the counter | `:463`, `:1096` |
-| `session_window_gate=active resume_at=…` | Pause in force | `:1579` |
-| `session_window_gate issue=#N phase=… action=retry_decrement count=a/b` | Paused attempt refunded | `:432` |
-| `session_window_paused=true action=skip_…` / `main_red=… session_window_paused=… action=skip_…` | A stage was skipped by its guard | `:1428`, `:1434`, `:1598` |
-| `main_red_gate=active action=skip_implement_dispatch` | Main is red | `:1596` |
-| `main_red_recheck=dispatched interval=Nm` / `main_red_fixer=dispatched` | Recheck / autofix started | `:219`, `:245` |
-| `branch_probe_error issue=#N reason=…` | Branch probe failed; treated as no branch | `:534`, `:549` |
-| `SCHED_UNHANDLED_ERR line=L exit=C` | An unhandled command failed; the scheduler is about to exit and be restarted | `:1461` |
+| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `hold_unchanged` (a repeat HOLD whose comment was skipped), `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1332-1333` |
+| `dispatch command="…"` / `dispatch_error command="…" exit=N` | A run was started / `docker compose run` failed | `:318`, `:325` |
+| `rate_limit remaining=… sleeping=…s until_reset` | Rate guard is sleeping | `:81` |
+| `ci_gate issue=#N pr=#P failing=K action=move_to_blocked` | CI gate | `:908` |
+| `blocked_rescue issue=#N action=promoted_to_in_review` | Rescue | `:948` |
+| `sweep=orphaned_in_progress issue=#N action=move_to_blocked` | Orphan sweep | `:969` |
+| `conflict_gate issue=#N pr=#P mergeable=CONFLICTING\|UNKNOWN action=…` | Conflict stage | `:1034`, `:1046` |
+| `end_gate issue=#N pr=#P state=… action=Close\|Continue` | End gate | `:283`, `:290` |
+| `classify_comments #N: verdict=…` / `cache hit …` / `fallback reason=api_error\|unparsed …` | Comment classifier | `:789`, `:830`, `:840`, `:846` |
+| `ceiling_gate issue=#N action=above_ceiling_blocked` | Dispatch ceiling | `:1104` |
+| `dep_gate issue=#N blocked_by=#M dep_status=…` / `… resolved=closed_off_board` | Dependency gate | `:665-676` |
+| `spec_auto_advance` / `spec_grace_window` / `plan_auto_advance` / `plan_grace_window` | Grace timer | `:220-225`, `:261-266` |
+| `circuit_breaker=trip issue=#N phase=…` | Breaker trip | `:341` |
+| `delivery_gate issue=#N phase=… action=delivery_failure_skip count=a/b` | Delivery failure exempted from the counter | `:404`, `:1037` |
+| `session_window_gate=active resume_at=…` | Pause in force | `:1520` |
+| `session_window_gate issue=#N phase=… action=retry_decrement count=a/b` | Paused attempt refunded | `:373` |
+| `session_window_paused=true action=skip_…` / `main_red=… session_window_paused=… action=skip_…` | A stage was skipped by its guard | `:1369`, `:1375`, `:1539` |
+| `main_red_gate=active action=skip_implement_dispatch` | Main is red | `:1537` |
+| `main_red_recheck=dispatched interval=Nm` / `main_red_fixer=dispatched` | Recheck / autofix started | `:160`, `:186` |
+| `branch_probe_error issue=#N reason=…` | Branch probe failed; treated as no branch | `:475`, `:490` |
+| `SCHED_UNHANDLED_ERR line=L exit=C` | An unhandled command failed; the scheduler is about to exit and be restarted | `:1402` |
 
 ## Running two instances side by side
 
@@ -773,15 +774,15 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 1. **Plan feedback is only acted on with `direct-to-pr`; spec feedback always is.**
    `stage_refine` sends every `spec-pending-review` item to `spec_advance_check`
    (`scheduler.sh:1264-1271`). `stage_plan` sends an item to `plan_advance_check` only
-   if it has both `plan-pending-review` and `direct-to-pr` (`:1259-1266`); otherwise
-   `has_refine_skip_label` skips it (`:1268`). A human comment on a plan for a ticket
+   if it has both `plan-pending-review` and `direct-to-pr` (`:1200-1207`); otherwise
+   `has_refine_skip_label` skips it (`:1209`). A human comment on a plan for a ticket
    without `direct-to-pr` therefore does not trigger a re-plan, although
-   `plan_advance_check` contains the code for it (`:293-310`).
+   `plan_advance_check` contains the code for it (`:234-251`).
 
 2. **The `N:resolve` counter is never reset except by a trip, and is checked before
-   mergeability.** `stage_conflict_resolve` evaluates the ceiling (`:1080-1084`) before
-   it looks up the PR or its mergeable state (`:1087-1090`), and increments
-   `N:resolve` on each Deconflict dispatch (`:1098`). No code path resets that key on a
+   mergeability.** `stage_conflict_resolve` evaluates the ceiling (`:1021-1025`) before
+   it looks up the PR or its mergeable state (`:1028-1031`), and increments
+   `N:resolve` on each Deconflict dispatch (`:1039`). No code path resets that key on a
    successful deconflict (`reset_retry` is called with `N`, `N:refine`, `N:plan` only;
    `breaker.py` `reset_retry` clears suffixes `:sig`, `:delivery`, `:loop:*`,
    `:cverdict`, `:cid`, `:crawlog`, not `:resolve`). So after `MAX_RETRIES` Deconflict
@@ -797,12 +798,12 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
    this reason ("Priority 3 would then retry it as 'Fix'").
 
 4. **Container matching is by substring and host-wide.**
-   - `is_issue_running` uses `grep -q "#${issue_num}"` (`:176`), so issue 12 is
+   - `is_issue_running` uses `grep -q "#${issue_num}"` (`:117`), so issue 12 is
      considered running while a container for issue 123 exists.
    - `docker ps` lists all containers the daemon has, so a second instance's container
      for its own issue #12 also counts. The same applies to `count_refine_running`
-     (`:250`), which is compared with this instance's `REFINE_WIP_LIMIT`, and to
-     `is_recheck_running` / `is_fixer_running` (`:192`, `:226`).
+     (`:191`), which is compared with this instance's `REFINE_WIP_LIMIT`, and to
+     `is_recheck_running` / `is_fixer_running` (`:133`, `:167`).
 
 5. **Labels are matched as substrings and only the first 10 are fetched.**
    `has_skip_label` and `has_refine_skip_label` use unanchored `grep -qi`, so any label
@@ -847,11 +848,11 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     `deploy/docker-compose.yml` sets `CLONE_DIR`, so the lookup found no adapter and the
     built-in defaults replaced the target's `safety.sensitive_keywords` and
     `safety.hard_exclude_paths`. Now `main_once` calls `_target_dir()`
-    (`epic_autopilot.py:394`, `:623`): `CLONE_DIR` if set, else `/workspace/project` when
+    (`epic_autopilot.py:420`, `:649`): `CLONE_DIR` if set, else `/workspace/project` when
     that holds `.factory/adapter.yaml`, else `.`. `_effective_sensitive_keywords` unions
     the config/env pattern with the adapter's, and `_effective_exclude_paths` unions the
     exclusions found from `CLONE_DIR` or the cwd with the target adapter's
-    (`:350`, `:364`), so reading the target's adapter cannot drop an exclusion. What is
+    (`:376`, `:390`), so reading the target's adapter cannot drop an exclusion. What is
     left: a target with no `.factory/adapter.yaml` at the mount still gets the built-in
     defaults, and the `config.yaml` `epic_autopilot.hard_exclude_paths` fallback in
     `_load_exclude_paths` is still reached only if loading the adapter raises, since a
@@ -862,10 +863,10 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     `main_red_recheck_check` and `main_red_fixer_check` run back to back
     (`scheduler.sh:1541-1542`) and may both dispatch in one poll; the capacity guard
     was evaluated once, before them. The summary's `dispatched=` shows only the second.
-    The comment at `:211` says "Callers guarantee a free factory slot".
+    The comment at `:152` says "Callers guarantee a free factory slot".
 
 13. **`Close` dispatches are not deduplicated against a running container.**
-    `end_gate_check` (`:343`) and the `MERGE` branch (`:1130`) call `dispatch` without
+    `end_gate_check` (`:284`) and the `MERGE` branch (`:1071`) call `dispatch` without
     `is_issue_running`, unlike the `Continue` branches. With `FACTORY_WIP_LIMIT=1` the
     capacity guard hides this; with a higher limit a second `Close issue #N` could be
     started while the first is still running (the verdict is cached, so it repeats).
@@ -876,28 +877,28 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     raised.
 
 15. **Review triage is unguarded by design, including for `Continue`.** Guard `none`
-    (`:1403`) means `Continue issue #N` and `Close issue #N` can be dispatched while
+    (`:1344`) means `Continue issue #N` and `Close issue #N` can be dispatched while
     main is red or during a session-window pause, and the classifier's own
-    `claude -p` call is made during a pause. The comment at `:1397-1400` states that P1
+    `claude -p` call is made during a pause. The comment at `:1338-1341` states that P1
     is unguarded; whether dispatching `Continue` into an exhausted window is intended is
     not stated.
 
 16. **"1/4/5 continue" while main is red holds only when no recheck was dispatched.**
-    Comment at `:1591-1592`. On a poll where `Recheck main` or `Fix main` is dispatched,
+    Comment at `:1532-1533`. On a poll where `Recheck main` or `Fix main` is dispatched,
     `DISPATCHED` is set and review triage, plan and refine all break on their first item.
 
 17. **The dependency gate fails open on a body fetch error and closed on a state fetch
     error.** `dependencies_met` returns 0 (met) when the issue body cannot be fetched
-    (`:707-708`; test N20 calls this "pre-existing behaviour"), but blocks when a
-    dependency's state cannot be fetched (`:727-732`). The on-board comparison is
-    case-sensitive (`!= "Done"`, `:734`) while status grouping elsewhere is not.
+    (`:648-649`; test N20 calls this "pre-existing behaviour"), but blocks when a
+    dependency's state cannot be fetched (`:668-673`). The on-board comparison is
+    case-sensitive (`!= "Done"`, `:675`) while status grouping elsewhere is not.
 
 18. **No counter on the Ready stage.** `stage_ready_implement` has no retry counter. If
     `docker compose run` fails for a Ready ticket, the ticket stays Ready and the
     dispatch is retried every poll with only `dispatch_error` in the log.
 
 19. **`above-ceiling` removal alone triggers an automatic dispatch.** The parking
-    comment tells the human to remove the label and dispatch manually (`:1176-1181`).
+    comment tells the human to remove the label and dispatch manually (`:1117-1122`).
     The ticket is in Blocked, so once the label is gone `stage_blocked_retry` will
     dispatch it by itself on the next poll.
 
@@ -922,7 +923,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 22. **Minor comment drift.** `config/config.yaml:5` says polling pauses when remaining
     is "<" the floor; the code uses `-le` (`scheduler.sh:76`). The comment above
     `evaluate_stop` cites line numbers "l.395" and "l.10" that no longer match
-    (`:163-164`). `config.yaml:1` names a path (`.claude/skills/refinement/config.yaml`)
+    (`:104-105`). `config.yaml:1` names a path (`.claude/skills/refinement/config.yaml`)
     that is not in the scheduler's search list. The stale-preview warning looks for the
     MarketHawk-specific name `mh-preview-` on every instance (`:1500`). Autopilot and
     main-red notifications post to `http://backend:8000/api/v1/alerts/system` and are

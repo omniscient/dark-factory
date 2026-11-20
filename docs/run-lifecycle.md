@@ -168,7 +168,7 @@ No Archon workflow is involved. The side-effect config says the same:
 2. Find the remote branch `origin/feat/issue-<N>-*`; take the first match
    (`entrypoint.sh:904-905`). None found: escalate.
 3. `git reset --hard` and `git clean -fd dark-factory/ .claude/` to undo the setup
-   copies, then check the branch out; verify `HEAD` is on it (`:945-961`). Either
+   copies, then check the branch out; verify `HEAD` is on it (`:920-936`). Either
    failing: escalate.
 4. Resolve (`factory_core/cli.py deconflict`, implemented in
    `scripts/factory_core/deconflict.py:233-337`):
@@ -196,7 +196,7 @@ No Archon workflow is involved. The side-effect config says the same:
    `frontend/`. Failure: escalate.
 6. `git push origin <branch>`, move the board to **In Review**, overwrite
    `conflict_resolution.md` with a short prose summary, post
-   "Dark Factory — Merge Conflicts Resolved", exit 0 (`:992-1024`).
+   "Dark Factory — Merge Conflicts Resolved", exit 0 (`:967-999`).
 
 **Escalation** means: move the board to **Blocked**, post one
 "Dark Factory — Conflict Resolution Escalated" comment with the reason and manual steps,
@@ -900,7 +900,7 @@ entry to `runs.jsonl`, and exits 0. Tuned by `scheduler.session_window_backoff_e
 With the backoff disabled, a rate-limit match makes the entrypoint sleep until the
 parsed reset time plus 60 s (300 s when the time cannot be parsed or the result is
 negative or above 90000 s) and re-run the whole workflow
-(`:1043-1078`).
+(`:1018-1053`).
 
 ---
 
@@ -1049,16 +1049,16 @@ This path does not go through `on_failure`; see
 
 Any unguarded failing command after `entrypoint.sh:634`: clone failure, dependency
 install failure, the adapter gate, the missing smoke hook, a failed push in the
-deconflict path. `on_failure` (`:535-665`):
+deconflict path. `on_failure` (`:503-633`):
 
 1. Appends a `failed` entry to `runs.jsonl` and assembles a `run-record.json` with
    `status: failed`.
 2. For `refine`, `plan`, `deconflict`: writes the error signature and posts
    "Refinement Pipeline — Failed" (marker `df-refine-failure`) with the exit code and the
-   retry command. **No board change**; the scheduler's breaker owns that (`:613-634`).
+   retry command. **No board change**; the scheduler's breaker owns that (`:581-602`).
 3. For `fix`, `continue`: writes the error signature, posts the post-mortem, moves the
    board to **Blocked**, and posts "Dark Factory Run — Failed" (marker
-   `df-factory-failure`) saying so (`:635-659`).
+   `df-factory-failure`) saying so (`:603-627`).
 4. For `close` or runs without an issue number: no comment.
 5. Posts the cost report.
 
@@ -1165,37 +1165,37 @@ The scheduler-side oddities are tracked in
 
 6. **A failed workflow does not run `on_failure`.** The failure branch ends in
    `exit "$EXIT_CODE"` (`entrypoint.sh:1054-1057`), and an `ERR` trap does not fire on
-   `exit` (the script says so itself at `:680-682`; confirmed with a small bash probe).
+   `exit` (the script says so itself at `:648-650`; confirmed with a small bash probe).
    So on this path there is no "Dark Factory Run — Failed" comment, no move to Blocked,
    no `failed` run-record entry, no assembled `run-record.json`, and no cost report. The
-   comment above `_write_error_signature` (`:396-403`) calls this the load-bearing call
+   comment above `_write_error_signature` (`:364-371`) calls this the load-bearing call
    site, so it may be intended that the scheduler owns the board here, but the failure
-   bookkeeping in `on_failure` (`:568-604`) is then only reached by setup-time failures.
+   bookkeeping in `on_failure` (`:536-572`) is then only reached by setup-time failures.
 
 7. **The "Paused (session window)" issue comment looks unreachable.** It is posted only
    inside `on_failure`, when `TMP_OUT` exists and the pause check matches
    (`entrypoint.sh:506-534`). `TMP_OUT` exists only inside the workflow loop, where a
-   pause match exits 0 directly (`:1039-1042`) without posting anything. In normal
+   pause match exits 0 directly (`:1014-1017`) without posting anything. In normal
    operation a paused run therefore leaves no comment on the issue and posts no cost
    report.
 
 8. **The adapter gate runs before the self-contained fallback copy.**
    `_adapter_invalid_refuse` is called at `entrypoint.sh:768`; the baked scripts are
-   copied into `dark-factory/scripts` at `:811-816`. `on_failure` then calls
+   copied into `dark-factory/scripts` at `:779-784`. `on_failure` then calls
    `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py` for the comment footer with no
-   guard (`:620`, `:643`). For a target that does not carry `dark-factory/scripts` in its
+   guard (`:588`, `:611`). For a target that does not carry `dark-factory/scripts` in its
    repository (the self target has `scripts/` at the root), that call fails; a bash probe
    confirms a failing assignment inside the trap handler aborts the handler. The
-   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:640`) happen
+   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:608`) happen
    first, but the generic failure comment and the cost report would not be posted.
-   `run_post_mortem` (`:264`) uses the same missing path. Not verified against a live run.
+   `run_post_mortem` (`:232`) uses the same missing path. Not verified against a live run.
 
 9. **Kill-switch retry path has unguarded pipelines.** With the session-window backoff
    disabled, `RESET_TIME=$(grep … | head -1)` and the `RESET_TZ` line
    (`entrypoint.sh:1023-1024`) run under `set -euo pipefail` with no `|| true`. When the
    output has no "resets <time>" text the pipeline status is non-zero, which would fire
    the `ERR` trap instead of using the 300 s default on the next line. The script's own
-   comment at `:132-134` describes this exact hazard for another `grep`.
+   comment at `:100-102` describes this exact hazard for another `grep`.
 
 10. **`BENCH_MODE` handling is inconsistent.** In stub mode `classify-preview` is skipped
     by its `when:` (`workflows/archon-dark-factory.yaml:852`). `preview-up` depends only
