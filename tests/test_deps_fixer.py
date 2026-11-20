@@ -520,6 +520,33 @@ def test_tracking_marker_must_open_the_body(tmp_path, monkeypatch):
     assert io.open_tracking_issues() == [42]
 
 
+_GH_AUTHOR_STUB = r'''#!/bin/sh
+echo "$*" >> "$GH_STUB_LOG"
+[ "$1 $2" = "issue list" ] || exit 0
+case "$*" in
+  *"--author @me"*) echo '[{"number":42,"body":"<!-- df-deps-audit --> ours"}]' ;;
+  *) echo '[{"number":9,"body":"<!-- df-deps-audit --> planted"},{"number":42,"body":"<!-- df-deps-audit --> ours"}]' ;;
+esac
+'''
+
+
+def test_foreign_authored_marker_issue_is_not_adopted(tmp_path, monkeypatch):
+    # operator review F5: the stub plays GitHub. Issue 9 was opened by an outside account with
+    # the marker first in its body; it is only returned when the list is NOT author-filtered.
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    log = tmp_path / "gh.log"
+    monkeypatch.setenv("GH_STUB_LOG", str(log))
+    _stub(tmp_path, monkeypatch, "gh", _GH_AUTHOR_STUB)
+    assert io.open_tracking_issues() == [42]
+    adv = df.parse_advisories(RED)
+    assert io.find_or_create_tracking_issue(adv, df.advisory_set_hash(adv)) == 42
+    calls = log.read_text().splitlines()
+    lists = [c for c in calls if c.startswith("issue list")]
+    assert lists and all("--author @me" in c for c in lists)
+    assert any(c.startswith("issue edit 42 ") for c in calls)
+    assert not any(c.startswith(("issue edit 9 ", "issue close 9")) for c in calls)
+
+
 def test_template_deps_audit_hook_emits_contract_lines(tmp_path):
     bin_ = tmp_path / "bin"
     bin_.mkdir()

@@ -395,7 +395,11 @@ class LiveIO(_MainRedLiveIO):
         return f"validate hook exit={rc}\n{(out + err).strip()}"
 
     def _list_open(self, extra):
-        r = self._sh(["gh", "issue", "list", "--repo", OWNER, "--state", "open", *extra,
+        # --author @me: only issues the factory's own account opened. The repo may be public,
+        # and anyone can open an issue whose body starts with the marker; adopting it would
+        # overwrite its body, label it, board it, and close it on the next clean audit.
+        r = self._sh(["gh", "issue", "list", "--repo", OWNER, "--state", "open",
+                      "--author", "@me", *extra,
                       "--limit", "500", "--json", "number,body"], timeout=60)
         try:
             items = json.loads(r.stdout or "[]")
