@@ -156,6 +156,24 @@ def tracking_issue_body(advisories: list, h: str) -> str:
             f"issue carries `direct-to-pr`.\n\n{footer()}")
 
 
+FENCE_LIMIT = 4000
+
+
+def fenced(text: str, keep: str = "head", limit: int = FENCE_LIMIT) -> str:
+    """Free text (fix-agent notes, hook output) as an inert code block for a GitHub body.
+    Capped at `limit` characters with a truncation marker (keep="tail" keeps the end, where
+    a test run prints its result). Every backtick becomes an apostrophe, so nothing inside
+    can close the fence: `Closes #N`, `@name` and markup stay literal text."""
+    text = (text or "").replace("`", "'")
+    if len(text) > limit:
+        cut = len(text) - limit
+        if keep == "tail":
+            text = f"[… truncated, {cut} characters omitted]\n" + text[-limit:]
+        else:
+            text = text[:limit] + f"\n[… truncated, {cut} characters omitted]"
+    return f"```\n{text}\n```"
+
+
 def pr_title(advisories: list) -> str:
     ids = sorted({a["id"] for a in advisories})
     shown = ", ".join(ids[:5]) + (", …" if len(ids) > 5 else "")
@@ -177,8 +195,9 @@ def pr_body(issue: int, advisories: list, remaining: list, changed: list,
         parts += ["", "### Still reported after the fix (needs a human decision)",
                   advisory_table(remaining)]
     if notes.strip():
-        parts += ["", "### Fix-agent notes (proposed ignores / justifications)", notes.strip()]
-    parts += ["", "### Local test run", "```", tests[-4000:], "```", "", footer()]
+        parts += ["", "### Fix-agent notes (proposed ignores / justifications)",
+                  fenced(notes.strip(), keep="head")]
+    parts += ["", "### Local test run", fenced(tests, keep="tail"), "", footer()]
     return "\n".join(parts)
 
 

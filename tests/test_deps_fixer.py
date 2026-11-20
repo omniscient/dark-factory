@@ -137,6 +137,43 @@ def test_pr_title_and_body():
     assert partial.startswith("Refs #7") and "ignore PYSEC-2026-4298" in partial
 
 
+def _outside_fences(body: str) -> str:
+    """The lines of a GitHub body that are NOT inside a ``` code block."""
+    out, inside = [], False
+    for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            inside = not inside
+            continue
+        if not inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def test_pr_body_notes_and_test_output_are_inert_fenced_text():
+    # operator review F4: fix-agent notes and validate-hook output are free text. Neither may
+    # close an issue (`Closes #1`), mention an account, or break out of its code block.
+    adv = df.parse_advisories(RED)
+    notes = "Proposed ignore.\nCloses #1 and cc @octocat\n```\nFixes #2 @hubot\n````\nResolves #3"
+    tests = "ok\n```\nCloses #4 @mona\n~~~\n   ```` \nCloses #5"
+    body = df.pr_body(7, adv, [], ["package.json"], "fixed-by-agent", tests, notes)
+    outside = _outside_fences(body)
+    for needle in ("Closes #", "Fixes #", "Resolves #", "@octocat", "@hubot", "@mona"):
+        assert needle in body and needle not in outside, needle
+    assert body.count("```") == 4                      # exactly the two fences pr_body opens
+    assert body.startswith("Refs #7") and "Posted by" in outside   # footer still outside
+
+
+def test_fenced_caps_length_with_a_truncation_marker():
+    assert df.fenced("short") == "```\nshort\n```"
+    head = df.fenced("A" * 3000 + "B" * 3000, keep="head")
+    assert head.startswith("```\n" + "A" * 3000 + "B" * 1000 + "\n[… truncated, 2000 characters omitted]")
+    tail = df.fenced("A" * 3000 + "B" * 3000, keep="tail")
+    assert tail == "```\n[… truncated, 2000 characters omitted]\n" + "A" * 1000 + "B" * 3000 + "\n```"
+    body = df.pr_body(7, df.parse_advisories(RED), [], ["package.json"], "p",
+                      "t" * 50000, "n" * 50000)
+    assert body.count("n") < 4300 and body.count("t") < 4300 and len(body) < 10000
+
+
 def test_tracking_issue_body_carries_marker_and_hash():
     adv = df.parse_advisories(RED)
     body = df.tracking_issue_body(adv, df.advisory_set_hash(adv))
