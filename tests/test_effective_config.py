@@ -298,6 +298,30 @@ def test_render_env_non_scalar_is_null_with_warning(capsys):
     assert "POLL_INTERVAL is not a single-line scalar" in capsys.readouterr().err
 
 
+def test_render_env_block_scalar_trailing_newline_is_stripped(capsys):
+    """A folded/literal block scalar keeps its text, as the former `$(yq ...)` read did;
+    a value with an interior newline is still emitted as null with a warning."""
+    import yaml
+    cfg = yaml.safe_load(
+        "dispatch_ceiling:\n"
+        "  keywords: >\n"
+        "    migration|refactor\n"
+        "  label: |\n"
+        "    above-ceiling\n"
+        "epic_autopilot:\n"
+        "  sensitive_keywords: |\n"
+        "    trading\n"
+        "    auth\n")
+    assert cfg["dispatch_ceiling"]["keywords"] == "migration|refactor\n"
+    env = _parse_env(ec.render_env(cfg, "scheduler", "x"))
+    assert env["ABOVE_CEILING_KEYWORDS"] == "migration|refactor"
+    assert env["ABOVE_CEILING_LABEL"] == "above-ceiling"
+    assert env["EPIC_AUTOPILOT_SENSITIVE_KEYWORDS"] is None
+    err = capsys.readouterr().err
+    assert "EPIC_AUTOPILOT_SENSITIVE_KEYWORDS is not a single-line scalar" in err
+    assert "ABOVE_CEILING_KEYWORDS" not in err
+
+
 def test_scheduler_mode_first_match_never_reads_clone(tmp_path, monkeypatch):
     """Requirement 2 / safety invariant 2: whole-file first match; no baked fill-in, no clone."""
     first = tmp_path / "project-config.yaml"

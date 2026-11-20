@@ -174,6 +174,9 @@ def _env_value(var: str, value):
         return None
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, str):
+        # A `>` / `|` block scalar ends in a newline that the former `$(yq ...)` read stripped.
+        value = value.rstrip("\n")
     if isinstance(value, (int, float, str)) and "\n" not in str(value):
         return str(value)
     print(f"effective-config: {var} is not a single-line scalar — emitted as null",
