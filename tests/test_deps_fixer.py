@@ -460,3 +460,33 @@ def test_tracking_marker_must_open_the_body(tmp_path, monkeypatch):
           "#!/bin/sh\necho '[{\"number\":7,\"body\":\"quoting <!-- df-deps-audit --> in prose\"},"
           "{\"number\":42,\"body\":\"<!-- df-deps-audit --> real\"}]'\n")
     assert io.open_tracking_issues() == [42]
+
+
+def test_template_deps_audit_hook_emits_contract_lines(tmp_path):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "pip-audit").write_text(
+        "#!/bin/sh\necho '{\"dependencies\":[{\"name\":\"python-jose\",\"version\":\"3.3.0\","
+        "\"vulns\":[{\"id\":\"PYSEC-2026-4298\",\"fix_versions\":[]}]}]}'\nexit 1\n")
+    (bin_ / "npm").write_text(
+        "#!/bin/sh\necho '{\"vulnerabilities\":{\"axios\":{\"severity\":\"high\",\"via\":"
+        "[{\"url\":\"https://github.com/advisories/GHSA-xxxx-yyyy-zzzz\"}],\"range\":\"<1.7.4\","
+        "\"fixAvailable\":{\"version\":\"1.7.4\"}},\"lodash\":{\"severity\":\"moderate\","
+        "\"via\":[],\"range\":\"*\",\"fixAvailable\":true}}}'\nexit 1\n")
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "requirements.txt").write_text("python-jose==3.3.0\n")
+    (clone / "package-lock.json").write_text("{}\n")
+    hook = REPO_ROOT / "templates" / "new-target" / ".factory" / "hooks" / "deps-audit"
+    assert os.access(hook, os.X_OK), "template hook must be committed executable"
+    env = dict(os.environ, CLONE_DIR=str(clone), TMPDIR=str(tmp_path),
+               PATH=f"{bin_}:{os.environ['PATH']}")
+    r = subprocess.run([str(hook)], env=env, capture_output=True, text=True)
+    assert r.returncode == 1
+    assert [a["id"] for a in df.parse_advisories(r.stdout)] == ["PYSEC-2026-4298", "GHSA-xxxx-yyyy-zzzz"]
+    (clone / "requirements.txt").unlink()
+    (clone / "package-lock.json").unlink()
+    r = subprocess.run([str(hook)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout == ""
