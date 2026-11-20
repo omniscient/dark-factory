@@ -39,6 +39,13 @@ safety:
   main_red_allowed_paths:
     - "src/"
     - "tests/"
+  # Optional: globs the (off-by-default) dependency-health loop's fix may touch. Omit it to
+  # keep the default manifest/lockfile list (requirements*.txt, pyproject.toml, package.json,
+  # package-lock.json, yarn.lock, pnpm-lock.yaml) — see README "adapter.yaml keys".
+  # deps_allowed_paths:
+  #   - "**/requirements*.txt"
+  #   - "**/package.json"
+  #   - "**/package-lock.json"
 
 # EDIT: glob -> memory file the factory appends lessons to.
 memory_routing:

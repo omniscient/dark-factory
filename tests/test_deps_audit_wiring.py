@@ -38,3 +38,11 @@ def test_config_documents_deps_audit_block_shipping_off():
     assert block["interval_hours"] == 24 and block["model"] == "claude-opus-5-5"
     assert block["max_attempts"] == 3 and block["ci_wait_minutes"] == 20
     assert cfg["side_effect"]["phase_levels"]["audit_deps"] == 5
+
+
+def test_readme_documents_hooks_adapter_key_and_kill_switch():
+    readme = (REPO_ROOT / "README.md").read_text()
+    for needle in ("| `deps-audit` |", "| `deps-fix` |", "`safety.deps_allowed_paths`",
+                   "DEPS_AUDIT_ENABLED=true", "deploy/instance.env",
+                   "templates/new-target/.factory/hooks/deps-audit"):
+        assert needle in readme, needle
