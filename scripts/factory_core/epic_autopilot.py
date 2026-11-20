@@ -314,7 +314,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
         return {"outcome": "advanced", "issue": cand["number"], "reason": reason}
 
     concerns = "; ".join(verdict.get("concerns", [])) or "not low-risk / low confidence"
-    unparseable = verdict.get("reasons") == ["unparseable"]  # parse_verdict's _HOLD sentinel
+    unparseable = verdict.get("reasons") == _HOLD["reasons"]  # parse_verdict's _HOLD sentinel
     input_digest = None if unparseable else spec_hash(prompt)
     unchanged = hold_unchanged(state, cand["number"], h, input_digest)
     if not unchanged:
