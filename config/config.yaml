@@ -50,6 +50,11 @@ code_review:
     - high
     - critical
 
+docs_conformance:            # Gate 2.5 (#535): docs vs the final post-Gate-2 diff, before push-and-pr
+  enabled: true              # false = the command writes STATUS: SKIPPED (passes in both modes)
+  mode: observe              # observe = record the verdict, which never blocks; enforce = fail closed on
+                             # BLOCKED/ERROR/missing. Flipping to enforce is a separate reviewed change (#536)
+
 preview:
   enabled: true   # false = always build the preview (pre-differentiator behavior) — kill-switch
   model: haiku
@@ -147,12 +152,14 @@ token_optimization:
     implement: 30000
     conformance: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/dark-factory-token-optimization.md)
     code-review: 22000         # provisional from T5 smoke run; recalibrate per runbook Follow-up Path (docs/dark-factory-token-optimization.md)
+    docs-conformance: 22000    # #535: uncalibrated; mirrors conformance until observe-mode telemetry exists
   enforce:
     refine: true               # T3b: enforcement live — #733 via #731 scorecard: 0% section_at_risk
     plan: true                 # T3b: enforcement live — #733 via #731 scorecard: 0% section_at_risk
     implement: false
     conformance: true          # T6: enforcement live — 0% section_at_risk in T5 calibration
     code-review: true          # T6: enforcement live — 0% section_at_risk in T5 calibration
+    docs-conformance: false    # #535: observe until calibrated, like implement
   issue_context:
     reserve_tokens: 2000      # minimum token reservation for issue_context (floor applied even when actual < reserve)
   architecture:

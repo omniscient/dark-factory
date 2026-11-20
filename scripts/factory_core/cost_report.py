@@ -116,7 +116,7 @@ def format_push_line(run_record: dict) -> str:
 # Optimizer deliveries that count toward the headline "Context savings" (#511). Mirrors
 # scripts/context_budget.py _DELIVERED_SAVINGS (a test keeps the two in sync): memory
 # is delivered to the refine/plan/implement(+continue) prompts, the ranked diff to
-# conformance/code-review (diff_rank.py records no phase, every record counts).
+# conformance/code-review/docs-conformance (diff_rank.py records no phase, every record counts).
 DELIVERED_MEMORY_PHASES = frozenset({"refine", "plan", "implement", "continue"})
 DELIVERED_SAVINGS_FILE = "delivered-savings.jsonl"
 BUDGET_LEGACY_FILE = "context-budget.json"

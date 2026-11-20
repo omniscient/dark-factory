@@ -296,6 +296,26 @@ def _markers_regex(args):
     print("|".join(re.escape(p) for p in identity.detection_patterns()))
 
 
+def _docs_conformance_config(args):
+    # Single source of truth for docs_conformance.{enabled,mode} normalization, so the
+    # three former copies (dark-factory-docs-conformance.md Phase 1 and Phase 4-5, and the
+    # docs-conformance-gate workflow node) cannot drift (#535).
+    import yaml
+    try:
+        doc = yaml.safe_load(Path(args.config).read_text(encoding="utf-8")) or {}
+    except Exception:
+        doc = {}
+    # A non-mapping document or block is a config-read failure like any other: the
+    # shipped default, never a crash the caller has to paper over.
+    cfg = doc.get("docs_conformance") if isinstance(doc, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = {}
+    enabled = str(cfg.get("enabled", True)).lower()
+    mode = cfg.get("mode", "observe")
+    mode = mode if mode == "enforce" else "observe"
+    print(f"{enabled} {mode}")
+
+
 def _render_prompt(args):
     from factory_core.prompt_render import render, PromptRenderError
 
@@ -473,6 +493,10 @@ def main():
 
     mkr = sub.add_parser("markers-regex")
     mkr.set_defaults(func=_markers_regex)
+
+    dcc = sub.add_parser("docs-conformance-config")
+    dcc.add_argument("--config", required=True)
+    dcc.set_defaults(func=_docs_conformance_config)
 
     rp = sub.add_parser("render-prompt")
     rp.add_argument("--template", required=True)

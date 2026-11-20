@@ -320,7 +320,7 @@ Consequences that follow directly from this:
   (`deploy/instance.env.example:9-10`, `:127-132`).
 - Values the scheduler takes from `config.yaml` via `_set_cfg` stay in the scheduler
   process. A feature whose run-side half reads an env var must also have that var in
-  `.archon/.env`. `config/config.yaml:115-117` says this about `MAIN_RED_AUTOFIX_ENABLED`,
+  `.archon/.env`. `config/config.yaml:120-122` says this about `MAIN_RED_AUTOFIX_ENABLED`,
   and `entrypoint.sh` (the `fix-main` branch) confirms the run container checks it again.
 - The run container mounts the same state volume at `/var/lib/dark-factory`
   (`run-compose.yml`, `scheduler_state`), which is how sentinels and failure signatures

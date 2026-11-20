@@ -15,6 +15,7 @@ EXPECTED_COMMANDS = {
     "ceiling-revisit.md",
     "dark-factory-code-review.md",
     "dark-factory-conformance.md",
+    "dark-factory-docs-conformance.md",
     "dark-factory-implement.md",
     "dark-factory-plan.md",
     "dark-factory-refine.md",
