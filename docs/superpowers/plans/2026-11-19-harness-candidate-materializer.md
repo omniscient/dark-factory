@@ -1,6 +1,7 @@
 # Harness Candidate Materializer (Phase A) Implementation Plan
 
 **Issue:** #465
+**Revised:** 2026-11-21 (operator amendment after plan gate review)
 
 > **For agentic workers:** this plan is executed task by task by the factory's implement
 > phase. Steps use checkbox (`- [ ]`) syntax for tracking. Run every command from the
@@ -65,7 +66,7 @@ design of record for both phases; this plan covers **Phase A only**).
 | `scripts/factory_core/materializer.py` | Create | `Baseline`, config ceilings, envelope policy (`check_network`, `resolve_limits`), baseline digesting (`compute_repo_digest`, `resolve_in_tree`), workspace construction (`build_workspace`, `remove_workspace`), argv translation (`validate_write_paths`, `base_bind_dirs`, `build_bwrap_argv`, `invocation_digest`), the bundle (`materialize`, `seal_bundle`, `verify_bundle`, `resolve_out_dir`), CLI `materialize` |
 | `tests/test_materializer.py` | Create | Unit tests: no namespaces, no skips, throwaway git baselines only |
 | `config/config.yaml` | Modify (append at end) | New top-level `materializer:` block with 4 leaf keys |
-| `docs/configuration.md` | Modify | Leaf-key count 95 → 99, a `### materializer` Layer 1 table (4 rows) |
+| `docs/configuration.md` | Modify | Leaf-key count 106 → 110, a `### materializer` Layer 1 table (4 rows) |
 | `evals/materializer/fixtures/manifest.json` | Create | Expected verdict and phase for each of the 18 fixtures |
 | `evals/materializer/fixtures/baseline-manifest.json` | Create | The synthetic baselines (`clean` plus 5 variants) that the fixtures name |
 | `evals/materializer/fixtures/candidate-<fixture>.json` | Create (18, generated) | One full candidate record per fixture, with real digests |
@@ -109,6 +110,22 @@ These are the spec's open details, settled so that the code below is unambiguous
   The prototype confirmed that last case: by default, an injected `apply.whitespace=error`
   took effect. The `ls-tree`/`cat-file` calls keep the host's global config, because
   production may rely on a global `safe.directory`.
+- **Applied result is verified, never assumed**: #464's `extract_diff_paths()` and `git apply`
+  are two parsers of one untrusted string. `str.splitlines()` also breaks on `\r`, `\v`, `\f`,
+  `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029; git breaks only on `\n`. A fake `@@` header after
+  one of those makes the parser swallow a real `---`/`+++` pair as hunk content, so a diff that
+  validates as docs-only H0 patches `scheduler.sh` or `.github/workflows/publish.yml` when
+  applied. Two checks close this. Before the apply, a diff that the two would split differently
+  is refused (`_check_diff_lines`). After it, `_verify_applied` compares the workspace with the
+  digested blobs: every path whose content, type or exec bit changed must be named by the
+  validated diff and lie under `editable_path_allowlist`, and no symlink may be added, removed
+  or retargeted (a plain hunk on a symlink path rewrites its target, with no mode header for
+  #464 to reject).
+  **Deliberate trade-off:** a diff containing `\r`, `\f`, `\v`, `\x1c`-`\x1e`, `\x85`, U+2028
+  or U+2029 is refused outright, and that includes a legitimate edit of a CRLF file. Failing
+  closed is preferred to guessing which reading git will take. The root cause, `str.splitlines()`
+  in `mechanism_candidate.extract_diff_paths`, is tracked in a follow-up ticket filed by the
+  operator; this plan does not edit `mechanism_candidate.py`.
 - **Same blobs**: `materialize()` writes the workspace from the in-memory blobs it just
   digested. It never re-reads them.
 - **`write_paths`**: each entry is checked with #464's own path rules (`_check_path_text`,
@@ -124,9 +141,10 @@ These are the spec's open details, settled so that the code below is unambiguous
   `canonical_digest()` can always seal a refusal, and a BLOCKED bundle is always written. A
   failure to remove the workspace is reported in a BLOCKED reason, never raised. That includes a
   failed build: `_build_workspace` re-raises its original error with the leaked path appended.
-  An unusable bundle path (NUL byte, unencodable name) is a `MaterializerError`. The CLI treats a
-  candidate file it cannot load (unreadable, invalid JSON, or nested deeply enough to raise
-  `RecursionError`) as exit 2. `provenance` = `materializer_version`, `module_digest` (sha256 of
+  An unusable bundle path (NUL byte, unencodable name) is a `MaterializerError`. The CLI reads
+  the candidate file through a 16 MiB cap and treats any failure to load it, and any exception
+  out of `materialize()`, as exit 2: both `except` clauses catch `Exception`, because an
+  uncaught exception exits 1, the code that means "BLOCKED, bundle written". `provenance` = `materializer_version`, `module_digest` (sha256 of
   `materializer.py`), `bwrap_available: null`, `invocation_digest` (the argv with the random
   workspace path normalised to `<workspace>`, or `null` if refused before any argv), and
   `limits`. `baseline` = the declared block, plus `commit` and `computed_repo_digest`.
@@ -153,12 +171,13 @@ These are the spec's open details, settled so that the code below is unambiguous
 ```bash
 ls scripts/docs_refs_check.py docs/configuration.md scripts/factory_core/mechanism_candidate.py \
    scripts/factory_core/verdict.py docs/superpowers/specs/2026-10-22-harness-candidate-materializer-design.md
-grep -n "95 leaf keys" docs/configuration.md
+grep -n "106 leaf keys" docs/configuration.md
 tail -3 config/config.yaml
 ls scripts/factory_core/materializer.py tests/test_materializer.py evals/materializer 2>&1 | grep -c "No such file"
 ```
 
-Expected: the five paths are listed. `95 leaf keys` appears on two lines (about 81 and 304).
+Expected: the five paths are listed. `106 leaf keys` appears on two lines (about 81 and 336). If `main` has moved again, use the
+count `grep -n "leaf keys" docs/configuration.md` prints and add 4 to it in Task 1 Step 8.
 The last line of `config/config.yaml` is `      - material_conformance_uncertainty`. The final
 count is `3` (none of the new files exist yet). If `docs_refs_check.py` or
 `docs/configuration.md` is missing, the branch did not fork from current `main`. Rebase onto
@@ -450,11 +469,11 @@ The check prints whatever config path it resolved, which may be absolute.
 
 - [ ] **Step 8: Document the keys** in `docs/configuration.md`, with three edits:
 
-  1. In the Layer 1 intro, replace `` (`Dockerfile:152`). 95 leaf keys, `` with
-     `` (`Dockerfile:152`). 99 leaf keys, ``.
+  1. In the Layer 1 intro, replace `106 leaf keys,` (on the line that cites `Dockerfile:152`) with
+     `110 leaf keys,`.
   2. In the `token_optimization` counting paragraph, replace
-     ``` `comments` 4, `diff` 3, `escalation` 1): 95 leaf keys.``` with
-     ``` `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 99 leaf keys.```
+     ``` `comments` 4, `diff` 3, `escalation` 1): 106 leaf keys.``` with
+     ``` `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 110 leaf keys.```
   3. Insert this section immediately **before** the `### Unread keys (summary)` heading (after
      the counting paragraph and its blank line):
 
@@ -862,6 +881,8 @@ def _list_tree(commit, repo_root):
                   f"refused, never flattened")
         if mode not in _FILE_MODES and mode != _SYMLINK_MODE:
             _fail(f"baseline entry {path!r} has unsupported mode {mode}")
+        if not size.isdigit():  # ls-tree -l prints BAD for a blob it cannot read
+            _fail(f"baseline entry {path!r} has no readable blob (ls-tree size {size!r})")
         entries.append((path, mode, sha, int(size)))
     if not entries:
         _fail(f"baseline commit {commit} has an empty tree")
@@ -1082,6 +1103,66 @@ def test_workspace_inside_the_clone_or_artifacts_is_refused(tmp_path, monkeypatc
         mz.build_workspace(_record(b), b)
     assert os.listdir(artifacts) == []
     assert os.listdir(b.repo_root) == [".git"]
+
+
+def _smuggle(sep, target=_TOOL):
+    """Docs-only by #464's reading, but git also patches `target`: `sep` is a line break
+    for str.splitlines() and not for git, so the fake @@ header after it makes the parser
+    swallow the real ---/+++ header pair as hunk content."""
+    return (f"diff --git a/{_DOC} b/{_DOC}\n--- a/{_DOC}\n+++ b/{_DOC}\n@@ -1,1 +1,1 @@\n-old\n"
+            f"+new{sep}@@ -1,1 +1,1 @@\n--- a/{target}\n+++ b/{target}\n@@ -1,1 +1,1 @@\n"
+            f"-MAX = 3\n+MAX = 99999\n")
+
+
+@pytest.mark.parametrize("sep", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028",
+                                 "\u2029", "\r"])
+def test_diff_with_a_non_newline_line_break_is_refused(tmp_path, scratch_tmp, sep):
+    b = _make_repo(tmp_path)
+    r = _record(b, diff=_smuggle(sep))
+    assert sorted(mc.extract_diff_paths(r["diff"])) == [_DOC]  # #464 sees a docs-only H0 diff
+    with pytest.raises(mz.MaterializerError, match="line break other than"):
+        mz.build_workspace(r, b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_applied_paths_must_be_the_validated_paths(tmp_path, scratch_tmp, monkeypatch):
+    """The outcome is checked even when a parser differential gets past the line check."""
+    b = _make_repo(tmp_path)
+    monkeypatch.setattr(mz, "_check_diff_lines", lambda diff: None)
+    with pytest.raises(mz.MaterializerError,
+                       match=r"changed paths the validated diff does not name: \['scripts/tool.py'\]"):
+        mz.build_workspace(_record(b, diff=_smuggle("\x0c")), b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_diff_cannot_retarget_a_baseline_symlink(tmp_path, scratch_tmp):
+    """A plain hunk on a symlink path rewrites its target. No mode header is involved, so
+    #464 accepts it, and the baseline's own symlink check has already run."""
+    link = "docs/superpowers/notes/link"
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, link: {"symlink": "t.md"}})
+    eof = "\\ No newline at end of file\n"
+    diff = (f"diff --git a/{link} b/{link}\n--- a/{link}\n+++ b/{link}\n@@ -1 +1 @@\n"
+            f"-t.md\n{eof}+/etc/passwd\n{eof}")
+    with pytest.raises(mz.MaterializerError, match="added or retargeted the symlink"):
+        mz.build_workspace(_record(b, diff=diff), b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_verify_applied_refuses_a_removed_symlink(tmp_path, scratch_tmp):
+    """Called directly: #464 rejects `deleted file mode 120000`, so no validated diff
+    reaches this branch through git. The check does not depend on that."""
+    link = "docs/superpowers/notes/link"
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, link: {"symlink": "t.md"}})
+    r = _record(b)
+    entries, blobs, _ = mz._load_baseline(b.commit, b.repo_root, _CFG["max_workspace_bytes"])
+    ws = mz.build_workspace(r, b)
+    try:
+        mz._verify_applied(ws, r, entries, blobs)  # the honest result passes
+        os.unlink(os.path.join(ws, *link.split("/")))
+        with pytest.raises(mz.MaterializerError, match="removed the symlink"):
+            mz._verify_applied(ws, r, entries, blobs)
+    finally:
+        mz.remove_workspace(ws)
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -1090,7 +1171,7 @@ def test_workspace_inside_the_clone_or_artifacts_is_refused(tmp_path, monkeypatc
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `8 failed, 39 passed` (`AttributeError: ... has no attribute 'build_workspace'`).
+Expected: `20 failed, 39 passed` (`AttributeError: ... has no attribute 'build_workspace'`).
 
 - [ ] **Step 3: Implement.** Append to `scripts/factory_core/materializer.py`:
 
@@ -1135,6 +1216,57 @@ def _apply_diff(workspace, diff):
                   + proc.stderr.decode("utf-8", "replace").strip())
 
 
+def _check_diff_lines(diff):
+    """#464's extract_diff_paths() reads the diff with str.splitlines(), which also breaks
+    on \\r, \\v, \\f, \\x1c-\\x1e, \\x85, U+2028 and U+2029; git breaks only on \\n. A
+    diff the two would split differently is refused, so the lines that were validated are
+    the lines that are applied."""
+    lines = diff.split("\n")
+    if diff.endswith("\n"):
+        lines.pop()
+    if diff.splitlines() != lines:
+        _fail("candidate diff contains a line break other than '\\n' (\\r, \\v, \\f, "
+              "\\x1c-\\x1e, \\x85, U+2028 or U+2029); mechanism_candidate and git would "
+              "split it differently, so it is refused")
+
+
+def _verify_applied(workspace, candidate, entries, blobs):
+    """What git applied must be what #464 validated: every path whose content, type or
+    exec bit differs from the digested baseline is named by the validated diff and lies
+    under editable_path_allowlist, and no symlink was added, removed or retargeted. Never
+    follows a symlink."""
+    declared = set(mc.extract_diff_paths(candidate["diff"]))
+    allowlist = candidate["editable_path_allowlist"]
+    base = {path: mode for path, mode, _, _ in entries}
+    seen, changed = set(), set()
+    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            st = os.lstat(full)
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
+            seen.add(rel)
+            mode = base.get(rel)
+            if stat.S_ISLNK(st.st_mode):
+                if mode != _SYMLINK_MODE or os.fsencode(os.readlink(full)) != blobs[rel]:
+                    _fail(f"candidate diff added or retargeted the symlink {rel!r}")
+            elif not stat.S_ISREG(st.st_mode):
+                _fail(f"workspace entry {rel!r} is not a regular file, directory or symlink")
+            elif (mode not in _FILE_MODES
+                  or (mode == "100755") != bool(st.st_mode & stat.S_IXUSR)
+                  or st.st_size != len(blobs[rel])
+                  or Path(full).read_bytes() != blobs[rel]):
+                changed.add(rel)
+    for rel in sorted(set(base) - seen):
+        if base[rel] == _SYMLINK_MODE:
+            _fail(f"candidate diff removed the symlink {rel!r}")
+        changed.add(rel)
+    stray = sorted(p for p in changed if p not in declared or not mc._contained(p, allowlist))
+    if stray:
+        _fail(f"candidate diff changed paths the validated diff does not name: {stray}")
+
+
 def _tree_bytes(root):
     """Total size of everything under root; never follows a symlink."""
     total = 0
@@ -1170,10 +1302,12 @@ def _build_workspace(candidate, baseline, entries, blobs, cap):
                 _fail(f"workspace {workspace} is inside {root}; it must be outside the "
                       f"clone and $ARTIFACTS_DIR")
         _write_snapshot(workspace, entries, blobs, cap)
+        _check_diff_lines(candidate["diff"])
         _apply_diff(workspace, candidate["diff"])
         size = _tree_bytes(workspace)
         if size > cap:
             _fail(_cap_msg(size, cap))
+        _verify_applied(workspace, candidate, entries, blobs)
     except BaseException as exc:
         leftover = _cleanup(workspace)
         if leftover and isinstance(exc, Exception):
@@ -1200,7 +1334,7 @@ def build_workspace(candidate, baseline, *, config=None):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `47 passed`.
+Expected: `59 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1330,7 +1464,7 @@ def test_build_bwrap_argv_refuses_egress_and_bad_limits(tmp_path, scratch_tmp):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `14 failed, 47 passed` (`AttributeError: ... has no attribute 'build_bwrap_argv'` /
+Expected: `14 failed, 59 passed` (`AttributeError: ... has no attribute 'build_bwrap_argv'` /
 `'base_bind_dirs'` / `'validate_write_paths'`).
 
 - [ ] **Step 3: Implement.** Append to `scripts/factory_core/materializer.py`:
@@ -1412,7 +1546,7 @@ def invocation_digest(args, workspace):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `61 passed`.
+Expected: `73 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1626,7 +1760,7 @@ def test_rematerialize_replaces_the_read_only_bundle(tmp_path, scratch_tmp):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `13 failed, 61 passed` (`AttributeError: ... has no attribute 'materialize'` /
+Expected: `13 failed, 73 passed` (`AttributeError: ... has no attribute 'materialize'` /
 `'verify_bundle'`).
 
 - [ ] **Step 3: Implement.** Append to `scripts/factory_core/materializer.py`:
@@ -1787,7 +1921,7 @@ def materialize(candidate, *, baseline, out_dir=None, config=None, known_digests
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `74 passed`.
+Expected: `86 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1847,6 +1981,11 @@ def test_cli_exit_codes(tmp_path):
     nested = _cli(base + ["--candidate", str(deep), "--out-dir", str(tmp_path / "o5")], env)
     assert nested.returncode == 2 and "cannot read candidate" in nested.stderr
     assert not (tmp_path / "o5").exists()
+    huge = tmp_path / "huge.json"
+    huge.write_bytes(b" " * (mz._MAX_CANDIDATE_BYTES + 1))
+    oversized = _cli(base + ["--candidate", str(huge), "--out-dir", str(tmp_path / "o6")], env)
+    assert oversized.returncode == 2 and "cannot read candidate" in oversized.stderr
+    assert not (tmp_path / "o6").exists()
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1855,7 +1994,7 @@ def test_cli_exit_codes(tmp_path):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `1 failed, 74 passed`. `test_cli_exit_codes` fails because `python -m
+Expected: `1 failed, 86 passed`. `test_cli_exit_codes` fails because `python -m
 factory_core.materializer` exits 0 having done nothing, so `ok.stdout` is empty.
 
 - [ ] **Step 3: Implement.** Append to `scripts/factory_core/materializer.py`:
@@ -1879,18 +2018,34 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+_MAX_CANDIDATE_BYTES = 16 * 1024 * 1024
+
+
+def _load_candidate(path):
+    """The candidate JSON, read through a size cap: the file is agent-written."""
+    with open(path, "rb") as f:
+        raw = f.read(_MAX_CANDIDATE_BYTES + 1)
+    if len(raw) > _MAX_CANDIDATE_BYTES:
+        raise ValueError(f"file is larger than {_MAX_CANDIDATE_BYTES} bytes")
+    return json.loads(raw.decode("utf-8"))
+
+
 def main(argv=None):
+    """Exit 1 means "BLOCKED, bundle written" and nothing else. An uncaught exception
+    would also exit 1, so both steps catch Exception, not a list of the types seen so
+    far (OSError, ValueError, RecursionError, MemoryError, ...): exit 2, no bundle."""
     args = parse_args(argv)
     try:
-        candidate = json.loads(Path(args.candidate).read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as exc:  # RecursionError: deep nesting
-        print(f"materializer: cannot read candidate {args.candidate!r}: {exc}", file=sys.stderr)
+        candidate = _load_candidate(args.candidate)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        print(f"materializer: cannot read candidate {args.candidate!r}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     try:
         bundle = materialize(candidate, baseline=Baseline(args.commit, args.repo_root),
                              out_dir=args.out_dir or None, known_digests=args.known_digest)
-    except MaterializerError as exc:
-        print(f"materializer: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — materialize() raises only before a bundle exists
+        print(f"materializer: no bundle written: {_error_text(exc)}", file=sys.stderr)
         return 2
     v = bundle["verdict"]
     sys.stdout.write(_verdict.format_verdict(GATE_TYPE, v["status"], v["findings_count"],
@@ -1910,7 +2065,7 @@ if __name__ == "__main__":
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `75 passed`.
+Expected: `87 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -2134,7 +2289,7 @@ def test_execution_fixture_argv(tmp_path, scratch_tmp, monkeypatch, name):
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `43 failed, 75 passed`. The candidate files do not exist yet, so the failures are
+Expected: `43 failed, 87 passed`. The candidate files do not exist yet, so the failures are
 `FileNotFoundError: ... candidate-<fixture>.json`, plus the empty `on_disk` set in
 `test_fixture_set_is_complete`.
 
@@ -2209,7 +2364,7 @@ SHAs or timestamps.
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q
 ```
 
-Expected: `118 passed`.
+Expected: `130 passed`.
 
 - [ ] **Step 8: Commit**
 
@@ -2232,13 +2387,13 @@ PYTHONPATH=scripts python -m pytest tests/ -v 2>&1 | tail -3
 
 Expected: `... passed` and no failures (the prototype run of this plan against `main` was
 `2665 passed`; the exact count moves with `main`). `tests/test_materializer.py` reports
-`118 passed` and no skips:
+`130 passed` and no skips:
 
 ```bash
 PYTHONPATH=scripts python -m pytest tests/test_materializer.py -q -rs 2>&1 | tail -1
 ```
 
-Expected: `118 passed` (no `skipped`).
+Expected: `130 passed` (no `skipped`).
 
 - [ ] **Step 2: Run the `dag-check` job's steps**
 

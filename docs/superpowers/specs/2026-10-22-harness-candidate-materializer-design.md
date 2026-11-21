@@ -3,6 +3,7 @@
 **Issue:** #465 · **Epic:** #463 (Add a governed recursive harness-improvement capability)
 **Depends on:** #464 (closed/merged — `scripts/factory_core/mechanism_candidate.py`)
 **Revised:** 2026-11-19 (operator amendment after second spec-gate review: Phase A/Phase B split per owner Decision 2, runnable preflight probe and CI step, write_paths containment, live attack fixtures, bind order, snapshot source)
+**Revised:** 2026-11-21 (operator amendment after plan gate review: R9 clarification)
 **Scope of #465:** Phase A (materialize) only. Phase B (run) is specified here as the design of
 record and is implemented under the Phase B follow-up issue #544 (filed by the operator at spec approval;
 `Depends on: #465`). See "Implementation sequencing".
@@ -241,6 +242,10 @@ its phase. See "Open questions" for the result of the CI spike Decision 1 called
    an H3-touching record can never reach `materialize()`/`run()` as a valid record in the first
    place (round-2 addition: see `attack-h3-surface` fixture below, which exists to pin this down as
    an asserted fact rather than an implicit assumption).
+   Validation alone is not the containment: after the diff is applied, the workspace is
+   verified against the validated path set (every path whose content, type or exec bit changed
+   must be a declared diff path inside `editable_path_allowlist`, and no symlink may be added,
+   removed or retargeted), and a mismatch is a `BLOCKED` refusal.
    - **H2 policy (round-2 addition, Decision 2):** `materialize()` accepts H0–H2 candidates (full
      workspace build, digesting, bundle production — all independent of real execution). `run()`
      accepts **only H0–H1**; given an H2 candidate it refuses with a `BLOCKED` verdict and a
