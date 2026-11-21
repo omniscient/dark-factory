@@ -142,6 +142,9 @@ template reuses the same commands.
 `.factory/hooks/deps-audit` (optional) is the check for the dependency-health loop
 (#484). The template copies a pip-audit + npm audit stub; edit it to mirror your CI
 audit steps (same files, same ignore list), or delete it to keep the loop inactive.
+The stub only looks at a root `requirements.txt` / `package-lock.json` and exits 2 (an
+error, not "clean") when neither exists, so a target with manifests elsewhere must add
+its own blocks.
 The loop ships off on the factory side either way; see the README hooks table.
 
 ### 3c. Make the hooks executable and LF

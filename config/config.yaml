@@ -157,7 +157,7 @@ side_effect:
     revise_advisory: 5  # #196 plan-level addition (revise-advisory node) — see Architecture note
     deconflict: 5  # entrypoint.sh's own $INTENT=deconflict flow — inline, never through archon; deconflict.py:143 runs a claude -p session
     fix_main: 5  # entrypoint.sh's $INTENT=fix-main -- a standalone `claude -p` session (main_red_fixer.py), not a DAG node
-    audit_deps: 5  # entrypoint.sh's $INTENT=audit-deps -- a standalone `claude -p` session (deps_fixer.py), not a DAG node
+    audit_deps: 2  # entrypoint.sh's $INTENT=audit-deps -- lowered from 5 (#548): deps_fixer.py's push/PR calls (LiveIO.start_branch/changed_paths/open_pr) are plain harness subprocesses, never under CLAUDECODE=1, so the git/gh shim never gates them; only apply_agent_fix's claude -p session is gated, and it needs local edits + local git only (level 2: push/tag/remote set-url denied, gh read verbs only -- side_effect.py profile 2)
 
 token_optimization:
   enforce_budgets: true       # true = enforce budgets for per-scenario enforce: true scenarios; env: TOKEN_OPTIMIZATION_ENFORCE_BUDGETS=false|0|no is a kill-only override read by scripts/budget_gate.sh (forces observe; can never force enforce on); other rollback is a git commit to main (see runbook)

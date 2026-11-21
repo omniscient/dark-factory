@@ -7,13 +7,18 @@
 # inactive for this target. The factory side ships OFF; an operator enables it with
 # DEPS_AUDIT_ENABLED=true in BOTH deploy/instance.env (scheduler) and .archon/.env (runs).
 # Keep install/progress noise on stderr; stdout is parsed (non-matching lines are ignored).
+# Exit 2 (an error, never "clean") when no supported manifest is at the repo root.
 set -uo pipefail
-cd "${CLONE_DIR}"
+cd "${CLONE_DIR}" || exit 1
 rc=0
+found_manifest=0
 # EDIT: Python — same requirements file and --ignore-vuln flags as your CI step.
 if [ -f requirements.txt ]; then
+  found_manifest=1
+  # Pinned (bump deliberately); installed with no GitHub token in its environment.
   command -v pip-audit >/dev/null 2>&1 \
-    || pip install --quiet --no-warn-script-location pip-audit >&2
+    || env -u GH_TOKEN -u GITHUB_TOKEN \
+         pip install --quiet --no-warn-script-location 'pip-audit==2.10.1' >&2
   pip-audit -r requirements.txt --format json --progress-spinner off 2>/dev/null \
     > "${TMPDIR:-/tmp}/deps-audit-pip.json" || rc=1
   python3 - "${TMPDIR:-/tmp}/deps-audit-pip.json" <<'PY'
@@ -31,6 +36,7 @@ PY
 fi
 # EDIT: Node — same --audit-level as your CI step.
 if [ -f package-lock.json ]; then
+  found_manifest=1
   npm audit --audit-level=high --json 2>/dev/null \
     > "${TMPDIR:-/tmp}/deps-audit-npm.json" || rc=1
   python3 - "${TMPDIR:-/tmp}/deps-audit-npm.json" <<'PY'
@@ -48,5 +54,10 @@ for name, v in sorted(vulns.items()):
     for vid in (ids or ["via:" + ",".join(x for x in v.get("via", []) if isinstance(x, str))]):
         print("\t".join(["npm", name, v.get("range", ""), fixed, vid, v["severity"]]))
 PY
+fi
+# EDIT: a target whose manifests are not at the repo root needs its own blocks above.
+if [ "$found_manifest" = 0 ]; then
+  echo "deps-audit: no requirements.txt or package-lock.json at repo root — this hook does not support this layout" >&2
+  rc=2
 fi
 exit "$rc"

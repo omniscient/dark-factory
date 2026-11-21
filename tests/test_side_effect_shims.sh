@@ -160,6 +160,12 @@ FACTORY_SIDE_EFFECT_LEVEL=2 check allow git stash
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git branch newbranch      # local; only level 1 is allow-list
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  git send-pack origin HEAD  # plumbing push bypass
 FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh issue create --title x
+# #548: audit_deps runs at level 2 — the fix agent may not merge, open a PR, relabel the
+# tracking issue (direct-to-pr would arm auto-merge) or write through the REST API.
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh pr merge 1
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh pr create
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh issue edit 1 --add-label direct-to-pr
+FACTORY_SIDE_EFFECT_LEVEL=2 check deny  gh api repos/o/r/issues -X POST -f title=x
 
 # --- Level 3: GitHub ticket creation ---
 FACTORY_SIDE_EFFECT_LEVEL=3 check allow git commit -m x
