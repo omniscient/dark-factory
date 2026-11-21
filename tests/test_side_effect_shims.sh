@@ -411,6 +411,31 @@ FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's 
   git push https://github.com/evil/x.git feat
 FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" git push evil feat
 "$REAL_GIT_BIN" remote remove evil
+# gh aliases (no token in the environment): judged as their expansion, tighten-only.
+"$REAL_GH_BIN" alias set p 'pr create' >/dev/null 2>&1
+"$REAL_GH_BIN" alias set xs secret >/dev/null 2>&1
+"$REAL_GH_BIN" alias set il 'issue list' >/dev/null 2>&1
+"$REAL_GH_BIN" alias set --shell sh 'gh pr create' >/dev/null 2>&1
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "pr create" gh p --title x --body y
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh p --title x --body y
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "secret list" gh xs list
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'il' is denied" gh il
+FACTORY_SIDE_EFFECT_LEVEL=3 check_deny_reason "'il' is denied" gh il
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh il
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "shell alias|shell-style parsing" gh sh
+SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 FACTORY_SIDE_EFFECT_LEVEL=5 \
+  check_deny_reason "outside a nested check" gh pr view 1
+# gh extensions: denied at levels 1-4, unchanged at 5.
+mkdir -p "$XDG_DATA_HOME/gh/extensions/gh-someext"
+printf '#!/bin/sh\necho SOMEEXT "$@"\n' > "$XDG_DATA_HOME/gh/extensions/gh-someext/gh-someext"
+chmod +x "$XDG_DATA_HOME/gh/extensions/gh-someext/gh-someext"
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "\(extension\)" gh someext list
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "\(extension\)" gh someext
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh someext
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh extension install o/x
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh ext install o/x
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh extension install o/x
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "flag before" gh -R o/r pr create
 # --- end #553 cases ---
 unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---
