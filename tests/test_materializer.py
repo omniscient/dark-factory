@@ -556,3 +556,191 @@ def test_build_bwrap_argv_refuses_egress_and_bad_limits(tmp_path, scratch_tmp):
                                                               "max_duration_seconds": None}), ws, _CFG)
     finally:
         mz.remove_workspace(ws)
+
+
+# ── materialize() and the artifact bundle ───────────────────────────────────────
+
+_BUNDLE_KEYS = {"candidate_id", "candidate_digest", "risk_class", "baseline", "diff",
+                "materialized_at", "provenance", "verdict", "bundle_digest"}
+
+
+def test_materialize_pass_bundle(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    r = _record(b)
+    out = tmp_path / "out"
+    bundle = mz.materialize(r, baseline=b, out_dir=out)
+    assert set(bundle) == _BUNDLE_KEYS
+    assert bundle["verdict"] == {"status": "PASS", "gate_type": "materializer", "findings_count": 0,
+                                 "severity": "none", "reason": bundle["verdict"]["reason"]}
+    assert "nothing executed" in bundle["verdict"]["reason"]
+    assert bundle["candidate_id"] == "mz-test" and bundle["candidate_digest"] == r["candidate_digest"]
+    assert bundle["risk_class"] == "H0"
+    assert bundle["diff"] == r["diff"]
+    assert bundle["baseline"]["commit"] == b.commit
+    assert bundle["baseline"]["repo_digest"] == bundle["baseline"]["computed_repo_digest"]
+    assert {k: bundle["baseline"][k] for k in mc._BASELINE_FIELDS} == r["baseline"]
+    prov = bundle["provenance"]
+    assert prov["bwrap_available"] is None
+    assert prov["materializer_version"] == mz.MATERIALIZER_VERSION
+    assert mc.DIGEST_RE.fullmatch(prov["module_digest"])
+    assert mc.DIGEST_RE.fullmatch(prov["invocation_digest"])
+    assert prov["limits"]["memory_limit_mb"] == 512
+    assert mz.verify_bundle(bundle)
+    on_disk = out / "bundle.json"
+    assert json.loads(on_disk.read_text(encoding="utf-8")) == bundle
+    assert not os.stat(on_disk).st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    assert os.listdir(scratch_tmp) == []
+    assert os.listdir(b.repo_root) == [".git"]
+
+
+def test_materialize_accepts_h2(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    bundle = mz.materialize(_h2(b), baseline=b, out_dir=tmp_path / "out")
+    assert bundle["verdict"]["status"] == "PASS"
+    assert bundle["risk_class"] == "H2"
+
+
+def test_bundle_tamper_is_detected(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    bundle = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")
+    assert mz.verify_bundle(bundle)
+    for key, value in (("diff", "tampered"), ("verdict", {"status": "PASS"}), ("risk_class", "H0x")):
+        assert not mz.verify_bundle({**bundle, key: value})
+    assert not mz.verify_bundle({k: v for k, v in bundle.items() if k != "bundle_digest"})
+    assert not mz.verify_bundle("not a bundle")
+
+
+def test_invocation_digest_is_independent_of_the_workspace_path(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    one = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "one")
+    two = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "two")
+    assert one["provenance"]["invocation_digest"] == two["provenance"]["invocation_digest"]
+
+
+def test_refusals_are_blocked_bundles_with_no_workspace(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    cases = [
+        (_record(b, risk_class="H4"), "unknown risk_class"),
+        ({"not": "a record"}, "schema_version"),
+        ([], "candidate record must be a mapping"),
+        (_record(b, parent_digest=mc.canonical_digest("parent")), "does not resolve"),
+        (_record(b, resource_envelope={"cpu_limit": "1", "memory_limit_mb": 10 ** 6,
+                                       "max_duration_seconds": None}), "exceeds the materializer"),
+        (_record(b, diff=_diff(_DOC, "-not the baseline", "+new")), "does not apply cleanly"),
+    ]
+    for i, (record, match) in enumerate(cases):
+        bundle = mz.materialize(record, baseline=b, out_dir=tmp_path / f"out{i}")
+        v = bundle["verdict"]
+        assert (v["status"], v["findings_count"], v["severity"]) == ("BLOCKED", 1, "high"), match
+        assert match in v["reason"]
+        assert bundle["provenance"]["bwrap_available"] is None
+        assert mz.verify_bundle(bundle)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_bad_baseline_is_blocked(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    for baseline, match in ((mz.Baseline("HEAD", b.repo_root), "full 40-hex"),
+                            (mz.Baseline(b.commit, str(tmp_path / "nope")), "is not a directory"),
+                            (("commit", "root"), "must be a Baseline")):
+        bundle = mz.materialize(_record(b), baseline=baseline, out_dir=tmp_path / "out")
+        assert bundle["verdict"]["status"] == "BLOCKED"
+        assert match in bundle["verdict"]["reason"]
+
+
+def test_known_digests_resolve_the_parent(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    parent = mc.canonical_digest("parent")
+    bundle = mz.materialize(_record(b, parent_digest=parent), baseline=b,
+                            out_dir=tmp_path / "out", known_digests=[parent])
+    assert bundle["verdict"]["status"] == "PASS"
+
+
+def test_unexpected_errors_fail_closed(tmp_path, scratch_tmp, monkeypatch):
+    b = _make_repo(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(mz, "build_bwrap_argv", boom)
+    bundle = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")
+    assert bundle["verdict"]["status"] == "BLOCKED"
+    assert bundle["verdict"]["reason"] == "RuntimeError: boom"
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_untrusted_lone_surrogates_still_yield_a_sealed_bundle(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    surrogate_diff = json.loads(json.dumps(_record(b)).replace('"diff": "', '"diff": "\\ud800', 1))
+    bad_digest = _record(b)
+    bad_digest["baseline"]["repo_digest"] = "\ud800"
+    cases = [(surrogate_diff, b, "diff"), (bad_digest, b, "baseline"),
+             (_record(b), mz.Baseline("\udcff" * 40, b.repo_root), "baseline")]
+    for i, (record, baseline, key) in enumerate(cases):
+        bundle = mz.materialize(record, baseline=baseline, out_dir=tmp_path / f"out{i}")
+        assert bundle["verdict"]["status"] == "BLOCKED"
+        assert mz.verify_bundle(bundle)
+        assert json.loads((tmp_path / f"out{i}" / "bundle.json").read_text(encoding="utf-8")) == bundle
+    assert bundle["baseline"]["commit"] is None
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_cleanup_failure_is_blocked_not_raised(tmp_path, scratch_tmp, monkeypatch):
+    b = _make_repo(tmp_path)
+    real = mz.remove_workspace
+
+    def stuck(ws):
+        raise OSError("device busy")
+    monkeypatch.setattr(mz, "remove_workspace", stuck)
+    bundle = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")
+    assert bundle["verdict"]["status"] == "BLOCKED"
+    assert "was not removed: device busy" in bundle["verdict"]["reason"]
+    assert mz.verify_bundle(bundle)
+    for leftover in os.listdir(scratch_tmp):
+        real(str(scratch_tmp / leftover))
+
+
+def test_materialize_executes_nothing_from_the_workspace(tmp_path, scratch_tmp, monkeypatch):
+    b = _make_repo(tmp_path)
+    seen = []
+    real = subprocess.run
+
+    def spy(cmd, *a, **k):
+        seen.append(cmd)
+        return real(cmd, *a, **k)
+    monkeypatch.setattr(mz.subprocess, "run", spy)
+    assert mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")["verdict"]["status"] == "PASS"
+    assert seen and all(cmd[0] == "git" for cmd in seen)
+    assert all(arg not in ("bwrap", "prlimit") for cmd in seen for arg in cmd)
+
+
+def test_out_dir_resolution(tmp_path, scratch_tmp, monkeypatch):
+    b = _make_repo(tmp_path)
+    with pytest.raises(mz.MaterializerError, match="out_dir is required"):
+        mz.materialize(_record(b), baseline=b)
+    artifacts = tmp_path / "artifacts"
+    monkeypatch.setenv("ARTIFACTS_DIR", str(artifacts))
+    mz.materialize(_record(b), baseline=b)
+    assert (artifacts / "materializer" / "mz-test" / "bundle.json").is_file()
+    for bad in ("../escape", "a/b", "", None, 7):
+        with pytest.raises(mz.MaterializerError, match="not safe for the default bundle path"):
+            mz.materialize({**_record(b), "candidate_id": bad}, baseline=b)
+    assert not (tmp_path / "escape").exists()
+    with pytest.raises(mz.MaterializerError, match="inside the baseline clone"):
+        mz.materialize(_record(b), baseline=b, out_dir=Path(b.repo_root) / "bundle")
+    assert os.listdir(b.repo_root) == [".git"]
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("x", encoding="utf-8")
+    with pytest.raises(mz.MaterializerError, match="cannot write bundle"):
+        mz.materialize(_record(b), baseline=b, out_dir=not_a_dir)
+    for unusable in (tmp_path / "nul\0dir", tmp_path / "\ud800"):
+        with pytest.raises(mz.MaterializerError, match="not a usable path|cannot write bundle"):
+            mz.materialize(_record(b), baseline=b, out_dir=unusable)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_rematerialize_replaces_the_read_only_bundle(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")
+    second = mz.materialize(_h2(b), baseline=b, out_dir=tmp_path / "out")
+    assert json.loads((tmp_path / "out" / "bundle.json").read_text(encoding="utf-8")) == second
+    assert sorted(os.listdir(tmp_path / "out")) == ["bundle.json"]

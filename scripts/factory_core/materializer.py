@@ -527,3 +527,152 @@ def build_bwrap_argv(candidate, workspace, config, *, argv=()):
 def invocation_digest(args, workspace):
     """Digest of the resolved argv with the random workspace path normalised away."""
     return mc.canonical_digest([a.replace(workspace, "<workspace>") for a in args])
+
+
+# ── Artifact bundle ─────────────────────────────────────────────────────────────
+
+def _verdict_block(status, reason):
+    findings, severity = (0, "none") if status == "PASS" else (1, "high")
+    block = _verdict.parse_verdict(_verdict.format_verdict(GATE_TYPE, status, findings, severity))
+    block["reason"] = reason
+    return block
+
+
+def _module_digest():
+    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def seal_bundle(bundle):
+    """Add bundle_digest: canonical_digest over the bundle with that key absent."""
+    body = {k: v for k, v in bundle.items() if k != "bundle_digest"}
+    return {**body, "bundle_digest": mc.canonical_digest(body)}
+
+
+def verify_bundle(bundle):
+    """True when bundle_digest still matches the rest of the bundle."""
+    if not isinstance(bundle, dict) or "bundle_digest" not in bundle:
+        return False
+    return seal_bundle(bundle)["bundle_digest"] == bundle["bundle_digest"]
+
+
+def resolve_out_dir(candidate, out_dir=None):
+    """out_dir, else $ARTIFACTS_DIR/materializer/<candidate_id>/ (sanitized id); never
+    the current directory."""
+    if out_dir:
+        return Path(out_dir)
+    artifacts = os.environ.get("ARTIFACTS_DIR")
+    if not artifacts:
+        _fail("out_dir is required when $ARTIFACTS_DIR is unset (no fallback to the "
+              "current directory)")
+    cid = candidate.get("candidate_id") if isinstance(candidate, dict) else None
+    if not isinstance(cid, str) or not _SAFE_ID_RE.fullmatch(cid):
+        _fail(f"candidate_id {cid!r} is not safe for the default bundle path "
+              f"(^[A-Za-z0-9_-]+$)")
+    return Path(artifacts) / "materializer" / cid
+
+
+def _write_bundle(dest, bundle):
+    """Atomic, read-only bundle.json (a unique temp name, so concurrent writers never
+    interleave). Any OSError is a MaterializerError: no bundle was written, which callers
+    (and the CLI's exit 2) must never mistake for a BLOCKED one."""
+    path = dest / "bundle.json"
+    tmp = None
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=dest, prefix=".bundle-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
+        os.chmod(tmp, 0o444)
+        os.replace(tmp, path)
+    except (OSError, ValueError) as exc:  # ValueError: NUL or unencodable path
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        _fail(f"cannot write bundle to {dest}: {exc}")
+    return path
+
+
+def _text(v):
+    """v if it is a str that encodes as UTF-8, else None. JSON (and surrogateescape argv)
+    can carry lone surrogates, which canonical_digest() cannot seal; untrusted fields are
+    copied into the bundle only through this."""
+    if not isinstance(v, str):
+        return None
+    try:
+        v.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return v
+
+
+
+def materialize(candidate, *, baseline, out_dir=None, config=None, known_digests=()):
+    """Validate, digest, build and remove one candidate workspace; write and return its
+    bundle. Accepts H0-H2. Every refusal is a BLOCKED bundle, never an exception; only
+    an unwritable bundle location or a failed bundle write raises MaterializerError.
+    Executes nothing from the workspace and never probes for bwrap
+    (provenance.bwrap_available is null)."""
+    dest = resolve_out_dir(candidate, out_dir)
+    try:
+        inside = isinstance(baseline, Baseline) and isinstance(baseline.repo_root, str) \
+            and os.path.isdir(baseline.repo_root) and _is_within(dest, baseline.repo_root)
+    except (OSError, ValueError) as exc:  # ValueError: NUL or unencodable path
+        _fail(f"bundle directory {dest!r} is not a usable path: {exc}")
+    if inside:
+        _fail(f"bundle directory {dest} is inside the baseline clone {baseline.repo_root}")
+    rec = candidate if isinstance(candidate, dict) else {}
+    declared = rec.get("baseline") if isinstance(rec.get("baseline"), dict) else {}
+    commit = baseline.commit if isinstance(baseline, Baseline) else None
+    risk = computed = inv = limits = None
+    workspace = None
+    try:
+        _check_baseline(baseline)
+        cfg = _config(config)
+        # The spec's safety source: the clone's working-tree .factory/adapter.yaml, not
+        # content of the pinned commit (that is what repo_digest covers).
+        risk = mc.validate_candidate(candidate, safety=mc.load_safety(baseline.repo_root),
+                                     known_digests=known_digests)
+        if risk not in _ACCEPTED_RISK:
+            _fail(f"risk class {risk} is not materializable")
+        check_network(candidate)
+        limits = resolve_limits(candidate, cfg)
+        cap = cfg["max_workspace_bytes"]
+        entries, blobs, manifest = _load_baseline(baseline.commit, baseline.repo_root, cap)
+        computed = mc.canonical_digest(manifest)
+        if computed != candidate["baseline"]["repo_digest"]:
+            _fail(f"baseline repo_digest mismatch: commit {baseline.commit} hashes to "
+                  f"{computed}, the candidate declares {candidate['baseline']['repo_digest']}")
+        # The workspace is written from the very blobs just digested, never a re-read.
+        workspace = _build_workspace(candidate, baseline, entries, blobs, cap)
+        inv = invocation_digest(build_bwrap_argv(candidate, workspace, cfg), workspace)
+        status, reason = "PASS", ("workspace built from the digested baseline with the "
+                                  "candidate diff applied; nothing executed")
+    except Exception as exc:  # noqa: BLE001 — every failure is a BLOCKED bundle, never a crash
+        status, reason = "BLOCKED", _error_text(exc)
+    finally:
+        leftover = _cleanup(workspace)
+    if leftover:
+        status, reason = "BLOCKED", f"{reason}; {leftover}"
+    bundle = seal_bundle({
+        "candidate_id": _text(rec.get("candidate_id")),
+        "candidate_digest": _text(rec.get("candidate_digest")),
+        "risk_class": risk,
+        "baseline": {**{k: _text(declared.get(k)) for k in mc._BASELINE_FIELDS},
+                     "commit": _text(commit), "computed_repo_digest": computed},
+        "diff": _text(rec.get("diff")),
+        "materialized_at": datetime.datetime.now(datetime.timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "provenance": {
+            "materializer_version": MATERIALIZER_VERSION,
+            "module_digest": _module_digest(),
+            "bwrap_available": None,
+            "invocation_digest": inv,
+            "limits": limits,
+        },
+        "verdict": _verdict_block(status, reason.encode("utf-8", "backslashreplace")
+                                         .decode("utf-8")),
+    })
+    _write_bundle(dest, bundle)
+    return bundle
