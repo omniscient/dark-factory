@@ -387,6 +387,51 @@ def test_hold_dedup_does_not_change_selection():
     assert io2.advanced == [] and len(io2.comments) == 1
 
 
+# ── #547: a failed HOLD comment never becomes the dedup baseline ─────────────
+
+LATEST = "2026-06-23T03:00:00+00:00"   # 25h after LATER
+
+
+class FailingCommentIO(FakeIO):
+    def comment(self, issue, body):
+        super().comment(issue, body)
+        return False
+
+
+def test_live_comment_reports_gh_exit(monkeypatch, capsys):
+    import types
+    rc = {"value": 1}
+    monkeypatch.setattr(ap.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=rc["value"]))
+    live = ap.LiveIO("x")
+    assert live.comment(402, "body") is False
+    assert capsys.readouterr().err == "autopilot: comment on #402 failed (gh exit 1)\n"
+    rc["value"] = 0
+    assert live.comment(402, "body") is True
+    captured = capsys.readouterr()
+    assert captured.err == "" and captured.out == ""
+
+
+def test_failed_hold_comment_is_not_a_baseline():
+    cand = c(number=402)
+    h, d = ap.spec_hash(cand["spec_text"]), _digest(cand)
+    st = {}
+    io = FailingCommentIO([cand], HOLD_REVIEW % "risky")
+    out = ap.run_once(TTL_CFG, io, st, "2026-06-21", NOW)
+    assert len(io.comments) == 1 and out["outcome"] == "hold"
+    assert "parked (HOLD)" in io.comments[0][1]
+    entry = st["verdicts"]["402"]
+    assert "input_digest" not in entry
+    assert entry["verdict"] == "HOLD" and entry["spec_hash"] == h and entry["ts"] == NOW
+    io2 = FakeIO([c(number=402)], HOLD_REVIEW % "risky, reworded")
+    out2 = ap.run_once(TTL_CFG, io2, st, "2026-06-22", LATER)
+    assert len(io2.comments) == 1 and out2["outcome"] == "hold"
+    assert st["verdicts"]["402"]["input_digest"] == d
+    io3 = FakeIO([c(number=402)], HOLD_REVIEW % "risky, reworded again")
+    out3 = ap.run_once(TTL_CFG, io3, st, "2026-06-23", LATEST)
+    assert io3.comments == [] and out3["outcome"] == "hold_unchanged"
+
+
 # ── Task 4: pick_next_epic selector ─────────────────────────────────────────
 
 def _e(number, title="epic", labels=None, board_order=0):

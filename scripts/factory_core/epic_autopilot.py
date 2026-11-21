@@ -317,10 +317,16 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
     unparseable = verdict.get("reasons") == _HOLD["reasons"]  # parse_verdict's _HOLD sentinel
     input_digest = None if unparseable else spec_hash(prompt)
     unchanged = hold_unchanged(state, cand["number"], h, input_digest)
+    # A failed post (LiveIO returns False) must not become the dedup baseline (#547).
+    ok = True
     if not unchanged:
-        io.comment(cand["number"],
-                   f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}")
-    record_verdict(state, cand["number"], h, "HOLD", now_iso, input_digest=input_digest)
+        ok = io.comment(
+            cand["number"],
+            f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}"
+        )
+    posted = unchanged or (ok is not False)
+    record_verdict(state, cand["number"], h, "HOLD", now_iso,
+                   input_digest=input_digest if posted else None)
     return {"outcome": "hold_unchanged" if unchanged else "hold",
             "issue": cand["number"], "reason": concerns}
 
@@ -330,6 +336,7 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 import os  # noqa: E402
 import subprocess  # noqa: E402
+import sys  # noqa: E402
 import urllib.request  # noqa: E402
 from . import identity  # noqa: E402
 from .providers import get_tracker  # noqa: E402
@@ -601,12 +608,17 @@ class LiveIO:
     def advance(self, issue: int) -> None:
         get_tracker().add_label(str(issue), "direct-to-pr")
 
-    def comment(self, issue: int, body: str) -> None:
+    def comment(self, issue: int, body: str) -> bool:
         # Not routed through get_tracker() (#249): this posts a plain, non-idempotent
         # comment (unlike board.post_or_update_comment) — Tracker's frozen ABC (#248
         # §5.1) has only upsert_comment (marker-based), which would change idempotency
         # semantics here (multiple advance/hold comments over a ticket's lifetime).
-        subprocess.run(["gh", "issue", "comment", str(issue), "--repo", OWNER, "--body", body], check=False)
+        result = subprocess.run(
+            ["gh", "issue", "comment", str(issue), "--repo", OWNER, "--body", body], check=False)
+        if result.returncode != 0:
+            print(f"autopilot: comment on #{issue} failed (gh exit {result.returncode})",
+                  file=sys.stderr)
+        return result.returncode == 0
 
     def fetch_ready_epics(self) -> list:
         return _ready_epics()

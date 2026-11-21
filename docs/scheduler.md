@@ -615,7 +615,10 @@ true (`scheduler.sh:1382-1388`). One pass (`epic_autopilot.py` `run_once`):
    - Advance: add the `direct-to-pr` label, comment, count against the daily cap, cache
      `ADVANCE`. The grace timer then moves the ticket on later polls.
    - Hold: comment "parked (HOLD)" unless the stored HOLD is unchanged (same spec and
-     review input), and cache it. Not counted against the cap. A skipped comment reports `hold_unchanged`.
+     review input), and cache it. Not counted against the cap. A skipped comment reports
+     `hold_unchanged`. An unparseable review always comments and never becomes a dedup
+     baseline. If the HOLD comment fails to post, the verdict is cached without its
+     review-input digest, so the next cycle comments again.
 7. **No candidates.** If `EPIC_AUTOPILOT_START_EPICS` is true, pick the next Ready epic
    (`pick_next_epic`: `must-have` before `should-have`, then board order, skipping titles
    or labels matching the exclude regex), move it to In progress, add `ready-for-agent`
@@ -852,11 +855,11 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     `deploy/docker-compose.yml` sets `CLONE_DIR`, so the lookup found no adapter and the
     built-in defaults replaced the target's `safety.sensitive_keywords` and
     `safety.hard_exclude_paths`. Now `main_once` calls `_target_dir()`
-    (`epic_autopilot.py:420`, `:649`): `CLONE_DIR` if set, else `/workspace/project` when
+    (`epic_autopilot.py:427`, `:661`): `CLONE_DIR` if set, else `/workspace/project` when
     that holds `.factory/adapter.yaml`, else `.`. `_effective_sensitive_keywords` unions
     the config/env pattern with the adapter's, and `_effective_exclude_paths` unions the
     exclusions found from `CLONE_DIR` or the cwd with the target adapter's
-    (`:376`, `:390`), so reading the target's adapter cannot drop an exclusion. What is
+    (`:383`, `:397`), so reading the target's adapter cannot drop an exclusion. What is
     left: a target with no `.factory/adapter.yaml` at the mount still gets the built-in
     defaults, and the `config.yaml` `epic_autopilot.hard_exclude_paths` fallback in
     `_load_exclude_paths` is still reached only if loading the adapter raises, since a
