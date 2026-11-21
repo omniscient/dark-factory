@@ -998,4 +998,31 @@ def test_template_deps_audit_hook_emits_contract_lines(tmp_path):
     (clone / "requirements.txt").unlink()
     (clone / "package-lock.json").unlink()
     r = subprocess.run([str(hook)], env=env, capture_output=True, text=True)
-    assert r.returncode == 0 and r.stdout == ""
+    assert r.returncode == 2 and r.stdout == ""          # unsupported layout ≠ "clean"
+    assert "no requirements.txt or package-lock.json at repo root" in r.stderr
+
+
+_TEMPLATE_HOOK = REPO_ROOT / "templates" / "new-target" / ".factory" / "hooks" / "deps-audit"
+
+
+def test_template_deps_audit_hook_fails_on_missing_clone_dir(tmp_path):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    ran = tmp_path / "tool.ran"
+    for tool in ("pip-audit", "npm", "pip"):
+        (bin_ / tool).write_text(f'#!/bin/sh\ntouch "{ran}"\nexit 1\n')
+        (bin_ / tool).chmod(0o755)
+    cwd = tmp_path / "cwd"                     # manifests here: a missed cd would audit them
+    cwd.mkdir()
+    (cwd / "requirements.txt").write_text("x==1\n")
+    (cwd / "package-lock.json").write_text("{}\n")
+    env = dict(os.environ, CLONE_DIR=str(tmp_path / "missing"), TMPDIR=str(tmp_path),
+               PATH=f"{bin_}:{os.environ['PATH']}")
+    r = subprocess.run([str(_TEMPLATE_HOOK)], cwd=cwd, env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and r.stdout == "" and not ran.exists()
+
+
+def test_template_deps_audit_hook_pins_pip_audit_without_token():
+    text = _TEMPLATE_HOOK.read_text()
+    assert "pip-audit==" in text and "env -u GH_TOKEN -u GITHUB_TOKEN" in text
+    assert 'cd "${CLONE_DIR}" || exit 1' in text and "set -e" not in text   # || rc=1 must keep working
