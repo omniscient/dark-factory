@@ -119,3 +119,169 @@ def test_declared_egress_is_refused(net):
     with pytest.raises(mz.MaterializerError, match="declares egress"):
         mz.check_network({"network_envelope": net})
     mz.check_network({"network_envelope": {"egress_allowed": False, "allowed_hosts": []}})
+
+
+# ── Throwaway baselines ─────────────────────────────────────────────────────────
+
+def _git(cwd, *args, data=None):
+    return subprocess.run(["git", *args], cwd=cwd, input=data, capture_output=True,
+                          check=True, env=_GIT_ENV).stdout.decode().strip()
+
+
+def _make_repo(tmp_path, files=None, name="repo", message="baseline"):
+    """A git repo whose one commit holds exactly `files` ({path: spec}); the working tree
+    stays empty. spec: {"content": str} | {"zeros": n} | {"symlink": target} |
+    {"gitlink": sha}, plus an optional "mode"."""
+    repo = Path(tmp_path) / name
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    for path, spec in sorted((files if files is not None else _CLEAN_FILES).items()):
+        if "gitlink" in spec:
+            mode, sha = "160000", spec["gitlink"]
+        else:
+            if "symlink" in spec:
+                mode, data = "120000", spec["symlink"].encode()
+            elif "zeros" in spec:
+                mode, data = spec.get("mode", "100644"), b"\0" * spec["zeros"]
+            else:
+                mode, data = spec.get("mode", "100644"), spec["content"].encode()
+            sha = _git(repo, "hash-object", "-w", "--stdin", data=data)
+        _git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{sha},{path}")
+    tree = _git(repo, "write-tree")
+    commit = _git(repo, "commit-tree", tree, "-m", message)
+    return mz.Baseline(commit=commit, repo_root=str(repo))
+
+
+@pytest.fixture
+def scratch_tmp(tmp_path, monkeypatch):
+    """Point tempfile (hence mkdtemp workspaces) at an empty dir the test can inspect."""
+    d = tmp_path / "scratch"
+    d.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(d))
+    monkeypatch.delenv("ARTIFACTS_DIR", raising=False)
+    return d
+
+
+def _record(baseline=None, **overrides):
+    """A valid H0 draft record for the clean baseline, overrides applied, digests restamped."""
+    r = {
+        "schema_version": 1, "candidate_id": "mz-test", "candidate_digest": None,
+        "parent_digest": None,
+        "baseline": {k: mc.canonical_digest(f"synthetic {k}") for k in mc._BASELINE_FIELDS},
+        "source": {"issue": 465, "run_id": "run-materializer-test"},
+        "observed_failure": {"description": "synthetic", "evidence_refs": []},
+        "invariant_scope": "materializer-test",
+        "domain_scope": {"repo": "omniscient/dark-factory", "issue": 465, "pr": None,
+                         "agent_role": "implement"},
+        "risk_class": "H0", "editable_path_allowlist": ["docs/superpowers/notes/"],
+        "diff": _DOC_DIFF, "dependency_closure": [],
+        "expected_behavioral_hypothesis": "synthetic",
+        "resource_envelope": {"cpu_limit": "1", "memory_limit_mb": 512, "max_duration_seconds": 60},
+        "permission_envelope": {"tool_allow": [], "tool_deny": []},
+        "network_envelope": {"egress_allowed": False, "allowed_hosts": []},
+        "filesystem_envelope": {"read_paths": [], "write_paths": ["docs/superpowers/notes/"]},
+        "side_effect_envelope": {"side_effect_level": 1},
+        "probe_evidence_refs": [], "contradictions": [], "confidence": 0.5,
+        "reviewer": {"actor": "verifier", "identity": None},
+        "approver": {"actor": "human", "identity": None},
+        "lifecycle_state": "draft",
+        "supersession": {"superseded_by": None, "supersedes": []},
+        "expiry": {"expires_at": None}, "rollback_handle": None,
+    }
+    r.update(overrides)
+    if baseline is not None:
+        r["baseline"] = {**r["baseline"],
+                         "repo_digest": mz.compute_repo_digest(baseline.commit, baseline.repo_root)}
+    r["candidate_digest"] = mc.candidate_digest_of(r)
+    return r
+
+
+def _h2(baseline=None, **overrides):
+    return _record(baseline, risk_class="H2", editable_path_allowlist=[_TOOL], diff=_TOOL_DIFF,
+                   filesystem_envelope={"read_paths": [], "write_paths": [_TOOL]}, **overrides)
+
+
+# ── Baseline digesting ──────────────────────────────────────────────────────────
+
+def test_repo_digest_is_the_canonical_manifest_digest(tmp_path):
+    b = _make_repo(tmp_path, {"a.txt": {"content": "x"}, "bin/run": {"content": "y", "mode": "100755"},
+                              "l": {"symlink": "a.txt"}})
+    expected = mc.canonical_digest({
+        "a.txt": {"mode": "100644", "sha256": "sha256:" + hashlib.sha256(b"x").hexdigest()},
+        "bin/run": {"mode": "100755", "sha256": "sha256:" + hashlib.sha256(b"y").hexdigest()},
+        "l": {"mode": "120000", "target": "a.txt",
+              "sha256": "sha256:" + hashlib.sha256(b"a.txt").hexdigest()},
+    })
+    assert mz.compute_repo_digest(b.commit, b.repo_root) == expected
+
+
+def test_repo_digest_is_content_addressed_and_ignores_the_working_tree(tmp_path):
+    a = _make_repo(tmp_path, name="a", message="one")
+    b = _make_repo(tmp_path, name="b", message="two")
+    assert a.commit != b.commit
+    digest = mz.compute_repo_digest(a.commit, a.repo_root)
+    assert digest == mz.compute_repo_digest(b.commit, b.repo_root)
+    (Path(a.repo_root) / "untracked.txt").write_text("staged run-time file", encoding="utf-8")
+    assert mz.compute_repo_digest(a.commit, a.repo_root) == digest
+    exec_bit = {**_CLEAN_FILES, _DOC: {"content": "old\n", "mode": "100755"}}
+    c = _make_repo(tmp_path, exec_bit, name="c")
+    assert mz.compute_repo_digest(c.commit, c.repo_root) != digest
+
+
+def test_replace_refs_do_not_change_the_baseline(tmp_path):
+    b = _make_repo(tmp_path)
+    digest = mz.compute_repo_digest(b.commit, b.repo_root)
+    original = _git(b.repo_root, "rev-parse", f"{b.commit}:{_DOC}")
+    forged = _git(b.repo_root, "hash-object", "-w", "--stdin", data=b"forged\n")
+    _git(b.repo_root, "replace", original, forged)
+    assert _git(b.repo_root, "cat-file", "-p", original) == "forged"  # git itself is fooled
+    assert mz.compute_repo_digest(b.commit, b.repo_root) == digest
+
+
+@pytest.mark.parametrize("commit, match", [
+    ("HEAD", "full 40-hex"), ("abc123", "full 40-hex"), ("A" * 40, "full 40-hex"),
+    ("0" * 40, "git ls-tree failed"),
+])
+def test_baseline_commit_must_be_a_full_sha_in_the_repo(tmp_path, commit, match):
+    b = _make_repo(tmp_path)
+    with pytest.raises(mz.MaterializerError, match=match):
+        mz.compute_repo_digest(commit, b.repo_root)
+
+
+def test_tree_sha_is_not_a_commit(tmp_path):
+    b = _make_repo(tmp_path)
+    tree = _git(b.repo_root, "rev-parse", f"{b.commit}^{{tree}}")
+    with pytest.raises(mz.MaterializerError, match="git ls-tree failed"):
+        mz.compute_repo_digest(tree, b.repo_root)
+
+
+@pytest.mark.parametrize("files, match", [
+    ({"vendor/lib": {"gitlink": "0123456789abcdef0123456789abcdef01234567"}}, r"gitlink \(submodule\)"),
+    ({"m.bin": {"content": "version https://git-lfs.github.com/spec/v1\noid sha256:00\nsize 1\n"}},
+     "Git LFS pointer"),
+    ({"d/escape": {"symlink": "../../outside"}}, "resolves outside the snapshot"),
+    ({"abs": {"symlink": "/etc/passwd"}}, "resolves outside the snapshot"),
+    ({"loop": {"symlink": "loop"}}, "resolves outside the snapshot"),
+    # Lexically inside, really outside: deep/up -> .. is the root, so via/.. leaves it.
+    ({"deep/up": {"symlink": ".."}, "via": {"symlink": "deep/up/.."}}, "resolves outside the snapshot"),
+])
+def test_baseline_refusals(tmp_path, files, match):
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, **files})
+    with pytest.raises(mz.MaterializerError, match=match):
+        mz.compute_repo_digest(b.commit, b.repo_root)
+
+
+def test_resolve_in_tree():
+    links = {"d/up": "..", "d/s": "../scripts", "abs": "/x", "a": "b", "b": "a"}
+    assert mz.resolve_in_tree("d/s", links) == "scripts"
+    assert mz.resolve_in_tree("d/up", links) == ""
+    assert mz.resolve_in_tree("d/up/..", links) is None
+    assert mz.resolve_in_tree("abs", links) is None
+    assert mz.resolve_in_tree("a", links) is None
+    assert mz.resolve_in_tree("plain/file", links) == "plain/file"
+
+
+def test_expanded_size_cap_checked_before_reading(tmp_path):
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, "docs/superpowers/zeros.bin": {"zeros": 4096}})
+    with pytest.raises(mz.MaterializerError, match="over materializer.max_workspace_bytes"):
+        mz.compute_repo_digest(b.commit, b.repo_root, max_bytes=4096)

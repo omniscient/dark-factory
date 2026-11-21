@@ -154,3 +154,154 @@ def resolve_limits(candidate, config):
     limits["max_nproc"] = config["max_nproc"]
     limits["max_file_bytes"] = config["max_workspace_bytes"]
     return limits
+
+
+# ── Baseline digesting ──────────────────────────────────────────────────────────
+
+def _check_baseline(baseline):
+    if not isinstance(baseline, Baseline):
+        _fail("baseline must be a Baseline(commit, repo_root)")
+    if not isinstance(baseline.commit, str) or not _COMMIT_RE.fullmatch(baseline.commit):
+        _fail(f"baseline.commit must be a full 40-hex commit SHA, got {baseline.commit!r}")
+    if not isinstance(baseline.repo_root, str) or not os.path.isdir(baseline.repo_root):
+        _fail(f"baseline.repo_root {baseline.repo_root!r} is not a directory")
+
+
+def _git_env():
+    """os.environ minus every inherited GIT_* variable (GIT_DIR, GIT_OBJECT_DIRECTORY,
+    GIT_INDEX_FILE, ... would silently retarget git at another repository), with replace
+    refs disabled (refs/replace/* would let cat-file serve other content for a sha) and
+    no lazy fetch (a partial-clone baseline must never reach the network)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
+
+
+def _git(repo_root, *args, data=None):
+    try:
+        proc = subprocess.run(["git", "-C", str(repo_root), *args], input=data,
+                              capture_output=True, check=False, env=_git_env())
+    except OSError as exc:
+        _fail(f"cannot run git: {exc}")
+    if proc.returncode != 0:
+        _fail(f"git {args[0]} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout
+
+
+def _cap_msg(size, cap):
+    return f"workspace expands to {size} bytes, over materializer.max_workspace_bytes ({cap})"
+
+
+def _list_tree(commit, repo_root):
+    out = _git(repo_root, "ls-tree", "-r", "-l", "-z", "--full-tree", f"{commit}^{{commit}}")
+    entries = []
+    for rec in out.split(b"\0"):
+        if not rec:
+            continue
+        meta, _, raw = rec.partition(b"\t")
+        mode, _kind, sha, size = meta.decode("ascii").split()
+        try:
+            path = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            _fail(f"baseline path {raw!r} is not UTF-8")
+        try:
+            mc._check_path_text(path, "baseline path")
+        except mc.MechanismCandidateError as exc:
+            _fail(str(exc))
+        if any(part.casefold() == ".git" for part in path.split("/")):
+            _fail(f"baseline path {path!r} has a .git component")
+        if mode == _GITLINK_MODE:
+            _fail(f"baseline entry {path!r} is a gitlink (submodule); submodules are "
+                  f"refused, never flattened")
+        if mode not in _FILE_MODES and mode != _SYMLINK_MODE:
+            _fail(f"baseline entry {path!r} has unsupported mode {mode}")
+        if not size.isdigit():  # ls-tree -l prints BAD for a blob it cannot read
+            _fail(f"baseline entry {path!r} has no readable blob (ls-tree size {size!r})")
+        entries.append((path, mode, sha, int(size)))
+    if not entries:
+        _fail(f"baseline commit {commit} has an empty tree")
+    return entries
+
+
+def _read_blobs(repo_root, entries, max_bytes):
+    """Blob contents by path, via one `git cat-file --batch`. The expanded size is checked
+    against the cap from the tree listing before any content is read."""
+    total = sum(size for _, _, _, size in entries)
+    if total > max_bytes:
+        _fail(_cap_msg(total, max_bytes))
+    out = _git(repo_root, "cat-file", "--batch",
+               data="".join(f"{sha}\n" for _, _, sha, _ in entries).encode("ascii"))
+    blobs, pos = {}, 0
+    try:
+        for path, _, sha, size in entries:
+            nl = out.index(b"\n", pos)
+            if out[pos:nl].decode("ascii").split() != [sha, "blob", str(size)]:
+                _fail(f"git cat-file returned an unexpected header for {path!r}")
+            blobs[path] = out[nl + 1:nl + 1 + size]
+            pos = nl + 1 + size + 1
+    except ValueError:
+        _fail("git cat-file output ended early")
+    return blobs
+
+
+def resolve_in_tree(path, links):
+    """Resolve repo-relative `path` against a virtual tree whose symlinks are `links`
+    ({path: target}), component by component like realpath. None when the walk leaves
+    the root, hits an absolute target, or exceeds the hop limit (a loop)."""
+    parts, todo, hops = [], path.split("/"), 0
+    while todo:
+        part = todo.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+            continue
+        parts.append(part)
+        target = links.get("/".join(parts))
+        if target is not None:
+            hops += 1
+            if hops > _MAX_SYMLINK_HOPS or target.startswith("/"):
+                return None
+            parts.pop()
+            todo = target.split("/") + todo
+    return "/".join(parts)
+
+
+def _load_baseline(commit, repo_root, max_bytes):
+    """(entries, blobs, manifest) for the pinned commit. Refusal order: gitlink, then
+    Git LFS pointer, then a symlink resolving outside the snapshot."""
+    entries = _list_tree(commit, repo_root)
+    blobs = _read_blobs(repo_root, entries, max_bytes)
+    links = {}
+    for path, mode, _, _ in entries:
+        if mode == _SYMLINK_MODE:
+            try:
+                links[path] = blobs[path].decode("utf-8")
+            except UnicodeDecodeError:
+                _fail(f"baseline symlink {path!r} has a non-UTF-8 target")
+        elif blobs[path].startswith(_LFS_HEADER):
+            _fail(f"baseline entry {path!r} is a Git LFS pointer; LFS content is refused, "
+                  f"never fetched")
+    for path, target in sorted(links.items()):
+        if resolve_in_tree(path, links) is None:
+            _fail(f"baseline symlink {path!r} -> {target!r} resolves outside the snapshot "
+                  f"(or loops)")
+    manifest = {}
+    for path, mode, _, _ in entries:
+        entry = {"mode": mode, "sha256": "sha256:" + hashlib.sha256(blobs[path]).hexdigest()}
+        if mode == _SYMLINK_MODE:
+            entry["target"] = links[path]
+        manifest[path] = entry
+    return entries, blobs, manifest
+
+
+def compute_repo_digest(commit, repo_root, *, max_bytes=None):
+    """repo_digest of a pinned commit: canonical_digest over {path: {mode, sha256[, target]}}
+    from `git ls-tree -r` + `git cat-file` (never `git archive`, never the working tree)."""
+    _check_baseline(Baseline(commit, str(repo_root)))
+    cap = load_config()["max_workspace_bytes"] if max_bytes is None else max_bytes
+    _, _, manifest = _load_baseline(commit, repo_root, cap)
+    return mc.canonical_digest(manifest)
