@@ -417,7 +417,10 @@ def _smuggle(sep, target=_TOOL):
 def test_diff_with_a_non_newline_line_break_is_refused(tmp_path, scratch_tmp, sep):
     b = _make_repo(tmp_path)
     r = _record(b, diff=_smuggle(sep))
-    assert sorted(mc.extract_diff_paths(r["diff"])) == [_DOC]  # #464 sees a docs-only H0 diff
+    # Since #552 the validator refuses these diffs itself; before it, it read them as a
+    # docs-only H0 diff. The materializer's own line check must not depend on that.
+    with pytest.raises(mc.MechanismCandidateError, match="after a hunk"):
+        mc.extract_diff_paths(r["diff"])
     with pytest.raises(mz.MaterializerError, match="line break other than"):
         mz.build_workspace(r, b)
     assert os.listdir(scratch_tmp) == []
@@ -427,6 +430,9 @@ def test_applied_paths_must_be_the_validated_paths(tmp_path, scratch_tmp, monkey
     """The outcome is checked even when a parser differential gets past the line check."""
     b = _make_repo(tmp_path)
     monkeypatch.setattr(mz, "_check_diff_lines", lambda diff: None)
+    # Stand in for a validator that under-reports (as #464's did before #552): it names only
+    # the doc path, while git also patches scripts/tool.py.
+    monkeypatch.setattr(mz.mc, "extract_diff_paths", lambda diff: [_DOC])
     with pytest.raises(mz.MaterializerError,
                        match=r"changed paths the validated diff does not name: \['scripts/tool.py'\]"):
         mz.build_workspace(_record(b, diff=_smuggle("\x0c")), b)
