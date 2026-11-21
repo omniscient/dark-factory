@@ -48,14 +48,42 @@ def _deps_allowed_paths(clone_dir: str | None = None) -> list:
     return list(_DEFAULT_ALLOWED_PATHS)
 
 
-# Advisory fields come from external feeds (registry metadata relayed by the hook): keep
-# package / version / range / id characters only, so no backticks, markup, HTML comments or
-# brackets reach the fix-agent prompt or a GitHub body.
-_UNSAFE = re.compile(r"[^A-Za-z0-9@/._:<>=~^*,+| -]")
+# Advisory fields come from external feeds (registry metadata relayed by the hook) and reach
+# the fix-agent prompt, the tracking issue and the PR body. Each field must fullmatch an
+# anchored ASCII allowlist that carries its own length bound. A value that does not is
+# replaced WHOLE: never masked per character (words would survive), never dropped with its
+# row (the advisory would vanish from the human's view and from the set hash) — #548.
+_A = re.ASCII  # every pattern: no Unicode digits or letters
+_PKG = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+_NAME = rf"(?:@{_PKG}/)?{_PKG}"                    # "requests", "@types/node"
+# One version token starts with a digit (after an optional operator / "v"), or is a wildcard.
+_TOK = r"(?:[<>=~^]{0,2}v?[0-9][A-Za-z0-9.+_-]{0,39}|\*|[xX])"
+# Empty, the hook's literal "available", or up to 8 tokens joined by npm/pip range separators.
+_VER = re.compile(rf"(?:available|(?:{_TOK}(?:(?: \|\| | - |, ?| ){_TOK}){{0,7}})?)", _A)
+# Structured advisory ids; also the only ids pr_title names.
+_NAMED_ID = (r"GHSA(?:-[0-9a-z]{4}){3}|CVE-[0-9]{4}-[0-9]{4,7}"
+             r"|PYSEC-[0-9]{4}-[0-9]{1,6}|[0-9]{1,10}")
+_NAMED_ID_RE = re.compile(rf"(?:{_NAMED_ID})", _A)
+_FIELD_PATTERNS = {
+    "ecosystem": re.compile(r"[a-z]{1,20}", _A),   # "pip", "npm", future ecosystems
+    "package":   re.compile(_NAME, _A),
+    "installed": _VER,                             # version or npm range string
+    "fixed_in":  _VER,                             # may be a comma-joined list
+    "id":        re.compile(rf"(?:{_NAMED_ID}|via:{_NAME}(?:,{_NAME}){{0,7}})", _A),
+    "severity":  re.compile(r"(?:low|moderate|medium|high|critical|unknown)", _A),
+}
+PLACEHOLDER = "unparseable"
 
 
-def _clean(v: str) -> str:
-    return _UNSAFE.sub("?", v.strip())[:120]
+def _placeholder(field: str, raw: str) -> str:
+    if field == "id":  # content-derived, so distinct bad ids keep distinct hash/cap identity
+        return f"{PLACEHOLDER}-" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:8]
+    return PLACEHOLDER
+
+
+def _clean(field: str, v: str) -> str:
+    v = v.strip()
+    return v if _FIELD_PATTERNS[field].fullmatch(v) else _placeholder(field, v)
 
 
 def parse_advisories(stdout: str) -> list:
@@ -66,7 +94,7 @@ def parse_advisories(stdout: str) -> list:
         parts = line.rstrip("\r").split("\t")
         if len(parts) != len(FIELDS) or not parts[4].strip():
             continue
-        out.append(dict(zip(FIELDS, (_clean(p) for p in parts))))
+        out.append({f: _clean(f, p) for f, p in zip(FIELDS, parts)})
     return out
 
 
@@ -131,7 +159,7 @@ def mark_cap_escalated(state: dict, h: str) -> None:
 def advisory_table(advisories: list) -> str:
     rows = ["| Ecosystem | Package | Installed | Fixed in | Advisory | Severity |",
             "|---|---|---|---|---|---|"]
-    for a in advisories:
+    for a in sorted(advisories, key=lambda a: a["id"]):
         # Code spans: a scoped npm name (@types/node) must not @-mention an account and a
         # leftover <tag> must not render. _clean has already removed every backtick.
         rows.append("| " + " | ".join(
