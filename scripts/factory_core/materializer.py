@@ -150,11 +150,8 @@ def resolve_limits(candidate, config):
     else:
         _fail(f"resource_envelope.cpu_limit {cpu!r} is not a supported format "
               f"(a bare integer CPU count from 1 to 999)")
-    host_cpus = os.cpu_count() or 1
-    if cpus > host_cpus:
-        _fail(f"resource_envelope.cpu_limit {cpu!r} exceeds this host's cpu count "
-              f"({host_cpus}); cpu_limit may lower the RLIMIT_CPU multiplier, never "
-              f"raise it past what the host actually has")
+    # Host capacity (how many CPUs this machine has) is checked where the candidate is
+    # executed (Phase B, #544), not here: a sealed verdict must not depend on the host.
     limits["cpu_seconds"] = cpus * limits["max_duration_seconds"]
     limits["max_nproc"] = config["max_nproc"]
     limits["max_file_bytes"] = config["max_workspace_bytes"]

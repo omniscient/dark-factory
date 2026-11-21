@@ -106,6 +106,15 @@ def test_resolve_limits_ceilings_apply_downward_only():
         lim(max_duration_seconds=101)
 
 
+def test_resolve_limits_does_not_depend_on_the_host_cpu_count(monkeypatch):
+    """Host capacity is Phase B's check (#544); the same record must resolve to the same
+    limits, hence the same sealed verdict, on any host."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 1)
+    limits = mz.resolve_limits({"resource_envelope": {"cpu_limit": "999", "memory_limit_mb": None,
+                                                      "max_duration_seconds": None}}, _CFG)
+    assert limits["cpu_seconds"] == 999 * 100
+
+
 @pytest.mark.parametrize("cpu", ["0", "500m", "1.5", " 1", "1\n", "", "1000", "-1", "2 cores", 2, True])
 def test_cpu_limit_unsupported_formats_fail_closed(cpu):
     with pytest.raises(mz.MaterializerError, match="cpu_limit .* is not a supported format"):
