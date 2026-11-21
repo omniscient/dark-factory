@@ -40,22 +40,80 @@ python3() {
 export -f python3
 export STUB_LOG
 
+# #553: the shims now ask real git/gh what a verb resolves to (aliases, push URLs,
+# extensions), so the stubs hand exactly those read-only lookups to the real binaries --
+# found on PATH, skipping any side-effect shim (this script also runs inside factory
+# containers, where the shim is first on PATH) -- and echo every other call as before.
+_find_real() {
+  local p
+  for p in $(type -ap "$1"); do
+    grep -q "side-effect guard" "$p" 2>/dev/null || { echo "$p"; return 0; }
+  done
+  return 1
+}
+REAL_GIT_BIN=$(_find_real git) || { echo "FAIL: no real git on PATH"; exit 1; }
+REAL_GH_BIN=$(_find_real gh) || { echo "FAIL: no real gh on PATH"; exit 1; }
+
 # Real binary stubs the shim must exec through when allowed.
 mkdir -p "$TMP/real"
-cat > "$TMP/real/git" <<'EOF'
+cat > "$TMP/real/git" <<EOF
 #!/usr/bin/env bash
-echo "REAL_GIT $*"
+args=("\$@"); i=0
+while [ "\$i" -lt "\${#args[@]}" ]; do
+  case "\${args[\$i]}" in
+    --list-cmds=*) exec "$REAL_GIT_BIN" "\$@" ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env) i=\$((i + 2)) ;;
+    -*) i=\$((i + 1)) ;;
+    *) break ;;
+  esac
+done
+case "\${args[\$i]:-} \${args[\$((i + 1))]:-}" in
+  "config "*|"remote get-url"|"symbolic-ref "*) exec "$REAL_GIT_BIN" "\$@" ;;
+esac
+echo "REAL_GIT \$*"
 EOF
-cat > "$TMP/real/gh" <<'EOF'
+cat > "$TMP/real/gh" <<EOF
 #!/usr/bin/env bash
-echo "REAL_GH $*"
+case "\${1:-} \${2:-}" in
+  "alias list"|"extension list") exec "$REAL_GH_BIN" "\$@" ;;
+esac
+echo "REAL_GH \$*"
 EOF
 chmod +x "$TMP/real/git" "$TMP/real/gh"
 
 SHIM_DIR="$REPO_ROOT/scripts/shims"
 export PATH="$SHIM_DIR:$TMP/real:$PATH"
 
+# #553 fixture: a real repo whose origin is the run's repository (o/r), so the level-4
+# push-destination check has something to resolve, independent of the checkout this
+# test runs from. No developer/runner config, gh alias, extension, token or SSH
+# override leaks in.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GH_CONFIG_DIR="$TMP/gh-config" XDG_DATA_HOME="$TMP/xdg-data"
+mkdir -p "$GH_CONFIG_DIR" "$XDG_DATA_HOME"
+unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_CONFIG GIT_CONFIG_COUNT \
+  GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE || true
+export FACTORY_REPO_SLUG=o/r
+"$REAL_GIT_BIN" init -q -b feat "$TMP/repo"
+"$REAL_GIT_BIN" -C "$TMP/repo" remote add origin https://github.com/o/r.git
+cd "$TMP/repo"
+
 PASS=0; FAIL=0
+check_deny_reason() {
+  # usage: check_deny_reason <ERE the deny message must match> <cmd...> -- #553: a new
+  # deny case must be denied for its own reason, not by some unrelated check.
+  local re="$1"; shift
+  local out rc
+  set +e
+  out=$("$@" 2>&1)
+  rc=$?
+  set -e
+  if [ "$rc" != "0" ] && echo "$out" | grep -q "side-effect guard" && echo "$out" | grep -qE -- "$re"; then
+    PASS=$((PASS+1))
+  else
+    echo "FAIL (expected deny /$re/): $* -> rc=$rc out=$out"; FAIL=$((FAIL+1))
+  fi
+}
 check() {
   # usage: check <allow|deny> <cmd...>   e.g. check allow git log
   local expect="$1"; shift
@@ -242,6 +300,12 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh auth login
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh api repos/o/r -X DELETE
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh repo view o/r
 
+# --- #553: alias, env-config, transport-override and destination bypass shapes ---
+# Every new deny asserts its reason (check_deny_reason), so a case cannot pass because an
+# unrelated check denied it. All run in the $TMP/repo fixture (origin = o/r, branch feat).
+export FACTORY_RUN_BRANCH="feat"
+# --- end #553 cases ---
+unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---
 # The blocks above never set ARTIFACTS_DIR, so _emit_denied's early
 # `[ -n "$artdir" ] || return 0` guard always short-circuits there and the python3()
