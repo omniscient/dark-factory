@@ -318,10 +318,13 @@ def run_once(cfg: dict, io, state: dict, today: str, now_iso=None) -> dict:
     input_digest = None if unparseable else spec_hash(prompt)
     unchanged = hold_unchanged(state, cand["number"], h, input_digest)
     # A failed post (LiveIO returns False) must not become the dedup baseline (#547).
-    posted = unchanged or io.comment(
-        cand["number"],
-        f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}"
-    ) is not False
+    ok = True
+    if not unchanged:
+        ok = io.comment(
+            cand["number"],
+            f"\U0001f916 **Epic Autopilot** — parked (HOLD). {concerns}\n\n---\n{identity.marker('autopilot')}"
+        )
+    posted = unchanged or (ok is not False)
     record_verdict(state, cand["number"], h, "HOLD", now_iso,
                    input_digest=input_digest if posted else None)
     return {"outcome": "hold_unchanged" if unchanged else "hold",
