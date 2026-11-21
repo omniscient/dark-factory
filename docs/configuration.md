@@ -338,7 +338,7 @@ Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 
 ### `materializer`
 
 Ceilings for the harness candidate materializer (#465,
-[spec](superpowers/specs/2026-10-22-harness-candidate-materializer-design.md)). Read only by
+[spec](archive/2026-10-22-harness-candidate-materializer-design.md)). Read only by
 `scripts/factory_core/materializer.py` (`load_config`, from this checkout's
 `config/config.yaml`); no DAG node, scheduler path or gate calls the materializer yet. A
 candidate's `resource_envelope` may lower a ceiling, never raise it (a larger declared value is

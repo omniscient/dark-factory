@@ -6,7 +6,7 @@ artifact bundle, and translates the record's envelopes into the bwrap argument l
 Phase B executor (#544) will launch. Phase A executes nothing from the workspace, needs
 no namespaces, and makes no claim that the sandbox boundary holds: its argv is checked
 by tests, never run. Candidate payloads are untrusted data; every check fails closed.
-Spec: docs/superpowers/specs/2026-10-22-harness-candidate-materializer-design.md
+Spec: docs/archive/2026-10-22-harness-candidate-materializer-design.md
 
 Usage:
     PYTHONPATH=scripts python3 -m factory_core.materializer materialize \\
