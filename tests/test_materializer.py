@@ -729,6 +729,15 @@ def test_unexpected_errors_fail_closed(tmp_path, scratch_tmp, monkeypatch):
     assert os.listdir(scratch_tmp) == []
 
 
+def test_verify_bundle_is_false_for_a_bundle_that_cannot_be_digested(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    bundle = mz.materialize(_record(b), baseline=b, out_dir=tmp_path / "out")
+    assert mz.verify_bundle(bundle) is True
+    for extra in ("\ud800", {"k\udfff": 1}, {1, 2}, b"bytes"):
+        assert mz.verify_bundle({**bundle, "extra": extra}) is False
+    assert mz.verify_bundle({**bundle, "bundle_digest": "\ud800"}) is False
+
+
 def test_untrusted_lone_surrogates_still_yield_a_sealed_bundle(tmp_path, scratch_tmp):
     b = _make_repo(tmp_path)
     surrogate_diff = json.loads(json.dumps(_record(b)).replace('"diff": "', '"diff": "\\ud800', 1))

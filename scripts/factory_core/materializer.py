@@ -580,10 +580,15 @@ def seal_bundle(bundle):
 
 
 def verify_bundle(bundle):
-    """True when bundle_digest still matches the rest of the bundle."""
+    """True when bundle_digest still matches the rest of the bundle. A bundle that cannot
+    be digested at all (a lone surrogate, a non-JSON value) is False, never an exception:
+    the bundle being verified is a file someone else may have written."""
     if not isinstance(bundle, dict) or "bundle_digest" not in bundle:
         return False
-    return seal_bundle(bundle)["bundle_digest"] == bundle["bundle_digest"]
+    try:
+        return seal_bundle(bundle)["bundle_digest"] == bundle["bundle_digest"]
+    except Exception:  # noqa: BLE001 — unverifiable is not verified
+        return False
 
 
 def resolve_out_dir(candidate, out_dir=None):
