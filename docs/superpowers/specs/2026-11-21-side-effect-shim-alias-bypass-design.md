@@ -1,6 +1,7 @@
 # Side-Effect Shim — Close Alias, Env-Config and Transport-Override Bypasses
 
 **Issue:** #553
+**Revised:** 2026-11-21 (operator amendment after spec gate review)
 
 ## Overview / Problem statement
 
@@ -56,12 +57,35 @@ that token is itself a stand-in for a different verb. Confirmed in this refine p
    for this invocation (it only failed afterward in this sandbox for lack of a real
    GitHub auth context — the shim-level bypass itself reproduces).
 7. **`gh extension`** is absent from every level's `gh_allowed`/`gh_denied`; at levels
-   2-5 (`gh_mode=deny`, allow-by-default) `gh extension install ...` / `gh <ext-name>`
-   passes through unclassified — an installed extension binary can act with `gh`'s own
+   4-5 (`gh_mode=deny`, allow-by-default) `gh extension install ...` / `gh <ext-name>`
+   passes through unclassified, and at levels 1-3 (`gh_mode=allow`) `gh <ext-name>
+   list|view|status|search` passes too, because the second word alone matches
+   `gh_allowed` (measured: `gh someext list` at level 1 is not denied) — an installed extension binary can act with `gh`'s own
    stored credentials with no verb-level check at all.
 8. **`gh api` with a body and no explicit method** is already classified correctly as a
    POST by the existing `HAS_BODY`/`METHOD` inference in `scripts/shims/gh` (read, not
    bypassed) — no bug, just missing a regression test tying it to this ticket.
+
+Found by the spec gate review and measured against the origin/main shims in a throwaway
+`ghcr.io/omniscient/dark-factory:latest` container (git 2.53.0, gh 2.105.0, local bare
+repos as origin); all four are fixed by this ticket:
+
+9. **Arguments inside an alias value.** `git -c alias.del='push --delete' del origin feat`
+   at level 5 deleted the remote branch (never-list bypass); `alias.x='push --force'` and
+   `alias.x='push origin'` + `HEAD:main` pushed at level 4. Resolving only the alias's
+   first token to `push` would still not see `--delete`, `--force` or the remote.
+10. **Alias values that are not a bare verb.** `alias.v='-p push'` and `alias.w='"push"'`
+    both push at level 2. `git config --get` also exits 1 for an *invalid* key
+    (`alias.a b`, `alias.--no-advice`), the same code as "not found", so exit 1 cannot
+    mean "safe, classify as-is".
+11. **External `git-<verb>` commands.** git runs a `git-foo` executable found on `PATH`
+    in preference to an alias named `foo` (measured), and prepends `/usr/lib/git-core` to
+    that child's `PATH`, so a nested `git push` inside it reaches real git (pushed at
+    level 2).
+12. **Unrecognised global options desync the verb.** `git --no-advice push origin HEAD`
+    and `git --attr-source HEAD push origin HEAD` both push at level 2: the skip-loop in
+    `scripts/shims/git` does not know those options, reads the option as the verb, and
+    falls through. Same shape in gh: `gh -R o/r pr create` at level 4 is not denied.
 
 This is a `gate_*`-adjacent change per CLAUDE.md's Hard limits: it must only tighten
 existing enforcement, must not touch `scripts/factory_core/side_effect.py`'s level/profile
@@ -75,47 +99,80 @@ Full Q&A dialogue is in the pipeline comment on #553. Resolutions below are load
 1. **All eight items (1-8 above) are fixed in this one ticket**, except the general
    "git forks a child, child resolves real git via git-core PATH" class (hooks,
    `core.pager`, `core.editor`, `GIT_EXTERNAL_DIFF`, `credential.helper` each running a
-   nested `git <verb>`), which is filed as a separate follow-up (see Open questions) and
-   only documented here, not fixed. The two shims are ~390 lines combined today and the
+   nested `git <verb>`), which is tracked in a follow-up ticket filed by the operator and
+   only documented here (Requirement 8), not fixed. Items 9-12 are fixed here as well. The two shims are ~390 lines combined today and the
    fix stays well inside the repo's 400-line diff-size convention; splitting the eight
    items would leave a known, now-documented bypass open on a gate surface, against
    "must only tighten." The follow-up class is different in kind — closing it means
    controlling which hooks/helpers run inside the clone, not an argv/env classification
    problem, and is not an argv-only fix like the other eight.
 
-2. **Verb-spoofing fix (items 1, 2, 3, 6 — git and gh aliases, however set).** One
-   resolution mechanism per tool, not per bypass variant:
-   - **git.** Before classifying `VERB1`, check whether it is a real git builtin via
-     `"$REAL_GIT" --list-cmds=builtins` (git itself never applies an alias that shadows a
-     builtin, so builtins skip resolution entirely — `status`, `clone`, `init`, `push`,
-     `commit`, etc. never depend on the lookup below and cannot regress from it). For
-     every other `VERB1`, run `"$REAL_GIT" <the same -C/-c/--git-dir/--config-env
-     overrides already parsed off argv> config --get alias.<VERB1>`, letting it inherit
-     the shim's own ambient environment unchanged (this alone covers the env-var variant
-     in item 3, since `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` are
-     already in that environment, and covers the persisted variant in item 2, since
-     `config --get` reads `.git/config` and global/system config the same way):
-     - Exit 1 (key not found) → not an alias; classify `VERB1` as-is.
-     - Exit 0 → resolve the value. A value starting with `!` → deny outright (item 4,
-       see Requirement 3) regardless of level. Otherwise take the first whitespace-
-       separated token of the value as the new candidate verb and repeat, up to a depth
-       cap of 5 (arbitrary but reasonable — real alias chains observed in practice are
-       1-2 deep; git's own cycle detector catches pure self-reference but not depth, so
-       the cap is this shim's own safety bound). Hitting the cap denies ("alias chain too
-       deep").
-     - Any other non-zero exit (3 = bad config file, 128 = fatal) → deny ("alias
-       resolution failed"); real git would refuse to run on a broken config anyway, so
-       this loses no legitimate invocation.
-     - Verified empirically this pass: `config --get` exits 1 cleanly even with no `.git`
-       directory present (e.g. before `clone`/`init`), so global/system `~/.gitconfig`
-       aliases are still covered and pre-repo verbs need no special-casing beyond the
-       builtin check above.
-     - Classify the **final resolved verb** against the existing `git_denied`/
-       `git_allowed`/`push_scope` logic exactly as today — no change to those tables.
-   - **gh.** Same shape: resolve `VERB1` against `gh alias list` (or equivalently check
-     whether it names a defined alias) before falling back to literal classification;
-     apply the same depth cap and fail-closed rule for consistency, even though gh
-     aliases are not transitively chained the way git's are in practice.
+2. **Verb-spoofing fix (items 1, 2, 3, 6, 9-12 — git and gh aliases, however set).** One
+   resolution mechanism per tool, governed by one invariant.
+
+   **Tighten-only invariant.** An invocation reaches the real binary only if (a) its
+   literal argv passes today's classification, unchanged, AND (b) every expanded form
+   passes that same classification. Resolution can add denials; it can never turn a deny
+   into an allow. (Without (a), `git -c alias.l='log --output=f' l` at level 1 — denied
+   today as the unlisted verb `l` — would resolve to the allowed verb `log` and pass.)
+
+   - **git.** At the point where the shim would `exec "$REAL_GIT" "$@"` today (the
+     literal form has already passed), at every level 1-5:
+     1. `VERB1` (the token after the existing global-option skip-loop) must be empty
+        (bare `git`, unchanged) or match `^[a-z][a-z0-9-]*$`; otherwise deny
+        ("unrecognised option or verb syntax"). This closes item 12 without enumerating
+        git's global options: any option the skip-loop does not know is denied instead of
+        being read as a verb. Consequence: informational flags the loop does not list
+        (`--html-path`, `--man-path`, `--info-path`, `--list-cmds=…`) are denied for phase
+        agents; `--version`/`--help` keep their existing passthrough.
+     2. The known-verb set is `"$REAL_GIT" --list-cmds=main` (169 commands on git 2.53.0
+        in the image: the 146 builtins plus the programs in git's exec-path such as
+        `submodule`, `subtree`, `http-push`, `filter-branch`, `mergetool`). If that
+        command fails or prints nothing → deny ("verb resolution failed").
+     3. `VERB1` in that set → no alias lookup. git never applies an alias over a command
+        it can find, so `status`, `clone`, `push`, `commit`, `submodule` etc. cannot
+        regress from alias noise, and `-c alias.status=push status` runs `status`.
+     4. `VERB1` not in that set:
+        - If it is in `"$REAL_GIT" --list-cmds=others` (a `git-<verb>` executable on
+          `PATH`) → deny ("external git command"). git would run that executable, not
+          the alias (item 11).
+        - Else run `"$REAL_GIT" <the global options already parsed off argv> config --get
+          alias.<VERB1>`, inheriting the shim's environment unchanged (this covers
+          `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, `GIT_CONFIG_PARAMETERS`,
+          `GIT_CONFIG_GLOBAL`, `--config-env`, and persisted local/global/system config).
+          Exit 1 → deny ("unknown verb"): the verb is neither a git command nor an alias
+          (this replaces the earlier "classify as-is", which failed open). Any other
+          non-zero exit → deny ("alias resolution failed").
+        - Exit 0: a value starting with `!` → deny ("shell alias", Requirement 3). A value
+          containing `"`, `'`, `\` or a newline → deny ("alias value needs shell-style
+          parsing"): the shim does not re-implement git's own command-line splitting.
+        - Otherwise the expanded argv is `<global options> <whitespace-separated tokens of
+          the value> <the arguments that followed VERB1>`. Run the **entire**
+          classification on the expanded argv — skip-loop, tables, push flag/remote/
+          refspec parsing, level-1 write-form checks, Requirements 3 and 4, and this
+          resolution step again for alias chains — and deny if any of it denies. Depth
+          cap 5 → deny ("alias chain too deep").
+     5. What is finally exec'd is still the untouched original argv.
+   - **gh.** At every point where the shim would `exec "$REAL_GH" "$@"` today, at every
+     level 1-5:
+     1. `VERB1` must be empty or match `^[A-Za-z0-9][A-Za-z0-9_-]*$`; otherwise deny
+        ("flag before the command"). This closes `gh -R o/r pr create` in the shim; it is
+        not a table change.
+     2. `"$REAL_GH" alias list` (reads config only; measured exit 0 with no token and no
+        config dir). Failure → deny ("alias resolution failed"). If it has a line
+        `VERB1: <expansion>`: deny when the expansion is empty or multi-line (`|`, `>`),
+        starts with `!` (shell alias), or contains a quote, a backslash or `$` (positional
+        placeholders); otherwise the expanded argv is `<tokens of the expansion> <the
+        arguments that followed VERB1>` and the entire gh classification (including the
+        `gh api` method inference and Requirement 5) runs on it, depth cap 5.
+     3. gh refuses to define an alias over a core command (measured: "already a gh
+        command or extension"), and the literal form is always classified, so an alias
+        cannot loosen a core command either.
+   - **Measured with a prototype of this requirement** (patched copies of both shims in a
+     throwaway container, real pushes to local bare repos): every vector in items 1-3,
+     6 and 9-12 is denied with no change on the remote; the 113 existing assertions of
+     `tests/test_side_effect_shims.sh` pass; no legitimate call listed under "Legitimate
+     usage" in the test plan is denied.
 
 3. **Shell-alias and transport-override denial (items 4, 5) apply at every side-effect
    level 1-5, unconditionally — not scoped to where push itself is restricted.** This
@@ -123,8 +180,9 @@ Full Q&A dialogue is in the pipeline comment on #553. Resolutions below are load
    allow some pushes, so "deny this on a push" looks at first glance like changing what
    those levels permit. It is not, for two independent reasons confirmed this pass:
    - `side_effect.py`'s never-list (`_GIT_NEVER = ["push --delete", "push
-     :refspec-delete"]`) is already, by the module's own docstring, "denied at EVERY
-     level and checked before any allow-list" — including level 5. A `!`-alias whose
+     :refspec-delete"]`) belongs to the never-list that the comment above `_GH_NEVER` in
+     that module calls "denied at EVERY level" — enforced through `push_scope` at levels
+     1-4 and through `git_denied` at level 5. A `!`-alias whose
      body runs `git push --delete` subverts that existing rule via the git-core
      PATH-prepend finding (item 4); denying the outer alias is closing a bypass of a
      rule that already applies everywhere, not adding a new one.
@@ -137,55 +195,66 @@ Full Q&A dialogue is in the pipeline comment on #553. Resolutions below are load
      level-conditional rule.
    - Concretely: the shim checks for a resolved alias value beginning with `!`, and for
      `core.sshCommand`/`GIT_SSH_COMMAND`/`GIT_SSH` set from any source (`-c`,
-     `--config-env`, env-config, or persisted config) **before** any `push_scope`/level
-     branching — the same position the never-list check already occupies — and denies
-     unconditionally when found, on any verb that can open a transport (`push`, `fetch`,
+     `--config-env`, env-config, or persisted config) independently of `push_scope` and level
+     (once the literal form has passed, see Architecture) and denies unconditionally
+     when found, on any verb that can open a transport (`push`, `fetch`,
      `pull`, `clone`, `ls-remote`, `remote update`, `submodule`). The deny message names
      the reason ("shell alias", "sshCommand override"), not a level, so it isn't mistaken
      for a level-policy change in a run's logs.
 
-4. **Destination-redirect check (item 5's `pushurl`/`insteadOf` half) applies at levels
-   1-4 only; it is a no-op at level 5.** `push_scope=unrestricted` at level 5 means the
-   destination is not something that level restricts in the first place — unlike the
-   shell-alias/sshCommand case, a redirected push does not fork a nested `git` process
-   and so never reaches the never-list either; there is nothing to close at level 5 for
-   this specific check. Mechanism, on the `push` verb wherever `push_scope` is `denied`
-   or `own_branch_only`:
-   - Resolve the remote-to-push against (in order): the positional remote/`--repo` value
-     (if it is itself a literal URL, compare it directly); else `branch.<current>.
-     pushRemote`; else `remote.pushDefault`; else `branch.<current>.remote`; else
-     `origin`.
-   - Resolve its actual push destination via `"$REAL_GIT" <same global opts>
-     remote get-url --push <remote>` (this applies `insteadOf`/`pushInsteadOf`
-     rewrites the same way the real push would).
-   - **Primary baseline:** compare against `https://github.com/${FACTORY_REPO_SLUG}.git`
-     (mirrors `entrypoint.sh:18`'s own `REPO_URL` construction; `FACTORY_REPO_SLUG` is
-     `export`ed by `scripts/identity.sh`, sourced at the top of `entrypoint.sh`, so it
-     propagates to a phase agent's Bash-tool subprocess the same way
-     `CLAUDECODE`/`FACTORY_SIDE_EFFECT_LEVEL` already do — same propagation class the
-     existing `FACTORY_RUN_BRANCH` comment in `scripts/shims/git` already relies on).
-     Strip a trailing `.git`/`/` from both sides before comparing. Deny on mismatch or on
-     resolution failure.
-   - **Fallback when `FACTORY_REPO_SLUG` is unset:** compare the remote's "clean"
-     resolution (re-run `remote get-url --push` with none of the invocation's `-c`/
-     `--config-env`/env-config overrides applied) against the overridden resolution; deny
-     on any difference. This is a weaker guarantee (it only proves "this invocation didn't
-     change the answer," not "the answer is the factory's own repo") — document it
-     plainly next to the existing `FACTORY_RUN_BRANCH` degraded-guarantee comment in
-     `scripts/shims/git`, the same way that comment already documents its own v1
-     degradation.
+4. **Destination-redirect check (item 5's `pushurl`/`insteadOf` half) applies wherever
+   `push_scope` is `own_branch_only` (level 4); it is a no-op at level 5.** At levels 1-3
+   `push` is denied outright before this check is reached. `push_scope=unrestricted` at
+   level 5 means the destination is not something that level restricts. Mechanism, after
+   the existing own-branch checks have passed:
+   - **Which remote.** The positional repository argument; else the `--repo` value (git
+     uses `--repo` only when no positional repository is given); else
+     `branch.<current>.pushRemote`; else `remote.pushDefault`; else
+     `branch.<current>.remote`; else `origin`.
+   - **Its push URLs.** `"$REAL_GIT" <same global options> remote get-url --push --all
+     <remote>` — `--all` is required: without it git prints only the first of several
+     `pushurl` values while a real push goes to all of them (measured). Every URL printed
+     must match the baseline. This applies `insteadOf`/`pushInsteadOf` the same way the
+     real push would.
+   - **Literal destination.** If the argument is not a configured remote name
+     (`get-url` fails), it is treated as a literal URL or path: it must itself match the
+     baseline, and the push is denied if any `url.*.insteadOf`/`url.*.pushInsteadOf` is
+     in effective config (`config --get-regexp`), because `get-url` cannot resolve
+     rewrites for a literal.
+   - **Primary baseline:** `https://github.com/${FACTORY_REPO_SLUG}` (mirrors
+     `entrypoint.sh:18`'s `REPO_URL`; `FACTORY_REPO_SLUG` is `export`ed by
+     `scripts/identity.sh`). Strip a trailing `/` and `.git` from both sides before
+     comparing. Deny on mismatch or on resolution failure.
+   - **Fallback when `FACTORY_REPO_SLUG` is unset:** the baseline is `remote.origin.url`
+     read with none of the invocation's `-c`/`--config-env` options and with
+     `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`
+     unset (only `-C`/`--git-dir`/`--work-tree` are kept). This is a weaker guarantee —
+     a persisted `git remote set-url origin` or a persisted `insteadOf` moves the
+     baseline with it — and is documented as such next to the existing
+     `FACTORY_RUN_BRANCH` degraded-guarantee comment in `scripts/shims/git`. (The earlier
+     wording, "clean vs overridden resolution of the same remote", could not catch a
+     literal URL, another remote name or a persisted `pushurl`; this wording does —
+     measured.)
 
-5. **`gh extension` (item 7) denied at levels 1-4; unchanged at level 5.** Levels 1-3
-   already deny it today as an unlisted verb under `gh_mode=allow`'s deny-by-default —
-   no change needed there; this only closes level 4 (`gh_mode=deny`, allow-by-default),
-   where `extension install`/`extension upgrade`/`extension exec`, and any `VERB1` that
-   resolves to an already-installed extension name (checked via `gh extension list`,
-   same resolve-before-classify shape as Requirement 2), are added to that level's
-   effective deny set inside the shim (not to `side_effect.py`'s `gh_denied` table — the
-   issue's scope excludes editing that file; the shim adds this check the same way it
-   already adds the `api`-method-inference and `branch`-write-detection checks beyond
-   the flat tables). Level 5 is unchanged — gh extension access there is no more
-   dangerous than what level 5 already grants wholesale.
+5. **`gh extension` (item 7) denied at levels 1-4; unchanged at level 5.** The check is
+   evaluated at levels 1-4, not only at 4: at levels 1-3 an extension invoked as
+   `gh <ext-name> list|view|status|search` passes today (item 7). In the shim, after the
+   literal form has passed and at the same point as Requirement 2's gh resolution:
+   - `extension install`, `extension upgrade`, `extension exec` → deny.
+   - `VERB1` naming an installed extension (a line `gh <VERB1>` in `gh extension list`) →
+     deny ("extension").
+   - **Without a token.** `gh extension list` exits 4 when no token is in the environment
+     and no login is stored (measured), although it only reads the local extensions
+     directory. The shim therefore runs it with
+     `GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-placeholder}}"` for that one subprocess
+     (measured: exit 0, lists a locally installed extension, no token needed). If it still
+     fails → deny ("extension resolution failed"). Result: with no token the shim neither
+     denies everything nor fails open — legitimate calls pass the shim and reach gh's own
+     auth error (measured: exit 4 from gh, no guard message). `gh alias list` needs no
+     such handling.
+   - These are added inside the shim, not to `side_effect.py`'s `gh_denied` table.
+   Level 5 is unchanged — gh extension access there is no more dangerous than what
+   level 5 already grants wholesale.
 
 6. **`gh api` body-without-method (item 8): no code change, test-only.** Add a
    regression case to `tests/test_side_effect_shims.sh` pinning the existing behavior
@@ -200,82 +269,159 @@ Full Q&A dialogue is in the pipeline comment on #553. Resolutions below are load
    non-table checks: clustered push-flag expansion, `branch`-write detection, `gh api`
    method inference). The level/profile definitions themselves are untouched.
 
+8. **Documentation.** `docs/adapter-authoring-guide.md`, section "Side-effect levels",
+   states plainly that the shim is a PATH guard for a fallible agent, not a sandbox, and
+   lists what stays out of its reach: calling the real binary by absolute path, unsetting
+   `CLAUDECODE` or `FACTORY_SIDE_EFFECT_LEVEL`, direct HTTP with the token, and any
+   process git itself spawns — hooks, `rebase --exec`, `core.editor`, `core.pager`,
+   `bisect run`, `submodule foreach`, `credential.helper` — because git puts its exec-path
+   ahead of the shim on that child's `PATH` (measured: `git rebase --exec 'git push …'`
+   pushes at level 2, before and after this ticket).
+
+9. **Operator decisions recorded at the spec gate** (the owner can revisit any of these
+   at the plan gate):
+   1. The nested-child class (Requirement 8's last item) is a documented residual in this
+      ticket, not fixed here; it is tracked in a follow-up ticket filed by the operator.
+   2. A final verb outside `"$REAL_GIT" --list-cmds=main` is denied at every level when
+      the shim is active (Requirement 2). Consequence, stated plainly: external
+      `git-<verb>` subcommands such as `git lfs` are denied for phase agents. None is
+      installed in the image today (`--list-cmds=others` is empty), and a test pins that
+      every git verb the factory's own commands and scripts use is in the known-verb set
+      (see the test plan).
+   3. gh level-4 gaps that live in `side_effect.py`'s tables (for example `gh workflow
+      run` is not in level 4's `gh_denied`) are out of scope; follow-up ticket filed by
+      the operator. This ticket does not edit `side_effect.py`.
+
 ## Architecture / Approach
 
-Both shims gain a **verb-resolution pass** that runs immediately after the existing
-global-option skip-loop (which already isolates `VERB1`/`VERB2` and the same `-C`/`-c`/
-`--git-dir`/`--config-env` style overrides for git, `-R`/`--repo` for gh) and before any
-existing `case "$VERB1"` classification:
+Both shims keep their existing classification exactly as it is and gain a **resolution
+pass that runs only after the literal form has passed** — at the point of today's final
+`exec` — and that re-runs the whole classification on each expanded form:
 
 ```
 git shim, in order:
   1. --version/--help passthrough (existing, unchanged)
-  2. is VERB1 a real git builtin? (--list-cmds=builtins) -> skip to classification
-  3. else: resolve alias chain (config --get alias.<verb>, same -c/--git-dir overrides,
-     depth-capped) -> deny on "!" value, deny on resolution error, deny on cap -> loop
-     with resolved verb as new VERB1
-  4. shell-alias / sshCommand / GIT_SSH* checks (new; every level, before push_scope)
-  5. existing commit/tag/remote/push/send-pack classification (unchanged tables)
-  6. NEW: push-destination check (levels 1-4 only, push verb only)
-  7. existing level-1 allow-list fail-closed default (unchanged)
-  8. existing level-1 write-form/branch/remote advisory checks (unchanged)
-  9. exec $REAL_GIT "$@" (unchanged — the untouched original argv, same as today;
-     resolution never rewrites what's actually exec'd, only what's classified)
+  2. existing global-option skip-loop -> VERB1/VERB2/VERB_ARGS (unchanged)
+  3. existing commit/tag/remote/push/send-pack classification (unchanged tables)
+  4. NEW, inside push/own_branch_only, after the own-branch checks: push-destination
+     check (Requirement 4)
+  5. existing level-1 allow-list default and level-1 write-form/branch/remote checks
+     (unchanged)
+  6. NEW, every level: VERB1 syntax check; known-verb check (--list-cmds=main); for an
+     unknown verb: external-command deny, alias lookup, "!"/quote deny, then steps 2-7
+     again on the expanded argv (depth cap 5)
+  7. NEW, every level, transport verbs only: core.sshCommand / GIT_SSH_COMMAND / GIT_SSH
+     deny (Requirement 3)
+  8. exec $REAL_GIT "$@" (the untouched original argv; resolution never rewrites what is
+     exec'd, only what is classified)
 
 gh shim, in order:
   1. --version/--help passthrough (existing, unchanged)
   2. gh persistent-flag skip-loop (existing, unchanged) -> VERB1/VERB2/TWO_WORD
-  3. NEW: resolve VERB1 against `gh alias list` (depth-capped, fail-closed on error)
-  4. NEW: deny VERB1/TWO_WORD matching "extension install|upgrade|exec", or VERB1
-     resolving to an installed extension name, at levels 1-4 (no-op at 1-3, where
-     it's already denied by allow-mode; the real fix is at 4)
-  5. existing `gh api` method-inference classification (unchanged)
-  6. existing gh_denied/gh_allowed classification on the resolved verb (unchanged tables)
-  7. exec $REAL_GH "$@" (unchanged)
+  3. existing `gh api` method inference and gh_denied/gh_allowed classification
+     (unchanged tables)
+  4. NEW, every level, wherever step 3 would exec: VERB1 syntax check; `gh alias list`
+     lookup, "!"/quote/"$" deny, then steps 2-5 again on the expanded argv (depth cap 5)
+  5. NEW, levels 1-4: deny `extension install|upgrade|exec` and any VERB1 that is an
+     installed extension (Requirement 5)
+  6. exec $REAL_GH "$@" (unchanged)
 ```
 
-Every new check fails closed (deny on subprocess error, unresolvable config, or cap
-overrun) consistent with the shim's existing R5 fail-closed convention at level 1, now
-extended to the new checks at every level since they stand in front of the never-list
-rather than inside a single level's table.
+Every new check fails closed (deny on subprocess error, unresolvable config, unknown
+verb, or cap overrun) at every level. How the expanded form is re-classified is the
+plan's choice; the prototype re-invoked the shim itself in a classify-only mode, which
+guarantees that the literal and expanded forms go through identical code.
 
 ### Test plan
 
-`tests/test_side_effect_shims.sh` gains one new section per fixture class, following the
-file's existing flat `check <allow|deny> <cmd...>` harness and `FACTORY_SIDE_EFFECT_LEVEL=N
-check ...` convention:
+All tests live in `tests/test_side_effect_shims.sh`, which CI runs (it is listed in
+`.github/workflows/ci.yml`). The new cases need real `git` and real `gh` binaries on the
+runner; both are on GitHub's ubuntu runners and in the factory image. No test touches the
+network or needs a token.
 
-- A real (not stubbed) temporary git repo fixture, since alias resolution needs to run
-  real `git config`/`git alias`/`git remote` subcommands to be meaningful — the existing
-  harness's `$TMP/real/git` echo-stub cannot exercise alias resolution at all. This adds
-  a `mktemp -d` repo (and a second bare "remote" dir) to the existing `$TMP` fixture,
-  analogous to how `tests/test_deps_fixer.py`'s fixture pattern was described in the
-  #484 spec, but git-native and bash.
-- Verb-spoofing cases at levels 1-5: `-c alias.p=push`, persisted `git config alias.p
-  push`, `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` variant, a 2-hop
-  alias chain, a 6-hop chain (cap-exceeded deny), each expected `deny` where `push`
-  itself would deny, `allow` where it wouldn't (e.g. level 5's non-delete pushes).
-- `gh alias set p 'pr create'` then `gh p` at level 4 → deny; at level 5 → allow
-  (matching bare `gh pr create`'s existing level-5 behavior).
-- Shell-alias cases at every level 1-5: `alias.x = "!echo hi"` → deny; a control case
-  confirming an ordinary allowed verb at the same level still passes (proving the new
-  check doesn't over-deny).
-- `core.sshCommand`/`GIT_SSH_COMMAND`/`GIT_SSH` cases at levels 1-5 on `push`/`fetch`,
-  plus a control plain push at level 5 to pin "a normal level-5 push is unaffected".
-- Destination-redirect cases at levels 1, 4 (own_branch_only) via `-c
-  remote.origin.pushurl=<other>` and `-c url.<other>.insteadOf=<origin-url>`; a control
-  case confirming an ordinary own-branch push with no override still allows at level 4.
-- `gh extension install <name>` / `gh <installed-ext-name>` at level 4 → deny; at level 1
-  → deny (already, via allow-mode default — assert this to lock in the "no regression"
-  half); at level 5 → allow.
-- `gh api repos/o/r/issues -f title=x` (no `-X`) at a level where `api:non-GET` is denied
-  → deny (regression pin for item 8, no behavior change).
-- Builtin-skip control: `git status`, `git push origin x` (level 5), `git clone <url>`
-  (no level var set, passthrough case) all still pass with zero alias-lookup subprocess
-  calls needed for correctness (the fixture doesn't need to assert zero-calls
-  mechanically, just that these still behave correctly with the real binary and a fixture
-  repo that happens to also define unrelated aliases, to prove builtin verbs are immune
-  to alias noise).
+**Existing assertions.** The 113 existing assertions stay byte-identical and must all
+still pass. Only the harness preamble and the two stubs change:
+
+- The `$TMP/real/git` stub hands `--list-cmds=*`, `config …` and `remote get-url …`
+  (found after skipping `-C`/`-c`/`--git-dir`/`--work-tree`/`--namespace`/`--config-env`)
+  to the real git and echoes `REAL_GIT $*` for everything else, `symbolic-ref` included.
+  The `$TMP/real/gh` stub hands `alias list` and `extension list` to the real gh and
+  echoes `REAL_GH $*` otherwise. Without this, the echo-stubs would answer the new
+  lookups with `REAL_GIT …` at exit 0 and every allow assertion would deny.
+- The preamble creates a fixture repo (`git init`, `remote add origin
+  https://github.com/o/r.git`), `cd`s into it, and exports `FACTORY_REPO_SLUG=o/r`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GH_CONFIG_DIR="$TMP/…"`,
+  `XDG_DATA_HOME="$TMP/…"`, and unsets `GH_TOKEN`, `GITHUB_TOKEN`, `GIT_SSH`,
+  `GIT_SSH_COMMAND`. This keeps the level-4 push assertions independent of the checkout
+  the test happens to run from, and keeps `gh alias set` / a developer's global
+  `core.sshCommand` out of the picture.
+- Measured with the prototype: 113 of 113 existing assertions pass with exactly this
+  stub and preamble change.
+
+**New deny assertions assert the reason**, not only "a guard message and non-zero exit":
+a helper takes a regex the deny message must match, so a case cannot pass because some
+unrelated check denied it.
+
+**New cases** (each was run against the prototype; expected result as listed):
+
+- Alias sources at level 2, deny as `push`: `-c alias.p=push p`; persisted `git config
+  alias.pp push` then `git pp`; `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0`;
+  `GIT_CONFIG_PARAMETERS`; `GIT_CONFIG_GLOBAL=<file>`; `--config-env=alias.ce=VAR`; a
+  2-hop chain. A 6-hop chain at level 5 → deny ("too deep").
+- Shell alias `!…` at levels 2 and 5 → deny ("shell alias").
+- Arguments in the alias value: `alias.del='push --delete'` at level 5 → deny
+  ("push --delete"); `alias.x='push --force'` at level 4 → deny; `alias.x='push origin'`
+  + `HEAD:main` at level 4 → deny ("push (main)").
+- Tighten-only: `-c alias.l=log l` and `-c alias.l='log --output=f' l` at level 1 → deny
+  (as today).
+- Non-bare values: `alias.v='-p push'` at level 2 → deny as `push`; `alias.w='"push"'`
+  → deny ("shell-style parsing").
+- Global options: `git --no-advice push`, `git --attr-source HEAD push` at level 2 and
+  `git --no-advice status` at level 5 → deny ("unrecognised option"); `git -C .
+  --git-dir=.git --no-pager push` at level 2 → deny as `push`; clustered `git push -fu
+  origin feat` at level 4 → deny ("push --force").
+- Unknown verb: `git frobnicate` at level 5 and `git lfs push origin feat` at level 2 →
+  deny ("unknown verb"); `git submodule status` at level 5 → allow.
+- Controls (allow): `-c alias.p=push p origin feat` and `-c alias.lg='log --oneline' lg`
+  at level 5; `-c alias.status=push status` at level 5; `git -C . -c user.name=x commit
+  -m x`, `git --no-pager -C . diff --name-only`, `git --git-dir=.git status` at level 2.
+- Transport override: `-c core.sshCommand=x push` and `GIT_SSH_COMMAND=x git fetch` at
+  level 5, `GIT_SSH=x git fetch` at level 1 → deny ("sshCommand"); plain `git push origin
+  feat` at level 5 and `git fetch origin` at level 1 → allow.
+- Destination at level 4 with `FACTORY_REPO_SLUG=o/r`: `push origin feat` and `push
+  https://github.com/o/r.git feat` → allow; literal other URL, `-c
+  remote.origin.pushurl=<other>`, `-c url.<other>.insteadOf=<origin>`, a second remote
+  (`remote add evil` then `push evil feat`), two `pushurl` values (one other) → deny
+  ("not the run's repository"); a literal baseline URL while an `insteadOf` is in config
+  → deny ("URL rewrite"). The same `pushurl` override at level 5 → allow (no-op there).
+  With `FACTORY_REPO_SLUG` unset (fallback): `push origin feat` → allow; `-c pushurl`,
+  literal other URL, `push evil feat` → deny.
+- gh, with no token in the environment: `gh alias set p 'pr create'` then `gh p` at
+  level 4 → deny ("pr create"), at level 5 → allow; alias `xs: secret` then `gh xs list`
+  at level 1 → deny; alias `il: issue list` then `gh il` at levels 1 and 3 → deny (as
+  today, tighten-only), at level 4 → allow; a `--shell` alias at level 4 → deny;
+  a locally installed extension `gh someext list` at level 1 and `gh someext` at level 4
+  → deny ("extension"), at level 5 → allow; `gh extension install o/x` at level 4 → deny,
+  at level 5 → allow; `gh -R o/r pr create` at level 4 → deny ("flag before");
+  `gh api repos/o/r/issues -f title=x` at level 4 → deny ("api POST", the regression pin
+  for item 8).
+- Legitimate usage, no token (allow): `gh issue comment|view|create|edit` at level 3;
+  `gh pr view`, `gh pr list`, `gh api repos/o/r` at level 1; `gh pr view` at level 4;
+  `gh pr create`, `gh api graphql -f query=…` at level 5.
+- Known-verb pin (operator decision 2): the test carries a pinned list of the git verbs
+  the factory's `commands/*.md`, `refinement-skills/`, `scripts/`, `entrypoint.sh` and
+  `workflows/*.yaml` invoke — `add apply branch cat-file checkout clean clone commit
+  config diff diff-tree fetch for-each-ref log ls-files ls-remote merge merge-base mv pull
+  push rebase remote reset rev-list rev-parse rm show stash status symbolic-ref
+  update-index write-tree` — and asserts each is in `git --list-cmds=main`. The list is
+  pinned, not derived by grep at test time: a grep over prose matches words such as
+  "git reports" and would make the test flaky. The grep used to build it is recorded in
+  a comment next to the list. Measured: none is missing on git 2.53.0.
+
+The prototype run of the cases above: 50 git and 24 gh new assertions; all passed except
+one case that was itself wrong (`push --repo <other> origin feat` is correctly allowed,
+because git ignores `--repo` when a positional repository is given; the `--repo` case was
+then measured with a real push and no positional repository, and is denied).
 
 ## Alternatives considered
 
@@ -313,27 +459,23 @@ check ...` convention:
 
 ## Open questions (non-blocking)
 
-- **Follow-up ticket: the general "git-spawned children run real git, not the shim"
-  class.** `/usr/lib/git-core` ahead of the shim in PATH for any process git itself forks
-  (hooks under `.git/hooks`/`core.hooksPath`, `core.pager`, `core.editor`,
-  `GIT_EXTERNAL_DIFF`, `credential.helper`) means a nested `git <verb>` from any of those
-  bypasses the shim regardless of what this ticket does to argv/alias/config
-  classification. This ticket denies the one concrete instance of it that's cheaply
-  closeable (shell aliases, since nothing legitimate needs one), and documents the rest
-  as a known limitation (see Requirement/doc update below) rather than fixing it, since
-  closing it for real means controlling which hooks/helpers are allowed to execute inside
-  the clone at all — a materially different, larger mechanism than this ticket's argv/env
-  classification fix. Should be filed as its own ticket for a human to scope; this spec
-  does not create that ticket (ticket-filing from the refine phase comment channel is
-  outside what this command does — see the pipeline comment's Next Steps for how a human
-  or the scheduler's own flow picks this up).
+- **The general "git-spawned children run real git, not the shim" class** (hooks,
+  `rebase --exec`, `core.editor`, `core.pager`, `bisect run`, `submodule foreach`,
+  `credential.helper`) stays open after this ticket and is documented as a residual
+  (Requirements 8 and 9.1). Closing it means controlling what git may execute inside the
+  clone, or putting a guard in front of git's exec-path in the image — a different,
+  larger mechanism than argv/env classification. It is tracked in a follow-up ticket
+  filed by the operator. External `git-<verb>` commands, which belonged to this class,
+  are closed here by Requirement 2.
 - **`gh` alias chaining depth.** gh does not appear to support multi-hop alias chains the
   way git does in ordinary use; the spec applies the same depth-5 cap for implementation
   consistency, but this is a defensive bound rather than something `gh` is known to need.
 - **Performance.** Each git/gh invocation at a restricted level now pays for one or more
   extra `config --get`/`alias list`/`remote get-url` subprocess calls. Expected to be
   negligible next to the Claude Code round-trip costs already dominating a phase agent's
-  wall-clock, but not separately benchmarked in this spec.
+  wall-clock, and measured with the prototype in the image: `git status` through the shim
+  takes about 65 ms in total, and a `gh --version` plus `gh issue view` pair about
+  260 ms.
 
 ## Assumptions (flagged)
 
@@ -350,8 +492,7 @@ check ...` convention:
   true; if a legitimate future use emerges, it would need its own carve-out, which is a
   gate change and so would need its own reviewed ticket per CLAUDE.md, not a quiet
   loosening of this ticket's denial.
-- git's own `--list-cmds=builtins` output (146 commands on git 2.53.0 in this sandbox) is
-  assumed stable enough across the factory image's pinned git version to use as the
-  resolution-skip condition; a future git upgrade changing that list is expected to only
-  ever *add* builtins (making more verbs skip resolution, never fewer), which is
-  tightening-neutral for this gate.
+- git's own `--list-cmds=main` output (169 commands on git 2.53.0 in the image) is the
+  known-verb set. A git upgrade can add or remove commands; a verb that disappears from
+  the set becomes denied (fail closed), and the known-verb pin in the test plan fails in
+  CI if that ever affects a verb the factory uses.
