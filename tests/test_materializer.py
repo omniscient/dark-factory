@@ -463,6 +463,27 @@ def test_verify_applied_refuses_a_removed_symlink(tmp_path, scratch_tmp):
         mz.remove_workspace(ws)
 
 
+def test_verify_applied_refuses_a_symlink_replaced_by_a_regular_file(tmp_path, scratch_tmp):
+    """Called directly, like the removed-symlink case: #464 rejects the mode headers a type
+    change needs. A regular file holding the very bytes of the link target is still not the
+    baseline symlink, and is refused even though the path is declared and allowlisted."""
+    link = "docs/superpowers/notes/link"
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, link: {"symlink": "t.md"}})
+    r = _record(b)
+    r["diff"] += _diff(link, "-t.md", "+t.md")  # only read by extract_diff_paths() here
+    assert link in mc.extract_diff_paths(r["diff"])
+    entries, blobs, _ = mz._load_baseline(b.commit, b.repo_root, _CFG["max_workspace_bytes"])
+    ws = mz.build_workspace(_record(b), b)
+    try:
+        dest = os.path.join(ws, *link.split("/"))
+        os.unlink(dest)
+        Path(dest).write_bytes(b"t.md")
+        with pytest.raises(mz.MaterializerError, match="replaced the symlink"):
+            mz._verify_applied(ws, r, entries, blobs)
+    finally:
+        mz.remove_workspace(ws)
+
+
 # ── bwrap argv translation ──────────────────────────────────────────────────────
 
 def _binds(argv):
