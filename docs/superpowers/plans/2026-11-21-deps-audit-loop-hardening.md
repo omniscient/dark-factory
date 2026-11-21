@@ -1,6 +1,7 @@
 # Dependency-Health Loop Hardening (lower `audit_deps` to level 2, per-field advisory allowlist, fail-closed halt, harness credential hygiene) Implementation Plan
 
 **Issue:** #548
+**Revised:** 2026-11-21 (operator amendment after plan gate review)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans (or
 > superpowers:subagent-driven-development) to implement this plan task-by-task. Steps use
@@ -273,7 +274,7 @@ subcommand names (see the hermeticity comment at the top of the file), and these
   ```
 - [ ] **Step 3: Run the tests and confirm they fail.**
   `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v -k "wholesale or legitimate or rejected_row or sanitised or code_spans"`
-  Expected: failures. `_clean()` takes 1 positional argument but 2 were given, and the old
+  Expected: 47 failed. `_clean()` takes 1 positional argument but 2 were given, and the old
   `_clean` masks with `?` instead of producing `unparseable`.
 - [ ] **Step 4: Implement.** In `scripts/factory_core/deps_fixer.py`, replace the
   `# Advisory fields come from external feeds …` comment block, `_UNSAFE`, and `_clean` (current
@@ -320,13 +321,17 @@ subcommand names (see the hermeticity comment at the top of the file), and these
   `out.append(dict(zip(FIELDS, (_clean(p) for p in parts))))` with
   `out.append({f: _clean(f, p) for f, p in zip(FIELDS, parts)})`. The empty-`id` skip stays as it
   is.
+  Also in `advisory_table`, change `for a in advisories:` to
+  `for a in sorted(advisories, key=lambda a: a["id"]):`. Step 2's rewritten
+  `test_advisory_table_cells_are_code_spans` asserts id order, so the sort has to land in this
+  task; Task 4 Step 3 replaces the whole function and keeps the sort.
   Notes for the implementer:
   - These patterns are the spec's patterns verbatim. They were run against both tables above, and
     against 100,000-character inputs, which return in under 1 ms (no catastrophic backtracking).
   - A bare `via:` id (npm `via: []` on a high-severity entry) becomes `unparseable-<hash>`. That
     stays stable across runs, so it is acceptable.
-- [ ] **Step 5: Run the tests and confirm they pass.** Same command as Step 3 → all passed. Then run the
-  whole file, `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v` → all passed. RED,
+- [ ] **Step 5: Run the tests and confirm they pass.** Same command as Step 3 → 47 passed. Then run the
+  whole file, `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v` → 91 passed. RED,
   NOFIX and the template-hook fixture ids all match the new patterns.
 - [ ] **Step 6: Commit.**
   `git add scripts/factory_core/deps_fixer.py tests/test_deps_fixer.py && git commit -m "fix(deps): per-field allowlist sanitising of advisory fields (#548)"`
@@ -597,7 +602,7 @@ subcommand names (see the hermeticity comment at the top of the file), and these
       assert posted == [(42, df.escalation_comment("no-fix", None, "Proposed ignore: X"))]
   ```
 - [ ] **Step 3: Run the tests and confirm they fail.**
-  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v -k "escalation"`
+  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v -k "escalation or liveio_escalate"`
   Expected: 3 failed. `escalation_notes == [""]`, because run_once does not pass notes,
   `escalation_comment` does not exist, and `LiveIO.escalate` takes no `notes`.
 - [ ] **Step 4: Implement.** Add a pure renderer after `ci_comment`. Its body text matches
@@ -624,8 +629,8 @@ subcommand names (see the hermeticity comment at the top of the file), and these
   ```
   In `run_once`'s `if not changed:` branch, change the call to
   `io.escalate(issue, "no-fix", h, notes=notes)`.
-- [ ] **Step 5: Run the tests and confirm they pass.** Same command as Step 3 → passed. Then run the
-  whole file → all passed.
+- [ ] **Step 5: Run the tests and confirm they pass.** Same command as Step 3 → 3 passed. Then run the
+  whole file → 102 passed.
 - [ ] **Step 6: Commit.**
   `git add scripts/factory_core/deps_fixer.py tests/test_deps_fixer.py && git commit -m "fix(deps): surface fix-agent notes on no-fix escalation (#548)"`
 
@@ -853,6 +858,17 @@ subcommand names (see the hermeticity comment at the top of the file), and these
           self.prompts.append(prompt)
           return self._notes
   ```
+  Also add a `changed_after=None` keyword to `FakeIO.__init__`, store it with a call counter
+  (`self._changed_after = changed_after` and `self._changed_calls = 0`), and replace
+  `changed_paths` so a test can make the second call return a different list:
+  ```python
+      def changed_paths(self):
+          # changed_after: what the tree looks like once the post-agent hooks have run
+          self._changed_calls += 1
+          if self._changed_after is not None and self._changed_calls > 1:
+              return self._changed_after
+          return self._changed
+  ```
 - [ ] **Step 2: Write the failing pure-core tests.**
   ```python
   def test_agent_hook_change_is_rejected_before_any_post_agent_hook():
@@ -874,6 +890,15 @@ subcommand names (see the hermeticity comment at the top of the file), and these
       io = FakeIO(audits=(RED, ""))
       df.run_once(CFG, io, {})
       assert io.calls[:4] == ["branch", "audit", "deps-fix", "audit"] and "agent" not in io.calls
+
+
+  def test_tree_change_after_scope_check_is_rejected_before_open_pr():
+      # allowed at the first scope check; a hook (or a leftover process) then wrote a CI workflow
+      io = FakeIO(audits=(RED, RED, ""),
+                  changed_after=["frontend/package-lock.json", ".github/workflows/ci.yml"])
+      out = df.run_once(CFG, io, {})
+      assert out == {"outcome": "escalated", "issue": 42, "pr": None, "reason": "scope:protected"}
+      assert io.escalations == [(42, "scope:protected", None)] and io.prs == []
   ```
 - [ ] **Step 3: Write the failing real-repo tests.** These use `_live_repo` from Task 7. Add the
   offline IO subclass and the two tests:
@@ -944,9 +969,10 @@ subcommand names (see the hermeticity comment at the top of the file), and these
       assert not sentinel.exists() and io.prs == []
   ```
 - [ ] **Step 4: Run the tests and confirm they fail.**
-  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v -k "post_agent_hook or hidden_hook or order_is_unchanged or skip_worktree or excluded_new"`
-  Expected: failures. There is no `df.HookTampered`, the re-audit runs before the scope check, and
-  the sentinel files are created. The one exception is `test_deterministic_path_order_is_unchanged`,
+  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v -k "post_agent_hook or hidden_hook or order_is_unchanged or skip_worktree or excluded_new or after_scope_check"`
+  Expected: 5 failed, 1 passed. There is no `df.HookTampered`, the re-audit runs before the scope
+  check, the two real-repo runs go on to open a PR (their result has no `reason`), and nothing
+  re-checks the scope after the hooks. The one pass is `test_deterministic_path_order_is_unchanged`,
   a regression guard that already passes.
 - [ ] **Step 5: Implement `HookTampered`.** In `deps_fixer.py`, add this near the top, after
   `FIELDS`:
@@ -1013,11 +1039,20 @@ subcommand names (see the hermeticity comment at the top of the file), and these
           # §6(d): a hook change hidden from git add -A — same outcome as a visible one.
           io.escalate(issue, "scope:protected", h)
           return {"outcome": "escalated", "issue": issue, "pr": None, "reason": "scope:protected"}
+
+      # A hook, the test suite or a process the agent left behind may have written to the tree
+      # since the scope check, and open_pr stages everything (git add -A): judge scope again.
+      changed = io.changed_paths()
+      scope = classify_deps_scope(changed, cfg["allowed_paths"], cfg["blocked_paths"])
+      if scope != "allowed":
+          io.escalate(issue, f"scope:{scope}", h)
+          return {"outcome": "escalated", "issue": issue, "pr": None, "reason": f"scope:{scope}"}
   ```
-  The `pr = io.open_pr(...)` line and everything after it stay as they are. The deterministic-only
-  path still runs, in order: deps-fix → audit → changed_paths → scope → run_tests.
-- [ ] **Step 8: Run the tests and confirm they pass.** Same command as Step 4 → passed. Then run
-  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v` → all passed. Pay attention to
+  The `pr = io.open_pr(...)` line and everything after it stay as they are; the PR body lists
+  the re-checked `changed`. The deterministic-only path still runs, in order: deps-fix → audit →
+  changed_paths → scope → run_tests, followed by the repeated changed_paths → scope.
+- [ ] **Step 8: Run the tests and confirm they pass.** Same command as Step 4 → 6 passed. Then run
+  `PYTHONPATH=scripts python -m pytest tests/test_deps_fixer.py -v` → 112 passed. Pay attention to
   `test_fixed_by_agent_when_deterministic_pass_leaves_advisories`, which still expects 3 audits,
   and to `test_no_fix_escalates_on_empty_diff_without_pr`.
 - [ ] **Step 9: Commit.**

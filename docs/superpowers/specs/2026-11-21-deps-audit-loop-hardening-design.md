@@ -356,7 +356,9 @@ Required changes, all tightening:
   returns; the post-agent re-audit and `run_tests` run only when the scope is `allowed`. A
   change to `.factory/hooks/deps-audit` (or anything else under `BLOCKED_PATHS`) is therefore
   rejected before the harness executes any hook from the working tree. On the
-  deterministic-only path (no agent) the order of the existing calls is unchanged.
+  deterministic-only path (no agent) the order of the existing calls is unchanged. The scope
+  check is repeated after the post-agent hooks and before `open_pr`, so anything written to the
+  tree in between is judged before it can be committed.
 - **(d) A post-agent hook runs only if it is the base commit's hook.** The scope check cannot
   see a change hidden from `git add -A` (an index flag such as skip-worktree on a tracked hook,
   or a new hook file excluded through `.git/info/exclude`). So before each hook the harness runs
