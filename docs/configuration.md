@@ -351,7 +351,7 @@ No env overrides, no adapter overlay.
 | `materializer.memory_limit_mb` | `4096` | `RLIMIT_AS` ceiling per sandboxed process (MiB) | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
 | `materializer.max_duration_seconds` | `1800` | wall-clock ceiling; `RLIMIT_CPU` is the candidate's integer `cpu_limit` times this | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
 | `materializer.max_workspace_bytes` | `268435456` | expanded-size cap on the baseline and the built workspace; also `RLIMIT_FSIZE` | `scripts/factory_core/materializer.py` (`build_workspace`, `resolve_limits`) | none |
-| `materializer.max_nproc` | `128` | `RLIMIT_NPROC` ceiling inside the sandbox (bounds the fork-bomb memory multiplier) | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
+| `materializer.max_nproc` | `128` | `RLIMIT_NPROC` ceiling for sandboxed processes (bounds the fork-bomb memory multiplier). The kernel accounts it per user, not per sandbox; whether processes outside the sandbox count is not verified in Phase A, and a sandbox-scoped bound (cgroup `pids.max`) is a Phase B item | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
 
 ### Unread keys (summary)
 
