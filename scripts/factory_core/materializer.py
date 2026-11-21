@@ -113,3 +113,44 @@ def load_config(path=None):
 
 def _config(config):
     return load_config() if config is None else check_config(config)
+
+
+# ── Envelope policy ─────────────────────────────────────────────────────────────
+
+def check_network(candidate):
+    """Declared egress is refused, never downgraded: the sandbox has no network."""
+    net = candidate["network_envelope"]
+    if net["egress_allowed"] or net["allowed_hosts"]:
+        _fail("network_envelope declares egress (egress_allowed or allowed_hosts); the "
+              "sandbox has no network by construction, and declared egress is refused, "
+              "never silently downgraded")
+
+
+def resolve_limits(candidate, config):
+    """Per-process rlimit values. A candidate may lower a config ceiling, never raise it."""
+    config = check_config(config)
+    res = candidate["resource_envelope"]
+    limits = {}
+    for key in ("memory_limit_mb", "max_duration_seconds"):
+        declared = res.get(key)
+        if declared is None:
+            limits[key] = config[key]
+        elif not mc._is_int(declared) or declared < 1:
+            _fail(f"resource_envelope.{key} must be an int >= 1 or null, got {declared!r}")
+        elif declared > config[key]:
+            _fail(f"resource_envelope.{key} {declared} exceeds the materializer.{key} "
+                  f"ceiling {config[key]}")
+        else:
+            limits[key] = declared
+    cpu = res.get("cpu_limit")
+    if cpu is None:
+        cpus = 1
+    elif isinstance(cpu, str) and _CPU_LIMIT_RE.fullmatch(cpu):
+        cpus = int(cpu)
+    else:
+        _fail(f"resource_envelope.cpu_limit {cpu!r} is not a supported format "
+              f"(a bare integer CPU count from 1 to 999)")
+    limits["cpu_seconds"] = cpus * limits["max_duration_seconds"]
+    limits["max_nproc"] = config["max_nproc"]
+    limits["max_file_bytes"] = config["max_workspace_bytes"]
+    return limits

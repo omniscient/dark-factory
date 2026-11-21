@@ -83,3 +83,39 @@ def test_load_config_missing_block_fails_closed(tmp_path):
         mz.load_config(tmp_path / "c.yaml")
     with pytest.raises(mz.MaterializerError, match="cannot load"):
         mz.load_config(tmp_path / "absent.yaml")
+
+
+# ── Envelope policy ─────────────────────────────────────────────────────────────
+
+_CFG = {"memory_limit_mb": 1024, "max_duration_seconds": 100, "max_workspace_bytes": 4096,
+        "max_nproc": 16}
+
+
+def test_resolve_limits_ceilings_apply_downward_only():
+    def lim(**res):
+        return mz.resolve_limits({"resource_envelope": {"cpu_limit": None, "memory_limit_mb": None,
+                                                        "max_duration_seconds": None, **res}}, _CFG)
+    assert lim() == {"memory_limit_mb": 1024, "max_duration_seconds": 100, "cpu_seconds": 100,
+                     "max_nproc": 16, "max_file_bytes": 4096}
+    assert lim(memory_limit_mb=512, max_duration_seconds=30, cpu_limit="2") == {
+        "memory_limit_mb": 512, "max_duration_seconds": 30, "cpu_seconds": 60,
+        "max_nproc": 16, "max_file_bytes": 4096}
+    with pytest.raises(mz.MaterializerError, match="memory_limit_mb 2048 exceeds"):
+        lim(memory_limit_mb=2048)
+    with pytest.raises(mz.MaterializerError, match="max_duration_seconds 101 exceeds"):
+        lim(max_duration_seconds=101)
+
+
+@pytest.mark.parametrize("cpu", ["0", "500m", "1.5", " 1", "1\n", "", "1000", "-1", "2 cores", 2, True])
+def test_cpu_limit_unsupported_formats_fail_closed(cpu):
+    with pytest.raises(mz.MaterializerError, match="cpu_limit .* is not a supported format"):
+        mz.resolve_limits({"resource_envelope": {"cpu_limit": cpu, "memory_limit_mb": None,
+                                                 "max_duration_seconds": None}}, _CFG)
+
+
+@pytest.mark.parametrize("net", [{"egress_allowed": True, "allowed_hosts": []},
+                                 {"egress_allowed": False, "allowed_hosts": ["api.anthropic.com"]}])
+def test_declared_egress_is_refused(net):
+    with pytest.raises(mz.MaterializerError, match="declares egress"):
+        mz.check_network({"network_envelope": net})
+    mz.check_network({"network_envelope": {"egress_allowed": False, "allowed_hosts": []}})
