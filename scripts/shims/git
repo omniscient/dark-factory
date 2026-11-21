@@ -135,6 +135,73 @@ for _a in "${VERB_ARGS[@]}"; do
   esac
 done
 
+# #553 / spec Requirement 4: at own_branch_only the push must also land on the run's own
+# repository. Every push URL real git would use (`get-url --push --all`, so pushurl,
+# insteadOf and pushInsteadOf apply exactly as in the push) must equal the baseline.
+_norm_url() { local u="${1%/}"; printf '%s' "${u%.git}"; }
+_cfg_or_deny() {  # sets CFG_VAL; returns 0 found / 1 unset; any other failure denies
+  local rc=0
+  CFG_VAL=$(_git_config --get "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -le 1 ] || deny "push (config lookup failed)"
+  return "$rc"
+}
+_check_push_destination() {
+  local baseline remote="$REMOTE" cur="" urls url rc=0
+  if [ -n "${FACTORY_REPO_SLUG:-}" ]; then
+    baseline="https://github.com/${FACTORY_REPO_SLUG}"
+  else
+    # Degraded fallback (spec R4): origin's URL as persisted, read with none of this
+    # invocation's -c/--config-env/env config. Weaker than the slug -- a persisted
+    # `git remote set-url origin` or persisted insteadOf moves this baseline with it,
+    # the same kind of documented degradation as the FACTORY_RUN_BRANCH comment below.
+    local loc=() k=0
+    while [ "$k" -lt "${#_GLOBAL_OPTS[@]}" ]; do
+      case "${_GLOBAL_OPTS[$k]}" in
+        -C|--git-dir|--work-tree) loc+=("${_GLOBAL_OPTS[$k]}" "${_GLOBAL_OPTS[$((k + 1))]:-}"); k=$((k + 2)) ;;
+        --git-dir=*|--work-tree=*) loc+=("${_GLOBAL_OPTS[$k]}"); k=$((k + 1)) ;;
+        -c|--namespace|--exec-path|--super-prefix|--config-env) k=$((k + 2)) ;;
+        *) k=$((k + 1)) ;;
+      esac
+    done
+    baseline=$(env -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+      -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+      "$REAL_GIT" "${loc[@]}" config --get remote.origin.url 2>/dev/null) \
+      || deny "push (no baseline repository)"
+  fi
+  # Which remote, in git's own order: positional, --repo, branch.<b>.pushRemote,
+  # remote.pushDefault, branch.<b>.remote, origin.
+  [ -n "$remote" ] || remote="$REPO_OPT"
+  if [ -z "$remote" ]; then
+    cur=$("$REAL_GIT" "${_GLOBAL_OPTS[@]}" symbolic-ref --short -q HEAD 2>/dev/null || true)
+    if [ -n "$cur" ] && _cfg_or_deny "branch.${cur}.pushRemote"; then remote="$CFG_VAL"
+    elif _cfg_or_deny remote.pushDefault; then remote="$CFG_VAL"
+    elif [ -n "$cur" ] && _cfg_or_deny "branch.${cur}.remote"; then remote="$CFG_VAL"
+    else remote="origin"
+    fi
+  fi
+  urls=$("$REAL_GIT" "${_GLOBAL_OPTS[@]}" remote get-url --push --all "$remote" 2>/dev/null) || rc=$?
+  if [ "$rc" = "0" ]; then
+    [ -n "$urls" ] || deny "push (unresolvable destination)"
+    while IFS= read -r url; do
+      [ "$(_norm_url "$url")" = "$(_norm_url "$baseline")" ] \
+        || deny "push (destination is not the run's repository)"
+    done <<<"$urls"
+  else
+    # Not a configured remote: a literal URL or path. It must be the baseline itself, and
+    # no url.*.insteadOf/pushInsteadOf may be in effect (get-url cannot resolve those
+    # for a literal, so the shim cannot see where it would really go).
+    [ "$(_norm_url "$remote")" = "$(_norm_url "$baseline")" ] \
+      || deny "push (destination is not the run's repository)"
+    rc=0
+    _git_config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) deny "push (URL rewrite in effect for a literal destination)" ;;
+      1) : ;;
+      *) deny "push (config lookup failed)" ;;
+    esac
+  fi
+}
+
 case "$VERB1" in
   commit) _in_list "commit" "${GIT_DENIED[@]}" && deny "commit" ;;
   tag)    _in_list "tag" "${GIT_DENIED[@]}" && deny "tag" ;;
@@ -150,8 +217,9 @@ case "$VERB1" in
         deny "push"
         ;;
       own_branch_only)
-        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPECS=(); SKIP=0
+        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REPO_OPT=""; REFSPECS=(); SKIP=0
         for arg in "${PUSH_ARGS[@]}"; do
+          if [ "$SKIP" = "repo" ]; then REPO_OPT="$arg"; SKIP=0; continue; fi
           if [ "$SKIP" = "1" ]; then SKIP=0; continue; fi
           case "$arg" in
             --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
@@ -160,7 +228,9 @@ case "$VERB1" in
             --all|--mirror|--tags|--prune|--branches) WIDE="$arg" ;;
             # Value-taking push options: consume the value so it is never mistaken for
             # the remote or a refspec.
-            -o|--push-option|--receive-pack|--exec|--repo) SKIP=1 ;;
+            -o|--push-option|--receive-pack|--exec) SKIP=1 ;;
+            --repo) SKIP=repo ;;
+            --repo=*) REPO_OPT="${arg#--repo=}" ;;
             -*) : ;;
             +*) deny "push (+refspec force)" ;;
             *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPECS+=("$arg"); fi ;;
@@ -194,6 +264,7 @@ case "$VERB1" in
           [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
           [ "$TARGET_BRANCH" != "$OWN_BRANCH" ] && deny "push (not own branch)"
         done
+        _check_push_destination
         ;;
       unrestricted)
         # Read git_denied instead of hardcoding --delete/:* — the Trust model section
