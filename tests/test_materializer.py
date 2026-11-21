@@ -452,3 +452,107 @@ def test_verify_applied_refuses_a_removed_symlink(tmp_path, scratch_tmp):
             mz._verify_applied(ws, r, entries, blobs)
     finally:
         mz.remove_workspace(ws)
+
+
+# ── bwrap argv translation ──────────────────────────────────────────────────────
+
+def _binds(argv):
+    out, i, end = [], 0, argv.index("--")
+    while i < end:
+        if argv[i] in ("--bind", "--ro-bind"):
+            out.append(tuple(argv[i:i + 3]))
+            i += 3
+        else:
+            i += 1
+    return out
+
+
+def test_bwrap_argv_exact_order(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    r = _record(b, filesystem_envelope={"read_paths": [], "write_paths": ["docs/superpowers/notes/t.md"]})
+    ws = mz.build_workspace(r, b)
+    try:
+        argv = mz.build_bwrap_argv(r, ws, _CFG, argv=["python3", "-c", "pass"])
+        base = [x for d in mz.base_bind_dirs() for x in ("--ro-bind", d, d)]
+        assert argv == [
+            "bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--unshare-cgroup-try", "--unshare-net", "--die-with-parent", "--new-session",
+            "--cap-drop", "ALL",
+            "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/home/sandbox",
+            "--setenv", "TMPDIR", "/tmp",
+            *base,
+            "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/home/sandbox",
+            "--ro-bind", ws, "/workspace",
+            "--bind", os.path.join(ws, "docs", "superpowers", "notes", "t.md"),
+            "/workspace/docs/superpowers/notes/t.md",
+            "--chdir", "/workspace", "--",
+            "prlimit", f"--as={512 * 1024 * 1024}", "--cpu=60", "--nproc=16", "--fsize=4096", "--",
+            "python3", "-c", "pass",
+        ]
+        assert ("--ro-bind", "/", "/") not in _binds(argv)
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_base_bind_dirs_lib64_only_if_present():
+    assert mz.base_bind_dirs(lambda p: True) == ["/usr", "/bin", "/lib", "/lib64"]
+    assert mz.base_bind_dirs(lambda p: False) == ["/usr", "/bin", "/lib"]
+
+
+@pytest.mark.parametrize("entry, match", [
+    ("/etc", "is absolute"),
+    ("docs/superpowers/notes/../../../scripts", r"'\.\.' segment"),
+    ("docs\\superpowers", "backslash"),
+    ("docs/superpowers/notes/\x01", "control character"),
+    ("docs/superpowers/notes//t.md", "not a normalised"),
+    ("./docs/superpowers/notes/t.md", "not a normalised"),
+    ("", "is empty"),
+    ("scripts/tool.py", "not under editable_path_allowlist"),
+    ("docs/superpowers/notes/absent.md", "does not exist in the workspace"),
+])
+def test_write_paths_containment(tmp_path, scratch_tmp, entry, match):
+    b = _make_repo(tmp_path)
+    r = _record(b, filesystem_envelope={"read_paths": [], "write_paths": [entry]})
+    ws = mz.build_workspace(_record(b), b)
+    try:
+        with pytest.raises(mz.MaterializerError, match=match):
+            mz.build_bwrap_argv(r, ws, _CFG)
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_write_path_through_a_symlink_is_refused(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, "docs/superpowers/link": {"symlink": "../../scripts"}})
+    r = _record(b, editable_path_allowlist=["docs/superpowers/"],
+                filesystem_envelope={"read_paths": [], "write_paths": ["docs/superpowers/link"]})
+    ws = mz.build_workspace(r, b)
+    try:
+        with pytest.raises(mz.MaterializerError, match="passes through a symlink"):
+            mz.build_bwrap_argv(r, ws, _CFG)
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_write_paths_dedupe_and_directory_entries(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    r = _record(b, filesystem_envelope={"read_paths": [], "write_paths": [
+        "docs/superpowers/notes/t.md", "docs/superpowers/notes/", "docs/superpowers/notes/t.md"]})
+    ws = mz.build_workspace(r, b)
+    try:
+        assert mz.validate_write_paths(r, ws) == ["docs/superpowers/notes", "docs/superpowers/notes/t.md"]
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_build_bwrap_argv_refuses_egress_and_bad_limits(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    ws = mz.build_workspace(_record(b), b)
+    try:
+        with pytest.raises(mz.MaterializerError, match="declares egress"):
+            mz.build_bwrap_argv(_record(b, network_envelope={"egress_allowed": True, "allowed_hosts": []}),
+                                ws, _CFG)
+        with pytest.raises(mz.MaterializerError, match="cpu_limit"):
+            mz.build_bwrap_argv(_record(b, resource_envelope={"cpu_limit": "500m", "memory_limit_mb": None,
+                                                              "max_duration_seconds": None}), ws, _CFG)
+    finally:
+        mz.remove_workspace(ws)

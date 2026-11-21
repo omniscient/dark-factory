@@ -457,3 +457,73 @@ def build_workspace(candidate, baseline, *, config=None):
     cap = _config(config)["max_workspace_bytes"]
     entries, blobs, _ = _load_baseline(baseline.commit, baseline.repo_root, cap)
     return _build_workspace(candidate, baseline, entries, blobs, cap)
+
+
+# ── bwrap argv translation (pure; Phase B launches it) ──────────────────────────
+
+def validate_write_paths(candidate, workspace):
+    """filesystem_envelope.write_paths as validated workspace-relative paths (no trailing
+    '/', sorted). Each entry is a relative, normalised repo path under
+    editable_path_allowlist that exists in the workspace with no symlink component."""
+    allowlist = candidate["editable_path_allowlist"]
+    name = "filesystem_envelope.write_paths entry"
+    out = set()
+    for entry in candidate["filesystem_envelope"]["write_paths"]:
+        try:
+            mc._check_path_text(entry, name)
+        except mc.MechanismCandidateError as exc:
+            _fail(str(exc))
+        if mc._normalise(entry) != entry or entry in (".", "./"):
+            _fail(f"{name} {entry!r} is not a normalised repo-relative path")
+        if not mc._contained(entry, allowlist):
+            _fail(f"{name} {entry!r} is not under editable_path_allowlist")
+        rel = entry.rstrip("/")
+        cur = workspace
+        for part in rel.split("/"):
+            cur = os.path.join(cur, part)
+            if os.path.islink(cur):
+                _fail(f"{name} {entry!r} passes through a symlink ({part!r})")
+        if not os.path.exists(cur):
+            _fail(f"{name} {entry!r} does not exist in the workspace")
+        if not _is_within(cur, workspace) or os.path.realpath(cur) == os.path.realpath(workspace):
+            _fail(f"{name} {entry!r} does not resolve inside the workspace")
+        out.add(rel)
+    return sorted(out)
+
+
+def base_bind_dirs(exists=os.path.exists):
+    """The minimum host directories needed to exec python3 or /bin/sh in the sandbox."""
+    return [*BASE_BIND_DIRS, *(d for d in OPTIONAL_BASE_BIND_DIRS if exists(d))]
+
+
+def build_bwrap_argv(candidate, workspace, config, *, argv=()):
+    """The complete bwrap argument list for `argv` in `workspace`. Executes nothing.
+
+    Bind sources are only the base dirs, the workspace, and validated workspace
+    subpaths — never `/`, $HOME, $ARTIFACTS_DIR, the clone, or any credential path, by
+    construction. The env is cleared to PATH/HOME/TMPDIR. prlimit sits after `--` so
+    the rlimits bind the sandboxed child, never bwrap itself."""
+    check_network(candidate)
+    limits = resolve_limits(candidate, config)
+    writes = validate_write_paths(candidate, workspace)
+    args = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--unshare-cgroup-try", "--unshare-net", "--die-with-parent", "--new-session",
+            "--cap-drop", "ALL",
+            "--clearenv", "--setenv", "PATH", SANDBOX_PATH, "--setenv", "HOME", SANDBOX_HOME,
+            "--setenv", "TMPDIR", "/tmp"]
+    for d in base_bind_dirs():
+        args += ["--ro-bind", d, d]
+    args += ["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--tmpfs", SANDBOX_HOME]
+    args += ["--ro-bind", workspace, SANDBOX_WORKSPACE]
+    for rel in writes:
+        args += ["--bind", os.path.join(workspace, *rel.split("/")), f"{SANDBOX_WORKSPACE}/{rel}"]
+    args += ["--chdir", SANDBOX_WORKSPACE, "--",
+             "prlimit", f"--as={limits['memory_limit_mb'] * 1024 * 1024}",
+             f"--cpu={limits['cpu_seconds']}", f"--nproc={limits['max_nproc']}",
+             f"--fsize={limits['max_file_bytes']}", "--", *argv]
+    return args
+
+
+def invocation_digest(args, workspace):
+    """Digest of the resolved argv with the random workspace path normalised away."""
+    return mc.canonical_digest([a.replace(workspace, "<workspace>") for a in args])
