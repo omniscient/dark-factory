@@ -679,6 +679,11 @@ def materialize(candidate, *, baseline, out_dir=None, config=None, known_digests
                                      known_digests=known_digests)
         if risk not in _ACCEPTED_RISK:
             _fail(f"risk class {risk} is not materializable")
+        if _text(candidate["candidate_id"]) is None:
+            # Not an identity-bearing field, so #464's digest check does not see it; a
+            # PASS bundle would carry candidate_id null and name no candidate.
+            _fail("candidate_id is not UTF-8 encodable (a lone surrogate); a bundle that "
+                  "cannot name its candidate is refused")
         check_network(candidate)
         limits = resolve_limits(candidate, cfg)
         cap = cfg["max_workspace_bytes"]

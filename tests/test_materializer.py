@@ -754,6 +754,21 @@ def test_untrusted_lone_surrogates_still_yield_a_sealed_bundle(tmp_path, scratch
     assert os.listdir(scratch_tmp) == []
 
 
+def test_lone_surrogate_candidate_id_is_blocked_never_pass(tmp_path, scratch_tmp):
+    """candidate_id is not identity-bearing, so the record still validates with its digest
+    intact; the bundle could only say candidate_id null, which must never be a PASS."""
+    b = _make_repo(tmp_path)
+    record = json.loads(json.dumps(_record(b)).replace('"candidate_id": "mz-test"',
+                                                       '"candidate_id": "mz\\ud800"', 1))
+    assert record["candidate_id"] == "mz\ud800"
+    assert mc.validate_candidate(record, safety=mc.load_safety(b.repo_root)) == "H0"
+    bundle = mz.materialize(record, baseline=b, out_dir=tmp_path / "out")
+    assert bundle["verdict"]["status"] == "BLOCKED"
+    assert "candidate_id is not UTF-8 encodable" in bundle["verdict"]["reason"]
+    assert bundle["candidate_id"] is None and mz.verify_bundle(bundle)
+    assert os.listdir(scratch_tmp) == []
+
+
 def test_cleanup_failure_is_blocked_not_raised(tmp_path, scratch_tmp, monkeypatch):
     b = _make_repo(tmp_path)
     real = mz.remove_workspace
