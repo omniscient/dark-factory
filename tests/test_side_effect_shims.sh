@@ -436,6 +436,36 @@ FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh extension i
 FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh ext install o/x
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh extension install o/x
 FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "flag before" gh -R o/r pr create
+# Item 8 regression pin: a body with no -X is a POST.
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "api POST" gh api repos/o/r/issues -f title=x
+# Legitimate factory usage still passes with no token.
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue comment 1 --body hi
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue view 1
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue create --title x
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue edit 1 --add-label x
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh pr view 1
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh pr list
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh api repos/o/r
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh pr view 1
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh pr create
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh api graphql -f query=x
+
+# Known-verb pin (spec operator decision 2): every git verb the factory's own commands,
+# refinement skills, scripts, entrypoint and workflows invoke must be in git's known-verb
+# set, or the shim would deny it. Pinned, not grepped at test time (prose such as "git
+# reports" would make a live grep flaky); rebuilt from:
+#   grep -rhoE '\bgit (-C [^ ]+ )?[a-z][a-z-]+' commands/ refinement-skills/ scripts/ \
+#     entrypoint.sh workflows/*.yaml | awk '{print $NF}' | sort -u   (then hand-pruned)
+_KNOWN_VERBS=$("$REAL_GIT_BIN" --list-cmds=main)
+for v in add apply blame branch cat-file check-ignore checkout clean clone commit config diff diff-tree fetch \
+    for-each-ref grep log ls-files ls-remote merge merge-base mv pull push rebase remote reset \
+    rev-list rev-parse rm show stash status symbolic-ref update-index write-tree; do
+  if grep -qxF -- "$v" <<<"$_KNOWN_VERBS"; then
+    PASS=$((PASS+1))
+  else
+    echo "FAIL: factory git verb '$v' is not in git --list-cmds=main"; FAIL=$((FAIL+1))
+  fi
+done
 # --- end #553 cases ---
 unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---
