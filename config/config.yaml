@@ -205,3 +205,14 @@ token_optimization:
       - auth
       - high_blast_radius
       - material_conformance_uncertainty
+
+materializer:
+  # Harness candidate materializer ceilings (#465; scripts/factory_core/materializer.py).
+  # A candidate's resource_envelope may lower these, never raise them. rlimits are
+  # per-process, not a sandbox-wide cap; max_nproc bounds the fork-bomb multiplier.
+  # Read only by materializer.py; no DAG node, scheduler path or gate calls it yet.
+  # No env override, no adapter overlay.
+  memory_limit_mb: 4096         # RLIMIT_AS ceiling per sandboxed process (MiB)
+  max_duration_seconds: 1800    # wall-clock ceiling; RLIMIT_CPU = cpu_limit x this
+  max_workspace_bytes: 268435456  # expanded-size cap on the workspace (256 MiB); also RLIMIT_FSIZE
+  max_nproc: 128                # RLIMIT_NPROC ceiling inside the sandbox

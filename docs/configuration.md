@@ -78,7 +78,7 @@ Two consequences worth knowing:
 
 ## Layer 1: `config/config.yaml`
 
-The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 106 leaf keys,
+The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 110 leaf keys,
 documented below section by section. The scheduler's env projection is `apply_run_config_env`
 (`scripts/run_config_env.sh`); the list of exported keys is `ENV_WHITELIST`
 (`scripts/factory_core/effective_config.py:43-80`).
@@ -333,7 +333,25 @@ Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 
 `docs_conformance` 2, `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3,
 `epic_autopilot` 11, `main_red_autofix` 5, `deps_audit` 6, `side_effect.phase_levels` 10, `token_optimization` 32
 (`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
-`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 106 leaf keys.
+`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 110 leaf keys.
+
+### `materializer`
+
+Ceilings for the harness candidate materializer (#465,
+[spec](superpowers/specs/2026-10-22-harness-candidate-materializer-design.md)). Read only by
+`scripts/factory_core/materializer.py` (`load_config`, from this checkout's
+`config/config.yaml`); no DAG node, scheduler path or gate calls the materializer yet. A
+candidate's `resource_envelope` may lower a ceiling, never raise it (a larger declared value is
+a `BLOCKED` refusal). The rlimits are per process, not a sandbox-wide cap. Phase A only builds
+the `prlimit` argv from these values; nothing applies them until the Phase B executor (#544).
+No env overrides, no adapter overlay.
+
+| Key | Default | Controls | Reader | Env override (scope) |
+|---|---|---|---|---|
+| `materializer.memory_limit_mb` | `4096` | `RLIMIT_AS` ceiling per sandboxed process (MiB) | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
+| `materializer.max_duration_seconds` | `1800` | wall-clock ceiling; `RLIMIT_CPU` is the candidate's integer `cpu_limit` times this | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
+| `materializer.max_workspace_bytes` | `268435456` | expanded-size cap on the baseline and the built workspace; also `RLIMIT_FSIZE` | `scripts/factory_core/materializer.py` (`build_workspace`, `resolve_limits`) | none |
+| `materializer.max_nproc` | `128` | `RLIMIT_NPROC` ceiling inside the sandbox (bounds the fork-bomb memory multiplier) | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
 
 ### Unread keys (summary)
 
