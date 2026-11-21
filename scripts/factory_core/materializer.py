@@ -167,6 +167,11 @@ def _check_baseline(baseline):
         _fail(f"baseline.commit must be a full 40-hex commit SHA, got {baseline.commit!r}")
     if not isinstance(baseline.repo_root, str) or not os.path.isdir(baseline.repo_root):
         _fail(f"baseline.repo_root {baseline.repo_root!r} is not a directory")
+    top = _clone_top(baseline.repo_root)
+    if top != os.path.realpath(baseline.repo_root):
+        _fail(f"baseline.repo_root {baseline.repo_root!r} is not the top level of its clone "
+              f"({top!r}); a subdirectory would move the clone-containment checks and the "
+              f"adapter safety lookup off the clone root")
 
 
 def _git_env():
@@ -189,6 +194,16 @@ def _git(repo_root, *args, data=None):
     if proc.returncode != 0:
         _fail(f"git {args[0]} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return proc.stdout
+
+
+def _clone_top(repo_root):
+    """realpath of the work-tree top level git reports for repo_root. Fails closed for a
+    directory that is not inside a work tree (not a repository, a bare one, a .git dir)."""
+    out = _git(repo_root, "rev-parse", "--show-toplevel")
+    top = os.fsdecode(out[:-1] if out.endswith(b"\n") else out)
+    if not top:
+        _fail(f"git reports no work-tree top level for {repo_root!r}")
+    return os.path.realpath(top)
 
 
 def _cap_msg(size, cap):
@@ -631,13 +646,20 @@ def materialize(candidate, *, baseline, out_dir=None, config=None, known_digests
     Executes nothing from the workspace and never probes for bwrap
     (provenance.bwrap_available is null)."""
     dest = resolve_out_dir(candidate, out_dir)
+    clone = None
     try:
-        inside = isinstance(baseline, Baseline) and isinstance(baseline.repo_root, str) \
-            and os.path.isdir(baseline.repo_root) and _is_within(dest, baseline.repo_root)
+        if isinstance(baseline, Baseline) and isinstance(baseline.repo_root, str) \
+                and os.path.isdir(baseline.repo_root):
+            roots = [baseline.repo_root]
+            try:  # the real top level too: repo_root may name a subdirectory of the clone
+                roots.append(_clone_top(baseline.repo_root))
+            except MaterializerError:
+                pass  # not a work tree; _check_baseline() refuses it below, as BLOCKED
+            clone = next((root for root in roots if _is_within(dest, root)), None)
     except (OSError, ValueError) as exc:  # ValueError: NUL or unencodable path
         _fail(f"bundle directory {dest!r} is not a usable path: {exc}")
-    if inside:
-        _fail(f"bundle directory {dest} is inside the baseline clone {baseline.repo_root}")
+    if clone:
+        _fail(f"bundle directory {dest} is inside the baseline clone {clone}")
     rec = candidate if isinstance(candidate, dict) else {}
     declared = rec.get("baseline") if isinstance(rec.get("baseline"), dict) else {}
     commit = baseline.commit if isinstance(baseline, Baseline) else None

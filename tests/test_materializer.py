@@ -680,6 +680,35 @@ def test_bad_baseline_is_blocked(tmp_path, scratch_tmp):
         assert match in bundle["verdict"]["reason"]
 
 
+def test_repo_root_must_be_the_clone_top_level(tmp_path, scratch_tmp):
+    """A subdirectory of the clone as repo_root would move the "inside the clone" checks and
+    the adapter safety lookup off the clone root. It is refused, and nothing lands in the
+    clone: exit 2 without a bundle for an out-dir inside it, a BLOCKED bundle elsewhere."""
+    b = _make_repo(tmp_path)
+    r = _record(b)
+    sub = Path(b.repo_root) / "sub"
+    sub.mkdir()
+    nested = mz.Baseline(b.commit, str(sub))
+    with pytest.raises(mz.MaterializerError, match="is not the top level of its clone"):
+        mz.compute_repo_digest(b.commit, sub)
+    with pytest.raises(mz.MaterializerError, match="is inside the baseline clone"):
+        mz.materialize(r, baseline=nested, out_dir=Path(b.repo_root) / "o1")
+    bundle = mz.materialize(r, baseline=nested, out_dir=tmp_path / "out")
+    assert bundle["verdict"]["status"] == "BLOCKED" and mz.verify_bundle(bundle)
+    assert "is not the top level of its clone" in bundle["verdict"]["reason"]
+    cand = tmp_path / "c.json"
+    cand.write_text(json.dumps(r), encoding="utf-8")
+    base = ["materialize", "--candidate", str(cand), "--commit", b.commit, "--repo-root", str(sub)]
+    env = {"TMPDIR": str(scratch_tmp)}
+    inside = _cli(base + ["--out-dir", str(Path(b.repo_root) / "o2")], env)
+    assert inside.returncode == 2 and "is inside the baseline clone" in inside.stderr
+    outside = _cli(base + ["--out-dir", str(tmp_path / "o3")], env)
+    assert outside.returncode == 1 and "is not the top level of its clone" in outside.stderr
+    assert (tmp_path / "o3" / "bundle.json").is_file()
+    assert sorted(os.listdir(b.repo_root)) == [".git", "sub"] and os.listdir(sub) == []
+    assert os.listdir(scratch_tmp) == []
+
+
 def test_known_digests_resolve_the_parent(tmp_path, scratch_tmp):
     b = _make_repo(tmp_path)
     parent = mc.canonical_digest("parent")
