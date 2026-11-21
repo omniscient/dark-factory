@@ -897,6 +897,38 @@ def test_excluded_new_validate_hook_is_not_executed(tmp_path, monkeypatch):
     assert not sentinel.exists() and io.prs == []
 
 
+def test_level2_flow_end_to_end(tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("jq"):
+        pytest.skip("scripts/shims need jq")
+    from factory_core import providers
+    io, clone, origin = _live_repo(tmp_path, monkeypatch)   # clears ambient CLAUDECODE
+    rc_log, err_log, gh_log = tmp_path / "agent.rc", tmp_path / "agent.err", tmp_path / "gh.log"
+    # The "real" gh the shim would exec if it let a call through.
+    _stub(tmp_path, monkeypatch, "gh", f'#!/bin/sh\necho "$*" >> "{gh_log}"\n')
+    _stub(tmp_path, monkeypatch, "claude", f"""#!/usr/bin/env bash
+export CLAUDECODE=1
+git push origin HEAD 2>>"{err_log}"; echo "push=$?" >> "{rc_log}"
+gh pr merge 1 2>>"{err_log}"; echo "merge=$?" >> "{rc_log}"
+echo 'requests==2.32.0' > requirements.txt
+""")
+    monkeypatch.setenv("PATH", _shim_path()[1])          # never two shim dirs (see rules above)
+    monkeypatch.setenv("FACTORY_SIDE_EFFECT_LEVEL", "2")
+    monkeypatch.setattr(providers, "get_codehost", lambda: _FakeCodehost())
+
+    branch = io.start_branch()
+    io.apply_agent_fix("prompt")
+    assert rc_log.read_text().split() == ["push=1", "merge=1"]
+    assert err_log.read_text().count("side-effect guard") == 2
+    assert not gh_log.exists()                               # merge never reached gh
+    assert _g(origin, "for-each-ref", "refs/heads/").count("refs/heads/") == 1   # main only
+
+    assert io.changed_paths() == ["requirements.txt"]
+    assert io.open_pr(branch, "deps: resolve 1 advisories (GHSA-9wx4-h78v-vm56)", "b") == 17
+    assert "CLAUDECODE" not in os.environ                    # the harness is not gated
+    assert _g(origin, "rev-parse", f"refs/heads/{branch}") == _g(clone, "rev-parse", "HEAD")
+
+
 def test_agent_failure_raises_instead_of_escalating_no_fix(tmp_path, monkeypatch):
     io, _ = _fixture_io(tmp_path, monkeypatch)
     _stub(tmp_path, monkeypatch, "claude", "#!/bin/sh\necho 'usage limit reached' >&2\nexit 1\n")
