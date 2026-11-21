@@ -744,3 +744,50 @@ def test_rematerialize_replaces_the_read_only_bundle(tmp_path, scratch_tmp):
     second = mz.materialize(_h2(b), baseline=b, out_dir=tmp_path / "out")
     assert json.loads((tmp_path / "out" / "bundle.json").read_text(encoding="utf-8")) == second
     assert sorted(os.listdir(tmp_path / "out")) == ["bundle.json"]
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────────
+
+def _cli(args, env_extra=None):
+    env = {k: v for k, v in os.environ.items() if k != "ARTIFACTS_DIR"}
+    env["PYTHONPATH"] = str(_REPO_ROOT / "scripts")
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, "-m", "factory_core.materializer", *args],
+                          capture_output=True, text=True, env=env, cwd=_REPO_ROOT)
+
+
+def test_cli_exit_codes(tmp_path):
+    b = _make_repo(tmp_path)
+    good, bad = tmp_path / "good.json", tmp_path / "bad.json"
+    good.write_text(json.dumps(_record(b)), encoding="utf-8")
+    bad.write_text(json.dumps(_record(b, network_envelope={"egress_allowed": True, "allowed_hosts": []})),
+                   encoding="utf-8")
+    base = ["materialize", "--commit", b.commit, "--repo-root", b.repo_root]
+    env = {"TMPDIR": str(tmp_path)}
+    ok = _cli(base + ["--candidate", str(good), "--out-dir", str(tmp_path / "o1")], env)
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout == "STATUS: PASS\nGATE_TYPE: materializer\nFINDINGS_COUNT: 0\nSEVERITY: none\n"
+    blocked = _cli(base + ["--candidate", str(bad), "--out-dir", str(tmp_path / "o2")], env)
+    assert blocked.returncode == 1
+    assert blocked.stdout.startswith("STATUS: BLOCKED\n") and "declares egress" in blocked.stderr
+    assert (tmp_path / "o2" / "bundle.json").is_file()
+    no_out = _cli(base + ["--candidate", str(good)], env)
+    assert no_out.returncode == 2 and "out_dir is required" in no_out.stderr
+    unreadable = _cli(base + ["--candidate", str(tmp_path / "absent.json"), "--out-dir", str(tmp_path / "o3")], env)
+    assert unreadable.returncode == 2 and "cannot read candidate" in unreadable.stderr
+    unwritable = _cli(base + ["--candidate", str(good), "--out-dir", str(good)], env)
+    assert unwritable.returncode == 2 and "cannot write bundle" in unwritable.stderr
+    non_utf8 = ["materialize", "--commit", os.fsdecode(b"\xff"), "--repo-root", b.repo_root]
+    garbled = _cli(non_utf8 + ["--candidate", str(good), "--out-dir", str(tmp_path / "o4")], env)
+    assert garbled.returncode == 1 and "full 40-hex" in garbled.stderr
+    assert (tmp_path / "o4" / "bundle.json").is_file()
+    deep = tmp_path / "deep.json"
+    deep.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
+    nested = _cli(base + ["--candidate", str(deep), "--out-dir", str(tmp_path / "o5")], env)
+    assert nested.returncode == 2 and "cannot read candidate" in nested.stderr
+    assert not (tmp_path / "o5").exists()
+    huge = tmp_path / "huge.json"
+    huge.write_bytes(b" " * (mz._MAX_CANDIDATE_BYTES + 1))
+    oversized = _cli(base + ["--candidate", str(huge), "--out-dir", str(tmp_path / "o6")], env)
+    assert oversized.returncode == 2 and "cannot read candidate" in oversized.stderr
+    assert not (tmp_path / "o6").exists()

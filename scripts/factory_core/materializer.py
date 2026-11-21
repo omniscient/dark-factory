@@ -676,3 +676,62 @@ def materialize(candidate, *, baseline, out_dir=None, config=None, known_digests
     })
     _write_bundle(dest, bundle)
     return bundle
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────────
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("materialize", help="build, digest and bundle a candidate workspace "
+                                           "(executes nothing)")
+    m.add_argument("--candidate", required=True, help="candidate record JSON file")
+    m.add_argument("--commit", required=True, help="full 40-hex baseline commit SHA")
+    m.add_argument("--repo-root", required=True, help="clone containing --commit")
+    m.add_argument("--out-dir", default="",
+                   help="bundle directory (default $ARTIFACTS_DIR/materializer/<candidate_id>/)")
+    m.add_argument("--known-digest", action="append", default=[],
+                   help="a candidate_digest parent/dependency digests may resolve to (repeatable)")
+    return p.parse_args(argv)
+
+
+_MAX_CANDIDATE_BYTES = 16 * 1024 * 1024
+
+
+def _load_candidate(path):
+    """The candidate JSON, read through a size cap: the file is agent-written."""
+    with open(path, "rb") as f:
+        raw = f.read(_MAX_CANDIDATE_BYTES + 1)
+    if len(raw) > _MAX_CANDIDATE_BYTES:
+        raise ValueError(f"file is larger than {_MAX_CANDIDATE_BYTES} bytes")
+    return json.loads(raw.decode("utf-8"))
+
+
+def main(argv=None):
+    """Exit 1 means "BLOCKED, bundle written" and nothing else. An uncaught exception
+    would also exit 1, so both steps catch Exception, not a list of the types seen so
+    far (OSError, ValueError, RecursionError, MemoryError, ...): exit 2, no bundle."""
+    args = parse_args(argv)
+    try:
+        candidate = _load_candidate(args.candidate)
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        print(f"materializer: cannot read candidate {args.candidate!r}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        bundle = materialize(candidate, baseline=Baseline(args.commit, args.repo_root),
+                             out_dir=args.out_dir or None, known_digests=args.known_digest)
+    except Exception as exc:  # noqa: BLE001 — materialize() raises only before a bundle exists
+        print(f"materializer: no bundle written: {_error_text(exc)}", file=sys.stderr)
+        return 2
+    v = bundle["verdict"]
+    sys.stdout.write(_verdict.format_verdict(GATE_TYPE, v["status"], v["findings_count"],
+                                             v["severity"]))
+    if v["status"] != "PASS":
+        print(f"BLOCKED: {v['reason']}", file=sys.stderr)
+    return 0 if v["status"] == "PASS" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
