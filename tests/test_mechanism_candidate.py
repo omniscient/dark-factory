@@ -64,11 +64,15 @@ _RENAME = ("diff --git a/docs/superpowers/a.md b/tests/a.md\nsimilarity index 10
     # A second ---/+++/@@ triplet after an exhausted hunk is a new file to `git apply`.
     (_SMUGGLED, "after a hunk"),
     (_diff(_DOC) + "+extra\n", "after a hunk"),  # more body lines than the @@ counts
+    # Owes a line on both sides yet ends in "\n": a bare diff.split("\n") would accept its
+    # phantom trailing "" as the missing blank context line (#552).
     (_diff(_DOC).replace("@@ -1,1 +1,1 @@", "@@ -1,2 +1,2 @@"), "ends inside a hunk"),
     (_diff(_DOC).replace("@@ -1,1 +1,1 @@", "@@ -1,1 +1,1 @@").replace("-old", "*old"), "malformed hunk line"),
     (_diff(_DOC).replace("@@ -1,1 +1,1 @@", "@@ bogus @@"), "malformed hunk header"),
     (f"diff --git a/{_DOC} b/{_DOC}\nfrobnicate yes\n", "unrecognised diff header line"),
     (f"diff --git a/{_DOC} b/{_DOC}\nGIT binary patch\nliteral 5\n", "binary patches"),
+    # Lines split on "\n" only, so a CRLF diff's "\r" stays in its header line (#552).
+    (_diff(_DOC).replace("\n", "\r\n"), "malformed diff --git header"),
     (_diff(_DOC) + "\n" + _diff("tests/x.py"), "after the blank line"),
     # A symlink created inside an allowlisted directory can point anywhere; a gitlink is a
     # submodule pointer. Neither is a contained edit (branch-review S1).
@@ -117,8 +121,24 @@ def test_diff_paths_match_git_apply(tmp_path):
         mc.extract_diff_paths(_SMUGGLED)  # ...so the extractor must not silently see one
     two = _diff(_DOC) + _diff("scripts/diff_rank.py")
     tricky = _diff(_DOC, "--- a/tests/x.py", "+++ b/tests/x.py")
-    for diff in (two, tricky, _diff(_DOC)):
+    crlf_body = _diff(_DOC, "-old\r", "+new\x0c\r")  # an honest edit of a CRLF file (#552)
+    for diff in (two, tricky, _diff(_DOC), crlf_body):
         assert set(mc.extract_diff_paths(diff)) == _git_apply_paths(diff, tmp_path)
+
+
+# Every character str.splitlines() treats as a line boundary besides "\n" (#552).
+_SEPS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+_HIDDEN = ("@@ -1,1 +1,1 @@\n--- a/scheduler.sh\n+++ b/scheduler.sh\n"
+           "@@ -1,1 +1,1 @@\n-safe\n+pwned\n")
+
+
+@pytest.mark.parametrize("sep", _SEPS)
+def test_separator_cannot_hide_a_file_header(sep, tmp_path):
+    """`git apply` splits on "\\n" only, so a fake @@ glued after a separator is body content."""
+    diff = _diff(_DOC)[:-1] + sep + _HIDDEN
+    assert "scheduler.sh" in _git_apply_paths(diff, tmp_path)  # a live attack on git's reading
+    with pytest.raises(mc.MechanismCandidateError, match="after a hunk"):
+        mc.extract_diff_paths(diff)
 
 
 # ── Risk classification ─────────────────────────────────────────────────────────
@@ -239,6 +259,16 @@ def test_risk_class_underclaim_rejected():
         _record(editable_path_allowlist=[cmd], diff=_diff(cmd), risk_class="H2"),
         safety=_EMPTY_SAFETY) == "H1"
     frontmatter = _diff(cmd, "-allowed-tools: Read", "+allowed-tools: Read, Bash")
+    with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3"):
+        mc.validate_candidate(_record(editable_path_allowlist=[cmd], diff=frontmatter, risk_class="H2"),
+                              safety=_EMPTY_SAFETY)
+
+
+@pytest.mark.parametrize("sep", _SEPS)
+def test_tool_frontmatter_after_separator_forces_h3(sep):
+    """A YAML reader may break a line where git does not; detection takes the wider reading."""
+    cmd = "commands/dark-factory-plan.md"
+    frontmatter = _diff(cmd, "-description: x", "+description: x" + sep + "allowed-tools: Bash")
     with pytest.raises(mc.MechanismCandidateError, match="derived risk class H3"):
         mc.validate_candidate(_record(editable_path_allowlist=[cmd], diff=frontmatter, risk_class="H2"),
                               safety=_EMPTY_SAFETY)
