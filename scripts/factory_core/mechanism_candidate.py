@@ -119,8 +119,10 @@ H3_PREFIXES = (
     # Branch-review amendment: scheduler dispatch predicates; CI workflow verifiers.
     "scripts/scheduler_lib.sh", "scripts/check_workflow_",
 )
-# A changed allowed-tools:/disallowed-tools: line in a commands/*.md file forces H3.
-_TOOL_FRONTMATTER_RE = re.compile(r"^[+-]\s*(?:allowed-tools|disallowed-tools)\s*:")
+# A changed allowed-tools:/disallowed-tools: line in a commands/*.md file forces H3. Matched
+# against every str.splitlines() fragment of a changed line's content (#552): a YAML reader
+# may break a line on \r, \x85, U+2028 or U+2029 even though git does not.
+_TOOL_FRONTMATTER_RE = re.compile(r"^\s*(?:allowed-tools|disallowed-tools)\s*:")
 
 _GLOB_CHARS = frozenset("*?[")
 _GIT_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
@@ -136,6 +138,7 @@ _EXTENDED_HEADER_RE = re.compile(
 # allowlisted directory can point anywhere, and a gitlink (160000) is a submodule pointer,
 # so neither is a contained edit.
 _MODE_HEADER_RE = re.compile(r"^(?:old mode|new mode|deleted file mode|new file mode) (\S+)$")
+_MODE_HEADER_PREFIXES = ("old mode ", "new mode ", "deleted file mode ", "new file mode ")
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 
 
@@ -257,6 +260,8 @@ def extract_diff_paths(diff):
     exactly as `git apply` reads them, so header-looking lines inside a hunk are content
     and nothing may follow an exhausted hunk except another `@@`, a `diff --git`, or a
     `\\ No newline` marker — a smuggled `---`/`+++` triplet is rejected, never skipped.
+    Lines are split on `\\n` only, as `git apply` splits them (#552): `\\r`, `\\f`, `\\v`,
+    `\\x1c`-`\\x1e`, `\\x85`, U+2028 and U+2029 are line content, never a line boundary.
     Only git's known extended header lines are accepted; binary patches, absolute,
     backslash, `..`, C-quoted, and whitespace-bearing names, and an empty diff are
     rejected. Both sides of a rename/copy are returned.
@@ -268,7 +273,10 @@ def extract_diff_paths(diff):
     old_left = new_left = 0  # lines the current hunk still owes, per side
     in_hunks = False         # past the current block's first @@
     trailing = False         # a blank line ended the diff; only blank lines may follow
-    for line in diff.splitlines():
+    # Drop exactly one final "\n" so a terminated diff has no phantom trailing "" line,
+    # which the hunk loop would otherwise accept as a missing blank context line.
+    lines = diff[:-1].split("\n") if diff.endswith("\n") else diff.split("\n")
+    for line in lines:
         if trailing:
             if line.strip():
                 _fail("diff has content after the blank line that ends it")
@@ -337,9 +345,9 @@ def extract_diff_paths(diff):
             cur["rename_or_copy"] = True
         elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
             _fail("binary patches are not accepted")
-        elif _MODE_HEADER_RE.match(line):
-            mode = _MODE_HEADER_RE.match(line).group(1)
-            if mode not in _REGULAR_FILE_MODES:
+        elif line.startswith(_MODE_HEADER_PREFIXES):
+            m = _MODE_HEADER_RE.match(line)
+            if not m or m.group(1) not in _REGULAR_FILE_MODES:
                 _fail(f"diff header {line!r}: only regular file modes 100644/100755 are "
                       f"accepted (symlinks and gitlinks are not contained edits)")
         elif not _EXTENDED_HEADER_RE.match(line):
@@ -573,7 +581,8 @@ def _validate_standalone(record, safety):
     if outside:
         _fail(f"diff paths outside editable_path_allowlist (scope widening): {outside}")
     frontmatter = {p for p, lines in changed.items()
-                   if any(_TOOL_FRONTMATTER_RE.match(ln) for ln in lines)}
+                   if any(_TOOL_FRONTMATTER_RE.match(frag)
+                          for ln in lines for frag in ln[1:].splitlines())}
     touched = sorted(set(allowlist) | set(changed))
     derived = classify_risk(touched, safety, frontmatter)
     if derived == "H3":
