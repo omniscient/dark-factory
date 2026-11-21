@@ -304,6 +304,69 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh repo view o/r
 # Every new deny asserts its reason (check_deny_reason), so a case cannot pass because an
 # unrelated check denied it. All run in the $TMP/repo fixture (origin = o/r, branch feat).
 export FACTORY_RUN_BRANCH="feat"
+# Alias sources: however the alias is defined, `p` is judged as `push` (level 2 denies push).
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c alias.p=push p origin HEAD
+"$REAL_GIT_BIN" config alias.pp push
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git pp origin HEAD
+"$REAL_GIT_BIN" config --unset alias.pp
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+GIT_CONFIG_PARAMETERS="'alias.p'='push'" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+printf '[alias]\n\tp = push\n' > "$TMP/alias.gitconfig"
+GIT_CONFIG_GLOBAL="$TMP/alias.gitconfig" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+ALIAS_VALUE=push FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" \
+  git --config-env=alias.ce=ALIAS_VALUE ce origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" \
+  git -c alias.a1=a2 -c alias.a2=push a1 origin HEAD
+# GIT_CONFIG redirects only `git config` itself: a decoy file must not hide the real alias.
+printf '[alias]\n\tp = log\n' > "$TMP/decoy.gitconfig"
+GIT_CONFIG="$TMP/decoy.gitconfig" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c alias.p=push p origin HEAD
+# The classify-only marker is the shim's own; from the caller's environment it is denied.
+SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 FACTORY_SIDE_EFFECT_LEVEL=5 \
+  check_deny_reason "outside a nested check" git status
+# Depth cap: five hops resolve, six deny.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.h1=h2 -c alias.h2=h3 -c alias.h3=h4 \
+  -c alias.h4=h5 -c alias.h5=status h1
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "too deep" git -c alias.h1=h2 -c alias.h2=h3 \
+  -c alias.h3=h4 -c alias.h4=h5 -c alias.h5=h6 -c alias.h6=status h1
+# Shell aliases are unclassifiable -- denied at every level.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "shell alias" git -c 'alias.s=!git push origin HEAD' s
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "shell alias" git -c 'alias.s=!git push --delete origin feat' s
+# Arguments inside the alias value are judged too.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "push --delete" git -c 'alias.del=push --delete' del origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push --force" git -c 'alias.x=push --force' x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push \(main\)" git -c 'alias.x=push origin' x HEAD:main
+# Tighten-only: the literal form is still judged first (`l` is not on level 1's allow-list).
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'l' is denied" git -c alias.l=log l
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'l' is denied" git -c 'alias.l=log --output=f' l
+# Alias values that are not a bare verb.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c 'alias.v=-p push' v origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "shell-style parsing" git -c 'alias.w="push"' w origin HEAD
+# Global options the skip-loop does not know are denied, not read as the verb.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unrecognised option" git --no-advice push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unrecognised option" git --attr-source HEAD push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "unrecognised option" git --no-advice status
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -C . --git-dir=.git --no-pager push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push --force" git push -fu origin feat
+# Unknown verbs and external git-<verb> commands. (git-lfs is preinstalled on GitHub's
+# ubuntu runners but not in the factory image, so `lfs` may surface as either reason.)
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "unknown verb" git frobnicate
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unknown verb|external git command" git lfs push origin feat
+mkdir -p "$TMP/ext-bin"
+printf '#!/bin/sh\necho EXTERNAL "$@"\n' > "$TMP/ext-bin/git-evilx"; chmod +x "$TMP/ext-bin/git-evilx"
+PATH="$SHIM_DIR:$TMP/ext-bin:$TMP/real:$PATH" FACTORY_SIDE_EFFECT_LEVEL=2 \
+  check_deny_reason "external git command" git -c alias.evilx=status evilx
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git submodule status
+# Controls: legitimate aliases and global options keep working.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.p=push p origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c 'alias.lg=log --oneline' lg
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.status=push status   # a known verb never resolves
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -C . -c user.name=x commit -m x
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --no-pager -C . diff --name-only
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --git-dir=.git status
 # --- end #553 cases ---
 unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---

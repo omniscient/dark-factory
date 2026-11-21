@@ -96,9 +96,30 @@ done
 VERB1="${_ARGS[$_I]:-}"
 VERB2="${_ARGS[$((_I + 1))]:-}"
 VERB_ARGS=("${_ARGS[@]:$((_I + 1))}")   # everything after the verb (push flag parsing)
+# #553: the global options exactly as given, so every lookup below (alias, push URL,
+# sshCommand) asks real git with the same -c/--config-env/-C/--git-dir the invocation
+# itself will run with.
+_GLOBAL_OPTS=("${_ARGS[@]:0:$_I}")
+
+# #553: a nested classify-only run (an alias expansion being judged, see the end of this
+# file) must never exec anything -- it only reports deny (exit 1) or pass (exit 0).
+_CLASSIFY_ONLY="${SIDE_EFFECT_SHIM_CLASSIFY_ONLY:-}"
+# Only this shim sets it, always with a depth >= 1. At depth 0 it came from the caller's
+# own environment: fail loudly rather than silently do nothing on every call.
+if [ "$_CLASSIFY_ONLY" = "1" ] && [ "${SIDE_EFFECT_SHIM_DEPTH:-0}" = "0" ]; then
+  deny "SIDE_EFFECT_SHIM_CLASSIFY_ONLY outside a nested check"
+fi
 
 # Version/help never mutate anything.
-case "$VERB1" in --version|--help|-h|help|version) exec "$REAL_GIT" "$@" ;; esac
+case "$VERB1" in --version|--help|-h|help|version)
+  [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
+  exec "$REAL_GIT" "$@" ;;
+esac
+
+# #553: `git config` reads only the file named by GIT_CONFIG when that is set, while the
+# real command ignores it -- so a lookup that inherited it could be shown a decoy alias or
+# no sshCommand. Every config lookup the shim makes drops it; nothing else is changed.
+_git_config() { env -u GIT_CONFIG "$REAL_GIT" "${_GLOBAL_OPTS[@]}" config "$@"; }
 
 # Operator review of PR #396 (#2): git accepts clustered short options (`push -df`,
 # `push -fu`), which a token-wise `case` never sees as -d/-f. Expand clusters into
@@ -242,4 +263,48 @@ if [ "$GIT_MODE" = "allow" ]; then
   esac
 fi
 
+# #553 / spec Requirement 2: the verb judged above is the literal token; git may run
+# something else under that name (an alias from -c, --config-env, GIT_CONFIG_* env or any
+# config file, or a git-<verb> on PATH). The literal form has passed; now every expanded
+# form must pass the same classification too (tighten-only), at every level. Each check
+# fails closed. What is exec'd at the bottom is still the untouched "$@".
+_DEPTH="${SIDE_EFFECT_SHIM_DEPTH:-0}"
+case "$_DEPTH" in ''|*[!0-9]*) deny "${VERB1:-git} (alias chain depth)" ;; esac
+if [ -n "$VERB1" ]; then
+  # Anything the skip-loop above does not know (`--no-advice`, `--attr-source HEAD`)
+  # lands here instead of a verb; deny it rather than read the option as the verb.
+  [[ "$VERB1" =~ ^[a-z][a-z0-9-]*$ ]] || deny "$VERB1 (unrecognised option or verb syntax)"
+  _KNOWN=$("$REAL_GIT" --list-cmds=main 2>/dev/null) && [ -n "$_KNOWN" ] \
+    || deny "$VERB1 (verb resolution failed)"
+  # A known command never consults aliases (git does not let an alias shadow one).
+  if ! grep -qxF -- "$VERB1" <<<"$_KNOWN"; then
+    _OTHERS=$("$REAL_GIT" --list-cmds=others 2>/dev/null) || deny "$VERB1 (verb resolution failed)"
+    # git runs a git-<verb> found on PATH before an alias of that name, and the child
+    # gets git's exec-path ahead of this shim on its PATH -- unclassifiable.
+    grep -qxF -- "$VERB1" <<<"$_OTHERS" && deny "$VERB1 (external git command)"
+    [ "$_DEPTH" -lt 5 ] || deny "$VERB1 (alias chain too deep)"
+    _RC=0
+    _VALUE=$(_git_config --get "alias.${VERB1}" 2>/dev/null) || _RC=$?
+    # Exit 1 is also what an invalid key returns, so it can never mean "safe".
+    case "$_RC" in
+      0) : ;;
+      1) deny "$VERB1 (unknown verb)" ;;
+      *) deny "$VERB1 (alias resolution failed)" ;;
+    esac
+    # A shell alias has no verb to judge, and git runs its body with git's exec-path
+    # first on PATH, so a nested `git push` in it would reach real git (spec item 4).
+    case "$_VALUE" in '!'*) deny "$VERB1 (shell alias)" ;; esac
+    case "$_VALUE" in
+      *[\"\'\\]*|*$'\n'*) deny "$VERB1 (alias value needs shell-style parsing)" ;;
+    esac
+    read -ra _EXPANSION <<<"$_VALUE"
+    [ "${#_EXPANSION[@]}" -gt 0 ] || deny "$VERB1 (empty alias)"
+    # Re-run this whole shim, classify-only, on the expanded argv: identical code judges
+    # the literal and the expanded form, and alias chains recurse with the depth cap.
+    SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 SIDE_EFFECT_SHIM_DEPTH=$((_DEPTH + 1)) \
+      "$SHIM_DIR/git" "${_GLOBAL_OPTS[@]}" "${_EXPANSION[@]}" "${VERB_ARGS[@]}" || exit $?
+  fi
+fi
+
+[ "$_CLASSIFY_ONLY" = "1" ] && exit 0
 exec "$REAL_GIT" "$@"
