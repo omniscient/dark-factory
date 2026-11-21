@@ -37,6 +37,10 @@ NOTES_FILE = ".deps-fix-notes.md"  # agent-written PR-body notes; read + deleted
 FIELDS = ("ecosystem", "package", "installed", "fixed_in", "id", "severity")
 
 
+class HookTampered(RuntimeError):
+    """A post-agent hook's working-tree bytes differ from the base commit's (#548 §6(d))."""
+
+
 def _deps_allowed_paths(clone_dir: str | None = None) -> list:
     """Return safety.deps_allowed_paths from the adapter at use-time, falling back to defaults."""
     try:
@@ -337,10 +341,10 @@ def run_once(cfg: dict, io, state: dict) -> dict:
     if remaining:
         notes = io.apply_agent_fix(build_fix_prompt(remaining, cfg["allowed_paths"],
                                                     cfg["blocked_paths"])) or ""
-        after = read_audit(*io.run_audit())
-        remaining = remaining if after is None else after
         fix_path = "fixed-by-agent"
 
+    # #548 §6(c): judge scope BEFORE any hook runs on the agent's tree — a rewritten
+    # .factory/hooks/deps-audit is rejected here, never executed by the re-audit.
     changed = io.changed_paths()
     if not changed:
         io.escalate(issue, "no-fix", h, notes=notes)
@@ -350,7 +354,24 @@ def run_once(cfg: dict, io, state: dict) -> dict:
         io.escalate(issue, f"scope:{scope}", h)
         return {"outcome": "escalated", "issue": issue, "pr": None, "reason": f"scope:{scope}"}
 
-    tests = io.run_tests()
+    try:
+        if fix_path == "fixed-by-agent":
+            after = read_audit(*io.run_audit())
+            remaining = remaining if after is None else after
+        tests = io.run_tests()
+    except HookTampered:
+        # §6(d): a hook change hidden from git add -A — same outcome as a visible one.
+        io.escalate(issue, "scope:protected", h)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": "scope:protected"}
+
+    # A hook, the test suite or a process the agent left behind may have written to the tree
+    # since the scope check, and open_pr stages everything (git add -A): judge scope again.
+    changed = io.changed_paths()
+    scope = classify_deps_scope(changed, cfg["allowed_paths"], cfg["blocked_paths"])
+    if scope != "allowed":
+        io.escalate(issue, f"scope:{scope}", h)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": f"scope:{scope}"}
+
     pr = io.open_pr(branch, pr_title(advisories),
                     pr_body(issue, advisories, remaining, changed, fix_path, tests, notes))
     # SKIP_LABELS member, applied BEFORE the In review move: keeps scheduler.sh's In-review
@@ -410,7 +431,27 @@ class LiveIO(_MainRedLiveIO):
     def _git(self, *args, timeout=600, text=True):
         return self._sh(["git", *_GIT_SAFE, *args], timeout=timeout, text=text)
 
+    def _hook_is_base_copy(self, name):
+        """§6(d): git add -A cannot see a skip-worktree flag on a tracked hook or a new hook
+        hidden by .git/info/exclude, so compare bytes. A hook absent from the base commit
+        must be absent from the tree; a symlink or non-file never matches. Raw blob bytes on
+        purpose: a hook under .gitattributes eol/smudge conversion never matches and escalates
+        (fail closed) — running the filters would execute repository-local config."""
+        if not self.base_sha:
+            return False
+        rel = f".factory/hooks/{name}"
+        path = os.path.join(self.clone_dir, rel)
+        base = self._git("cat-file", "blob", f"{self.base_sha}:{rel}", text=False)
+        if base.returncode != 0:
+            return not os.path.lexists(path)
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        with open(path, "rb") as f:
+            return f.read() == base.stdout
+
     def _hook(self, name, gate):
+        if self._agent_ran and not self._hook_is_base_copy(name):
+            raise HookTampered(name)  # never executed; run_once escalates scope:protected
         flag = "--gate " if gate else ""
         r = self._sh(["bash", "-c", f'source "$1" && run_hook {flag}{name}', "_", _hooks_sh()],
                      timeout=1800)

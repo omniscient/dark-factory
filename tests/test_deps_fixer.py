@@ -289,7 +289,7 @@ def test_deps_allowed_paths_adapter_override(tmp_path):
 class FakeIO:
     def __init__(self, audits=(RED,), present=True, changed=None, ci="green",
                  merge_ok=True, direct_to_pr=False, notes="", issue=42, open_tracking=True,
-                 halted=False):
+                 halted=False, tampered=False, changed_after=None):
         # audits: successive deps-audit stdouts; "" = clean (rc 0), "!" = unparseable red
         self._audits = list(audits)
         self._present = present
@@ -301,6 +301,9 @@ class FakeIO:
         self._issue = issue
         self._open_tracking = open_tracking
         self._halted = halted
+        self._tampered = tampered
+        self._changed_after = changed_after
+        self._changed_calls = 0
         self.calls, self.prompts, self.prs, self.merged = [], [], [], []
         self.escalations, self.labels, self.comments, self.closed = [], [], [], []
         self.escalation_notes = []
@@ -309,6 +312,8 @@ class FakeIO:
         return self._present
 
     def run_audit(self):
+        if self._tampered and "agent" in self.calls:
+            raise df.HookTampered("deps-audit")
         self.calls.append("audit")
         out = self._audits.pop(0) if len(self._audits) > 1 else self._audits[0]
         if out == "":
@@ -344,10 +349,15 @@ class FakeIO:
         self.calls.append("deps-fix")
 
     def apply_agent_fix(self, prompt):
+        self.calls.append("agent")
         self.prompts.append(prompt)
         return self._notes
 
     def changed_paths(self):
+        # changed_after: what the tree looks like once the post-agent hooks have run
+        self._changed_calls += 1
+        if self._changed_after is not None and self._changed_calls > 1:
+            return self._changed_after
         return self._changed
 
     def run_tests(self):
@@ -505,6 +515,36 @@ def test_protected_scope_escalates_without_pr():
     out = df.run_once(CFG, io, {})
     assert out["outcome"] == "escalated" and out["reason"] == "scope:protected"
     assert io.prs == [] and io.merged == []
+
+
+def test_agent_hook_change_is_rejected_before_any_post_agent_hook():
+    io = FakeIO(audits=(RED, RED, ""), changed=[".factory/hooks/deps-audit"])
+    out = df.run_once(CFG, io, {})
+    assert out["reason"] == "scope:protected" and io.prs == []
+    after_agent = io.calls[io.calls.index("agent"):]
+    assert "audit" not in after_agent                  # no hook ran on the agent's tree
+
+
+def test_hidden_hook_change_escalates_protected():
+    io = FakeIO(audits=(RED, RED, ""), tampered=True)
+    out = df.run_once(CFG, io, {})
+    assert out == {"outcome": "escalated", "issue": 42, "pr": None, "reason": "scope:protected"}
+    assert io.escalations == [(42, "scope:protected", None)] and io.prs == []
+
+
+def test_deterministic_path_order_is_unchanged():
+    io = FakeIO(audits=(RED, ""))
+    df.run_once(CFG, io, {})
+    assert io.calls[:4] == ["branch", "audit", "deps-fix", "audit"] and "agent" not in io.calls
+
+
+def test_tree_change_after_scope_check_is_rejected_before_open_pr():
+    # allowed at the first scope check; a hook (or a leftover process) then wrote a CI workflow
+    io = FakeIO(audits=(RED, RED, ""),
+                changed_after=["frontend/package-lock.json", ".github/workflows/ci.yml"])
+    out = df.run_once(CFG, io, {})
+    assert out == {"outcome": "escalated", "issue": 42, "pr": None, "reason": "scope:protected"}
+    assert io.escalations == [(42, "scope:protected", None)] and io.prs == []
 
 
 def test_cap_escalates_once_without_attempting():
@@ -789,6 +829,72 @@ def test_open_pr_runs_no_repository_hooks(tmp_path, monkeypatch):
     assert io.open_pr(branch, "deps: t", "body") == 17
     assert _g(origin, "rev-parse", f"refs/heads/{branch}") == _g(clone, "rev-parse", "HEAD")
     assert not pre_commit.exists() and not pre_push.exists()
+
+
+class _OfflineLiveIO(df.LiveIO):
+    """Real git / hook / agent paths; every GitHub-facing call is recorded, not made."""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.escalations, self.prs = [], []
+
+    def find_or_create_tracking_issue(self, advisories, h):
+        return 42
+
+    def open_tracking_issues(self):
+        return []
+
+    def halt_reason(self, issue):
+        return None
+
+    def escalate(self, issue, reason, h, pr=None, notes=""):
+        self.escalations.append(reason)
+
+    def open_pr(self, branch, title, body):
+        self.prs.append(title)
+        return 900
+
+    def add_label(self, issue, label):
+        pass
+
+    def move_to_in_review(self, issue):
+        pass
+
+    def poll_ci(self, pr):
+        return "pending"
+
+    def comment(self, issue, body):
+        pass
+
+    def has_direct_to_pr(self, issue):
+        return False
+
+
+def test_skip_worktree_hook_rewrite_is_not_executed(tmp_path, monkeypatch):
+    _, clone, _ = _live_repo(tmp_path, monkeypatch)
+    io = _OfflineLiveIO(dict(clone_dir=str(clone), model="x"))
+    sentinel = tmp_path / "hook.ran"
+    _stub(tmp_path, monkeypatch, "claude",
+          "#!/bin/sh\necho 'requests==2.32.0' > requirements.txt\n"
+          "git update-index --skip-worktree .factory/hooks/deps-audit\n"
+          f"printf '#!/bin/sh\\ntouch {sentinel}\\nexit 0\\n' > .factory/hooks/deps-audit\n")
+    out = df.run_once(CFG, io, {})
+    assert out["reason"] == "scope:protected" and io.escalations == ["scope:protected"]
+    assert not sentinel.exists() and io.prs == []
+
+
+def test_excluded_new_validate_hook_is_not_executed(tmp_path, monkeypatch):
+    _, clone, _ = _live_repo(tmp_path, monkeypatch)
+    io = _OfflineLiveIO(dict(clone_dir=str(clone), model="x"))
+    sentinel = tmp_path / "validate.ran"
+    _stub(tmp_path, monkeypatch, "claude",
+          "#!/bin/sh\necho 'requests==2.32.0' > requirements.txt\n"
+          "echo .factory/hooks/validate >> .git/info/exclude\n"
+          f"printf '#!/bin/sh\\ntouch {sentinel}\\n' > .factory/hooks/validate\n"
+          "chmod +x .factory/hooks/validate\n")
+    out = df.run_once(CFG, io, {})
+    assert out["reason"] == "scope:protected" and io.escalations == ["scope:protected"]
+    assert not sentinel.exists() and io.prs == []
 
 
 def test_agent_failure_raises_instead_of_escalating_no_fix(tmp_path, monkeypatch):
