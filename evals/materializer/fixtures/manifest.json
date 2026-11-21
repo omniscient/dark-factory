@@ -1,0 +1,20 @@
+{
+  "attack-credential-canary": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-network-testnet": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-docker-socket": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-path-escape": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-git-mutation": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-resource-exhaustion": {"phases": ["A", "B"], "baseline": "clean", "materialize": "PASS", "phase_a_check": "argv"},
+  "attack-write-path-absolute": {"phases": ["A", "B"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "is absolute"},
+  "attack-write-path-dotdot": {"phases": ["A", "B"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "'\\.\\.' segment"},
+  "attack-write-path-symlink": {"phases": ["A", "B"], "baseline": "write-path-symlink", "materialize": "BLOCKED", "error_match": "passes through a symlink"},
+  "attack-symlink-escape": {"phases": ["A"], "baseline": "symlink-escape", "materialize": "BLOCKED", "error_match": "resolves outside the snapshot"},
+  "attack-submodule": {"phases": ["A"], "baseline": "submodule", "materialize": "BLOCKED", "error_match": "gitlink \\(submodule\\)"},
+  "attack-lfs-pointer": {"phases": ["A"], "baseline": "lfs-pointer", "materialize": "BLOCKED", "error_match": "Git LFS pointer"},
+  "attack-archive-bomb": {"phases": ["A"], "baseline": "archive-bomb", "config": {"max_workspace_bytes": 1048576}, "materialize": "BLOCKED", "error_match": "over materializer.max_workspace_bytes"},
+  "attack-h3-surface": {"phases": ["A"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "derived risk class H3 is forbidden"},
+  "refuse-egress-declared": {"phases": ["A"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "declares egress"},
+  "refuse-digest-mismatch": {"phases": ["A"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "repo_digest mismatch"},
+  "refuse-cpu-limit-format": {"phases": ["A"], "baseline": "clean", "materialize": "BLOCKED", "error_match": "cpu_limit '500m' is not a supported format"},
+  "refuse-h2-run": {"phases": ["B"], "baseline": "clean", "materialize": "PASS", "run": "BLOCKED", "run_error_match": "H2 execution quarantine policy not yet defined"}
+}

@@ -78,7 +78,7 @@ Two consequences worth knowing:
 
 ## Layer 1: `config/config.yaml`
 
-The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 106 leaf keys,
+The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 110 leaf keys,
 documented below section by section. The scheduler's env projection is `apply_run_config_env`
 (`scripts/run_config_env.sh`); the list of exported keys is `ENV_WHITELIST`
 (`scripts/factory_core/effective_config.py:43-80`).
@@ -333,7 +333,25 @@ Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 
 `docs_conformance` 2, `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3,
 `epic_autopilot` 11, `main_red_autofix` 5, `deps_audit` 6, `side_effect.phase_levels` 10, `token_optimization` 32
 (`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
-`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1): 106 leaf keys.
+`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 110 leaf keys.
+
+### `materializer`
+
+Ceilings for the harness candidate materializer (#465,
+[spec](archive/2026-10-22-harness-candidate-materializer-design.md)). Read only by
+`scripts/factory_core/materializer.py` (`load_config`, from this checkout's
+`config/config.yaml`); no DAG node, scheduler path or gate calls the materializer yet. A
+candidate's `resource_envelope` may lower a ceiling, never raise it (a larger declared value is
+a `BLOCKED` refusal). The rlimits are per process, not a sandbox-wide cap. Phase A only builds
+the `prlimit` argv from these values; nothing applies them until the Phase B executor (#544).
+No env overrides, no adapter overlay.
+
+| Key | Default | Controls | Reader | Env override (scope) |
+|---|---|---|---|---|
+| `materializer.memory_limit_mb` | `4096` | `RLIMIT_AS` ceiling per sandboxed process (MiB) | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
+| `materializer.max_duration_seconds` | `1800` | wall-clock ceiling; `RLIMIT_CPU` is the candidate's integer `cpu_limit` times this | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
+| `materializer.max_workspace_bytes` | `268435456` | expanded-size cap on the baseline and the built workspace; also `RLIMIT_FSIZE` | `scripts/factory_core/materializer.py` (`build_workspace`, `resolve_limits`) | none |
+| `materializer.max_nproc` | `128` | `RLIMIT_NPROC` ceiling for sandboxed processes (bounds the fork-bomb memory multiplier). The kernel accounts it per user, not per sandbox; whether processes outside the sandbox count is not verified in Phase A, and a sandbox-scoped bound (cgroup `pids.max`) is a Phase B item | `scripts/factory_core/materializer.py` (`resolve_limits`) | none |
 
 ### Unread keys (summary)
 
@@ -527,7 +545,7 @@ back to defaults on any error.
 |---|---|---|
 | `token_optimization` (the only block that overlays `config.yaml`) | Merged over the run's config by `effective_config.resolve` (`effective_config.py:124-142`): baked, then the clone's committed config, then the adapter block. Written to the clone only when the clone has **no** `.claude/skills/refinement/config.yaml` (`effective_config.py:287-320`). When the clone has one it wins unchanged and a drift warning is printed. Fail-open: an invalid adapter skips the overlay | every `token_optimization` reader above |
 | `safety.sensitive_keywords` | unioned with `epic_autopilot.sensitive_keywords` | `epic_autopilot.py:397-410` (adapter directory: `_target_dir()`, see the `epic_autopilot` table) |
-| `safety.hard_exclude_paths` | replaces `epic_autopilot.hard_exclude_paths` in the autopilot's lookup order; the autopilot unions the lookups from `CLONE_DIR`/`.` and from `_target_dir()` (`_effective_exclude_paths`) | `epic_autopilot.py:359-368,383-394,442-462`; `mechanism_candidate.py:373-407` |
+| `safety.hard_exclude_paths` | replaces `epic_autopilot.hard_exclude_paths` in the autopilot's lookup order; the autopilot unions the lookups from `CLONE_DIR`/`.` and from `_target_dir()` (`_effective_exclude_paths`) | `epic_autopilot.py:359-368,383-394,442-462`; `mechanism_candidate.py:381-415` |
 | `safety.critical_diff_paths`, `safety.migration_seed_auth_patterns` | pattern lists for diff ranking and the blast-radius gate, with the floor unioned in | `scripts/diff_rank.py:70-84`, `scripts/gate_blast_radius.py:145-160` |
 | `safety.main_red_allowed_paths` | paths the main-red fixer may edit | `main_red_fixer.py:25-33,292` |
 | `safety.dispatch_ceiling_keywords` | **not read from the adapter**: only `adapter_defaults` supplies the fallback to `architecture_slice.py:83` | none effective |
