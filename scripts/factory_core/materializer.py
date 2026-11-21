@@ -305,3 +305,155 @@ def compute_repo_digest(commit, repo_root, *, max_bytes=None):
     cap = load_config()["max_workspace_bytes"] if max_bytes is None else max_bytes
     _, _, manifest = _load_baseline(commit, repo_root, cap)
     return mc.canonical_digest(manifest)
+
+
+# ── Workspace construction ──────────────────────────────────────────────────────
+
+def _write_snapshot(workspace, entries, blobs, cap):
+    """Write the digested blobs with their recorded modes; symlinks last, so no regular
+    file is ever written through one."""
+    written = 0
+    for path, mode, _, _ in sorted(entries, key=lambda e: e[1] == _SYMLINK_MODE):
+        dest = os.path.join(workspace, *path.split("/"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if mode == _SYMLINK_MODE:
+            os.symlink(blobs[path].decode("utf-8"), dest)
+            continue
+        written += len(blobs[path])
+        if written > cap:
+            _fail(_cap_msg(written, cap))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(dest, flags, 0o755 if mode == "100755" else 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(blobs[path])
+
+
+def _apply_diff(workspace, diff):
+    """`git apply --check`, then `git apply`, in the snapshot (no .git, so git runs as a
+    plain patch tool). Inherited GIT_* variables are dropped, repository discovery stops
+    at the workspace, a baseline shaped like a bare repository (top-level HEAD, objects/,
+    refs/, config) is never used as one, and no system/global config applies — so no
+    other repository and no host or baseline config can steer the apply."""
+    env = _git_env()
+    env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(workspace))
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    for args in (("apply", "--check"), ("apply",)):
+        proc = subprocess.run(["git", "-c", "safe.bareRepository=explicit", *args, "-"],
+                              cwd=workspace, input=diff.encode("utf-8"),
+                              capture_output=True, env=env, check=False)
+        if proc.returncode != 0:
+            _fail("candidate diff does not apply cleanly to the baseline: "
+                  + proc.stderr.decode("utf-8", "replace").strip())
+
+
+def _check_diff_lines(diff):
+    """#464's extract_diff_paths() reads the diff with str.splitlines(), which also breaks
+    on \\r, \\v, \\f, \\x1c-\\x1e, \\x85, U+2028 and U+2029; git breaks only on \\n. A
+    diff the two would split differently is refused, so the lines that were validated are
+    the lines that are applied."""
+    lines = diff.split("\n")
+    if diff.endswith("\n"):
+        lines.pop()
+    if diff.splitlines() != lines:
+        _fail("candidate diff contains a line break other than '\\n' (\\r, \\v, \\f, "
+              "\\x1c-\\x1e, \\x85, U+2028 or U+2029); mechanism_candidate and git would "
+              "split it differently, so it is refused")
+
+
+def _verify_applied(workspace, candidate, entries, blobs):
+    """What git applied must be what #464 validated: every path whose content, type or
+    exec bit differs from the digested baseline is named by the validated diff and lies
+    under editable_path_allowlist, and no symlink was added, removed or retargeted. Never
+    follows a symlink."""
+    declared = set(mc.extract_diff_paths(candidate["diff"]))
+    allowlist = candidate["editable_path_allowlist"]
+    base = {path: mode for path, mode, _, _ in entries}
+    seen, changed = set(), set()
+    for dirpath, dirnames, filenames in os.walk(workspace, followlinks=False):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            st = os.lstat(full)
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            rel = os.path.relpath(full, workspace).replace(os.sep, "/")
+            seen.add(rel)
+            mode = base.get(rel)
+            if stat.S_ISLNK(st.st_mode):
+                if mode != _SYMLINK_MODE or os.fsencode(os.readlink(full)) != blobs[rel]:
+                    _fail(f"candidate diff added or retargeted the symlink {rel!r}")
+            elif not stat.S_ISREG(st.st_mode):
+                _fail(f"workspace entry {rel!r} is not a regular file, directory or symlink")
+            elif (mode not in _FILE_MODES
+                  or (mode == "100755") != bool(st.st_mode & stat.S_IXUSR)
+                  or st.st_size != len(blobs[rel])
+                  or Path(full).read_bytes() != blobs[rel]):
+                changed.add(rel)
+    for rel in sorted(set(base) - seen):
+        if base[rel] == _SYMLINK_MODE:
+            _fail(f"candidate diff removed the symlink {rel!r}")
+        changed.add(rel)
+    stray = sorted(p for p in changed if p not in declared or not mc._contained(p, allowlist))
+    if stray:
+        _fail(f"candidate diff changed paths the validated diff does not name: {stray}")
+
+
+def _tree_bytes(root):
+    """Total size of everything under root; never follows a symlink."""
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in dirnames + filenames:
+            st = os.lstat(os.path.join(dirpath, name))
+            if not stat.S_ISDIR(st.st_mode):
+                total += st.st_size
+    return total
+
+
+def remove_workspace(workspace):
+    if workspace and os.path.lexists(workspace):
+        shutil.rmtree(workspace)
+
+
+def _cleanup(workspace):
+    """remove_workspace(), reporting a failure instead of raising it, so the original
+    refusal survives and the leaked workspace is named."""
+    try:
+        remove_workspace(workspace)
+    except OSError as exc:
+        return f"workspace {workspace} was not removed: {exc}"
+    return None
+
+
+def _build_workspace(candidate, baseline, entries, blobs, cap):
+    workspace = tempfile.mkdtemp(prefix="materializer-")
+    try:
+        roots = [baseline.repo_root] + [d for d in (os.environ.get("ARTIFACTS_DIR"),) if d]
+        for root in roots:
+            if _is_within(workspace, root):
+                _fail(f"workspace {workspace} is inside {root}; it must be outside the "
+                      f"clone and $ARTIFACTS_DIR")
+        _write_snapshot(workspace, entries, blobs, cap)
+        _check_diff_lines(candidate["diff"])
+        _apply_diff(workspace, candidate["diff"])
+        size = _tree_bytes(workspace)
+        if size > cap:
+            _fail(_cap_msg(size, cap))
+        _verify_applied(workspace, candidate, entries, blobs)
+    except BaseException as exc:
+        leftover = _cleanup(workspace)
+        if leftover and isinstance(exc, Exception):
+            raise MaterializerError(f"{_error_text(exc)}; {leftover}") from exc
+        raise
+    return workspace
+
+
+def build_workspace(candidate, baseline, *, config=None):
+    """A fresh mkdtemp() workspace: the pinned commit's blobs plus the candidate diff.
+    Outside the clone and $ARTIFACTS_DIR; no .git. The size cap is checked on the tree
+    listing before any blob is read, while writing, and after the diff is applied. On
+    any failure the workspace is removed before the error propagates; on success the
+    caller owns remove_workspace()."""
+    _check_baseline(baseline)
+    cap = _config(config)["max_workspace_bytes"]
+    entries, blobs, _ = _load_baseline(baseline.commit, baseline.repo_root, cap)
+    return _build_workspace(candidate, baseline, entries, blobs, cap)

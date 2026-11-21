@@ -285,3 +285,170 @@ def test_expanded_size_cap_checked_before_reading(tmp_path):
     b = _make_repo(tmp_path, {**_CLEAN_FILES, "docs/superpowers/zeros.bin": {"zeros": 4096}})
     with pytest.raises(mz.MaterializerError, match="over materializer.max_workspace_bytes"):
         mz.compute_repo_digest(b.commit, b.repo_root, max_bytes=4096)
+
+
+# ── Workspace construction ──────────────────────────────────────────────────────
+
+def test_build_workspace_applies_the_diff_to_a_fresh_snapshot(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, "docs/superpowers/link": {"symlink": "notes/t.md"}})
+    ws = mz.build_workspace(_record(b), b)
+    try:
+        root = Path(ws)
+        assert root.parent == scratch_tmp
+        assert not mz._is_within(ws, b.repo_root)
+        assert (root / _DOC).read_text(encoding="utf-8") == "new\n"
+        assert (root / _TOOL).read_text(encoding="utf-8") == "MAX = 3\n"
+        assert os.stat(root / "scripts/run.sh").st_mode & stat.S_IXUSR
+        assert not os.stat(root / _TOOL).st_mode & stat.S_IXUSR
+        assert os.readlink(root / "docs/superpowers/link") == "notes/t.md"
+        assert not (root / ".git").exists()
+        assert os.listdir(b.repo_root) == [".git"]  # the baseline clone is never written
+    finally:
+        mz.remove_workspace(ws)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_diff_that_does_not_apply_fails_and_leaves_nothing(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    r = _record(b, diff=_diff(_DOC, "-not the baseline", "+new"))
+    with pytest.raises(mz.MaterializerError, match="does not apply cleanly"):
+        mz.build_workspace(r, b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_failed_build_reports_a_leaked_workspace(tmp_path, scratch_tmp, monkeypatch):
+    b = _make_repo(tmp_path)
+    real = mz.remove_workspace
+
+    def stuck(ws):
+        raise OSError("device busy")
+    monkeypatch.setattr(mz, "remove_workspace", stuck)
+    with pytest.raises(mz.MaterializerError,
+                       match="(?s)does not apply cleanly.*was not removed: device busy"):
+        mz.build_workspace(_record(b, diff=_diff(_DOC, "-not the baseline", "+new")), b)
+    for leftover in os.listdir(scratch_tmp):
+        real(str(scratch_tmp / leftover))
+
+
+def test_inherited_git_env_is_ignored(tmp_path, scratch_tmp, monkeypatch):
+    other = _make_repo(tmp_path, {"decoy.txt": {"content": "another repository\n"}}, name="other")
+    b = _make_repo(tmp_path)
+    record = _record(b)
+    monkeypatch.setenv("GIT_DIR", str(Path(other.repo_root) / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", other.repo_root)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "decoy-index"))
+    assert mz.compute_repo_digest(b.commit, b.repo_root) == record["baseline"]["repo_digest"]
+    ws = mz.build_workspace(record, b)
+    try:
+        assert (Path(ws) / _DOC).read_text(encoding="utf-8") == "new\n"
+        assert os.listdir(other.repo_root) == [".git"]
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_baseline_shaped_like_a_bare_repo_cannot_configure_git_apply(tmp_path, scratch_tmp):
+    """Top-level HEAD/objects/refs/config would make git treat the workspace as a bare
+    repo and load its config; here that config would turn a whitespace warning into an
+    error. safe.bareRepository=explicit keeps git a plain patch tool."""
+    hostile = {**_CLEAN_FILES, "HEAD": {"content": "ref: refs/heads/main\n"},
+               "objects/info/keep": {"content": ""}, "refs/heads/keep": {"content": ""},
+               "config": {"content": "[core]\n\tbare = true\n[apply]\n\twhitespace = error\n"}}
+    b = _make_repo(tmp_path, hostile)
+    ws = mz.build_workspace(_record(b, diff=_diff(_DOC, "-old", "+new  ")), b)
+    try:
+        assert (Path(ws) / _DOC).read_text(encoding="utf-8") == "new  \n"
+    finally:
+        mz.remove_workspace(ws)
+
+
+def test_workspace_cap_trips_during_construction(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, "docs/superpowers/zeros.bin": {"zeros": 8192}})
+    with pytest.raises(mz.MaterializerError, match="over materializer.max_workspace_bytes"):
+        mz.build_workspace(_record(b), b, config={**_CFG, "max_workspace_bytes": 8192})
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_workspace_cap_counts_the_applied_diff(tmp_path, scratch_tmp):
+    b = _make_repo(tmp_path)
+    total = sum(len(spec["content"].encode()) for spec in _CLEAN_FILES.values())
+    cfg = {**_CFG, "max_workspace_bytes": total}
+    mz.remove_workspace(mz.build_workspace(_record(b), b, config=cfg))  # same-size edit fits
+    grow = _record(b, diff=_diff(_DOC, "-old", "+new and longer"))
+    with pytest.raises(mz.MaterializerError, match="over materializer.max_workspace_bytes"):
+        mz.build_workspace(grow, b, config=cfg)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_workspace_inside_the_clone_or_artifacts_is_refused(tmp_path, monkeypatch):
+    b = _make_repo(tmp_path)
+    monkeypatch.setattr(tempfile, "tempdir", b.repo_root)
+    with pytest.raises(mz.MaterializerError, match="must be outside the clone"):
+        mz.build_workspace(_record(b), b)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(artifacts))
+    monkeypatch.setenv("ARTIFACTS_DIR", str(artifacts))
+    with pytest.raises(mz.MaterializerError, match="must be outside the clone"):
+        mz.build_workspace(_record(b), b)
+    assert os.listdir(artifacts) == []
+    assert os.listdir(b.repo_root) == [".git"]
+
+
+def _smuggle(sep, target=_TOOL):
+    """Docs-only by #464's reading, but git also patches `target`: `sep` is a line break
+    for str.splitlines() and not for git, so the fake @@ header after it makes the parser
+    swallow the real ---/+++ header pair as hunk content."""
+    return (f"diff --git a/{_DOC} b/{_DOC}\n--- a/{_DOC}\n+++ b/{_DOC}\n@@ -1,1 +1,1 @@\n-old\n"
+            f"+new{sep}@@ -1,1 +1,1 @@\n--- a/{target}\n+++ b/{target}\n@@ -1,1 +1,1 @@\n"
+            f"-MAX = 3\n+MAX = 99999\n")
+
+
+@pytest.mark.parametrize("sep", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028",
+                                 "\u2029", "\r"])
+def test_diff_with_a_non_newline_line_break_is_refused(tmp_path, scratch_tmp, sep):
+    b = _make_repo(tmp_path)
+    r = _record(b, diff=_smuggle(sep))
+    assert sorted(mc.extract_diff_paths(r["diff"])) == [_DOC]  # #464 sees a docs-only H0 diff
+    with pytest.raises(mz.MaterializerError, match="line break other than"):
+        mz.build_workspace(r, b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_applied_paths_must_be_the_validated_paths(tmp_path, scratch_tmp, monkeypatch):
+    """The outcome is checked even when a parser differential gets past the line check."""
+    b = _make_repo(tmp_path)
+    monkeypatch.setattr(mz, "_check_diff_lines", lambda diff: None)
+    with pytest.raises(mz.MaterializerError,
+                       match=r"changed paths the validated diff does not name: \['scripts/tool.py'\]"):
+        mz.build_workspace(_record(b, diff=_smuggle("\x0c")), b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_diff_cannot_retarget_a_baseline_symlink(tmp_path, scratch_tmp):
+    """A plain hunk on a symlink path rewrites its target. No mode header is involved, so
+    #464 accepts it, and the baseline's own symlink check has already run."""
+    link = "docs/superpowers/notes/link"
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, link: {"symlink": "t.md"}})
+    eof = "\\ No newline at end of file\n"
+    diff = (f"diff --git a/{link} b/{link}\n--- a/{link}\n+++ b/{link}\n@@ -1 +1 @@\n"
+            f"-t.md\n{eof}+/etc/passwd\n{eof}")
+    with pytest.raises(mz.MaterializerError, match="added or retargeted the symlink"):
+        mz.build_workspace(_record(b, diff=diff), b)
+    assert os.listdir(scratch_tmp) == []
+
+
+def test_verify_applied_refuses_a_removed_symlink(tmp_path, scratch_tmp):
+    """Called directly: #464 rejects `deleted file mode 120000`, so no validated diff
+    reaches this branch through git. The check does not depend on that."""
+    link = "docs/superpowers/notes/link"
+    b = _make_repo(tmp_path, {**_CLEAN_FILES, link: {"symlink": "t.md"}})
+    r = _record(b)
+    entries, blobs, _ = mz._load_baseline(b.commit, b.repo_root, _CFG["max_workspace_bytes"])
+    ws = mz.build_workspace(r, b)
+    try:
+        mz._verify_applied(ws, r, entries, blobs)  # the honest result passes
+        os.unlink(os.path.join(ws, *link.split("/")))
+        with pytest.raises(mz.MaterializerError, match="removed the symlink"):
+            mz._verify_applied(ws, r, entries, blobs)
+    finally:
+        mz.remove_workspace(ws)
