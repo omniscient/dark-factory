@@ -1,0 +1,31 @@
+{
+  "clean": {
+    "extends": null,
+    "files": {
+      "README.md": {"content": "synthetic materializer baseline (#465)\n"},
+      "docs/superpowers/notes/t.md": {"content": "old\n"},
+      "scripts/tool.py": {"content": "MAX = 3\n"},
+      "scripts/run.sh": {"content": "#!/bin/sh\necho ok\n", "mode": "100755"}
+    }
+  },
+  "write-path-symlink": {
+    "extends": "clean",
+    "files": {"docs/superpowers/link": {"symlink": "../../scripts"}}
+  },
+  "symlink-escape": {
+    "extends": "clean",
+    "files": {"docs/superpowers/escape": {"symlink": "../../../outside"}}
+  },
+  "submodule": {
+    "extends": "clean",
+    "files": {"vendor/lib": {"gitlink": "0123456789abcdef0123456789abcdef01234567"}}
+  },
+  "lfs-pointer": {
+    "extends": "clean",
+    "files": {"docs/superpowers/model.bin": {"content": "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n"}}
+  },
+  "archive-bomb": {
+    "extends": "clean",
+    "files": {"docs/superpowers/zeros.bin": {"zeros": 2097152}}
+  }
+}
