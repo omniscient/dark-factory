@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 from . import identity
@@ -290,8 +291,8 @@ Make the minimal change, then stop. Do not commit, push, or open a PR — the ha
 
 
 def run_once(cfg: dict, io, state: dict) -> dict:
-    """One bounded audit → fix → PR pass. Outcomes: inactive | error | held | clean |
-    escalated (reason cap | no-fix | scope:<s>) | fixed-deterministically | fixed-by-agent."""
+    """One bounded audit → fix → PR pass. Outcomes: inactive | error |
+    held (reason needs-discussion | halt-check-failed) | clean | escalated (reason cap | no-fix | scope:<s>) | fixed-deterministically | fixed-by-agent."""
     if not io.audit_hook_present():
         return {"outcome": "inactive", "issue": None, "pr": None}
     branch = io.start_branch()  # pristine origin/main checkout — the audit runs on it too
@@ -309,8 +310,9 @@ def run_once(cfg: dict, io, state: dict) -> dict:
     issue = io.find_or_create_tracking_issue(advisories, h)
     if issue is None:
         return {"outcome": "error", "issue": None, "pr": None, "reason": "tracking-issue"}
-    if io.is_halted(issue):  # needs-discussion halts ALL automation, this loop included
-        return {"outcome": "held", "issue": issue, "pr": None, "reason": "needs-discussion"}
+    halt = io.halt_reason(issue)  # needs-discussion halts ALL automation, this loop included
+    if halt:  # "needs-discussion", or "halt-check-failed" (a gh error holds too — fail closed)
+        return {"outcome": "held", "issue": issue, "pr": None, "reason": halt}
     if attempts_for(state, h) >= cfg["max_attempts"]:
         if not cap_escalated(state, h):
             io.escalate(issue, "cap", h)
@@ -506,15 +508,32 @@ class LiveIO(_MainRedLiveIO):
         get_tracker().set_status(str(issue), "in_review")
 
     def _labels(self, issue):
+        """Raises on a failed lookup: "no labels" and "lookup failed" must not both be []."""
         r = self._sh(["gh", "issue", "view", str(issue), "--repo", OWNER,
                       "--json", "labels", "--jq", ".labels[].name"], timeout=60)
+        if r.returncode != 0:
+            raise RuntimeError(f"gh issue view {issue} exited {r.returncode}: "
+                               f"{(r.stderr or '').strip()[-300:]}")
         return (r.stdout or "").split()
 
     def has_direct_to_pr(self, issue):
-        return "direct-to-pr" in self._labels(issue)
+        try:
+            return "direct-to-pr" in self._labels(issue)
+        except Exception:
+            return False  # an error never arms an auto-merge
+
+    def halt_reason(self, issue):
+        """None | "needs-discussion" | "halt-check-failed". The halt check fails CLOSED: a gh
+        error or timeout holds the loop exactly like the label would, and says so."""
+        try:
+            labels = self._labels(issue)
+        except Exception as exc:
+            print(f"deps_fixer: halt check failed for #{issue}: {exc}", file=sys.stderr)
+            return "halt-check-failed"
+        return "needs-discussion" if "needs-discussion" in labels else None
 
     def is_halted(self, issue):
-        return "needs-discussion" in self._labels(issue)
+        return self.halt_reason(issue) is not None
 
     def add_label(self, issue, label):
         from .providers import get_tracker
@@ -559,5 +578,6 @@ def main_once() -> int:
                 json.dump(state, f)
         except Exception:
             pass
-    print(f"deps_fixer={out['outcome']} issue=#{out.get('issue')} pr=#{out.get('pr')}")
+    reason = f" reason={out['reason']}" if out.get("reason") else ""
+    print(f"deps_fixer={out['outcome']} issue=#{out.get('issue')} pr=#{out.get('pr')}{reason}")
     return 0

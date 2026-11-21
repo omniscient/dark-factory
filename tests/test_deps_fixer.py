@@ -329,8 +329,11 @@ class FakeIO:
     def find_or_create_tracking_issue(self, advisories, h):
         return self._issue
 
-    def is_halted(self, issue):
-        return self._halted
+    def halt_reason(self, issue):
+        # halted: False | True (a real needs-discussion label) | a reason string
+        if self._halted is True:
+            return "needs-discussion"
+        return self._halted or None
 
     def start_branch(self):
         self.calls.append("branch")
@@ -406,6 +409,14 @@ def test_needs_discussion_on_tracking_issue_holds_the_loop():
     out = df.run_once(CFG, io, st)
     assert out == {"outcome": "held", "issue": 42, "pr": None, "reason": "needs-discussion"}
     assert st == {} and io.prs == [] and io.prompts == [] and io.calls == ["branch", "audit"]
+
+
+def test_halt_check_failure_holds_with_its_own_reason():
+    io = FakeIO(halted="halt-check-failed")
+    st = {}
+    out = df.run_once(CFG, io, st)
+    assert out == {"outcome": "held", "issue": 42, "pr": None, "reason": "halt-check-failed"}
+    assert st == {} and io.prs == [] and io.prompts == []
 
 
 def test_clean_moves_tracking_issue_to_done_then_closes():
@@ -584,6 +595,52 @@ def test_changed_paths_lists_both_sides_of_a_rename(tmp_path, monkeypatch):
     changed = io.changed_paths()
     assert ".github/workflows/ci.yml" in changed
     assert df.classify_deps_scope(changed, GLOBS, BLOCKED) == "protected"
+
+
+def _gh_result(rc, out="", err=""):
+    return subprocess.CompletedProcess(args=["gh"], returncode=rc, stdout=out, stderr=err)
+
+
+def test_label_lookup_error_fails_closed_for_halt_and_open_for_merge(tmp_path, monkeypatch, capsys):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    monkeypatch.setattr(io, "_sh", lambda *a, **k: _gh_result(1, "", "HTTP 502: Bad Gateway"))
+    assert io.is_halted(42) is True
+    assert io.has_direct_to_pr(42) is False
+    assert io.halt_reason(42) == "halt-check-failed"
+    assert "HTTP 502" in capsys.readouterr().err          # the failing gh's stderr is shown
+
+
+def test_label_lookup_timeout_fails_closed_for_halt_and_open_for_merge(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+
+    def timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="gh", timeout=60)
+    monkeypatch.setattr(io, "_sh", timeout)
+    assert io.is_halted(42) is True and io.has_direct_to_pr(42) is False
+
+
+def test_label_lookup_success_reads_labels(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    monkeypatch.setattr(io, "_sh", lambda *a, **k: _gh_result(0, "bug\nneeds-discussion\n"))
+    assert io.halt_reason(42) == "needs-discussion" and io.has_direct_to_pr(42) is False
+    monkeypatch.setattr(io, "_sh", lambda *a, **k: _gh_result(0, "direct-to-pr\n"))
+    assert io.halt_reason(42) is None and io.is_halted(42) is False
+    assert io.has_direct_to_pr(42) is True
+
+
+def test_main_once_summary_line_carries_reason(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("CLONE_DIR", str(tmp_path))
+    monkeypatch.setattr(df, "LiveIO", lambda cfg: None)
+    monkeypatch.setattr(df, "run_once", lambda cfg, io, state: {
+        "outcome": "held", "issue": 42, "pr": None, "reason": "halt-check-failed"})
+    assert df.main_once() == 0
+    assert capsys.readouterr().out.strip() == (
+        "deps_fixer=held issue=#42 pr=#None reason=halt-check-failed")
+    monkeypatch.setattr(df, "run_once", lambda cfg, io, state: {
+        "outcome": "clean", "issue": None, "pr": None})
+    df.main_once()
+    assert capsys.readouterr().out.strip() == "deps_fixer=clean issue=#None pr=#None"
 
 
 def _stub(tmp_path, monkeypatch, name, script):
