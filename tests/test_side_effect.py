@@ -199,5 +199,7 @@ def test_config_yaml_has_side_effect_phase_levels():
     cfg = _yaml.safe_load((_REPO_ROOT / "config/config.yaml").read_text())
     levels = cfg["side_effect"]["phase_levels"]
     for phase in ("refine", "plan", "implement", "validate", "conformance",
-                  "code_review", "revise_advisory", "deconflict", "fix_main", "audit_deps"):
+                  "code_review", "revise_advisory", "deconflict", "fix_main"):
         assert levels[phase] == 5, f"{phase} must start at level 5 (no v1 regression)"
+    # #548: the deps fix agent only edits files and uses local git; the harness pushes.
+    assert levels["audit_deps"] == 2

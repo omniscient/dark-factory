@@ -269,7 +269,7 @@ no (`loops[].side_effect_level` in the adapter is a separate setting for adapter
 | `side_effect.phase_levels.revise_advisory` | `5` | `fix`, `continue` |
 | `side_effect.phase_levels.deconflict` | `5` | `deconflict` |
 | `side_effect.phase_levels.fix_main` | `5` | `fix-main` |
-| `side_effect.phase_levels.audit_deps` | `5` | `audit-deps` |
+| `side_effect.phase_levels.audit_deps` | `2` | `audit-deps` |
 
 ### `token_optimization`
 
