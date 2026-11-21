@@ -181,6 +181,38 @@ def test_build_fix_prompt_names_scope_and_no_fix_rule():
     p = df.build_fix_prompt(df.parse_advisories(NOFIX), GLOBS, BLOCKED)
     assert "PYSEC-2026-4298" in p and "**/package-lock.json" in p and ".github/" in p
     assert df.NOTES_FILE in p and "audit" in p and "ignore" in p
+    assert "unparseable" in p
+
+
+def _adv(i, aid=None):
+    return {"ecosystem": "npm", "package": f"p{i}", "installed": "1.0", "fixed_in": "2.0",
+            "id": aid or f"GHSA-{i:04d}-aaaa-bbbb", "severity": "high"}
+
+
+def test_advisory_table_caps_rows_but_hash_covers_all():
+    adv = [_adv(i) for i in range(51)]
+    table = df.advisory_table(adv)
+    assert sum(1 for ln in table.splitlines() if ln.startswith("| `npm`")) == 50
+    assert table.endswith("\n\n+1 more advisories not shown")
+    assert df.advisory_set_hash(adv) != df.advisory_set_hash(adv[:50])   # all 51 hashed
+    assert "**51**" in df.tracking_issue_body(adv, "h")                   # count unchanged
+
+
+def test_build_fix_prompt_frames_table_as_data():
+    p = df.build_fix_prompt(df.parse_advisories(NOFIX), GLOBS, BLOCKED)
+    assert df.DATA_FRAMING in p
+    assert p.index(df.DATA_FRAMING) < p.index("| Ecosystem |")
+
+
+def test_pr_title_names_only_structured_ids():
+    adv = [_adv(0, str(n)) for n in range(1, 8)]
+    adv += [_adv(0, "via:@types/node,lodash"), _adv(0, df._placeholder("id", "x y"))]
+    t = df.pr_title(adv)
+    assert t == "deps: resolve 9 advisories (1, 2, 3, 4, 5, …, +2 other)"
+    assert "via:" not in t and "unparseable" not in t and "@" not in t
+    assert df.pr_title([_adv(0, "via:lodash")]) == "deps: resolve 1 advisories (+1 other)"
+    many = [_adv(i, f"CVE-2024-{1000000 + i}") for i in range(1000)]
+    assert len(df.pr_title(many)) <= 200
 
 
 def test_pr_title_and_body():
