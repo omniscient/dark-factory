@@ -215,4 +215,8 @@ materializer:
   memory_limit_mb: 4096         # RLIMIT_AS ceiling per sandboxed process (MiB)
   max_duration_seconds: 1800    # wall-clock ceiling; RLIMIT_CPU = cpu_limit x this
   max_workspace_bytes: 268435456  # expanded-size cap on the workspace (256 MiB); also RLIMIT_FSIZE
-  max_nproc: 128                # RLIMIT_NPROC ceiling inside the sandbox
+  max_nproc: 128                # RLIMIT_NPROC ceiling. Per the real UID, not sandbox-scoped:
+                                 # under --unshare-user that is the host factory user, so this
+                                 # also counts that user's processes outside the sandbox (can
+                                 # read as a spurious EAGAIN, not proof the sandbox is full).
+                                 # A cgroup pids.max is the sandbox-scoped bound; Phase B item.

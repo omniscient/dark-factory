@@ -476,12 +476,14 @@ def test_bwrap_argv_exact_order(tmp_path, scratch_tmp):
         base = [x for d in mz.base_bind_dirs() for x in ("--ro-bind", d, d)]
         assert argv == [
             "bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-            "--unshare-cgroup-try", "--unshare-net", "--die-with-parent", "--new-session",
+            "--unshare-cgroup-try", "--unshare-net", "--disable-userns",
+            "--die-with-parent", "--new-session",
             "--cap-drop", "ALL",
             "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/home/sandbox",
             "--setenv", "TMPDIR", "/tmp",
             *base,
-            "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/home/sandbox",
+            "--size", "4096", "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
+            "--size", "4096", "--tmpfs", "/home/sandbox",
             "--ro-bind", ws, "/workspace",
             "--bind", os.path.join(ws, "docs", "superpowers", "notes", "t.md"),
             "/workspace/docs/superpowers/notes/t.md",

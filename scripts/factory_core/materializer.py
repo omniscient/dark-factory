@@ -150,6 +150,11 @@ def resolve_limits(candidate, config):
     else:
         _fail(f"resource_envelope.cpu_limit {cpu!r} is not a supported format "
               f"(a bare integer CPU count from 1 to 999)")
+    host_cpus = os.cpu_count() or 1
+    if cpus > host_cpus:
+        _fail(f"resource_envelope.cpu_limit {cpu!r} exceeds this host's cpu count "
+              f"({host_cpus}); cpu_limit may lower the RLIMIT_CPU multiplier, never "
+              f"raise it past what the host actually has")
     limits["cpu_seconds"] = cpus * limits["max_duration_seconds"]
     limits["max_nproc"] = config["max_nproc"]
     limits["max_file_bytes"] = config["max_workspace_bytes"]
@@ -384,6 +389,9 @@ def _verify_applied(workspace, candidate, entries, blobs):
                     _fail(f"candidate diff added or retargeted the symlink {rel!r}")
             elif not stat.S_ISREG(st.st_mode):
                 _fail(f"workspace entry {rel!r} is not a regular file, directory or symlink")
+            elif mode == _SYMLINK_MODE:
+                _fail(f"candidate diff replaced the symlink {rel!r} with a regular file; "
+                      f"removing a symlink is refused, never accepted as an ordinary change")
             elif (mode not in _FILE_MODES
                   or (mode == "100755") != bool(st.st_mode & stat.S_IXUSR)
                   or st.st_size != len(blobs[rel])
@@ -502,18 +510,29 @@ def build_bwrap_argv(candidate, workspace, config, *, argv=()):
     Bind sources are only the base dirs, the workspace, and validated workspace
     subpaths — never `/`, $HOME, $ARTIFACTS_DIR, the clone, or any credential path, by
     construction. The env is cleared to PATH/HOME/TMPDIR. prlimit sits after `--` so
-    the rlimits bind the sandboxed child, never bwrap itself."""
+    the rlimits bind the sandboxed child, never bwrap itself. `--disable-userns` blocks
+    the sandboxed child from opening a further, unconfined user namespace of its own
+    (bwrap >= 0.8); a seccomp filter is a Phase B launcher item, not this translator's.
+    Each `--tmpfs` carries a matching `--size` (bwrap >= 0.9), so /tmp and $HOME are
+    bounded by the same byte ceiling as the workspace instead of being able to exhaust
+    host RAM/disk unbounded; RLIMIT_FSIZE still only caps one file at a time, and
+    accounting the total written across tmpfs plus the bound write paths during an
+    actual run (a quota, or a post-run walk) is Phase B's job, since Phase A never
+    executes anything to recheck."""
     check_network(candidate)
     limits = resolve_limits(candidate, config)
     writes = validate_write_paths(candidate, workspace)
+    tmpfs_size = str(limits["max_file_bytes"])
     args = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
-            "--unshare-cgroup-try", "--unshare-net", "--die-with-parent", "--new-session",
+            "--unshare-cgroup-try", "--unshare-net", "--disable-userns",
+            "--die-with-parent", "--new-session",
             "--cap-drop", "ALL",
             "--clearenv", "--setenv", "PATH", SANDBOX_PATH, "--setenv", "HOME", SANDBOX_HOME,
             "--setenv", "TMPDIR", "/tmp"]
     for d in base_bind_dirs():
         args += ["--ro-bind", d, d]
-    args += ["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--tmpfs", SANDBOX_HOME]
+    args += ["--size", tmpfs_size, "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
+             "--size", tmpfs_size, "--tmpfs", SANDBOX_HOME]
     args += ["--ro-bind", workspace, SANDBOX_WORKSPACE]
     for rel in writes:
         args += ["--bind", os.path.join(workspace, *rel.split("/")), f"{SANDBOX_WORKSPACE}/{rel}"]
