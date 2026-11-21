@@ -77,6 +77,10 @@ _RENAME = ("diff --git a/docs/superpowers/a.md b/tests/a.md\nsimilarity index 10
     (f"diff --git a/{_DOC} b/{_DOC}\nnew file mode 160000\n--- /dev/null\n+++ b/{_DOC}\n"
      "@@ -0,0 +1 @@\n+Subproject commit 0000000000000000000000000000000000000000\n", "only regular file modes"),
     (f"diff --git a/{_DOC} b/{_DOC}\nold mode 100644\nnew mode 120000\n", "only regular file modes"),
+    # git accepts any whitespace after the mode, so a mode line that fails _MODE_HEADER_RE
+    # must be rejected, not waved through as a generic extended header (#552).
+    *[(f"diff --git a/{_DOC} b/{_DOC}\nnew file mode 120000{tail}\n--- /dev/null\n+++ b/{_DOC}\n"
+       "@@ -0,0 +1 @@\n+/etc/passwd\n", "only regular file modes") for tail in (" ", "\t", "\r")],
 ])
 def test_diff_path_extraction(diff, match):
     with pytest.raises(mc.MechanismCandidateError, match=match):

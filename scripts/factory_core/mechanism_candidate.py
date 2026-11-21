@@ -136,6 +136,7 @@ _EXTENDED_HEADER_RE = re.compile(
 # allowlisted directory can point anywhere, and a gitlink (160000) is a submodule pointer,
 # so neither is a contained edit.
 _MODE_HEADER_RE = re.compile(r"^(?:old mode|new mode|deleted file mode|new file mode) (\S+)$")
+_MODE_HEADER_PREFIXES = ("old mode ", "new mode ", "deleted file mode ", "new file mode ")
 _REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 
 
@@ -337,9 +338,9 @@ def extract_diff_paths(diff):
             cur["rename_or_copy"] = True
         elif line.startswith("GIT binary patch") or line.startswith("Binary files "):
             _fail("binary patches are not accepted")
-        elif _MODE_HEADER_RE.match(line):
-            mode = _MODE_HEADER_RE.match(line).group(1)
-            if mode not in _REGULAR_FILE_MODES:
+        elif line.startswith(_MODE_HEADER_PREFIXES):
+            m = _MODE_HEADER_RE.match(line)
+            if not m or m.group(1) not in _REGULAR_FILE_MODES:
                 _fail(f"diff header {line!r}: only regular file modes 100644/100755 are "
                       f"accepted (symlinks and gitlinks are not contained edits)")
         elif not _EXTENDED_HEADER_RE.match(line):
