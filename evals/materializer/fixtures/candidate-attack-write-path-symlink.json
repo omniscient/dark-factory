@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "candidate_id": "mz-attack-write-path-symlink",
+  "candidate_digest": "sha256:1fcf3c277ad68a41cc9526278501f4f37247fe2015573884537eb8056496aab6",
+  "parent_digest": null,
+  "baseline": {
+    "harness_digest": "sha256:917c2b2f18b3c6cf5f7a9921cf223afb16781a08145415dd6318022ef0533dd7",
+    "repo_digest": "sha256:ed9fe1e236961eeaa2b5539efc02b9eb019942ceb2d01ff793546e6ab3e6c09b",
+    "task_digest": "sha256:4248e08f0f606252619b12f8d190af27352baf938d304c98cab5697226b6f9bd",
+    "model_runtime_digest": "sha256:3bcb71f26c12c048b5e5a1f3ec6fef91fe0b1dc743064a14aac359f6548d1e82",
+    "tool_digest": "sha256:b667cbf0a3fd579fecdca950d55ea4bf673267636eb0797f0f78d2e141d6b943",
+    "verifier_digest": "sha256:1d322c09176823371c91c7b3ed8e88bc6f4e69dbc310c24b4ba2696aff2c94d4",
+    "policy_digest": "sha256:e53b94709a9a35ba70a4ee8d5ad7aa1245b3bd179b1c9c875a56a2c02c5c0e69",
+    "library_digest": "sha256:65edc1135c05f24893bbea02c5b5434b9089a49311cf8bef78abc4fd1c14ce4b"
+  },
+  "source": {
+    "issue": 465,
+    "run_id": "run-materializer-test"
+  },
+  "observed_failure": {
+    "description": "synthetic",
+    "evidence_refs": []
+  },
+  "invariant_scope": "materializer-test",
+  "domain_scope": {
+    "repo": "omniscient/dark-factory",
+    "issue": 465,
+    "pr": null,
+    "agent_role": "implement"
+  },
+  "risk_class": "H0",
+  "editable_path_allowlist": [
+    "docs/superpowers/"
+  ],
+  "diff": "diff --git a/docs/superpowers/notes/t.md b/docs/superpowers/notes/t.md\n--- a/docs/superpowers/notes/t.md\n+++ b/docs/superpowers/notes/t.md\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+  "dependency_closure": [],
+  "expected_behavioral_hypothesis": "synthetic",
+  "resource_envelope": {
+    "cpu_limit": "1",
+    "memory_limit_mb": 512,
+    "max_duration_seconds": 60
+  },
+  "permission_envelope": {
+    "tool_allow": [],
+    "tool_deny": []
+  },
+  "network_envelope": {
+    "egress_allowed": false,
+    "allowed_hosts": []
+  },
+  "filesystem_envelope": {
+    "read_paths": [],
+    "write_paths": [
+      "docs/superpowers/link"
+    ]
+  },
+  "side_effect_envelope": {
+    "side_effect_level": 1
+  },
+  "probe_evidence_refs": [],
+  "contradictions": [],
+  "confidence": 0.5,
+  "reviewer": {
+    "actor": "verifier",
+    "identity": null
+  },
+  "approver": {
+    "actor": "human",
+    "identity": null
+  },
+  "lifecycle_state": "draft",
+  "supersession": {
+    "superseded_by": null,
+    "supersedes": []
+  },
+  "expiry": {
+    "expires_at": null
+  },
+  "rollback_handle": null
+}

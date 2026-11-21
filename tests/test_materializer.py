@@ -791,3 +791,132 @@ def test_cli_exit_codes(tmp_path):
     oversized = _cli(base + ["--candidate", str(huge), "--out-dir", str(tmp_path / "o6")], env)
     assert oversized.returncode == 2 and "cannot read candidate" in oversized.stderr
     assert not (tmp_path / "o6").exists()
+
+
+# ── Fixtures (evals/materializer/fixtures/) ─────────────────────────────────────
+
+_MANIFEST = json.loads((_FIXTURES_DIR / "manifest.json").read_text(encoding="utf-8"))
+_BASELINES = json.loads((_FIXTURES_DIR / "baseline-manifest.json").read_text(encoding="utf-8"))
+_ARGV_FIXTURES = ("attack-credential-canary", "attack-network-testnet", "attack-docker-socket",
+                  "attack-path-escape", "attack-git-mutation", "attack-resource-exhaustion")
+
+
+def _baseline_files(name):
+    spec = _BASELINES[name]
+    return {**(_baseline_files(spec["extends"]) if spec["extends"] else {}), **spec["files"]}
+
+
+def _fixture(name):
+    return json.loads((_FIXTURES_DIR / f"candidate-{name}.json").read_text(encoding="utf-8"))
+
+
+def test_fixture_set_is_complete():
+    names = set(_MANIFEST)
+    assert len(names) == 18
+    assert len([n for n in names if n.startswith("attack-")]) == 14
+    assert len([n for n in names if n.startswith("refuse-")]) == 4
+    on_disk = {p.name[len("candidate-"):-len(".json")] for p in _FIXTURES_DIR.glob("candidate-*.json")}
+    assert on_disk == names
+    assert _baseline_files("clean") == _CLEAN_FILES
+    assert {n for n, e in _MANIFEST.items() if "A" in e["phases"]} == names - {"refuse-h2-run"}
+    assert all(_MANIFEST[n]["phase_a_check"] == "argv" for n in _ARGV_FIXTURES)
+
+
+@pytest.mark.parametrize("name", sorted(_MANIFEST))
+def test_fixture_digests_are_current(tmp_path, name):
+    record = _fixture(name)
+    assert record["candidate_id"] == f"mz-{name}"
+    assert record["candidate_digest"] == mc.candidate_digest_of(record)
+    b = _make_repo(tmp_path, _baseline_files(_MANIFEST[name]["baseline"]))
+    try:
+        computed = mz.compute_repo_digest(b.commit, b.repo_root)
+    except mz.MaterializerError:
+        return  # a refused baseline has no digest to match
+    if name == "refuse-digest-mismatch":
+        assert record["baseline"]["repo_digest"] != computed
+    else:
+        assert record["baseline"]["repo_digest"] == computed
+
+
+@pytest.mark.parametrize("name", sorted(n for n, e in _MANIFEST.items() if "A" in e["phases"]))
+def test_phase_a_fixture_verdicts(tmp_path, scratch_tmp, name):
+    entry = _MANIFEST[name]
+    b = _make_repo(tmp_path, _baseline_files(entry["baseline"]))
+    cfg = {**mz.load_config(), **entry.get("config", {})}
+    bundle = mz.materialize(_fixture(name), baseline=b, out_dir=tmp_path / "out", config=cfg)
+    assert bundle["verdict"]["status"] == entry["materialize"], bundle["verdict"]["reason"]
+    if "error_match" in entry:
+        assert re.search(entry["error_match"], bundle["verdict"]["reason"]), bundle["verdict"]["reason"]
+    if entry["materialize"] == "BLOCKED":
+        assert bundle["provenance"]["invocation_digest"] is None  # refused before any argv
+    assert mz.verify_bundle(bundle)
+    assert os.listdir(scratch_tmp) == []
+    assert os.listdir(b.repo_root) == [".git"]
+
+
+def test_refuse_h2_run_fixture_materializes_as_h2(tmp_path, scratch_tmp):
+    """materialize() accepts H2; the run() refusal this fixture is named for is Phase B."""
+    b = _make_repo(tmp_path, _baseline_files("clean"))
+    bundle = mz.materialize(_fixture("refuse-h2-run"), baseline=b, out_dir=tmp_path / "out")
+    assert (bundle["verdict"]["status"], bundle["risk_class"]) == ("PASS", "H2")
+
+
+_HOSTILE_ENV = {
+    "GH_TOKEN": "CANARY-465-gh", "ANTHROPIC_API_KEY": "CANARY-465-anthropic",
+    "CLAUDE_CODE_OAUTH_TOKEN": "CANARY-465-oauth", "DOCKER_HOST": "tcp://docker-socket-proxy:2375",
+    "BUILDKIT_HOST": "tcp://buildkitd:8372", "BUILDKIT_PORT": "8372", "SEQ_URL": "http://seq:5341",
+    "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+}
+
+
+@pytest.mark.parametrize("name", _ARGV_FIXTURES)
+def test_execution_fixture_argv(tmp_path, scratch_tmp, monkeypatch, name):
+    """Argv-level only: checks the translator, not that the boundary holds (Phase B)."""
+    home, artifacts = tmp_path / "home", tmp_path / "artifacts"
+    for root in (home / ".config" / "gh", home / ".claude", artifacts):
+        root.mkdir(parents=True)
+        (root / "canary.txt").write_text("CANARY-465", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ARTIFACTS_DIR", str(artifacts))
+    for k, v in _HOSTILE_ENV.items():
+        monkeypatch.setenv(k, v)
+    record = _fixture(name)
+    b = _make_repo(tmp_path, _baseline_files(_MANIFEST[name]["baseline"]))
+    cfg = mz.load_config()
+    ws = mz.build_workspace(record, b, config=cfg)
+    try:
+        argv = mz.build_bwrap_argv(record, ws, cfg)
+        pre = argv[:argv.index("--")]
+        joined = "\0".join(a.replace(ws, "<ws>") for a in argv)  # tmp names never match
+        setenv = [pre[i + 1] for i, a in enumerate(pre) if a == "--setenv"]
+        binds = _binds(argv)
+        assert argv[0] == "bwrap" and setenv == ["PATH", "HOME", "TMPDIR"]
+        assert {src for _, src, _ in binds} <= set(mz.base_bind_dirs()) | {ws} | {
+            os.path.join(ws, *rel.split("/")) for rel in mz.validate_write_paths(record, ws)}
+        if name == "attack-credential-canary":
+            assert pre.index("--clearenv") < pre.index("--setenv")
+            for needle in ("CANARY-465", str(home), str(artifacts), ".config/gh", ".claude",
+                           ".gitconfig", ".archon", b.repo_root):
+                assert needle not in joined, needle
+        elif name == "attack-network-testnet":
+            assert "--unshare-net" in pre and "--share-net" not in argv
+        elif name == "attack-docker-socket":
+            assert "docker" not in joined.lower() and "buildkit" not in joined.lower()
+            for k, v in _HOSTILE_ENV.items():
+                assert k not in joined and v not in joined, k
+        elif name == "attack-path-escape":
+            assert [(s, d) for f, s, d in binds if f == "--bind"] == [
+                (os.path.join(ws, *_DOC.split("/")), f"/workspace/{_DOC}")]
+            assert ("--ro-bind", "/", "/") not in binds
+            assert (pre.index("--tmpfs") < pre.index(ws) < pre.index("--bind")
+                    < pre.index("--chdir"))
+        elif name == "attack-git-mutation":
+            assert not (Path(ws) / ".git").exists()
+            assert not any(a.endswith("/.git") or "/.git/" in a or ".gitconfig" in a for a in argv)
+            assert b.repo_root not in joined
+        elif name == "attack-resource-exhaustion":
+            tail = argv[argv.index("--") + 1:]
+            assert tail == ["prlimit", f"--as={256 * 1024 * 1024}", "--cpu=60",
+                            f"--nproc={cfg['max_nproc']}", f"--fsize={cfg['max_workspace_bytes']}", "--"]
+    finally:
+        mz.remove_workspace(ws)
