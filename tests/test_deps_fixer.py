@@ -303,6 +303,7 @@ class FakeIO:
         self._halted = halted
         self.calls, self.prompts, self.prs, self.merged = [], [], [], []
         self.escalations, self.labels, self.comments, self.closed = [], [], [], []
+        self.escalation_notes = []
 
     def audit_hook_present(self):
         return self._present
@@ -375,8 +376,9 @@ class FakeIO:
     def comment(self, issue, body):
         self.comments.append((issue, body))
 
-    def escalate(self, issue, reason, h, pr=None):
+    def escalate(self, issue, reason, h, pr=None, notes=""):
         self.escalations.append((issue, reason, pr))
+        self.escalation_notes.append(notes)
 
 
 CFG = dict(max_attempts=3, model="claude-opus-5-5", auto_merge=False,
@@ -477,6 +479,25 @@ def test_no_fix_escalates_on_empty_diff_without_pr():
     out = df.run_once(CFG, io, {})
     assert out == {"outcome": "escalated", "issue": 42, "pr": None, "reason": "no-fix"}
     assert io.prs == [] and io.escalations[0][1] == "no-fix"
+
+
+def test_no_fix_escalation_carries_agent_notes():
+    io = FakeIO(audits=(RED, RED, RED), changed=[], notes="Proposed ignore: GHSA-9wx4-h78v-vm56")
+    out = df.run_once(CFG, io, {})
+    assert out["reason"] == "no-fix"
+    assert io.escalation_notes == ["Proposed ignore: GHSA-9wx4-h78v-vm56"]
+
+
+def test_escalation_comment_fences_notes_and_is_unchanged_without_them():
+    plain = df.escalation_comment("no-fix")
+    assert "escalating to a human (reason: no-fix)." in plain and plain.endswith(df.footer())
+    assert df.escalation_comment("no-fix", notes="  \n") == plain
+    assert "```" not in plain and "Fix-agent notes" not in plain
+    body = df.escalation_comment("no-fix", notes="No fixed release.\nCloses #1 cc @octocat")
+    outside = _outside_fences(body)
+    assert "No fixed release." in body and "No fixed release." not in outside
+    assert "Closes #1" not in outside and "@octocat" not in outside
+    assert "PR #9 left open for review." in df.escalation_comment("merge-failed", pr=9)
 
 
 def test_protected_scope_escalates_without_pr():
@@ -641,6 +662,16 @@ def test_main_once_summary_line_carries_reason(tmp_path, monkeypatch, capsys):
         "outcome": "clean", "issue": None, "pr": None})
     df.main_once()
     assert capsys.readouterr().out.strip() == "deps_fixer=clean issue=#None pr=#None"
+
+
+def test_liveio_escalate_posts_the_rendered_comment(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    posted = []
+    monkeypatch.setattr(io, "add_label", lambda issue, label: None)
+    monkeypatch.setattr(io, "comment", lambda issue, body: posted.append((issue, body)))
+    monkeypatch.setattr(io, "notify", lambda *a: None)
+    io.escalate(42, "no-fix", "h", notes="Proposed ignore: X")
+    assert posted == [(42, df.escalation_comment("no-fix", None, "Proposed ignore: X"))]
 
 
 def _stub(tmp_path, monkeypatch, name, script):
