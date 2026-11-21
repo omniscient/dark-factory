@@ -367,6 +367,19 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.status=push status   # a kn
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -C . -c user.name=x commit -m x
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --no-pager -C . diff --name-only
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --git-dir=.git status
+# Transport-command overrides: denied at every level, whatever the source.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" git -c core.sshCommand=x push origin feat
+GIT_SSH_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" git fetch origin
+GIT_SSH=x FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "sshCommand" git fetch origin
+GIT_CONFIG=/dev/null FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" \
+  git -c core.sshCommand=x fetch origin
+# Not only the classic transport verbs: archive --remote and maintenance prefetch open one too.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" \
+  git -c core.sshCommand=x archive --remote=ssh://h/x HEAD
+GIT_SSH_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "sshCommand" \
+  git maintenance run --task=prefetch
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git fetch origin
 # --- end #553 cases ---
 unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---

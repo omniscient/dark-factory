@@ -306,5 +306,22 @@ if [ -n "$VERB1" ]; then
   fi
 fi
 
+# #553 / spec Requirement 3, every level: a transport-command override splices an
+# arbitrary command into an otherwise authorised push/fetch. Nothing in the factory uses
+# one (HTTPS clone, gh credential helper), so it is denied outright. Checked on every
+# verb, not a list of transport verbs: `archive --remote`, `maintenance run
+# --task=prefetch` and a partial clone's lazy fetch open a transport from verbs such a
+# list would miss. The reason names the override, not a level.
+_V="${VERB1:-git}"
+[ -n "${GIT_SSH_COMMAND+x}" ] && deny "$_V (sshCommand override: GIT_SSH_COMMAND)"
+[ -n "${GIT_SSH+x}" ] && deny "$_V (sshCommand override: GIT_SSH)"
+_RC=0
+_git_config --get core.sshCommand >/dev/null 2>&1 || _RC=$?
+case "$_RC" in
+  0) deny "$_V (sshCommand override: core.sshCommand)" ;;
+  1) : ;;
+  *) deny "$_V (config lookup failed)" ;;
+esac
+
 [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
 exec "$REAL_GIT" "$@"
