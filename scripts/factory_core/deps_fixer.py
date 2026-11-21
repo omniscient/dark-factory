@@ -223,8 +223,13 @@ def pr_title(advisories: list) -> str:
     parts = named[:5] + (["…"] if len(named) > 5 else [])
     if len(ids) > len(named):
         parts.append(f"+{len(ids) - len(named)} other")
-    shown = f" ({', '.join(parts)})" if parts else ""
-    return f"deps: resolve {len(ids)} advisories{shown}"[:200]
+    prefix = f"deps: resolve {len(ids)} advisories"
+    while parts:
+        title = f"{prefix} ({', '.join(parts)})"
+        if len(title) <= 200:
+            return title
+        parts.pop()  # drop whole tokens from the end — never slice mid-id
+    return prefix[:200]
 
 
 def pr_body(issue: int, advisories: list, remaining: list, changed: list,
@@ -367,6 +372,12 @@ def run_once(cfg: dict, io, state: dict) -> dict:
     # A hook, the test suite or a process the agent left behind may have written to the tree
     # since the scope check, and open_pr stages everything (git add -A): judge scope again.
     changed = io.changed_paths()
+    if not changed:
+        # A post-agent hook (e.g. validate) emptied the diff: classify_scope([]) would read
+        # as "unknown" and escalate misleadingly. This is still "no fix survived" — same
+        # reason as the first no-fix check above.
+        io.escalate(issue, "no-fix", h, notes=notes)
+        return {"outcome": "escalated", "issue": issue, "pr": None, "reason": "no-fix"}
     scope = classify_deps_scope(changed, cfg["allowed_paths"], cfg["blocked_paths"])
     if scope != "allowed":
         io.escalate(issue, f"scope:{scope}", h)
@@ -518,6 +529,11 @@ class LiveIO(_MainRedLiveIO):
         return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
 
     def run_tests(self):
+        # §6(d): check base-copy status before the presence test. A tampered-and-hidden
+        # deletion (skip-worktree) makes the hook look absent; without this check that would
+        # short-circuit straight to "No validate hook" and skip validation entirely.
+        if self._agent_ran and not self._hook_is_base_copy("validate"):
+            raise HookTampered("validate")
         if not self._hook_present("validate"):
             return "No .factory/hooks/validate hook — no local test run; CI is the gate."
         rc, out, err = self._hook("validate", gate=True)
@@ -610,6 +626,9 @@ class LiveIO(_MainRedLiveIO):
         return "needs-discussion" if "needs-discussion" in labels else None
 
     def is_halted(self, issue):
+        """Deliberate compatibility alias: run_once uses halt_reason (which distinguishes
+        "needs-discussion" from a failed lookup), but this boolean form is kept for callers
+        that only need a yes/no answer."""
         return self.halt_reason(issue) is not None
 
     def add_label(self, issue, label):
