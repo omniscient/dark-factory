@@ -385,17 +385,30 @@ def _hooks_sh() -> str:
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks.sh")
 
 
+# #548 §6(a): the fix agent's environment carries no GitHub token (the harness keeps it).
+_TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
+# #548 §6(e): neither repository hooks nor an fsmonitor program run inside the harness's own
+# git calls. The agent can write .git/hooks/* and .git/config, and neither shows in a diff.
+_GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+
 class LiveIO(_MainRedLiveIO):
     """Reuses main_red_fixer.LiveIO's poll_ci / merge / notify; overrides the rest."""
 
     def __init__(self, cfg):
         super().__init__(cfg)
         self.clone_dir = os.path.abspath(cfg.get("clone_dir") or identity.CLONE_DIR)
+        self.base_sha = None       # origin/main as fetched by start_branch, before any agent
+        self._agent_ran = False    # set by apply_agent_fix; gates the §6(d) hook check
 
-    def _sh(self, cmd, timeout=600, stdin=None):
+    def _sh(self, cmd, timeout=600, stdin=None, unset_env=(), text=True):
+        env = {k: v for k, v in os.environ.items() if k not in unset_env}
+        env["CLONE_DIR"] = self.clone_dir
         return subprocess.run(cmd, cwd=self.clone_dir, input=stdin, capture_output=True,
-                              text=True, timeout=timeout,
-                              env={**os.environ, "CLONE_DIR": self.clone_dir})
+                              text=text, timeout=timeout, env=env)
+
+    def _git(self, *args, timeout=600, text=True):
+        return self._sh(["git", *_GIT_SAFE, *args], timeout=timeout, text=text)
 
     def _hook(self, name, gate):
         flag = "--gate " if gate else ""
@@ -419,18 +432,28 @@ class LiveIO(_MainRedLiveIO):
 
     def start_branch(self):
         branch = f"deps/audit-{time.strftime('%Y%m%d', time.gmtime())}"
-        self._sh(["git", "fetch", "origin", "main"], timeout=120)
-        self._sh(["git", "checkout", "-B", branch, "origin/main"])
+        self._git("fetch", "origin", "main", timeout=120)
+        self._git("checkout", "-B", branch, "origin/main")
         # entrypoint.sh's pre-route `npm install` / `pip install` can rewrite a tracked
         # lockfile; without this the audit (and changed_paths) would see that drift as a fix.
         # Untracked, git-excluded run-time files survive a hard reset.
-        self._sh(["git", "reset", "--hard", "origin/main"])
+        self._git("reset", "--hard", "origin/main")
+        # §6(b): the scope base is this SHA, held in memory — not a ref the agent can move.
+        r = self._git("rev-parse", "--verify", "origin/main^{commit}")
+        if r.returncode != 0 or not r.stdout.strip():
+            raise RuntimeError(f"cannot resolve origin/main: {(r.stderr or '').strip()}")
+        self.base_sha = r.stdout.strip()
         return branch
 
     def apply_agent_fix(self, prompt):
+        self._agent_ran = True
+        # §6(a): no GH_TOKEN/GITHUB_TOKEN for the agent; PATH (shims), the side-effect level
+        # and the Claude credentials pass unchanged. A target whose dependency resolution
+        # needs the token fails to resolve here and escalates no-fix (documented limit).
         r = self._sh(["claude", "-p", "--model", self.cfg["model"],
                       "--allowedTools", "Edit,Write,Read,Bash,Grep,Glob"],
-                     stdin=prompt, timeout=self.cfg.get("agent_timeout", 1200))
+                     stdin=prompt, timeout=self.cfg.get("agent_timeout", 1200),
+                     unset_env=_TOKEN_VARS)
         if r.returncode != 0:
             # A dead session (usage window, auth, crash) is not "no fix exists": do not
             # label the issue ready-for-human for it. main_once still saves the attempt.
@@ -445,10 +468,12 @@ class LiveIO(_MainRedLiveIO):
         return notes
 
     def changed_paths(self):
-        self._sh(["git", "add", "-A"])
+        if not self.base_sha:
+            raise RuntimeError("no recorded base commit — start_branch must run first")
+        self._git("add", "-A")
         # --no-renames: a rename must list BOTH paths, or `git mv <ci workflow> <allowed name>`
         # would pass the scope check as a single allowed path.
-        r = self._sh(["git", "diff", "--cached", "--name-only", "--no-renames", "origin/main", "--"])
+        r = self._git("diff", "--cached", "--name-only", "--no-renames", self.base_sha, "--")
         return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
 
     def run_tests(self):
@@ -499,11 +524,12 @@ class LiveIO(_MainRedLiveIO):
 
     def open_pr(self, branch, title, body):
         from .providers import get_codehost
-        self._sh(["git", "add", "-A"])
-        commit = self._sh(["git", "commit", "-m", title])
+        # §6(e): the target's own pre-commit hooks no longer run on this commit; CI is the gate.
+        self._git("add", "-A")
+        commit = self._git("commit", "-m", title)
         if commit.returncode != 0:
             raise RuntimeError(f"git commit failed on {branch}: {(commit.stderr or commit.stdout).strip()}")
-        push = self._sh(["git", "push", "-u", "origin", branch, "--force-with-lease"])
+        push = self._git("push", "-u", "origin", branch, "--force-with-lease")
         if push.returncode != 0:
             raise RuntimeError(f"git push failed for {branch}: {push.stderr.strip()}")
         pr_str = get_codehost().open_change(branch, "main", title, body, draft=False, repo=OWNER)

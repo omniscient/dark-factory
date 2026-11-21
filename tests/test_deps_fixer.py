@@ -612,6 +612,8 @@ def test_changed_paths_lists_both_sides_of_a_rename(tmp_path, monkeypatch):
     git("add", "-A")
     git("commit", "-qm", "init")
     git("update-ref", "refs/remotes/origin/main", "HEAD")
+    io.base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, check=True,
+                                 capture_output=True, text=True).stdout.strip()
     git("mv", ".github/workflows/ci.yml", "yarn.lock")
     changed = io.changed_paths()
     assert ".github/workflows/ci.yml" in changed
@@ -682,8 +684,114 @@ def _stub(tmp_path, monkeypatch, name, script):
     monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
 
 
+def _g(cwd, *a):
+    return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=cwd,
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+_AUDIT_HOOK = """#!/usr/bin/env bash
+cd "$CLONE_DIR" || exit 1
+if grep -q '2.31.0' requirements.txt; then
+  printf 'pip\\trequests\\t2.31.0\\t2.32.0\\tGHSA-9wx4-h78v-vm56\\thigh\\n'; exit 1
+fi
+exit 0
+"""
+
+
+def _live_repo(tmp_path, monkeypatch):
+    """A clone with a bare origin: requirements.txt + a base deps-audit hook on main.
+    Ambient factory env is cleared so the harness's own git is never shim-gated here."""
+    for var in ("CLAUDECODE", "FACTORY_SIDE_EFFECT_LEVEL", "ARTIFACTS_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    origin, clone = tmp_path / "origin.git", tmp_path / "clone"
+    _g(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    _g(tmp_path, "init", "-q", "-b", "main", str(clone))
+    _g(clone, "config", "user.email", "t@t")
+    _g(clone, "config", "user.name", "t")
+    (clone / "requirements.txt").write_text("requests==2.31.0\n")
+    hooks = clone / ".factory" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "deps-audit").write_text(_AUDIT_HOOK)
+    (hooks / "deps-audit").chmod(0o755)
+    _g(clone, "add", "-A")
+    _g(clone, "commit", "-qm", "init")
+    _g(clone, "remote", "add", "origin", str(origin))
+    _g(clone, "push", "-q", "origin", "main")
+    monkeypatch.setenv("FACTORY_HOOKS_SH", str(REPO_ROOT / "scripts" / "hooks.sh"))
+    (tmp_path / "state").mkdir()
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path / "state"))
+    return df.LiveIO(dict(clone_dir=str(clone), model="x")), clone, origin
+
+
+class _FakeCodehost:
+    def open_change(self, branch, base, title, body, draft=False, repo=None):
+        return "17"
+
+
+def _shim_path():
+    """This checkout's shims first; any OTHER scripts/shims entry (a factory container's
+    /opt/dark-factory/scripts/shims) dropped — two shim dirs exec each other forever."""
+    shims = str(REPO_ROOT / "scripts" / "shims")
+    rest = [p for p in os.environ["PATH"].split(":") if not p.rstrip("/").endswith("scripts/shims")]
+    return shims, ":".join([shims, *rest])
+
+
+def test_agent_env_has_no_github_token(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    for var in ("CLAUDECODE", "ARTIFACTS_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    dump = tmp_path / "agent.env"
+    _stub(tmp_path, monkeypatch, "claude", f'#!/bin/sh\nenv > "{dump}"\n')
+    shims, path = _shim_path()
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.setenv("GH_TOKEN", "secret-gh")
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-github")
+    monkeypatch.setenv("FACTORY_SIDE_EFFECT_LEVEL", "2")
+    io.apply_agent_fix("prompt")
+    lines = dump.read_text().splitlines()
+    assert not any(ln.startswith(("GH_TOKEN=", "GITHUB_TOKEN=")) for ln in lines)
+    assert "FACTORY_SIDE_EFFECT_LEVEL=2" in lines
+    assert any(ln.startswith("PATH=") and shims in ln for ln in lines)
+    # only the agent loses the token: the harness's own calls still carry it
+    assert io._sh(["sh", "-c", 'printf %s "$GH_TOKEN"']).stdout == "secret-gh"
+
+
+def test_changed_paths_ignores_agent_moved_origin_main(tmp_path, monkeypatch):
+    io, clone, _ = _live_repo(tmp_path, monkeypatch)
+    io.start_branch()
+    _stub(tmp_path, monkeypatch, "claude",
+          "#!/bin/sh\necho 'requests==2.32.0' > requirements.txt\n"
+          "git -c user.email=a@a -c user.name=a commit -qam bump\n"
+          "git update-ref refs/remotes/origin/main HEAD\n")
+    io.apply_agent_fix("prompt")
+    assert io.changed_paths() == ["requirements.txt"]     # diffed against the recorded SHA
+
+
+def test_changed_paths_without_recorded_base_fails_closed(tmp_path, monkeypatch):
+    io, _ = _fixture_io(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="base"):
+        io.changed_paths()
+
+
+def test_open_pr_runs_no_repository_hooks(tmp_path, monkeypatch):
+    from factory_core import providers
+    io, clone, origin = _live_repo(tmp_path, monkeypatch)
+    branch = io.start_branch()
+    pre_commit, pre_push = tmp_path / "pre-commit.ran", tmp_path / "pre-push.ran"
+    _stub(tmp_path, monkeypatch, "claude",
+          "#!/bin/sh\necho 'requests==2.32.0' > requirements.txt\n"
+          f"printf '#!/bin/sh\\ntouch {pre_commit}\\n' > .git/hooks/pre-commit\n"
+          f"printf '#!/bin/sh\\ntouch {pre_push}\\n' > .git/hooks/pre-push\n"
+          "chmod +x .git/hooks/pre-commit .git/hooks/pre-push\n")
+    monkeypatch.setattr(providers, "get_codehost", lambda: _FakeCodehost())
+    io.apply_agent_fix("prompt")
+    assert io.changed_paths() == ["requirements.txt"]
+    assert io.open_pr(branch, "deps: t", "body") == 17
+    assert _g(origin, "rev-parse", f"refs/heads/{branch}") == _g(clone, "rev-parse", "HEAD")
+    assert not pre_commit.exists() and not pre_push.exists()
+
+
 def test_agent_failure_raises_instead_of_escalating_no_fix(tmp_path, monkeypatch):
-    import pytest
     io, _ = _fixture_io(tmp_path, monkeypatch)
     _stub(tmp_path, monkeypatch, "claude", "#!/bin/sh\necho 'usage limit reached' >&2\nexit 1\n")
     with pytest.raises(RuntimeError, match="fix agent exited 1"):
