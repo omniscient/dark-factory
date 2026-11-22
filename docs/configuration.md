@@ -524,7 +524,7 @@ the table below only says how those keys relate to configuration.
 `adapter_defaults.DEFAULTS` (MarketHawk's constants); a file is validated and then
 `_deep_merge`d over the defaults (`adapter.py:209-216`), then the factory-owned boundary floor is
 unioned into `safety.critical_diff_paths` and `safety.migration_seed_auth_patterns`
-(`adapter.py:218-239`, `adapter_defaults.py:122-146`), which no adapter can remove. `adapter.get`
+(`adapter.py:218-239`, `adapter_defaults.py:123-147`), which no adapter can remove. `adapter.get`
 (`:296-302`) resolves a dotted path against the result. Consumers call it at use time and fall
 back to defaults on any error.
 
@@ -551,7 +551,7 @@ back to defaults on any error.
 | `safety.dispatch_ceiling_keywords` | **not read from the adapter**: only `adapter_defaults` supplies the fallback to `architecture_slice.py:83` | none effective |
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
-| `deconflict.models_init`, `deconflict.migrations_dir` | Tier-1 conflict resolution file paths | `scripts/factory_core/deconflict.py:21-45` |
+| `deconflict.models_init`, `deconflict.migrations_dir`, `deconflict.alembic_ini` | Tier-1 conflict resolution file paths; the alembic.ini whose directory the post-Tier-1 multi-head check runs in (not a file: check skipped, unless a migration file is conflicted, which escalates) | `scripts/factory_core/deconflict.py:22-55` |
 | `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:735` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
