@@ -110,6 +110,7 @@ DEFAULTS = {
     "deconflict": {
         "models_init": "backend/app/models/__init__.py",
         "migrations_dir": "alembic/versions/",
+        "alembic_ini": "backend/alembic.ini",
     },
     "loops": [],
 }
