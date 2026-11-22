@@ -442,3 +442,48 @@ def test_resolve_alembic_listing_path_is_clone_relative_for_symlinked_clone(tmp_
     listings = [c for c, _ in calls if c[:3] == ["git", "ls-files", "--others"]]
     assert listings and all(c[-2:] == ["--", "backend"] for c in listings)
     assert (["git", "add", "--", rev], str(link)) in calls
+
+
+# ---------------------------------------------------------------------------
+# path checks behind the alembic multi-head check (#576 review fixup)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("filepath, expected", [
+    ("backend/app/alembic/versions/abc123_add_col.py", True),
+    ("alembic/versions/abc123_add_col.py", True),
+    ("alembic/versions/sub/abc123_add_col.py", True),
+    # Narrower than tier1, whose `migrations_dir in filepath` substring test
+    # does match this path: components must align on directory boundaries.
+    ("myalembic/versions/x.py", False),
+    ("backend/app/models/__init__.py", False),
+])
+def test_is_under_migrations_dir_matches_whole_components(filepath, expected):
+    from factory_core import deconflict as dc
+    assert dc._is_under_migrations_dir(filepath, "alembic/versions/") is expected
+
+
+def test_is_under_migrations_dir_empty_pattern_matches_nothing():
+    from factory_core import deconflict as dc
+    assert dc._is_under_migrations_dir("alembic/versions/x.py", "") is False
+
+
+@pytest.mark.parametrize("ini_rel", ["../../etc/passwd", "/etc/passwd"])
+def test_resolve_alembic_ini_path_escaping_clone_falls_back_to_default(tmp_path, capsys, ini_rel):
+    from factory_core import deconflict as dc
+    resolved = dc._resolve_alembic_ini_path(str(tmp_path), ini_rel)
+    assert resolved == os.path.realpath(str(tmp_path / "backend" / "alembic.ini"))
+    assert "escapes clone_dir; using default" in capsys.readouterr().out
+
+
+def test_resolve_alembic_ini_path_keeps_path_inside_clone(tmp_path):
+    from factory_core import deconflict as dc
+    resolved = dc._resolve_alembic_ini_path(str(tmp_path), "services/api/alembic.ini")
+    assert resolved == os.path.realpath(str(tmp_path / "services" / "api" / "alembic.ini"))
+
+
+def test_deconflict_alembic_ini_empty_string_falls_back_to_default(tmp_path):
+    from factory_core import deconflict as dc
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "adapter.yaml").write_text(
+        "deconflict:\n  alembic_ini: ''\n")
+    assert dc._deconflict_alembic_ini(str(tmp_path)) == "backend/alembic.ini"
