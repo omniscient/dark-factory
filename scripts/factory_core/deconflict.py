@@ -16,6 +16,7 @@ from .adapter_defaults import DEFAULTS as _AD
 
 _DEFAULT_MODELS_INIT = _AD["deconflict"]["models_init"]
 _DEFAULT_MIGRATIONS_DIR = _AD["deconflict"]["migrations_dir"]
+_DEFAULT_ALEMBIC_INI = _AD["deconflict"]["alembic_ini"]
 
 
 def _deconflict_models_init(clone_dir: str | None = None) -> str:
@@ -40,6 +41,18 @@ def _deconflict_migrations_dir(clone_dir: str | None = None) -> str:
     except Exception:
         pass
     return _DEFAULT_MIGRATIONS_DIR
+
+
+def _deconflict_alembic_ini(clone_dir: str | None = None) -> str:
+    """Return deconflict.alembic_ini from adapter at use-time, falling back to default."""
+    try:
+        from . import adapter
+        val = adapter.get(clone_dir or ".", "deconflict.alembic_ini")
+        if val is not None and isinstance(val, str):
+            return val
+    except Exception:
+        pass
+    return _DEFAULT_ALEMBIC_INI
 
 
 def tier1(filepath: str, clone_dir: str) -> bool:
