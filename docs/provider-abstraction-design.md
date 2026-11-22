@@ -268,6 +268,8 @@ This answers *"is each persona using the proper tools and carrying the proper co
 - **Caveat 1 — cost goes approximate off-Anthropic.** Archon prices token usage as Claude. Under Databricks/OpenAI the token *counts* still flow, but dollar figures are mislabeled; reports stay directional, not billing-accurate. (The gateway's own ledger can carry truer per-backend cost later.)
 - **Caveat 2 — GPT quality is empirical.** Databricks-*Claude* is risk-free (identical model, different endpoint). OpenAI is the Claude-tuned harness *driving* GPT through a translation shim — it runs, but coding quality is a separate, measured question, not an assumed equivalence.
 
+> **Hybrid cloud + local (#556).** Adding a *local* endpoint alongside the cloud paths is governed by [`docs/hybrid-execution-contract.md`](hybrid-execution-contract.md), not by the gateway design above. As a provisional operator default pending owner confirmation (§4.11 of the contract), v1 supports one local server that speaks the Anthropic Messages API through `ANTHROPIC_BASE_URL` (no translation layer), isolates endpoints per dispatched run container, keeps every independent checker on a separate cloud-routed dispatch, and never falls back from a local failure to cloud. The contract is a decision report: nothing in it is implemented yet (#557–#564).
+
 ## 8. Scope boundaries
 
 | Axis | Reference (refactor-to-parity) | Real 2nd impl (live-validated) | Designed-against (follow-up) |

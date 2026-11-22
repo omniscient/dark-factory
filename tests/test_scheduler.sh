@@ -2192,6 +2192,190 @@ get_pr_for_issue() { echo ""; }
 export -f get_pr_for_issue
 
 # ==========================================
+# AB: Close-dispatch guard + shared close-phase breaker (#414)
+# ==========================================
+# Both Close sites — stage_review_triage's MERGE case and end_gate_check's APPROVED
+# case — route through dispatch_close (is_issue_running → evaluate_stop close →
+# trip_to_blocked | dispatch). AB1-AB7 stub the breaker adapters and log every call;
+# AB8 runs the real evaluate_stop against $STATE_FILE. scheduler.sh's `set -e` is live in
+# this runner, so non-zero returns are captured as `_AB_RC=0; f || _AB_RC=$?`.
+echo ""
+echo "--- AB: dispatch_close — guard + close-phase breaker at both Close sites ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; CI_BLOCKED=""
+_AB_REAL_EVALUATE_STOP=$(declare -f evaluate_stop)
+_AB_REAL_TRIP_TO_BLOCKED=$(declare -f trip_to_blocked)
+_AB_REAL_RESET_RETRY=$(declare -f reset_retry)
+# Generic python3 stub (same body section Y restores): end_gate_check reads the PR
+# review state from PROVIDERS_CLI_OUTPUT via the providers CLI.
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+AB_EVAL_OUT="stopped=false reason=none"
+evaluate_stop()     { echo "evaluate_stop $*" >> "$STUB_LOG"; echo "$AB_EVAL_OUT"; }
+trip_to_blocked()   { echo "trip_to_blocked $*" >> "$STUB_LOG"; }
+reset_retry()       { echo "reset_retry $*" >> "$STUB_LOG"; }
+dispatch()          { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_new_comments()  { echo '[{"id":"IC_414","author":{"login":"human"},"body":"ship it"}]'; }
+classify_comments() { echo "classify_comments $1" >> "$STUB_LOG"; echo "MERGE"; }
+get_pr_for_issue()  { echo "99"; }
+is_issue_running()  { return 1; }
+export -f python3 evaluate_stop trip_to_blocked reset_retry dispatch \
+  get_new_comments classify_comments get_pr_for_issue is_issue_running
+
+_AB_MERGE_711='[{"content":{"number":711,"title":"t"},"labels":[],"status":"In review"}]'
+_AB_DTP_712='[{"content":{"number":712,"title":"t"},"labels":["direct-to-pr"],"status":"In review"}]'
+_AB_DTP_712_ITEM=$(echo "$_AB_DTP_712" | jq -c '.[0]')
+# AB1: MERGE verdict while a container for the issue is running → skipped before the
+# breaker is consulted (no dispatch, no close attempt consumed)
+> "$STUB_LOG"
+is_issue_running() { return 0; }; export -f is_issue_running
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB1a: MERGE + running → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB1b: MERGE + running → breaker not consulted" \
+  "0" "$(grep -c '^evaluate_stop 711' "$STUB_LOG" || true)"
+assert_eq "AB1c: MERGE + running → DISPATCHED stays empty" "" "$DISPATCHED"
+is_issue_running() { return 1; }; export -f is_issue_running
+
+# AB3: MERGE verdict at the ceiling → trips with phase close, no dispatch
+> "$STUB_LOG"
+AB_EVAL_OUT="stopped=true reason=max_retries"
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB3a: MERGE consults the close counter at MAX_RETRIES" \
+  "1" "$(grep -c '^evaluate_stop 711 close 3$' "$STUB_LOG" || true)"
+assert_eq "AB3b: MERGE at ceiling → trip_to_blocked phase close" \
+  "1" "$(grep -c '^trip_to_blocked 711 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB3c: MERGE at ceiling → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB3d: MERGE at ceiling → DISPATCHED stays empty" "" "$DISPATCHED"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB5 (MERGE half): under the ceiling → Close dispatched, DISPATCHED set
+> "$STUB_LOG"
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB5a: MERGE under ceiling → Close dispatched" \
+  "1" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB5b: MERGE under ceiling → DISPATCHED set" "Close issue #711" "$DISPATCHED"
+assert_eq "AB5c: MERGE dispatch never calls reset_retry" \
+  "0" "$(grep -c '^reset_retry' "$STUB_LOG" || true)"
+
+
+# AB2: APPROVED end-gate while a container for the issue is running → skipped, still
+# returns 0, breaker not consulted
+> "$STUB_LOG"
+is_issue_running() { return 0; }; export -f is_issue_running
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+_AB_RC=0; end_gate_check 712 "$_AB_DTP_712_ITEM" || _AB_RC=$?
+assert_eq "AB2a: APPROVED + running → end_gate_check still returns 0" "0" "$_AB_RC"
+assert_eq "AB2b: APPROVED + running → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB2c: APPROVED + running → breaker not consulted" \
+  "0" "$(grep -c '^evaluate_stop 712' "$STUB_LOG" || true)"
+is_issue_running() { return 1; }; export -f is_issue_running
+
+# AB4: APPROVED end-gate at the ceiling → trips with phase close, returns 0, and
+# stage_review_triage never falls through to comment classification
+> "$STUB_LOG"
+AB_EVAL_OUT="stopped=true reason=max_retries"
+IN_REVIEW="$_AB_DTP_712"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB4a: APPROVED at ceiling → trip_to_blocked phase close" \
+  "1" "$(grep -c '^trip_to_blocked 712 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB4b: APPROVED at ceiling → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB4c: APPROVED at ceiling → no fall-through to classify_comments" \
+  "0" "$(grep -c '^classify_comments 712' "$STUB_LOG" || true)"
+_AB_RC=0; end_gate_check 712 "$_AB_DTP_712_ITEM" || _AB_RC=$?
+assert_eq "AB4d: APPROVED at ceiling → end_gate_check still returns 0" "0" "$_AB_RC"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB5 (APPROVED half): under the ceiling → Close dispatched, no reset_retry
+> "$STUB_LOG"
+IN_REVIEW="$_AB_DTP_712"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB5d: APPROVED under ceiling → Close dispatched" \
+  "1" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB5e: APPROVED under ceiling → DISPATCHED set" "Close issue #712" "$DISPATCHED"
+assert_eq "AB5f: APPROVED dispatch never calls reset_retry" \
+  "0" "$(grep -c '^reset_retry' "$STUB_LOG" || true)"
+
+# AB6: the same issue reaching Close via MERGE and then via APPROVED consults one
+# shared counter — identical evaluate_stop argv both times
+> "$STUB_LOG"
+IN_REVIEW='[{"content":{"number":716,"title":"t"},"labels":[],"status":"In review"}]'
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+IN_REVIEW='[{"content":{"number":716,"title":"t"},"labels":["direct-to-pr"],"status":"In review"}]'
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB6a: MERGE and APPROVED both consult evaluate_stop 716 close 3" \
+  "2" "$(grep -c '^evaluate_stop 716 close 3$' "$STUB_LOG" || true)"
+assert_eq "AB6b: no other evaluate_stop phase for 716" \
+  "2" "$(grep -c '^evaluate_stop 716 ' "$STUB_LOG" || true)"
+assert_eq "AB6c: both paths dispatched Close for 716" \
+  "2" "$(grep -c 'dispatch Close issue #716' "$STUB_LOG" || true)"
+
+
+# AB7: evaluate_stop CLI error (empty output) → fails open and dispatches, same as the
+# existing implement/plan/refine sites
+> "$STUB_LOG"
+AB_EVAL_OUT=""
+_AB_RC=0; dispatch_close 717 || _AB_RC=$?
+assert_eq "AB7a: empty evaluate_stop output → Close dispatched (fail open)" \
+  "1" "$(grep -c 'dispatch Close issue #717' "$STUB_LOG" || true)"
+assert_eq "AB7b: dispatch_close returns dispatch's exit code" "0" "$_AB_RC"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB8: real evaluate_stop against $STATE_FILE (trip_to_blocked still stubbed) — three
+# dispatches count on N:close, the fourth trips and does not dispatch
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+eval "$_AB_REAL_EVALUATE_STOP"; export -f evaluate_stop
+for _ab_i in 1 2 3; do dispatch_close 718 || true; done
+assert_eq "AB8a: three dispatch_close calls under the ceiling dispatch" \
+  "3" "$(grep -c 'dispatch Close issue #718' "$STUB_LOG" || true)"
+assert_eq "AB8b: attempts counted on the 718:close key" "3" "$(get_retry_count "718:close")"
+assert_eq "AB8c: bare implement key untouched" "0" "$(get_retry_count "718")"
+> "$STUB_LOG"
+_AB_RC=0; dispatch_close 718 || _AB_RC=$?
+assert_eq "AB8d: 4th call trips with phase close" \
+  "1" "$(grep -c '^trip_to_blocked 718 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB8e: no dispatch on trip" \
+  "0" "$(grep -c 'dispatch Close issue #718' "$STUB_LOG" || true)"
+assert_eq "AB8f: dispatch_close returns non-zero on trip" "1" "$_AB_RC"
+
+# Restore stubs to section defaults
+eval "$_AB_REAL_TRIP_TO_BLOCKED"; eval "$_AB_REAL_RESET_RETRY"
+export -f evaluate_stop trip_to_blocked reset_retry
+reset_python3_stub
+get_pr_for_issue() { echo ""; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+is_issue_running() { return 1; }
+export -f get_pr_for_issue dispatch is_issue_running
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+
+# Static drift lock: dispatch_close is the only raw Close dispatch, and both Close sites
+# route through it — a third Close site would have to bypass this lock to go unguarded.
+# Regexes are loose on purpose (quote style, spacing, call form) so reformatting or an
+# `||`/variable-based call doesn't silently defeat the lock: AB9a matches any
+# `dispatch "Close issue` / `dispatch 'Close issue` call (the raw dispatch, which must
+# live only inside dispatch_close); AB9b matches any invocation of dispatch_close itself,
+# guarded by `if` or not.
+assert_eq "AB9a: exactly one raw Close dispatch in scheduler.sh (inside dispatch_close)" \
+  "1" "$(grep -cE 'dispatch[[:space:]]+["'"'"']Close issue' "$SCHED")"
+assert_eq "AB9b: both Close sites route through dispatch_close" \
+  "2" "$(grep -vE '^[[:space:]]*#' "$SCHED" | grep -cE 'dispatch_close[[:space:]]+\S')"
+
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"

@@ -377,3 +377,4 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [`config/config.yaml`](config/config.yaml) — all policy knobs with inline documentation
 - [`bench/baseline.md`](bench/baseline.md) — replay benchmark task manifest and scoring formula
 - [`docs/adapter-authoring-guide.md`](docs/adapter-authoring-guide.md) — how to write a tracker, code-host, or model-endpoint adapter
+- [`docs/hybrid-execution-contract.md`](docs/hybrid-execution-contract.md) — hybrid cloud + local model execution contract (#556): decision report, not yet implemented

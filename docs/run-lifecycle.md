@@ -50,7 +50,7 @@ Related documents (not repeated here):
 
 The scheduler starts a run with
 `docker compose -f /opt/dark-factory/docker-compose.yml --profile factory run -d --rm dark-factory "<command>"`
-(`scheduler.sh:363-381`; the compose file is `run-compose.yml`, baked to that path by
+(`scheduler.sh:383-401`; the compose file is `run-compose.yml`, baked to that path by
 `Dockerfile:150`). The command string is the only argument. A human can start the same
 run by hand; with no argument the entrypoint prints usage and exits 1
 (`entrypoint.sh:88-97`).
@@ -70,12 +70,12 @@ The command is interpreted twice, by two different mechanisms:
 
 | Command the scheduler passes | Entrypoint intent | Workflow intent | Where the work happens |
 |---|---|---|---|
-| `Refine issue #N` (`scheduler.sh:262,1370`) | `refine` | `refine` | Workflow: refine phase |
-| `Plan issue #N` (`scheduler.sh:298,1303`) | `plan` | `plan` | Workflow: plan phase |
-| `Fix issue #N` (`scheduler.sh:1183,1239`) | `fix` | `new` | Workflow: implement through report |
-| `Continue issue #N` (`scheduler.sh:344,1129,1235`) | `continue` | `continue` | Workflow: same path as `new`, on the existing branch, with feedback digest and a merge of `main` |
-| `Close issue #N` (`scheduler.sh:336,1123`) | `close` | `close` | Workflow: merge PR, tear down preview, refresh hotspots |
-| `Deconflict issue #N` (`scheduler.sh:1093`) | `deconflict` | never reached | Entrypoint only ([section 3](#3-paths-handled-entirely-by-the-entrypoint)) |
+| `Refine issue #N` (`scheduler.sh:262,1390`) | `refine` | `refine` | Workflow: refine phase |
+| `Plan issue #N` (`scheduler.sh:298,1323`) | `plan` | `plan` | Workflow: plan phase |
+| `Fix issue #N` (`scheduler.sh:1203,1259`) | `fix` | `new` | Workflow: implement through report |
+| `Continue issue #N` (`scheduler.sh:344,1149,1255`) | `continue` | `continue` | Workflow: same path as `new`, on the existing branch, with feedback digest and a merge of `main` |
+| `Close issue #N` (`scheduler.sh:374`, via `dispatch_close` from `:336`, `:1143`) | `close` | `close` | Workflow: merge PR, tear down preview, refresh hotspots |
+| `Deconflict issue #N` (`scheduler.sh:1113`) | `deconflict` | never reached | Entrypoint only ([section 3](#3-paths-handled-entirely-by-the-entrypoint)) |
 | `Recheck main` (`scheduler.sh:157`) | `recheck` | never reached | Entrypoint only: smoke gate, then exit |
 | `Fix main` (`scheduler.sh:183`) | `fix-main` | never reached | Entrypoint only: main-red auto-fix |
 | `Audit deps` (`deps_audit_check` in `scheduler.sh`) | `audit-deps` | never reached | Entrypoint only: dependency-health loop |
@@ -1134,7 +1134,7 @@ Gate A3. The run exits 0. The feature ticket shows no comment. The regression ti
 The breaker is not part of a run; the scheduler trips it after repeated failed
 dispatches of the same phase or a repeated substantive error signature
 ([scheduler.md](scheduler.md)). What the human sees
-(`scripts/factory_core/breaker.py:333-383`): board **Blocked**, labels `needs-discussion`
+(`scripts/factory_core/breaker.py:333-384`): board **Blocked**, labels `needs-discussion`
 and `factory-regression`, and a "Scheduler — Circuit-Breaker Tripped (`<phase>`)" comment
 with the attempt count, the reason and the manual retry command. A run contributes to it
 only through its exit status and the error-signature file.
@@ -1167,7 +1167,7 @@ The scheduler-side oddities are tracked in
 [#530](https://github.com/omniscient/dark-factory/issues/530); see [scheduler.md](scheduler.md).
 
 1. **The workflow's `resolve` path appears unreachable.** The scheduler's
-   conflict command is `Deconflict issue #N` (`scheduler.sh:1093`). The entrypoint
+   conflict command is `Deconflict issue #N` (`scheduler.sh:1113`). The entrypoint
    handles `deconflict` inline and every branch of that block ends in `exit 0` before the
    workflow is started (`entrypoint.sh:981-1077`). No dispatched command contains the
    word "resolve". The nodes `setup-branch-resolve`, `preview-up-resolve`,
