@@ -449,6 +449,81 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
     return out, missing
 
 
+def _sum_usage(nodes: list) -> "tuple":
+    return (
+        sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes),
+        sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes),
+        sum(n.get("cost_usd", 0) for n in nodes),
+    )
+
+
+def _capture_totals(nodes: list, *, capture_ok: bool, clone_dir, archon_log_file,
+                    issue: int, run_id: str) -> "tuple[list, dict]":
+    """Classify per-node cost capture and build run-record totals (#453).
+
+    totals.cost_usd/token totals keep their fully-measured meaning: null when capture
+    failed (df#300) or is partial. known_* sum only completed nodes. Emits one
+    non-blocking health event per missing node, plus one when the workflow YAML or the
+    node log is unavailable.
+    """
+    totals = {
+        "gen_ai.usage.input_tokens": None,
+        "gen_ai.usage.output_tokens": None,
+        "cost_usd": None,
+        "cost_capture": "unavailable",
+        "node_log": "unavailable",
+        "known_cost_usd": None,
+        "known_input_tokens": None,
+        "known_output_tokens": None,
+        "missing_nodes": [],
+    }
+    if not capture_ok:
+        return nodes, totals
+
+    maps = _load_workflow_node_maps(clone_dir)
+    if maps is None:
+        emit_health_event(
+            "factory.cost_report.node_types_unavailable", issue, run_id,
+            {"clone_dir": str(clone_dir)},
+        )
+        tin, tout, cost = _sum_usage(nodes)
+        totals.update({
+            "gen_ai.usage.input_tokens": tin,
+            "gen_ai.usage.output_tokens": tout,
+            "cost_usd": cost,
+            "cost_capture": "unknown",
+        })
+        return nodes, totals
+
+    node_types, log_tokens = maps
+    log_events = _parse_node_log(archon_log_file, log_tokens)
+    if log_events is None:
+        emit_health_event(
+            "factory.cost_report.node_log_unavailable", issue, run_id,
+            {"archon_log_file": str(archon_log_file or "")},
+        )
+    nodes, missing = _classify_node_capture(nodes, node_types, log_events)
+    for entry in missing:
+        emit_health_event("factory.cost_report.node_missing", issue, run_id, dict(entry))
+
+    known_in, known_out, known_cost = _sum_usage(
+        [n for n in nodes if n.get("cost_capture") == "completed"]
+    )
+    complete = not missing
+    totals.update({
+        "gen_ai.usage.input_tokens": known_in if complete else None,
+        "gen_ai.usage.output_tokens": known_out if complete else None,
+        "cost_usd": known_cost if complete else None,
+        "cost_capture": "complete" if complete else "partial",
+        "node_log": "unavailable" if log_events is None else "parsed",
+        "known_cost_usd": known_cost,
+        "known_input_tokens": known_in,
+        "known_output_tokens": known_out,
+        "missing_nodes": missing,
+    })
+    return nodes, totals
+
+
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     """Extract stage verdict and metadata from a verdict artifact .md file.
 
@@ -839,18 +914,16 @@ def cmd_assemble(args) -> None:
         archon_path, exit_code=exit_code, stderr_text=stderr_text
     )
 
-    if archon_cost_capture.get("ok"):
-        # Capture succeeded — nodes may legitimately be empty (a run with no AI
-        # nodes), in which case these totals are a genuine, measured zero.
-        totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
-        totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
-        totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
-    else:
-        # Capture failed — totals are unmeasured, not zero. Keep them null so
-        # `.totals.cost_usd` doesn't read as a genuine zero (df#300).
-        totals_in = None
-        totals_out = None
-        totals_cost = None
+    # Capture failed -> totals null, not zero (df#300); otherwise classify every node's
+    # cost capture (#453) — a measured zero (no AI nodes) still totals 0.
+    nodes, totals = _capture_totals(
+        nodes,
+        capture_ok=bool(archon_cost_capture.get("ok")),
+        clone_dir=getattr(args, "clone_dir", None) or ".",
+        archon_log_file=getattr(args, "archon_log_file", None),
+        issue=args.issue,
+        run_id=args.run_id,
+    )
 
     from . import adapter
     try:
@@ -898,11 +971,7 @@ def cmd_assemble(args) -> None:
         "artifacts": artifacts,
         "loops": loops,
         "archon_cost_capture": archon_cost_capture,
-        "totals": {
-            "gen_ai.usage.input_tokens": totals_in,
-            "gen_ai.usage.output_tokens": totals_out,
-            "cost_usd": totals_cost,
-        },
+        "totals": totals,
     }
     if artifact_check is not None:
         run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
@@ -1113,6 +1182,8 @@ def main() -> None:
     a.add_argument("--archon-cost-json")
     a.add_argument("--archon-cost-exit-code", type=int, default=0)
     a.add_argument("--archon-cost-stderr-file")
+    a.add_argument("--archon-log-file", default=None,
+                   help="tee'd `archon workflow run` output, for per-node status (#453)")
     a.add_argument("--out-file", required=True)
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)

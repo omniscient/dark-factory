@@ -2282,3 +2282,136 @@ def test_classify_does_not_mutate_input_nodes():
     original = [_rec_node("implement")]
     rr._classify_node_capture(original, _TYPES, None)
     assert original == [_rec_node("implement")]
+
+
+# --- cmd_assemble integration ---
+
+def test_assemble_388_shape_marks_implement_missing(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 status="failed")
+    nodes = _by_id(rec)
+    assert list(nodes) == ["parse-intent", "fetch-issue", "implement",
+                           "classify-preview", "validate", "conformance"]
+    assert nodes["implement"]["cost_capture"] == "missing"
+    assert nodes["implement"]["reason"] == "no_usage_reported"
+    assert nodes["implement"]["cost_usd"] is None
+    assert nodes["implement"]["duration_ms"] == 1_555_000
+    assert nodes["fetch-issue"]["cost_capture"] == "completed"
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "partial"
+    assert totals["node_log"] == "parsed"
+    assert totals["cost_usd"] is None
+    assert totals["gen_ai.usage.input_tokens"] is None
+    assert totals["gen_ai.usage.output_tokens"] is None
+    assert totals["known_cost_usd"] == pytest.approx(1.89)
+    assert totals["known_input_tokens"] == 112
+    assert totals["known_output_tokens"] == 27697
+    assert totals["missing_nodes"] == [{"node_id": "implement", "reason": "no_usage_reported"}]
+    assert health_events == [
+        ("factory.cost_report.node_missing", {"node_id": "implement", "reason": "no_usage_reported"}),
+    ]
+
+
+def test_assemble_healthy_run_stays_complete(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=_LOG_HEALTHY)
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "complete"
+    assert totals["node_log"] == "parsed"
+    assert totals["missing_nodes"] == []
+    assert totals["cost_usd"] == 0.0207 + 0 + 4.1  # same sum, same order as before #453
+    assert totals["gen_ai.usage.input_tokens"] == 320
+    assert totals["gen_ai.usage.output_tokens"] == 52270
+    assert totals["known_cost_usd"] == totals["cost_usd"]
+    assert [n["cost_capture"] for n in rec["nodes"]] == ["completed"] * 3
+    assert health_events == []
+
+
+def test_assemble_started_but_unreported_node_is_missing(tmp_path, monkeypatch, health_events):
+    log = _LOG_HEALTHY + "[dark-factory-validate] Started\n"
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=log,
+                                 status="failed")
+    validate = _by_id(rec)["validate"]
+    assert validate["cost_capture"] == "missing"
+    assert validate["reason"] == "not_in_cost_report"
+    assert rec["totals"]["cost_capture"] == "partial"
+    assert rec["totals"]["known_cost_usd"] == pytest.approx(4.1207)
+    assert ("factory.cost_report.node_missing",
+            {"node_id": "validate", "reason": "not_in_cost_report"}) in health_events
+
+
+def test_assemble_failed_node_absent_from_report_is_missing(tmp_path, monkeypatch, health_events):
+    cost = {"runId": "wff", "nodes": [_cost_node("parse-intent", 20, 297, 0.0097, 5200)]}
+    log = ("[parse-intent] Started\n[parse-intent] Completed (5.2s)\n"
+           "[dark-factory-implement] Started\n"
+           "[dark-factory-implement] Failed: blast radius HUMAN_REQUIRED\n")
+    rec = _assemble_with_capture(tmp_path, monkeypatch, cost, log_text=log, status="failed")
+    assert _by_id(rec)["implement"]["reason"] == "not_in_cost_report"
+    assert rec["totals"]["missing_nodes"] == [{"node_id": "implement", "reason": "not_in_cost_report"}]
+
+
+@pytest.mark.parametrize("log_text", [None, "", "no node lines here\n"])
+def test_assemble_without_usable_log_synthesizes_nothing(tmp_path, monkeypatch, health_events, log_text):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=log_text,
+                                 status="failed")
+    assert "validate" in _by_id(rec)  # reported nodes only — nothing appended
+    assert len(rec["nodes"]) == len(_COST_388["nodes"])
+    assert rec["totals"]["node_log"] == "unavailable"
+    # Requirement 1 still applies without a log.
+    assert _by_id(rec)["implement"]["reason"] == "no_usage_reported"
+    assert [e for e, _ in health_events] == [
+        "factory.cost_report.node_log_unavailable",
+        "factory.cost_report.node_missing",
+    ]
+
+
+def test_assemble_empty_log_path_from_on_failure_is_tolerated(tmp_path, monkeypatch, health_events):
+    # on_failure passes "${TMP_OUT:-}" — empty when it fires before the workflow loop.
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps(_COST_HEALTHY))
+    args = _AssembleArgs(tmp_path, tmp_path / "run-record.json")
+    args.archon_cost_json = str(cost_json)
+    args.clone_dir = str(_clone_with_workflow(tmp_path))
+    args.archon_log_file = ""
+    rr.cmd_assemble(args)
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["totals"]["node_log"] == "unavailable"
+    assert rec["totals"]["cost_capture"] == "complete"
+
+
+def test_assemble_capture_failure_skips_classification(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 status="failed", exit_code=1)
+    assert rec["nodes"] == []
+    assert rec["totals"]["cost_capture"] == "unavailable"
+    assert rec["totals"]["cost_usd"] is None
+    assert rec["totals"]["known_cost_usd"] is None
+    assert health_events == []
+
+
+def test_assemble_unloadable_workflow_classifies_nothing(tmp_path, monkeypatch, health_events):
+    (tmp_path / "bare-clone").mkdir()
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 clone=tmp_path / "bare-clone", status="failed")
+    assert all("cost_capture" not in n for n in rec["nodes"])
+    assert _by_id(rec)["implement"]["cost_usd"] == 0  # never guessed to be bash or missing
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "unknown"
+    assert totals["cost_usd"] == pytest.approx(1.89)  # today's value, unchanged
+    assert totals["gen_ai.usage.input_tokens"] == 112
+    assert totals["known_cost_usd"] is None
+    assert [e for e, _ in health_events] == ["factory.cost_report.node_types_unavailable"]
+
+
+def test_assemble_cli_accepts_archon_log_file(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rr, "cmd_assemble", lambda a: seen.update(vars(a)))
+    monkeypatch.setattr(sys, "argv", [
+        "run_record", "assemble", "--run-id", "r1", "--issue", "1", "--intent", "fix",
+        "--artifacts-dir", "/tmp/a", "--out-file", "/tmp/a/run-record.json",
+        "--archon-log-file", "/tmp/a/archon-run.log",
+    ])
+    rr.main()
+    assert seen["archon_log_file"] == "/tmp/a/archon-run.log"
