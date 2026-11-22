@@ -96,9 +96,30 @@ done
 VERB1="${_ARGS[$_I]:-}"
 VERB2="${_ARGS[$((_I + 1))]:-}"
 VERB_ARGS=("${_ARGS[@]:$((_I + 1))}")   # everything after the verb (push flag parsing)
+# #553: the global options exactly as given, so every lookup below (alias, push URL,
+# sshCommand) asks real git with the same -c/--config-env/-C/--git-dir the invocation
+# itself will run with.
+_GLOBAL_OPTS=("${_ARGS[@]:0:$_I}")
+
+# #553: a nested classify-only run (an alias expansion being judged, see the end of this
+# file) must never exec anything -- it only reports deny (exit 1) or pass (exit 0).
+_CLASSIFY_ONLY="${SIDE_EFFECT_SHIM_CLASSIFY_ONLY:-}"
+# Only this shim sets it, always with a depth >= 1. At depth 0 it came from the caller's
+# own environment: fail loudly rather than silently do nothing on every call.
+if [ "$_CLASSIFY_ONLY" = "1" ] && [ "${SIDE_EFFECT_SHIM_DEPTH:-0}" = "0" ]; then
+  deny "SIDE_EFFECT_SHIM_CLASSIFY_ONLY outside a nested check"
+fi
 
 # Version/help never mutate anything.
-case "$VERB1" in --version|--help|-h|help|version) exec "$REAL_GIT" "$@" ;; esac
+case "$VERB1" in --version|--help|-h|help|version)
+  [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
+  exec "$REAL_GIT" "$@" ;;
+esac
+
+# #553: `git config` reads only the file named by GIT_CONFIG when that is set, while the
+# real command ignores it -- so a lookup that inherited it could be shown a decoy alias or
+# no sshCommand. Every config lookup the shim makes drops it; nothing else is changed.
+_git_config() { env -u GIT_CONFIG "$REAL_GIT" "${_GLOBAL_OPTS[@]}" config "$@"; }
 
 # Operator review of PR #396 (#2): git accepts clustered short options (`push -df`,
 # `push -fu`), which a token-wise `case` never sees as -d/-f. Expand clusters into
@@ -113,6 +134,73 @@ for _a in "${VERB_ARGS[@]}"; do
     *) PUSH_ARGS+=("$_a") ;;
   esac
 done
+
+# #553 / spec Requirement 4: at own_branch_only the push must also land on the run's own
+# repository. Every push URL real git would use (`get-url --push --all`, so pushurl,
+# insteadOf and pushInsteadOf apply exactly as in the push) must equal the baseline.
+_norm_url() { local u="${1%/}"; printf '%s' "${u%.git}"; }
+_cfg_or_deny() {  # sets CFG_VAL; returns 0 found / 1 unset; any other failure denies
+  local rc=0
+  CFG_VAL=$(_git_config --get "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -le 1 ] || deny "push (config lookup failed)"
+  return "$rc"
+}
+_check_push_destination() {
+  local baseline remote="$REMOTE" cur="" urls url rc=0
+  if [ -n "${FACTORY_REPO_SLUG:-}" ]; then
+    baseline="https://github.com/${FACTORY_REPO_SLUG}"
+  else
+    # Degraded fallback (spec R4): origin's URL as persisted, read with none of this
+    # invocation's -c/--config-env/env config. Weaker than the slug -- a persisted
+    # `git remote set-url origin` or persisted insteadOf moves this baseline with it,
+    # the same kind of documented degradation as the FACTORY_RUN_BRANCH comment below.
+    local loc=() k=0
+    while [ "$k" -lt "${#_GLOBAL_OPTS[@]}" ]; do
+      case "${_GLOBAL_OPTS[$k]}" in
+        -C|--git-dir|--work-tree) loc+=("${_GLOBAL_OPTS[$k]}" "${_GLOBAL_OPTS[$((k + 1))]:-}"); k=$((k + 2)) ;;
+        --git-dir=*|--work-tree=*) loc+=("${_GLOBAL_OPTS[$k]}"); k=$((k + 1)) ;;
+        -c|--namespace|--exec-path|--super-prefix|--config-env) k=$((k + 2)) ;;
+        *) k=$((k + 1)) ;;
+      esac
+    done
+    baseline=$(env -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+      -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+      "$REAL_GIT" "${loc[@]}" config --get remote.origin.url 2>/dev/null) \
+      || deny "push (no baseline repository)"
+  fi
+  # Which remote, in git's own order: positional, --repo, branch.<b>.pushRemote,
+  # remote.pushDefault, branch.<b>.remote, origin.
+  [ -n "$remote" ] || remote="$REPO_OPT"
+  if [ -z "$remote" ]; then
+    cur=$("$REAL_GIT" "${_GLOBAL_OPTS[@]}" symbolic-ref --short -q HEAD 2>/dev/null || true)
+    if [ -n "$cur" ] && _cfg_or_deny "branch.${cur}.pushRemote"; then remote="$CFG_VAL"
+    elif _cfg_or_deny remote.pushDefault; then remote="$CFG_VAL"
+    elif [ -n "$cur" ] && _cfg_or_deny "branch.${cur}.remote"; then remote="$CFG_VAL"
+    else remote="origin"
+    fi
+  fi
+  urls=$("$REAL_GIT" "${_GLOBAL_OPTS[@]}" remote get-url --push --all "$remote" 2>/dev/null) || rc=$?
+  if [ "$rc" = "0" ]; then
+    [ -n "$urls" ] || deny "push (unresolvable destination)"
+    while IFS= read -r url; do
+      [ "$(_norm_url "$url")" = "$(_norm_url "$baseline")" ] \
+        || deny "push (destination is not the run's repository)"
+    done <<<"$urls"
+  else
+    # Not a configured remote: a literal URL or path. It must be the baseline itself, and
+    # no url.*.insteadOf/pushInsteadOf may be in effect (get-url cannot resolve those
+    # for a literal, so the shim cannot see where it would really go).
+    [ "$(_norm_url "$remote")" = "$(_norm_url "$baseline")" ] \
+      || deny "push (destination is not the run's repository)"
+    rc=0
+    _git_config --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) deny "push (URL rewrite in effect for a literal destination)" ;;
+      1) : ;;
+      *) deny "push (config lookup failed)" ;;
+    esac
+  fi
+}
 
 case "$VERB1" in
   commit) _in_list "commit" "${GIT_DENIED[@]}" && deny "commit" ;;
@@ -129,8 +217,9 @@ case "$VERB1" in
         deny "push"
         ;;
       own_branch_only)
-        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REFSPECS=(); SKIP=0
+        FORCE=0; DELETE=0; WIDE=""; REMOTE=""; REPO_OPT=""; REFSPECS=(); SKIP=0
         for arg in "${PUSH_ARGS[@]}"; do
+          if [ "$SKIP" = "repo" ]; then REPO_OPT="$arg"; SKIP=0; continue; fi
           if [ "$SKIP" = "1" ]; then SKIP=0; continue; fi
           case "$arg" in
             --force|--force-with-lease*|--force-if-includes|-f) FORCE=1 ;;
@@ -139,7 +228,9 @@ case "$VERB1" in
             --all|--mirror|--tags|--prune|--branches) WIDE="$arg" ;;
             # Value-taking push options: consume the value so it is never mistaken for
             # the remote or a refspec.
-            -o|--push-option|--receive-pack|--exec|--repo) SKIP=1 ;;
+            -o|--push-option|--receive-pack|--exec) SKIP=1 ;;
+            --repo) SKIP=repo ;;
+            --repo=*) REPO_OPT="${arg#--repo=}" ;;
             -*) : ;;
             +*) deny "push (+refspec force)" ;;
             *) if [ -z "$REMOTE" ]; then REMOTE="$arg"; else REFSPECS+=("$arg"); fi ;;
@@ -173,6 +264,7 @@ case "$VERB1" in
           [ "$TARGET_BRANCH" = "main" ] && deny "push (main)"
           [ "$TARGET_BRANCH" != "$OWN_BRANCH" ] && deny "push (not own branch)"
         done
+        _check_push_destination
         ;;
       unrestricted)
         # Read git_denied instead of hardcoding --delete/:* — the Trust model section
@@ -242,4 +334,142 @@ if [ "$GIT_MODE" = "allow" ]; then
   esac
 fi
 
+# #553 / spec Requirement 2: the verb judged above is the literal token; git may run
+# something else under that name (an alias from -c, --config-env, GIT_CONFIG_* env or any
+# config file, or a git-<verb> on PATH). The literal form has passed; now every expanded
+# form must pass the same classification too (tighten-only), at every level. Each check
+# fails closed. What is exec'd at the bottom is still the untouched "$@".
+_DEPTH="${SIDE_EFFECT_SHIM_DEPTH:-0}"
+case "$_DEPTH" in ''|*[!0-9]*) deny "${VERB1:-git} (alias chain depth)" ;; esac
+if [ -n "$VERB1" ]; then
+  # Anything the skip-loop above does not know (`--no-advice`, `--attr-source HEAD`)
+  # lands here instead of a verb; deny it rather than read the option as the verb.
+  [[ "$VERB1" =~ ^[a-z][a-z0-9-]*$ ]] || deny "$VERB1 (unrecognised option or verb syntax)"
+  _KNOWN=$("$REAL_GIT" --list-cmds=main 2>/dev/null) && [ -n "$_KNOWN" ] \
+    || deny "$VERB1 (verb resolution failed)"
+  # A known command never consults aliases (git does not let an alias shadow one).
+  if ! grep -qxF -- "$VERB1" <<<"$_KNOWN"; then
+    _OTHERS=$("$REAL_GIT" --list-cmds=others 2>/dev/null) || deny "$VERB1 (verb resolution failed)"
+    # git runs a git-<verb> found on PATH before an alias of that name, and the child
+    # gets git's exec-path ahead of this shim on its PATH -- unclassifiable.
+    grep -qxF -- "$VERB1" <<<"$_OTHERS" && deny "$VERB1 (external git command)"
+    [ "$_DEPTH" -lt 5 ] || deny "$VERB1 (alias chain too deep)"
+    _RC=0
+    _VALUE=$(_git_config --get "alias.${VERB1}" 2>/dev/null) || _RC=$?
+    # Exit 1 is also what an invalid key returns, so it can never mean "safe".
+    case "$_RC" in
+      0) : ;;
+      1) deny "$VERB1 (unknown verb)" ;;
+      *) deny "$VERB1 (alias resolution failed)" ;;
+    esac
+    # A shell alias has no verb to judge, and git runs its body with git's exec-path
+    # first on PATH, so a nested `git push` in it would reach real git (spec item 4).
+    case "$_VALUE" in '!'*) deny "$VERB1 (shell alias)" ;; esac
+    case "$_VALUE" in
+      *[\"\'\\]*|*$'\n'*) deny "$VERB1 (alias value needs shell-style parsing)" ;;
+    esac
+    read -ra _EXPANSION <<<"$_VALUE"
+    [ "${#_EXPANSION[@]}" -gt 0 ] || deny "$VERB1 (empty alias)"
+    # Re-run this whole shim, classify-only, on the expanded argv: identical code judges
+    # the literal and the expanded form, and alias chains recurse with the depth cap.
+    SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 SIDE_EFFECT_SHIM_DEPTH=$((_DEPTH + 1)) \
+      "$SHIM_DIR/git" "${_GLOBAL_OPTS[@]}" "${_EXPANSION[@]}" "${VERB_ARGS[@]}" || exit $?
+  fi
+fi
+
+# #553 / spec Requirement 3, every level: a transport-command override splices an
+# arbitrary command into an otherwise authorised push/fetch. Nothing in the factory uses
+# one (HTTPS clone, gh credential helper), so it is denied outright. Checked on every
+# verb, not a list of transport verbs: `archive --remote`, `maintenance run
+# --task=prefetch` and a partial clone's lazy fetch open a transport from verbs such a
+# list would miss. The reason names the override, not a level.
+_V="${VERB1:-git}"
+[ -n "${GIT_SSH_COMMAND+x}" ] && deny "$_V (sshCommand override: GIT_SSH_COMMAND)"
+[ -n "${GIT_SSH+x}" ] && deny "$_V (sshCommand override: GIT_SSH)"
+_RC=0
+_git_config --get core.sshCommand >/dev/null 2>&1 || _RC=$?
+case "$_RC" in
+  0) deny "$_V (sshCommand override: core.sshCommand)" ;;
+  1) : ;;
+  *) deny "$_V (config lookup failed)" ;;
+esac
+
+# Gate 3 on PR #569 (high): sshCommand is not the only transport-command override. The
+# program a transport runs on the other end (--upload-pack / --receive-pack / --exec and
+# their config forms), a git:// proxy command, and the ext:: transport (whose address IS a
+# command line) each ran an arbitrary command from an allowed read verb at level 2 -- and
+# git puts its exec-path ahead of this shim on that command's PATH. Denied at every level,
+# on every verb, tighten-only. `rebase --exec` is not a transport and stays #565's.
+[ -n "${GIT_PROXY_COMMAND+x}" ] && deny "$_V (transport command override: GIT_PROXY_COMMAND)"
+_cfg_lines_or_deny() {  # sets CFG_LINES to the matching "key value" lines; 0 some / 1 none
+  local rc=0
+  CFG_LINES=$(_git_config --get-regexp "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -le 1 ] || deny "$_V (config lookup failed)"
+  return "$rc"
+}
+_cfg_lines_or_deny '^remote\..*\.(uploadpack|receivepack)$' \
+  && deny "$_V (transport command override: remote.*.uploadpack/receivepack)"
+_cfg_lines_or_deny '^core\.gitproxy$' && deny "$_V (transport command override: core.gitProxy)"
+for _a in "${VERB_ARGS[@]}"; do
+  # git accepts any unambiguous prefix of a long option (`--upload-pa=`, `--exe=`), so
+  # every prefix that can only resolve to one of the three is matched. None of these
+  # prefixes is a complete option of any git command.
+  case "$_a" in
+    --u|--u=*|--up|--up=*|--upl*|--r|--r=*|--re|--re=*|--rec|--rec=*|--rece*)
+      deny "$_V (transport command override: ${_a%%=*})" ;;
+    --e|--e=*|--ex|--ex=*|--exe*)
+      [ "$VERB1" = "rebase" ] || deny "$_V (transport command override: ${_a%%=*})" ;;
+  esac
+done
+# -u is --upload-pack only for these verbs (elsewhere it is --set-upstream, --update,
+# --untracked-files...). Alone, clustered (`-qu`) or with a glued value (`-ux`).
+case "$VERB1" in
+  ls-remote|clone|fetch-pack)
+    for _a in "${VERB_ARGS[@]}"; do
+      case "$_a" in
+        --) break ;;
+        --*) : ;;
+        -*u*) deny "$_V (transport command override: -u)" ;;
+      esac
+    done ;;
+esac
+# ext:: is refused by git itself unless the protocol policy is opened, so the policy
+# override is what is denied; an ext:: address is denied as well, whatever the policy.
+[ -n "${GIT_ALLOW_PROTOCOL+x}" ] && deny "$_V (protocol policy override: GIT_ALLOW_PROTOCOL)"
+for _k in protocol.allow protocol.ext.allow; do
+  _RC=0
+  _PV=$(_git_config --get "$_k" 2>/dev/null) || _RC=$?
+  case "$_RC" in
+    0) [ "$_PV" = "never" ] || deny "$_V (protocol policy override: $_k)" ;;
+    1) : ;;
+    *) deny "$_V (config lookup failed)" ;;
+  esac
+done
+for _a in "${VERB_ARGS[@]}"; do
+  case "$_a" in ext::*|*=ext::*) deny "$_V (ext:: transport)" ;; esac
+done
+if _cfg_lines_or_deny '^(remote\..*\.(url|pushurl)|url\..*\.(insteadof|pushinsteadof))$'; then
+  case "$CFG_LINES" in *ext::*) deny "$_V (ext:: transport in config)" ;; esac
+  # `<helper>::<address>` as a remote URL or an insteadOf base: see below.
+  grep -qE '^(url\.[A-Za-z0-9][A-Za-z0-9+.-]*::|[^ ]+ [A-Za-z0-9][A-Za-z0-9+.-]*::)' <<<"$CFG_LINES"     && deny "$_V (remote helper address in config)"
+fi
+# Operator review of 62efc98: the helper program itself is the same override one step
+# down. --exec-path / GIT_EXEC_PATH swap the directory git-remote-https is loaded from;
+# a remote-* helper run directly (remote-ext executes its address) skips every URL check
+# above; and `<helper>::<address>` loads git-remote-<helper> from PATH. The address form
+# is judged only on verbs that take a repository, so `git grep 'std::string'` and commit
+# messages are untouched.
+[ -n "${GIT_EXEC_PATH+x}" ] && deny "$_V (exec-path override: GIT_EXEC_PATH)"
+for _a in "${_GLOBAL_OPTS[@]}"; do
+  case "$_a" in --exec-path|--exec-path=*) deny "$_V (exec-path override: --exec-path)" ;; esac
+done
+case "$VERB1" in remote-*) deny "$VERB1 (remote helper)" ;; esac
+case "$VERB1" in
+  ls-remote|fetch|pull|clone|push|archive|fetch-pack|send-pack|remote|submodule|bundle|request-pull)
+    for _a in "${VERB_ARGS[@]}"; do
+      [[ "$_a" =~ ^(--[a-z-]+=)?[A-Za-z0-9][A-Za-z0-9+.-]*:: ]]         && deny "$_V (remote helper address)"
+    done ;;
+esac
+
+[ "$_CLASSIFY_ONLY" = "1" ] && exit 0
 exec "$REAL_GIT" "$@"

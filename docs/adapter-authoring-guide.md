@@ -475,11 +475,50 @@ intent executes (`side_effect.py`'s `effective-container-level`, called from
 `entrypoint.sh`). An intent with no phases — `close`, `recheck`, or an unrecognised one —
 resolves to level 1.
 
+Since #553 the shims also judge what git/gh would actually run, not only the literal
+verb, at every level: an alias — from `-c`, `--config-env`, `GIT_CONFIG_*` env, any config
+file, or `gh alias` — is resolved through the real binary and its expansion must pass the
+same checks as the literal form (an alias can add a denial, never remove one). Denied
+outright: shell aliases (`!…`), external `git-<verb>` commands and any verb git does not
+list in `--list-cmds=main` (so `git lfs` is denied for phase agents), a global option the
+shim does not know (`git --no-advice push`), a flag before the `gh` command (`gh -R o/r pr
+create`), and every transport-command override on every verb:
+`core.sshCommand`/`GIT_SSH_COMMAND`/`GIT_SSH`, `--upload-pack`/`--receive-pack`/`--exec`
+(any abbreviation; `-u` on `ls-remote`/`clone`/`fetch-pack`; `rebase --exec` is not a
+transport and is not covered), `remote.*.uploadpack`/`receivepack`, `core.gitProxy`/
+`GIT_PROXY_COMMAND`, a `protocol.allow` or `protocol.ext.allow` other than `never`,
+`GIT_ALLOW_PROTOCOL`, any `ext::` address in an argument or a remote URL,
+`--exec-path`/`GIT_EXEC_PATH`, the `remote-*` helper verbs, and a `<helper>::<address>`
+repository argument or remote URL. At
+levels 1–4 `gh extension install|upgrade|exec` and running an installed extension are
+denied. At level 4 every push URL (`remote get-url --push --all`, so `pushurl` and
+`insteadOf` count) must be `https://github.com/${FACTORY_REPO_SLUG}`. Without
+`FACTORY_REPO_SLUG` the baseline is origin's persisted URL, which is weaker: a persisted
+`remote set-url` moves it. Every lookup fails closed: if real git cannot answer (for
+example a nonexistent `-C` directory, or `--git-dir` pointing at a repository that does
+not exist yet) the call is denied with `config lookup failed` or `verb resolution
+failed`.
+
 **What this does and does not claim.** The shim (`scripts/shims/git`, `scripts/shims/gh`)
-is a `PATH` shim guarding the two CLIs a Bash-tool subprocess would otherwise reach
-directly; a process invoking `/usr/bin/git` by absolute path bypasses it. v1 is a policy
-boundary against mistaken or prompt-injected behavior, not a security boundary against a
-deliberately hostile agent — see `docs/factory-target-boundary.md` (#201) for the full
+is a `PATH` guard for a fallible agent, not a sandbox. It guards the two CLIs a Bash-tool
+subprocess would otherwise reach directly. Out of its reach, by construction:
+
+- calling the real binary by absolute path (`/usr/bin/git`, `/usr/bin/gh`);
+- unsetting `CLAUDECODE` or `FACTORY_SIDE_EFFECT_LEVEL`, which turns the shim into a
+  passthrough;
+- direct HTTP to GitHub with the token (`curl` against the API);
+- any process git itself spawns — hooks, `rebase --exec`, `core.editor`, `core.pager`,
+  `bisect run`, `submodule foreach`, `credential.helper`, and likewise an `ext::` transport,
+  a non-builtin command run from an `--exec-path`/`GIT_EXEC_PATH` override, and
+  `--upload-pack`/`--receive-pack`/`--exec` or `remote.*.uploadpack`/`receivepack` on a
+  local-path or ssh transport — because git
+  puts its exec-path ahead of the shim on that child's `PATH`, so a nested `git push` there
+  reaches real git (measured: `git rebase --exec 'git push …'`, `git -c
+  protocol.ext.allow=always fetch 'ext::…'` and `git --exec-path=<dir> submodule` all push
+  at level 2). This class is a documented residual of #553, tracked in a follow-up ticket.
+
+v1 is a policy boundary against mistaken or prompt-injected behavior, not a security
+boundary against a deliberately hostile agent — see `docs/factory-target-boundary.md` (#201) for the full
 trust-model writeup, and #196's spec (`docs/archive/2026-09-04-side-effect-levels-permission-profiles-a2-design.md`)
 Known limitations section for the credential-scoping follow-up (F1) that closes this gap.
 
