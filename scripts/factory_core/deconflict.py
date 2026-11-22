@@ -48,7 +48,7 @@ def _deconflict_alembic_ini(clone_dir: str | None = None) -> str:
     try:
         from . import adapter
         val = adapter.get(clone_dir or ".", "deconflict.alembic_ini")
-        if val is not None and isinstance(val, str):
+        if isinstance(val, str) and val:
             return val
     except Exception:
         pass
@@ -252,6 +252,29 @@ def _untracked_py(clone_dir: str, rel_dir: str) -> set:
     return {p for p in out.splitlines() if p.endswith(".py")}
 
 
+def _is_under_migrations_dir(filepath: str, migrations_dir: str) -> bool:
+    """True if filepath's directory contains migrations_dir as a contiguous,
+    boundary-aligned sequence of path components (not just a raw substring)."""
+    mig_parts = [p for p in os.path.normpath(migrations_dir).split(os.sep) if p and p != "."]
+    if not mig_parts:
+        return False
+    file_parts = os.path.normpath(os.path.dirname(filepath)).split(os.sep)
+    n = len(mig_parts)
+    return any(file_parts[i:i + n] == mig_parts for i in range(len(file_parts) - n + 1))
+
+
+def _resolve_alembic_ini_path(clone_dir: str, ini_rel: str) -> str:
+    """Join ini_rel onto clone_dir, rejecting absolute paths and traversal that
+    would escape clone_dir. Falls back to the default alembic_ini path."""
+    clone_real = os.path.realpath(clone_dir)
+    candidate = os.path.realpath(os.path.join(clone_dir, ini_rel))
+    if os.path.commonpath([clone_real, candidate]) == clone_real:
+        return candidate
+    print(f"[deconflict] alembic_ini path {ini_rel!r} escapes clone_dir; using default",
+          flush=True)
+    return os.path.realpath(os.path.join(clone_dir, _DEFAULT_ALEMBIC_INI))
+
+
 def _alembic_multihead_check(issue_num: int, clone_dir: str, conflicted: list) -> str | None:
     """Merge alembic heads after Tier 1. Returns an escalation reason, or None to continue.
 
@@ -259,12 +282,13 @@ def _alembic_multihead_check(issue_num: int, clone_dir: str, conflicted: list) -
     is a migration, which means the configured path is wrong.
     """
     ini_rel = _deconflict_alembic_ini(clone_dir)
-    ini_path = os.path.join(clone_dir, ini_rel)
+    ini_path = _resolve_alembic_ini_path(clone_dir, ini_rel)
     if not os.path.isfile(ini_path):
         print(f"[deconflict] alembic check skipped: {ini_rel} not found", flush=True)
         migrations_dir = _deconflict_migrations_dir(clone_dir)
         migration_conflicts = [f for f in conflicted
-                               if migrations_dir in f and f.endswith(".py")]
+                               if _is_under_migrations_dir(f, migrations_dir)
+                               and f.endswith(".py")]
         if migration_conflicts:
             return (f"Conflicted migration files ({', '.join(migration_conflicts)}) but no "
                     f"alembic.ini at {ini_rel}; check deconflict.alembic_ini.")
