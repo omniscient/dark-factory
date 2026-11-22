@@ -34,6 +34,7 @@ PROFILE_JSON=$(python3 "$CLI" render --level "$LEVEL" 2>/dev/null) || {
   exit 1
 }
 LEVEL_NAME=$(jq -r '.name' <<<"$PROFILE_JSON")
+LEVEL_NUM=$(jq -r '.level' <<<"$PROFILE_JSON")
 GH_MODE=$(jq -r '.gh_mode' <<<"$PROFILE_JSON")
 mapfile -t GH_ALLOWED < <(jq -r '.gh_allowed[]' <<<"$PROFILE_JSON")
 mapfile -t GH_DENIED  < <(jq -r '.gh_denied[]'  <<<"$PROFILE_JSON")
@@ -65,10 +66,22 @@ _in_list() {
   return 1
 }
 
+# #553: a nested classify-only run (an alias expansion being judged, see _finish) must
+# never exec anything -- it only reports deny (exit 1) or pass (exit 0).
+_CLASSIFY_ONLY="${SIDE_EFFECT_SHIM_CLASSIFY_ONLY:-}"
+# Only this shim sets it, always with a depth >= 1. At depth 0 it came from the caller's
+# own environment: fail loudly rather than silently do nothing on every call.
+if [ "$_CLASSIFY_ONLY" = "1" ] && [ "${SIDE_EFFECT_SHIM_DEPTH:-0}" = "0" ]; then
+  deny "SIDE_EFFECT_SHIM_CLASSIFY_ONLY outside a nested check"
+fi
+
 _GH_ARGS=("$@")
 VERB1="${_GH_ARGS[0]:-}"
 # Version/help never mutate anything and gh accepts them at any level.
-case "$VERB1" in --version|--help|-h|help|version) exec "$REAL_GH" "$@" ;; esac
+case "$VERB1" in --version|--help|-h|help|version)
+  [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
+  exec "$REAL_GH" "$@" ;;
+esac
 # Operator review of PR #396 (#1): cobra accepts persistent flags between the command
 # words (`gh pr -R o/r create` runs `pr create`), so the second word is read after
 # skipping them -- otherwise `TWO_WORD="pr -R"` matched nothing and passed at level 4
@@ -83,6 +96,58 @@ while [ "$_J" -lt "${#_GH_ARGS[@]}" ]; do
 done
 VERB2="${_GH_ARGS[$_J]:-}"
 TWO_WORD="$VERB1 $VERB2"
+
+# #553 / spec Requirements 2 and 5: every path that would exec real gh comes here once
+# the literal form has passed. gh may run something else under VERB1 (an alias, an
+# installed extension), so the expanded form must pass the same classification too
+# (tighten-only), at every level. Each check fails closed.
+_finish() {
+  local depth="${SIDE_EFFECT_SHIM_DEPTH:-0}" aliases line exp="" found=0 exts name toks=()
+  case "$depth" in ''|*[!0-9]*) deny "${VERB1:-gh} (alias chain depth)" ;; esac
+  if [ -n "$VERB1" ]; then
+    # `gh -R o/r pr create`: a flag in VERB1's place hides the command from the tables.
+    [[ "$VERB1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || deny "$VERB1 (flag before the command)"
+    # gh refuses an alias over a core command, so only a non-core VERB1 can match here.
+    aliases=$("$REAL_GH" alias list 2>/dev/null) || deny "$VERB1 (alias resolution failed)"
+    while IFS= read -r line; do
+      case "$line" in
+        "$VERB1:") found=1; exp="" ;;
+        "$VERB1: "*) found=1; exp="${line#"$VERB1: "}" ;;
+      esac
+    done <<<"$aliases"
+    if [ "$found" = "1" ]; then
+      [ "$depth" -lt 5 ] || deny "$VERB1 (alias chain too deep)"
+      case "$exp" in
+        ''|'|'*|'>'*) deny "$VERB1 (empty or multi-line alias)" ;;
+        '!'*) deny "$VERB1 (shell alias)" ;;
+        *[\"\'\\\$]*) deny "$VERB1 (alias value needs shell-style parsing)" ;;
+      esac
+      read -ra toks <<<"$exp"
+      SIDE_EFFECT_SHIM_CLASSIFY_ONLY=1 SIDE_EFFECT_SHIM_DEPTH=$((depth + 1)) \
+        "$SHIM_DIR/gh" "${toks[@]}" "${_GH_ARGS[@]:1}" || exit $?
+    fi
+  fi
+  # Requirement 5, levels 1-4: an extension binary acts with gh's own credentials and no
+  # verb-level check, so neither installing one nor running one is allowed below level 5.
+  if [ "$LEVEL_NUM" -le 4 ]; then
+    case "$VERB1" in
+      extension|extensions|ext)
+        case "$VERB2" in install|upgrade|exec) deny "extension $VERB2" ;; esac ;;
+    esac
+    if [ -n "$VERB1" ]; then
+      # `gh extension list` only reads the local extensions directory but exits 4 when no
+      # token is present at all; a placeholder for this one call keeps the check working
+      # without a token (and with one, the real token is passed unchanged).
+      exts=$(GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-placeholder}}" "$REAL_GH" extension list 2>/dev/null) \
+        || deny "$VERB1 (extension resolution failed)"
+      while IFS=$'\t' read -r name _; do
+        if [ "$name" = "gh $VERB1" ]; then deny "$VERB1 (extension)"; fi
+      done <<<"$exts"
+    fi
+  fi
+  [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
+  exec "$REAL_GH" "${_GH_ARGS[@]}"
+}
 
 if [ "$VERB1" = "api" ]; then
   METHOD=""; HAS_BODY=0; TAKE_NEXT=0
@@ -114,7 +179,7 @@ if [ "$VERB1" = "api" ]; then
       deny "api ${METHOD}"
     fi
   fi
-  exec "$REAL_GH" "$@"
+  _finish
 fi
 
 DISPLAY_VERB="$VERB1"
@@ -135,12 +200,12 @@ if [ "$GH_MODE" = "allow" ]; then
   # second half of a two-word entry, so this can't accidentally admit `gh pr create`.
   if _in_list "$VERB1" "${GH_ALLOWED[@]}" || _in_list "$VERB2" "${GH_ALLOWED[@]}" \
       || _in_list "$TWO_WORD" "${GH_ALLOWED[@]}"; then
-    exec "$REAL_GH" "$@"
+    _finish
   fi
   deny "$DISPLAY_VERB"
 else
   if _in_list "$VERB1" "${GH_DENIED[@]}" || _in_list "$TWO_WORD" "${GH_DENIED[@]}"; then
     deny "$DISPLAY_VERB"
   fi
-  exec "$REAL_GH" "$@"
+  _finish
 fi
