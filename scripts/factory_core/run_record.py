@@ -649,6 +649,24 @@ def _check_needs_discussion(issue) -> tuple:
     return NEEDS_DISCUSSION_LABEL in names, True
 
 
+def _push_result_is_fresh(push_path: pathlib.Path, started_at: str) -> bool:
+    """True if push_path's mtime is not older than this run's --started-at (#447 advisory).
+
+    `archon workflow cost --last` can hand back an earlier workflow run's id when the
+    current run was never recorded there (see _archon_workflow_run_id) — without this
+    check, that earlier run's push-result.json in the sibling directory would be
+    mistaken for this run's artifact. Unparseable started_at or an unreadable mtime
+    fails closed (not fresh): a spurious produced_ungated/1.0 is the failure mode #447
+    exists to remove, so an unverifiable timestamp must not be treated as evidence.
+    """
+    try:
+        started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        mtime = datetime.fromtimestamp(push_path.stat().st_mtime, tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return False
+    return mtime >= started
+
+
 def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | None":
     """Workflow run id from `archon workflow cost --last --json` output, or None.
 
@@ -731,7 +749,9 @@ def cmd_assemble(args) -> None:
         workflow_run_id = _archon_workflow_run_id(archon_path)
         if workflow_run_id is not None:
             workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
-            if workflow_push_path.exists():
+            if workflow_push_path.exists() and _push_result_is_fresh(
+                workflow_push_path, args.started_at
+            ):
                 artifact_push_path = workflow_push_path
         if artifact_push_path.exists():
             artifact_check = {"artifact_present": True}
