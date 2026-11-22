@@ -140,7 +140,7 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 
 The workflow therefore runs for `refine`, `plan`, `fix`, `continue` and `close` only.
 `refine`, `plan` and `close` skip the smoke gate; `close` and `recheck` skip the adapter
-gate (`entrypoint.sh:688-693`).
+gate (`entrypoint.sh:713-718`).
 
 ---
 
@@ -150,14 +150,14 @@ gate (`entrypoint.sh:688-693`).
 
 Runs steps 1-23 above with no issue number. The smoke gate's green path clears the
 main-red sentinel and closes the regression ticket; the run then exits 0
-(`entrypoint.sh:947-950`). If main is still red, the gate itself exits 0
+(`entrypoint.sh:972-975`). If main is still red, the gate itself exits 0
 (`smoke_gate.sh:66-135`).
 
 ### `Fix main`
 
 After the clone and setup, if `MAIN_RED_AUTOFIX_ENABLED` is not `true` the run logs that
 and exits 0. Otherwise it calls `factory_core/cli.py main-red-fix --once` and exits 0
-regardless of the result (`entrypoint.sh:908-916`). The fixer itself
+regardless of the result (`entrypoint.sh:933-941`). The fixer itself
 (`scripts/factory_core/main_red_fixer.py`) is outside this document; its knobs are the
 `main_red_autofix.*` keys ([configuration.md](configuration.md)).
 
@@ -178,7 +178,7 @@ No Archon workflow is involved. The side-effect config says the same:
 
 1. Smoke gate (step 23).
 2. Find the remote branch `origin/feat/issue-<N>-*`; take the first match
-   (`entrypoint.sh:957-958`). None found: escalate.
+   (`entrypoint.sh:982-983`). None found: escalate.
 3. `git reset --hard` and `git clean -fd dark-factory/ .claude/` to undo the setup
    copies, then check the branch out; verify `HEAD` is on it (`:973-989`). Either
    failing: escalate.
@@ -203,7 +203,7 @@ No Archon workflow is involved. The side-effect config says the same:
    - Writes `conflict_resolution.md` with `CONFLICT_VERDICT`
      (`none|tier1|tier2|clean_merge|escalate`), `FILES_CONFLICTED`, `TIER1_RESOLVED`,
      `TIER2_RESOLVED`, `ESCALATED` (`:198-207`).
-5. Validate (`entrypoint.sh:997-1018`): if `.factory/hooks/validate` is a non-empty file,
+5. Validate (`entrypoint.sh:1022-1043`): if `.factory/hooks/validate` is a non-empty file,
    run it through `run_hook --gate validate`; otherwise run `npx tsc --noEmit` in
    `frontend/`. Failure: escalate.
 6. `git push origin <branch>`, move the board to **In Review**, overwrite
@@ -212,12 +212,12 @@ No Archon workflow is involved. The side-effect config says the same:
 
 **Escalation** means: move the board to **Blocked**, post one
 "Dark Factory — Conflict Resolution Escalated" comment with the reason and manual steps,
-and exit 0 (`entrypoint.sh:758-781` for the entrypoint's own guards;
+and exit 0 (`entrypoint.sh:783-806` for the entrypoint's own guards;
 `scripts/factory_core/deconflict.py:210-230` for resolver failures). Exit 0 is deliberate so `on_failure` does
-not add a second comment (`entrypoint.sh:755-757`).
+not add a second comment (`entrypoint.sh:780-782`).
 
 Success in this path does not assemble a run record or post a cost report: every branch
-exits before `entrypoint.sh:1120`.
+exits before `entrypoint.sh:1145`.
 
 ---
 
@@ -594,7 +594,7 @@ and defaults are in [configuration.md](configuration.md).
 | Gate | Checks | Pass | Fail | Tuned by |
 |---|---|---|---|---|
 | **A1. Concurrency guard** (`entrypoint.sh:169-179`) | Number of other running run containers | Continue | Exit 1 before the trap is installed and before any board move: nothing appears on the ticket | `scheduler.factory_wip_limit` / `FACTORY_WIP_LIMIT` |
-| **A2. Adapter validity** (`entrypoint.sh:695-736`, called at `:802`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
+| **A2. Adapter validity** (`entrypoint.sh:720-761`, called at `:827`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
 | **A3. Smoke gate** (`scripts/hooks.sh:24-76`, `smoke_gate.sh`) | Runs the target's `.factory/hooks/smoke-gate` for `fix`, `continue`, `deconflict`, `recheck`. Exit 0 means `main` is green | Green (`smoke_gate.sh:140-163`): remove the `main-is-red` sentinel, close every open `regression` ticket carrying the `df-main-red` marker, continue | Red (`:66-135`): write `main-is-red` and `main-red-last-recheck` to the state dir; comment on the existing regression ticket or create "main is red: tsc/python import failure"; **exit 0**. The ticket being worked on gets no comment and no board change from the gate | `scheduler.main_red_recheck_*` (scheduler side) |
 | **A3b. Smoke hook missing** (`smoke_gate.sh:179-223`) | The hook is absent, a directory, or empty | n/a | Refuses the run: stderr, a `smoke-gate-hook-missing` line in `hook-warnings.log`, a "Dark Factory — Smoke-gate hook missing" comment (marker `df-smoke-hook-missing`), a health event; returns 1, which fires `on_failure`. Does not write or clear the main-red sentinel | none |
 
@@ -628,7 +628,7 @@ Each agent phase is preceded by a `budget-*` node and an `enforce-budget-*` node
   `observe` mode it is empty (`scripts/budget_enforce.py:7-11,316-333`).
 
 **These gates never stop a run.** Every `enforce-budget-*` node wraps the script in
-`|| true` (for example `workflows/archon-dark-factory.yaml:422`). Their effect is the
+`|| true` (for example `workflows/archon-dark-factory.yaml:425`). Their effect is the
 caps file, which later steps source: `scripts/load_memory_context.sh:25`, and the diff-ranking
 steps of the conformance and code-review commands
 (`commands/dark-factory-conformance.md:208`, `commands/dark-factory-code-review.md:110`).
@@ -645,7 +645,7 @@ issue number appears in the file name, or `#<N>` appears in the committed conten
 (second pass) a commit on the branch whose subject mentions `#<N>` touched that file. It
 prints nothing if there is none, and always exits 0 (`scripts/push_gate_check.sh:56-115`).
 
-| Situation | Outcome (`workflows/archon-dark-factory.yaml:492-585`, plan mirror `:609-702`) |
+| Situation | Outcome (`workflows/archon-dark-factory.yaml:495-588`, plan mirror `:612-705`) |
 |---|---|
 | Artifact found, push succeeds within 30 s, and `git ls-remote` shows the remote branch at local `HEAD` | Apply `spec-pending-review` (or `plan-pending-review`). `push-result.json` records `pushed: true` |
 | …but applying the label fails | Warning plus a "Refinement Pipeline — Gate Label Missing" comment (marker `df-gate-label-failure`) with the manual `gh issue edit` command |
@@ -694,7 +694,7 @@ under the config at the merge base, never from the working tree, so a change can
 disable its own gate (`scripts/gate_blast_radius.py:85-125`). The baked script copies are
 preferred over the clone's.
 
-`STATUS: HUMAN_REQUIRED` when any of these holds (`scripts/gate_blast_radius.py:534-554`):
+`STATUS: HUMAN_REQUIRED` when any of these holds (`scripts/gate_blast_radius.py:537-557`):
 
 - a changed file has a hotspot score at or above `blast_radius.hotspot_score_floor`
   (suppressed when `blast_radius.enabled` is false);
@@ -823,7 +823,7 @@ pass and read-only by instruction: one reviewer, no reconcile loop, no commits.
 | BLOCKED (`:248-308`) | "Docs Conformance (Gate 2.5) — Mismatch observed (informational)" comment (marker `df-docs-conformance-observed`); no label, no board move | "Docs Conformance (Gate 2.5) — Blocked" comment (marker `df-docs-conformance-blocked`) with the evidence and next steps; board to **Blocked**; `needs-discussion` label |
 
 **The `docs-conformance-gate` node enforces the result** with
-`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1262-1309`), not
+`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1265-1312`), not
 `verdict_gate_check.sh`, because `ERROR` must not pass:
 
 | First `STATUS:` line | `observe` | `enforce` |
@@ -914,7 +914,7 @@ conformance and code review have run; nothing re-runs those on the revised code.
 
 ### E. Close
 
-**E1. Merge refusal** (`close-preview`, `workflows/archon-dark-factory.yaml:236-269`).
+**E1. Merge refusal** (`close-preview`, `workflows/archon-dark-factory.yaml:236-272`).
 `Close issue #N` exits 1 without merging if the issue has `needs-discussion`, if no PR
 exists, if the blast-radius check on the PR head does not pass (gate D1; a
 `HUMAN_REQUIRED` diff needs a valid signed approval, and a checker failure also refuses),
@@ -951,16 +951,18 @@ negative or above 90000 s) and re-run the whole workflow
 
 ## 7. After the workflow
 
-Only when `archon workflow run` exits 0 (`entrypoint.sh:1120-1147`):
+Only when `archon workflow run` exits 0 (`entrypoint.sh:1145-1172`):
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:609-705`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:690-848`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts, adds
    per-node token and cost figures from the Archon cost JSON, the adapter's `loops`,
    `memory-trace.json` and `push-result.json` when present, and appends one line per
-   stage to `runs.jsonl`. Failure is ignored.
-3. `post_cost_report` (`entrypoint.sh:467-534`): if `run-record.json` exists and has
+   stage to `runs.jsonl`. For `refine`/`plan` it also records `artifact_check`
+   (`push-result.json` presence, else a `needs-discussion` label lookup) and scores an
+   artifact-less run `failed` or `clean_abort`. Failure is ignored.
+3. `post_cost_report` (`entrypoint.sh:479-546`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
    `delivered-savings.jsonl`; the legacy single `context-budget.json` is read only when no
@@ -1022,7 +1024,7 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `review.md` | code-review command | `review-gate`, `report`, `run-record assemble`, post-mortem |
 | `revise_advisory_*.md`, `revise_summary.txt`, `revise_advisory.md` | revise-advisory command | Fix subagent; PR comment |
 | `conflict_resolution.md` | `deconflict.py`; overwritten by the entrypoint deconflict success path | `report`; `run-record assemble`; failure classification |
-| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:433-436`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
+| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:445-448`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
 | `run-record.json` | `run-record assemble` | `post_cost_report` |
 
 State written outside the artifacts directory, under `/var/lib/dark-factory`:
@@ -1073,7 +1075,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
 
 ### Workflow failure (non-zero exit from `archon workflow run`)
 
-`entrypoint.sh:1066-1115`, in order:
+`entrypoint.sh:1091-1140`, in order:
 
 1. Session-window match: exit 0 (gate F).
 2. Rate-limit match with backoff disabled: sleep and retry.
@@ -1087,7 +1089,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    `DELIVERY_FAILURE_MAX_SECONDS`, no commits, clean tree, no phase artifact),
    `environmental:preview_infra`, `environmental:rate_limit`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:406-465`, `scripts/factory_core/error_signature.py:37-64`).
+   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:37-64`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see
@@ -1095,7 +1097,7 @@ This path does not go through `on_failure`; see
 
 ### Entrypoint failure (`on_failure`, the `ERR` trap)
 
-Any unguarded failing command after `entrypoint.sh:668`: clone failure, dependency
+Any unguarded failing command after `entrypoint.sh:693`: clone failure, dependency
 install failure, the adapter gate, the missing smoke hook, a failed push in the
 deconflict path. `on_failure` (`:504-634`):
 
@@ -1163,7 +1165,7 @@ The scheduler-side oddities are tracked in
 1. **The workflow's `resolve` path appears unreachable.** The scheduler's
    conflict command is `Deconflict issue #N` (`scheduler.sh:1093`). The entrypoint
    handles `deconflict` inline and every branch of that block ends in `exit 0` before the
-   workflow is started (`entrypoint.sh:956-1052`). No dispatched command contains the
+   workflow is started (`entrypoint.sh:981-1077`). No dispatched command contains the
    word "resolve". The nodes `setup-branch-resolve`, `preview-up-resolve`,
    `push-resolve`, and the `resolve` branches of `de-conflict`, `validate`,
    `status-in-review` and `report` would run only if `parse-intent` (a model call)
@@ -1172,7 +1174,7 @@ The scheduler-side oddities are tracked in
    archon".
 
 2. **On `continue`, `de-conflict` is not upstream of validation or the push.**
-   `de-conflict` depends on `regen-codeindex` (`workflows/archon-dark-factory.yaml:795`).
+   `de-conflict` depends on `regen-codeindex` (`workflows/archon-dark-factory.yaml:798`).
    `preview-changeset` also depends on `regen-codeindex` (`:789`), and the chain to
    `validate`, `conformance` and `push-and-pr` runs through it, not through
    `de-conflict`. Nothing orders the merge of `main` before validation, and nothing
@@ -1190,7 +1192,7 @@ The scheduler-side oddities are tracked in
    both state that a command node's internal `exit 1` "does not reliably surface as node
    failure to the DAG executor", which is why `conformance-gate` and `review-gate` exist
    (`commands/dark-factory-conformance.md:715-719`). There is no equivalent node for
-   `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1654-1672`).
+   `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1657-1675`).
    If the exit does not surface, conformance, push, PR creation and `status-in-review`
    would proceed and move a Blocked issue to In Review. The `needs-discussion` label
    would still stop `close-preview` from merging.
@@ -1211,11 +1213,11 @@ The scheduler-side oddities are tracked in
    (cost report) and the failure path (post-mortem, error signature).
    `scripts/comment_digest.py:124-135` records the same open question about `report`.
    The `report` node has a "⛔ Blocked … Issue moved to Blocked" branch for code review
-   (`workflows/archon-dark-factory.yaml:1683-1685`), which suggests it is expected to run
+   (`workflows/archon-dark-factory.yaml:1686-1688`), which suggests it is expected to run
    after a review block.
 
 6. **A failed workflow does not run `on_failure`.** The failure branch ends in
-   `exit "$EXIT_CODE"` (`entrypoint.sh:1111-1114`), and an `ERR` trap does not fire on
+   `exit "$EXIT_CODE"` (`entrypoint.sh:1136-1139`), and an `ERR` trap does not fire on
    `exit` (the script says so itself at `:649-651`; confirmed with a small bash probe).
    So on this path there is no "Dark Factory Run — Failed" comment, no move to Blocked,
    no `failed` run-record entry, no assembled `run-record.json`, and no cost report. The
@@ -1225,13 +1227,13 @@ The scheduler-side oddities are tracked in
 
 7. **The "Paused (session window)" issue comment looks unreachable.** It is posted only
    inside `on_failure`, when `TMP_OUT` exists and the pause check matches
-   (`entrypoint.sh:540-568`). `TMP_OUT` exists only inside the workflow loop, where a
+   (`entrypoint.sh:552-580`). `TMP_OUT` exists only inside the workflow loop, where a
    pause match exits 0 directly (`:1031-1034`) without posting anything. In normal
    operation a paused run therefore leaves no comment on the issue and posts no cost
    report.
 
 8. **The adapter gate runs before the self-contained fallback copy.**
-   `_adapter_invalid_refuse` is called at `entrypoint.sh:802`; the baked scripts are
+   `_adapter_invalid_refuse` is called at `entrypoint.sh:827`; the baked scripts are
    copied into `dark-factory/scripts` at `:780-785`. `on_failure` then calls
    `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py` for the comment footer with no
    guard (`:589`, `:612`). For a target that does not carry `dark-factory/scripts` in its
@@ -1243,13 +1245,13 @@ The scheduler-side oddities are tracked in
 
 9. **Kill-switch retry path has unguarded pipelines.** With the session-window backoff
    disabled, `RESET_TIME=$(grep … | head -1)` and the `RESET_TZ` line
-   (`entrypoint.sh:1080-1081`) run under `set -euo pipefail` with no `|| true`. When the
+   (`entrypoint.sh:1105-1106`) run under `set -euo pipefail` with no `|| true`. When the
    output has no "resets <time>" text the pipeline status is non-zero, which would fire
    the `ERR` trap instead of using the 300 s default on the next line. The script's own
    comment at `:100-102` describes this exact hazard for another `grep`.
 
 10. **`BENCH_MODE` handling is inconsistent.** In stub mode `classify-preview` is skipped
-    by its `when:` (`workflows/archon-dark-factory.yaml:872`). `preview-up` depends only
+    by its `when:` (`workflows/archon-dark-factory.yaml:875`). `preview-up` depends only
     on `classify-preview` with the default trigger rule, and the comment at `:793-800`
     describes exactly this cascade (a skipped `classify-preview` skipping `validate`,
     `push-and-pr` and `report`). If that holds, `preview-up`'s own stub branch
@@ -1262,7 +1264,7 @@ The scheduler-side oddities are tracked in
       `${ADVISORY_COUNT}` (`commands/dark-factory-code-review.md:278-280`), but Phase 4
       names the values `BLOCKERS` and `ADVISORY` (`:213-214`). Taken literally the file
       would say `BLOCKERS: 0` on a blocked run; `report` prints that number
-      (`workflows/archon-dark-factory.yaml:1684`).
+      (`workflows/archon-dark-factory.yaml:1687`).
     - Conformance, PASS branch: `conformance.md` is written from `${OOS_EXCISED}` and
       `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:554-556`), but scope
       remediation names them `EXCISED_COUNT` and `SPILLOVER_TICKETS` (`:437`, `:495`).
@@ -1278,7 +1280,7 @@ The scheduler-side oddities are tracked in
     runs `cd backend && python -m pytest` and `cd frontend && npx tsc`
     (`commands/dark-factory-validate.md:177-185`); `preview-up` builds `backend/Dockerfile`
     and `frontend/Dockerfile` and names stacks `mh-preview-<N>`
-    (`workflows/archon-dark-factory.yaml:996-1020`). `run_hook` is called only from
+    (`workflows/archon-dark-factory.yaml:999-1023`). `run_hook` is called only from
     `entrypoint.sh` (smoke gate, and `validate` in the deconflict path); no workflow node
     or command calls a target hook, and nothing calls the `preview-up`/`preview-down`
     hook names that `scripts/hooks.sh:14-15` lists. On a target without those directories
@@ -1289,17 +1291,17 @@ The scheduler-side oddities are tracked in
     reads `conflict_resolution.ai_tier` into `CONFLICT_RESOLUTION_AI_TIER`
     (`entrypoint.sh:35`, then the `CONFLICT_RESOLUTION_AI_TIER` row of `run-config.env`), and `config/config.yaml:64` documents `false` as "only
     Tier 1". But both callers run `cli.py deconflict --issue N` with no further flag
-    (`entrypoint.sh:747-748`, `workflows/archon-dark-factory.yaml:793-794`); the CLI
+    (`entrypoint.sh:772-773`, `workflows/archon-dark-factory.yaml:796-797`); the CLI
     computes `ai_tier=not args.no_ai_tier` from a `--no-ai-tier` flag that nothing
     passes (`scripts/factory_core/cli.py:40,364`); and `deconflict.py` does not read the
     environment variable. As far as this trace goes, Tier 2 always runs.
 
 15. **Smaller inconsistencies.**
     - `on_failure` logs "Moving issue #N back to Ready..." and then sets **Blocked**
-      (`entrypoint.sh:639-642`).
+      (`entrypoint.sh:664-667`).
     - The entrypoint's deconflict success path overwrites the resolver's key=value
       `conflict_resolution.md` with prose, labelled "TypeScript validation" even when the
-      validate hook ran instead (`entrypoint.sh:1028-1036`). `run-record` is not assembled
+      validate hook ran instead (`entrypoint.sh:1053-1061`). `run-record` is not assembled
       on that path, so only failure classification sees the file.
     - `close-preview` tests for `needs-discussion` with a substring `grep -c`
       (`workflows/archon-dark-factory.yaml:237-239`); the push gates and
