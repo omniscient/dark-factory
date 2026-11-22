@@ -2,6 +2,12 @@
 
 **Issue:** #414
 
+**Revised:** 2026-11-22 (operator amendment after spec gate review)
+
+> **Owner acknowledgement.** This also guards the direct-to-pr end-gate auto-merge dispatch,
+> which the issue does not name; tighten-only; the PR is held for the owner's explicit
+> acknowledgement before merge.
+
 ## Overview / Problem statement
 
 `stage_review_triage()` in `scheduler.sh` classifies new PR comments on "In Review" items
@@ -87,7 +93,9 @@ load-bearing.
    re-litigate a decision this spec already makes. This is the dedicated, reviewed ticket for
    this scheduler/breaker surface (not a side effect of unrelated work), so CLAUDE.md's "never
    weaken a gate as a side effect" limit does not block addressing both — this *adds* breaker
-   coverage where none exists.
+   coverage where none exists. This also guards the direct-to-pr end-gate auto-merge
+   dispatch, which the issue does not name; tighten-only; the PR is held for the owner's
+   explicit acknowledgement before merge.
 
 2. **Guard shape: `is_issue_running` first, matching `CONTINUE`/`CHANGES_REQUESTED`.** Both
    Close dispatch sites skip immediately if a container for the issue is already running —
@@ -95,11 +103,13 @@ load-bearing.
    already used everywhere else in this file).
 
 3. **Retry budget: extend the existing breaker pattern to both Close sites, as one shared
-   counter.** `scheduler.sh` already has four call sites doing exactly this —
+   counter.** `scheduler.sh` already has four call sites following this pattern —
    `evaluate_stop <issue> <phase> <ceiling>` → `trip_to_blocked` on `stopped=true`, else
    dispatch — for phases `implement` (`stage_blocked_retry`), `plan` (`stage_plan`), `refine`
-   (`stage_refine`), and `resolve` (`stage_conflict_resolve`). A new phase, `close`, extends
-   the same pattern:
+   (`stage_refine`), and `resolve` (`stage_conflict_resolve`; that one calls `evaluate_stop`
+   with `--peek` and increments at its dispatch branch, scheduler.sh:1073/1091). A new phase,
+   `close`, extends the same pattern, in the non-peek shape `implement`/`plan`/`refine` use
+   (`evaluate_stop` itself increments before the dispatch):
    - Both sites call one new shared helper, `dispatch_close <issue_num>` (defined once in
      `scheduler.sh`, alongside `end_gate_check`/`dispatch`), so the two paths cannot drift
      apart the way `MERGE`/`APPROVED` already have:
@@ -127,20 +137,32 @@ load-bearing.
      `reset_retry "$ISSUE"`, which clears the `implement` counter only).
    - **Ceiling: reuse `$MAX_RETRIES`** (`scheduler.max_retries`, config default 3) — the same
      ceiling `stage_conflict_resolve`'s `resolve` phase uses. No new config knob.
-   - **No `reset_retry` for `close`, ever.** Resetting the bare `implement` counter from the
-     Close path would let a failing Close mask real implement failures; there is no "fresh
-     input arrived" re-trigger event for `close` the way `spec_advance_check` provides for
-     `refine`/`plan` — once a Close actually succeeds, the issue leaves "In Review" and
-     neither triage path looks at it again, so the counter simply goes stale (consistent with
-     how `resolve`/`plan`/`refine`'s counters behave once their respective phases complete).
+   - **No scheduler-side `reset_retry` for `close`.** Neither Close path calls `reset_retry`:
+     resetting the bare `implement` counter from the Close path would let a failing Close
+     mask real implement failures, and there is no "fresh input arrived" re-trigger event for
+     `close` the way `spec_advance_check` provides for `refine`/`plan`.
+     `breaker.trip_to_blocked` itself clears `N:close` on trip (breaker.py:382), so after an
+     operator removes `needs-discussion` the ticket gets a fresh 3 attempts. Resume goes
+     through `stage_rescue_blocked` (green PR → In review → Close) or `stage_blocked_retry`
+     (→ `Continue issue #N`, scheduler.sh:1234). Short of a trip the count is never cleared:
+     once a Close succeeds the issue leaves "In Review" and the leftover count is inert.
+   - **Holds and refusals consume an attempt.** A Close ending in a blast hold or
+     `needs-discussion` refusal consumes one `close` attempt. Accepted: the label halts
+     re-dispatch; the count is cleared only by a trip. Three holds or failures over a
+     ticket's In-review life trip it.
+   - **Counts dispatches, not failures; fails open like its siblings.** The count advances
+     on every Close dispatch attempt, so a Close that exits 0 without moving the board is
+     bounded too: three dispatches, trip on the fourth poll. If `evaluate_stop` returns
+     empty output (CLI error), `dispatch_close` falls through to dispatch — the same
+     fail-open behavior as the existing sites (scheduler.sh:1221-1222), not a new one.
    - **No `check_failure_signature` for `close` in this ticket.** The two-strikes
      same-signature early trip is not required to close the forever-loop gap and there is no
      evidence yet that the Close workflow writes a failure-signature drop file; add it later
      if that changes.
    - **`breaker.py::trip_to_blocked`'s `retry_cmds` dict needs a `"close"` entry**
      (`"close": f"Close issue #{issue_num}"`). Without it, the trip comment's "re-run
-     manually" command falls through to the wrong default, `Fix issue #{issue_num}` — a
-     command that does not exist in this file's dispatch vocabulary.
+     manually" command falls through to the default, `Fix issue #{issue_num}` — the wrong
+     command for a close trip.
    - Update the usage comment above `trip_to_blocked()` (scheduler.sh:388,
      `implement|plan|refine|resolve`) to list `close` too.
 
@@ -181,6 +203,18 @@ Mirroring the existing stubbed `evaluate_stop`/`trip_to_blocked` pattern used fo
 6. `dispatch_close` is called with the same issue from both `MERGE` and `APPROVED` and both
    increments land on the same `evaluate_stop` key (asserted via the stubbed call log, not by
    re-deriving `_make_key`).
+7. pytest in `tests/test_factory_core_breaker.py` (CI-run): `trip_to_blocked(N, 'close', …)`
+   posts a comment containing `Close issue #N` and clears `N:close`.
+8. Unstubbed `evaluate_stop` against a temp `STATE_FILE` (`trip_to_blocked` stubbed): three
+   `dispatch_close` calls dispatch, the fourth trips with phase `close` and does not
+   dispatch; the counted key is `N:close`. The clear-on-trip half is test 7's.
+
+**Where these run.** `tests/test_scheduler.sh` is not CI-gated — `.github/workflows/ci.yml`
+lists only `tests/test_scheduler_lib.sh` among the scheduler shell tests — so tests 1-6 and 8
+run only when someone runs that file by hand. Test 7 is the one CI executes (`python -m
+pytest tests/`). `dispatch_close` must keep `"$issue_num"` as its `evaluate_stop` argument:
+the existing `evaluate_stop wired 4x` grep (tests/test_scheduler.sh:2037) counts
+`evaluate_stop "$ISSUE"` and must stay at 4.
 
 ## Alternatives considered
 
@@ -223,5 +257,5 @@ Mirroring the existing stubbed `evaluate_stop`/`trip_to_blocked` pattern used fo
   `$REFINE_MAX_RETRIES`. Both `close` and `resolve` act on an already-implemented PR/issue,
   not on the pre-implementation refine/plan loop.
 - No existing test currently exercises a successful `MERGE`/`APPROVED` dispatch's absence of
-  a `reset_retry` call for `close` — Requirement 3's "no reset, ever" rule is new behavior,
+  a `reset_retry` call for `close` — Requirement 3's "no scheduler-side reset" rule is new behavior,
   not a regression guard for something previously tested.
