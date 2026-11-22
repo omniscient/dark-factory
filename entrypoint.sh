@@ -348,6 +348,39 @@ print("SESSION_WINDOW_MATCH_BRANCH=" + shlex.quote(str(d.get("branch", ""))))
   return 0
 }
 
+# A blast-radius hold (#551) is a human-review stop, not a failure. blast_gate_check.sh
+# --hold (blast-gate node or the push-and-pr re-check) writes $FACTORY_BLAST_HOLD_FILE
+# (exported below, in this run's own $ARTIFACTS_DIR) before it pushes, labels, sets
+# Blocked and comments. On that marker: record a
+# blast_hold run-record row, post the cost report, and return 0 so the caller exits 0
+# WITHOUT run_post_mortem, _write_error_signature or on_failure. Unlike the session-window
+# pause, nothing is written for the scheduler either: no signature (check_failure_signature
+# has nothing to compare) and no retry rollback (a hold never resets or decrements a
+# counter). $ARTIFACTS_DIR is per run, so the marker cannot leak from an earlier run.
+# Returns 1 when there is no marker, so the caller falls through unchanged.
+_handle_blast_hold() {
+  local marker="${FACTORY_BLAST_HOLD_FILE:-${ARTIFACTS_DIR:+$ARTIFACTS_DIR/blast-hold.json}}"
+  [ -n "$marker" ] && [ -f "$marker" ] || return 1
+  # Only this run's own issue: a marker for any other issue (e.g. one a test wrote through
+  # an inherited FACTORY_BLAST_HOLD_FILE) must never turn a real failure into exit 0.
+  local held_issue head
+  held_issue=$(jq -r '.issue // ""' "$marker" 2>/dev/null || echo "")
+  [ -n "${ISSUE_NUM:-}" ] && [ "$held_issue" = "$ISSUE_NUM" ] || return 1
+  head=$(jq -r '.head_sha // ""' "$marker" 2>/dev/null || echo "")
+  echo "blast-radius hold for issue #${ISSUE_NUM:-?} at ${head:-<unknown>} — waiting for operator approval (not a failure)"
+  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
+    --run-id "${RUN_ID:-unknown}" \
+    --issue "${ISSUE_NUM:-0}" \
+    --intent "${INTENT:-unknown}" \
+    --stage blast_hold \
+    --verdict human_required \
+    --detail "head_sha=${head}" \
+    --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
+    --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
+  post_cost_report || true
+  return 0
+}
+
 # Maps the container's INTENT to the phase string the scheduler's retry keys and
 # trip_to_blocked() already use (_make_key in factory_core/breaker.py): "resolve" for
 # deconflict (not "deconflict" — matches the existing scheduler.sh call sites), "refine"
@@ -807,6 +840,9 @@ PYTHONPATH=/opt/dark-factory/scripts python3 -m factory_core.effective_config \
 # Archon gives every bash node its own $ARTIFACTS_DIR (the workflow run's directory, not this
 # one), so budget_gate.sh and architecture_slice.py find run-config.json through this export.
 export FACTORY_RUN_CONFIG_JSON="$ARTIFACTS_DIR/run-config.json"
+# Same reason (#551): blast_gate_check.sh --hold, running inside a bash node, writes the
+# hold marker here, and _handle_blast_hold reads it from here after the workflow exits.
+export FACTORY_BLAST_HOLD_FILE="$ARTIFACTS_DIR/blast-hold.json"
 
 # --- Apply config.yaml policy knobs post-clone (env/bootstrap values kept and logged) ---
 source /opt/dark-factory/scripts/run_config_env.sh
@@ -1029,6 +1065,10 @@ while true; do
 
   if [ "$EXIT_CODE" -ne 0 ]; then
     if _handle_session_window_pause "$TMP_OUT"; then
+      rm -f "$TMP_OUT"
+      exit 0
+    fi
+    if _handle_blast_hold; then
       rm -f "$TMP_OUT"
       exit 0
     fi
