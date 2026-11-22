@@ -693,12 +693,28 @@ def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)
 
+    # Resolved once, shared by the gate-stage loop and the push-result.json block (#573).
+    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
+    workflow_run_id = _archon_workflow_run_id(archon_path)
+    workflow_dir = artifacts_dir.parent / workflow_run_id if workflow_run_id is not None else None
+
     stages = []
     artifacts: dict = {}
     artifact_names = ["validation", "conformance", "review", "conflict_resolution"]
 
+    # #573: the validate, conformance and code-review DAG nodes write validation.md,
+    # conformance.md and review.md into archon's per-workflow-run $ARTIFACTS_DIR, a
+    # sibling of args.artifacts_dir (see _archon_workflow_run_id), never into the
+    # entrypoint's own directory. Same resolution as #447's push-result.json below: the
+    # own-dir path is the default and a fresh sibling copy wins. A stale sibling (an
+    # earlier workflow run's leftover) is never read: its review.md could score this run
+    # blocked. conflict_resolution.md is not a gate stage and keeps its own-dir lookup.
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
+        if name in GATE_STAGE_NAMES and workflow_dir is not None:
+            sibling = workflow_dir / f"{name}.md"
+            if sibling.exists() and _artifact_is_fresh(sibling, args.started_at):
+                md_path = sibling
         if md_path.exists():
             content = md_path.read_text(encoding="utf-8")
             artifacts[name] = content
@@ -706,7 +722,6 @@ def cmd_assemble(args) -> None:
             if stage:
                 stages.append(stage)
 
-    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
     stderr_text = ""
     stderr_file = getattr(args, "archon_cost_stderr_file", None)
     if stderr_file:
@@ -746,11 +761,10 @@ def cmd_assemble(args) -> None:
     # abort from a silent death. Never looked up on the failure-trap path (--status
     # failed scores failed anyway).
     artifact_check = None
+    artifact_push_path = artifacts_dir / "push-result.json"
     if args.intent in ("refine", "plan"):
-        artifact_push_path = artifacts_dir / "push-result.json"
-        workflow_run_id = _archon_workflow_run_id(archon_path)
-        if workflow_run_id is not None:
-            workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
+        if workflow_dir is not None:
+            workflow_push_path = workflow_dir / "push-result.json"
             if workflow_push_path.exists() and _artifact_is_fresh(
                 workflow_push_path, args.started_at
             ):

@@ -1953,6 +1953,198 @@ def test_assemble_non_refine_plan_ignores_workflow_run_dir(tmp_path, monkeypatch
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
 
 
+# ── gate-stage artifacts in archon's workflow-run directory (issue #573) ───
+
+_FRESH_EPOCH = _ASSEMBLE_STARTED_EPOCH + 1
+_STALE_EPOCH = _ASSEMBLE_STARTED_EPOCH - 1
+_CLEAN_GATES = {
+    "validation.md": "STATUS: PASS\n",
+    "conformance.md": "STATUS: PASS\nCYCLES: 0\n",
+    "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n",
+}
+_BLOCKED_REVIEW = "STATUS: BLOCKED\nBLOCKERS: 1\nADVISORY: 0\n"
+
+
+def _write_gates(directory, files, *, mtime=_FRESH_EPOCH):
+    for filename, content in files.items():
+        _write_workflow_artifact(directory, filename, content, mtime=mtime)
+
+
+def _assembled(args, entry_dir):
+    rr.cmd_assemble(args)
+    return json.loads((entry_dir / "run-record.json").read_text())
+
+
+@pytest.mark.parametrize("intent", ["fix", "continue"])
+def test_assemble_reads_gate_stages_from_workflow_run_dir(tmp_path, monkeypatch, intent):
+    # Direct #573 regression: in production the three gate files exist ONLY in archon's
+    # workflow-run directory. Before the fix, stages stayed [] and every completed
+    # implement run scored produced_ungated/1.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent=intent)
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    assert rec["artifacts"]["review"] == _CLEAN_GATES["review.md"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+    assert outcome["evidence"]["ungated"] is False
+    assert "artifact_check" not in rec
+
+
+def test_assemble_workflow_run_dir_gate_findings_are_penalized(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {
+        "validation.md": "STATUS: PASS\n",
+        "conformance.md": "STATUS: PASS\nCYCLES: 2\n",
+        "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 1\n",
+    })
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_with_findings"
+    assert outcome["score"] == 0.75
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("review.md", _BLOCKED_REVIEW),
+    ("conformance.md", "STATUS: BLOCKED\n"),
+    ("validation.md", "STATUS: FAIL\n"),
+], ids=["review", "conformance", "validation"])
+def test_assemble_blocking_verdict_in_workflow_run_dir_is_blocked(
+    tmp_path, monkeypatch, filename, content
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, filename: content})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "blocked"
+    assert outcome["score"] == 0.0
+
+
+def test_assemble_review_blocker_count_without_blocked_verdict_is_not_blocked(
+    tmp_path, monkeypatch
+):
+    # The verdict blocks, not the count (_BLOCKING_VERDICTS).
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": "STATUS: PASS\nBLOCKERS: 1\n"})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+
+
+def test_assemble_stale_workflow_run_dir_gate_stages_are_ignored(tmp_path, monkeypatch):
+    # `archon workflow cost --last` handed back an EARLIER workflow run's id: its
+    # BLOCKED review.md predates this run's --started-at and must not score it blocked.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW}, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["artifacts"] == {}
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+
+
+@pytest.mark.parametrize("started_at", ["", "not-a-timestamp", "2026-06-12 04:00:00"])
+def test_assemble_unparseable_started_at_ignores_workflow_run_dir_gate_stages(
+    tmp_path, monkeypatch, started_at
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    args.started_at = started_at
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+
+
+def test_assemble_fresh_workflow_run_dir_copy_wins_over_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 0}]
+    assert rec["artifacts"]["review"] == "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_own_dir_gate_stage_used_when_workflow_run_dir_lacks_it(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "validation.md").write_text("STATUS: FAIL\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "FAIL"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "blocked"
+
+
+def test_assemble_failure_trap_reads_workflow_run_dir_gate_stages(tmp_path, monkeypatch):
+    # entrypoint.sh's on_failure call site (--status failed): stages are now populated,
+    # the state stays failed/0.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    args.status = "failed"
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "failed"
+    assert outcome["score"] == 0.0
+
+
+# Shape of commands/dark-factory-validate.md's free-form report: no STATUS: line.
+_FREEFORM_VALIDATION = (
+    "# Validation Results\n\n"
+    "- Unit tests: PASS\n"
+    "- Endpoint tests: FAIL (2 failures)\n\n"
+    "Final status: FAIL\n"
+)
+
+
+def test_assemble_freeform_validation_md_pins_substring_heuristic(tmp_path, monkeypatch):
+    # Known parser gap (#573 spec, Assumptions): with no STATUS: line, the substring
+    # heuristic in _parse_artifact_stage sees "PASS" first and reads this FAIL report as
+    # PASS. Pinned as-is so the follow-up that fixes the heuristic changes it deliberately.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {"validation.md": _FREEFORM_VALIDATION})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "PASS"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_conflict_resolution_in_workflow_run_dir_not_read(tmp_path, monkeypatch):
+    # Known gap, left for a follow-up ticket: conflict_resolution.md keeps its own-dir
+    # lookup. Pinned so widening it is a deliberate change.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    _write_gates(workflow_dir, {"conflict_resolution.md": "CONFLICT_VERDICT=RESOLVED\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert "conflict_resolution" not in rec["artifacts"]
+    assert rec["stages"] == []
+
+
+def test_assemble_conflict_resolution_in_own_dir_still_read(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    (entry_dir / "conflict_resolution.md").write_text("CONFLICT_VERDICT=RESOLVED\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifacts"]["conflict_resolution"] == "CONFLICT_VERDICT=RESOLVED\n"
+    assert rec["stages"] == [{"stage": "conflict_resolution", "verdict": "RESOLVED"}]
+
+
 def _stored_refine_record(tmp_path, run_id, **extra):
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)
