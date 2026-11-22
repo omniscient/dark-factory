@@ -187,8 +187,9 @@ Named by mechanism — the string "bypass" does not appear in the enforcement co
   governs here specifically.) Even when `enabled: false`, it never suppresses the floor or
   the semantic adapter diff — it suppresses only the hotspot and size triggers.
 - **The self-target instance cannot substitute its own gate script.**
-  `commands/dark-factory-validate.md` prefers the image-baked
-  `/opt/dark-factory/scripts/gate_blast_radius.py`, falling back to the clone's own
+  `scripts/blast_gate_check.sh` (called by validate Phase 0, `blast-gate`, the
+  `push-and-pr` re-check and `close-preview`; each prefers the baked checker too) runs the
+  image-baked `/opt/dark-factory/scripts/gate_blast_radius.py`, falling back to the clone's own
   `dark-factory/scripts/gate_blast_radius.py` only if the baked copy is absent — a target
   that tracks its own `dark-factory/scripts/` is not the copy that decides its own gate.
 

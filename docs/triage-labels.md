@@ -57,7 +57,7 @@ Every label the scheduler, gates or phase agents apply or branch on. `scripts/bo
 
 | Label | Applied by | Read by / effect |
 |-------|-----------|------------------|
-| `needs-discussion` | Refine, plan, validate (blast-radius block), conformance and code-review commands when they block; the circuit breaker when it trips | **Halts all automation for the ticket.** In the scheduler's skip list for every stage, and in the refine/plan skip lists. Remove it to resume |
+| `needs-discussion` | Refine, plan, conformance and code-review commands when they block; `scripts/blast_gate_check.sh --hold` on a blast-radius hold (`blast-gate`, the `push-and-pr` re-check, `close-preview`); the circuit breaker when it trips | **Halts all automation for the ticket.** In the scheduler's skip list for every stage, and in the refine/plan skip lists. Remove it to resume — except after a blast-radius hold, where removing it by hand only re-holds: the operator's `approve-blast.sh` records a signed approval and lifts it (#551) |
 | `ready-for-agent` | Humans (triage); epic autopilot on an epic's open children | Opt-in gate for auto-refinement of Backlog items |
 | `ready-for-human` | Humans | Scheduler parks the ticket at every stage, including refine and plan; epic autopilot will not advance it |
 | `epic` | Humans | Scheduler never dispatches the epic itself; epic autopilot works on its children |

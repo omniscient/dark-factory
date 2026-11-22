@@ -39,7 +39,7 @@ comes from mixing them up.
 | Process | Config file it reads | Env file it gets | Source |
 |---|---|---|---|
 | Scheduler (`backlog-scheduler`) | first existing of `/workspace/project/config/config.yaml` (the bind-mounted target checkout), `/opt/dark-factory/config/config.yaml` (baked), `/opt/refinement-skills/config.yaml` (legacy). One file, no merging. Resolved by `factory_core.effective_config`'s scheduler mode into `$SCHEDULER_STATE_DIR/run-config.{json,env}`. | `deploy/instance.env` via compose `env_file:` | `scripts/factory_core/effective_config.py:33-37`, `scheduler.sh:35-42` (`read_config`), `deploy/docker-compose.yml` |
-| Run container (`entrypoint.sh` and everything it starts) | `<clone>/.claude/skills/refinement/config.yaml`: the target's committed copy if it has one, otherwise a copy materialised from the baked file plus the adapter's `token_optimization` block. Side-effect levels and the blast-radius gate additionally read the baked file directly. The same resolution is also written to `$ARTIFACTS_DIR/run-config.{json,env}`; `budget_gate.sh` and `architecture_slice.py` read `run-config.json` through `FACTORY_RUN_CONFIG_JSON`, the entrypoint knobs come from `run-config.env`. | `<PROJECT_DIR>/.archon/.env` (copied by the scheduler to `/opt/dark-factory/.archon/.env`), plus `run-compose.yml` `environment:`, plus `-e NAME` flags from `dispatch()` | `entrypoint.sh:61,805`, `scripts/factory_core/effective_config.py`, `scheduler.sh:47-59,363-380` |
+| Run container (`entrypoint.sh` and everything it starts) | `<clone>/.claude/skills/refinement/config.yaml`: the target's committed copy if it has one, otherwise a copy materialised from the baked file plus the adapter's `token_optimization` block. Side-effect levels and the blast-radius gate additionally read the baked file directly. The same resolution is also written to `$ARTIFACTS_DIR/run-config.{json,env}`; `budget_gate.sh` and `architecture_slice.py` read `run-config.json` through `FACTORY_RUN_CONFIG_JSON`, the entrypoint knobs come from `run-config.env`. | `<PROJECT_DIR>/.archon/.env` (copied by the scheduler to `/opt/dark-factory/.archon/.env`), plus `run-compose.yml` `environment:`, plus `-e NAME` flags from `dispatch()` | `entrypoint.sh:61,838`, `scripts/factory_core/effective_config.py`, `scheduler.sh:47-59,363-380` |
 
 ```
 SCHEDULER PROCESS                                RUN CONTAINER (one per dispatch)
@@ -139,14 +139,14 @@ All keys here are read by phase agents following the command files, from the run
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:53`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1594` (report text only) | none | no |
-| `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:61`, `commands/dark-factory-plan.md:179` (agent-read) | none | no |
-| `conformance.block_on_material` | `true` | material findings block | `commands/dark-factory-conformance.md:62` (agent-read) | none | no |
-| `conformance.scope_enforcement` | `true` | detect out-of-scope changes | `commands/dark-factory-conformance.md:63` (agent-read) | none | no |
-| `conformance.excise_out_of_scope` | `true` | revert out-of-scope changes (false = file a ticket only) | `commands/dark-factory-conformance.md:64` (agent-read) | none | no |
-| `conformance.backlog_label` | `scope-spillover` | label on auto-created spillover tickets | `commands/dark-factory-conformance.md:65` (agent-read) | none | no |
-| `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:69-70`, `commands/dark-factory-plan.md:186-187` (agent-read, python reads the clone's config; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`) | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
-| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1635` (report text) | none | no |
+| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:60`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1646` (report text only) | none | no |
+| `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:68`, `commands/dark-factory-plan.md:179` (agent-read) | none | no |
+| `conformance.block_on_material` | `true` | material findings block | `commands/dark-factory-conformance.md:69` (agent-read) | none | no |
+| `conformance.scope_enforcement` | `true` | detect out-of-scope changes | `commands/dark-factory-conformance.md:70` (agent-read) | none | no |
+| `conformance.excise_out_of_scope` | `true` | revert out-of-scope changes (false = file a ticket only) | `commands/dark-factory-conformance.md:71` (agent-read) | none | no |
+| `conformance.backlog_label` | `scope-spillover` | label on auto-created spillover tickets | `commands/dark-factory-conformance.md:72` (agent-read) | none | no |
+| `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:76-77`, `commands/dark-factory-plan.md:186-187` (agent-read, python reads the clone's config; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`) | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
+| `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1687` (report text) | none | no |
 | `code_review.block_threshold` | `high` | severity at or above which findings block | `commands/dark-factory-code-review.md:57`; `scripts/code_review_payload.py:152-155,200-206` | none | no |
 | `code_review.fail_open` | `true` | reviewer error becomes advisory | `commands/dark-factory-code-review.md:58` (agent-read) | none | no |
 | `code_review.max_findings` | `50` | cap on inline comments | `commands/dark-factory-code-review.md:59`; `scripts/code_review_payload.py:152,167` | none | no |
@@ -162,16 +162,16 @@ than `enforce` means `enabled: true` and `observe`.
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `docs_conformance.enabled` | `true` | false = the command writes `STATUS: SKIPPED`, which passes in both modes | `commands/dark-factory-docs-conformance.md:68,72-75` (agent-read) | none | no |
-| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch; the docs verdict never blocks. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`; it also blocks when `git status` changed during the `docs-conformance` node, which `observe` only logs. Outside this key: a commit or a staged change made during that node stops the push in every mode. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1259-1260` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
+| `docs_conformance.mode` | `observe` | `observe`: record the verdict and post an informational comment on a mismatch; the docs verdict never blocks. `enforce`: a BLOCKED, `ERROR`, missing or unparseable verdict blocks `push-and-pr`, with the blocking comment, a Blocked board move and `needs-discussion`; it also blocks when `git status` changed during the `docs-conformance` node, which `observe` only logs. Outside this key: a commit or a staged change made during that node stops the push in every mode. Turning `enforce` on is a separate, reviewed change ([#536](https://github.com/omniscient/dark-factory/issues/536)) | `commands/dark-factory-docs-conformance.md:68,213` (agent-read); `workflows/archon-dark-factory.yaml:1297-1298` (`docs-conformance-gate`), passed to `scripts/docs_verdict_gate_check.sh` | none | no |
 
 ### `preview`, `conflict_resolution`
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `preview.enabled` | `true` | false = always build the preview | `workflows/archon-dark-factory.yaml:818-819` (the `classify-preview` prompt tells the agent to read it; agent-read) | none | no |
-| `preview.model` | `haiku` | **unread**. The classifier model is hardcoded `model: haiku` at `workflows/archon-dark-factory.yaml:847` | none | none | no |
+| `preview.enabled` | `true` | false = always build the preview | `workflows/archon-dark-factory.yaml:838-839` (the `classify-preview` prompt tells the agent to read it; agent-read) | none | no |
+| `preview.model` | `haiku` | **unread**. The classifier model is hardcoded `model: haiku` at `workflows/archon-dark-factory.yaml:867` | none | none | no |
 | `conflict_resolution.enabled` | `true` | false = disable the P1.5 conflict scanner | `scheduler.sh:1039` (code default `true`) | `CONFLICT_RESOLUTION_ENABLED` (scheduler) | no |
-| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable and that bootstrap value always wins (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is only compared with it and logged when it differs, see D1), but nothing consumes it: the only call (`entrypoint.sh:715`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,364`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
+| `conflict_resolution.ai_tier` | `true` | intended: false = mechanical (Tier 1) resolution only. **Not honoured**: see D2 | `entrypoint.sh:35` sets the variable and that bootstrap value always wins (the `CONFLICT_RESOLUTION_AI_TIER` row of `ENV_WHITELIST`, `effective_config.py:77`, is only compared with it and logged when it differs, see D1), but nothing consumes it: the only call (`entrypoint.sh:748`) never passes `--no-ai-tier` (`scripts/factory_core/cli.py:40,364`) and `scripts/factory_core/deconflict.py` reads no env | `CONFLICT_RESOLUTION_AI_TIER` is set but never read (run) | no |
 
 ### `blast_radius`
 
@@ -182,10 +182,10 @@ It never reads the working tree, so a PR cannot loosen its own gate. No env over
 
 | Key | Default | Controls | Reader | Adapter |
 |---|---|---|---|---|
-| `blast_radius.enabled` | `true` | kill-switch for the gate | `scripts/gate_blast_radius.py:321` | no |
-| `blast_radius.hotspot_score_floor` | `5.0` | codeindex score at or above which a touched file is a hotspot | `scripts/gate_blast_radius.py:323`; `scripts/diff_rank.py:138` (from the clone's config) | no |
-| `blast_radius.size_budget_lines` | `400` | added plus deleted line threshold (see the YAML note: 0 does not disable it) | `scripts/gate_blast_radius.py:324,352` | no |
-| `blast_radius.size_budget_blocks` | `false` | true = size alone blocks, false = advisory | `scripts/gate_blast_radius.py:325,352` | no |
+| `blast_radius.enabled` | `true` | kill-switch for the gate | `scripts/gate_blast_radius.py:515` | no |
+| `blast_radius.hotspot_score_floor` | `5.0` | codeindex score at or above which a touched file is a hotspot | `scripts/gate_blast_radius.py:517`; `scripts/diff_rank.py:138` (from the clone's config) | no |
+| `blast_radius.size_budget_lines` | `400` | added plus deleted line threshold (see the YAML note: 0 does not disable it) | `scripts/gate_blast_radius.py:518,546` | no |
+| `blast_radius.size_budget_blocks` | `false` | true = size alone blocks, false = advisory | `scripts/gate_blast_radius.py:519,546` | no |
 
 ### `dispatch_ceiling`
 
@@ -221,7 +221,7 @@ reaches the reader is through `read_config`.
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `main_red_autofix.enabled` | `false` | kill-switch for the auto-fixer | two readers with separate env: the scheduler dispatches "Fix main" only if `MAIN_RED_AUTOFIX_ENABLED=true` (`scheduler.sh:180`), and the run container exits at once unless **its** `MAIN_RED_AUTOFIX_ENABLED` is `true` (`entrypoint.sh:874`) | `MAIN_RED_AUTOFIX_ENABLED` (both; the run side only from `.archon/.env`, it is not forwarded) | no |
+| `main_red_autofix.enabled` | `false` | kill-switch for the auto-fixer | two readers with separate env: the scheduler dispatches "Fix main" only if `MAIN_RED_AUTOFIX_ENABLED=true` (`scheduler.sh:180`), and the run container exits at once unless **its** `MAIN_RED_AUTOFIX_ENABLED` is `true` (`entrypoint.sh:910`) | `MAIN_RED_AUTOFIX_ENABLED` (both; the run side only from `.archon/.env`, it is not forwarded) | no |
 | `main_red_autofix.model` | `claude-opus-5-5` | fixer model | `scripts/factory_core/main_red_fixer.py:289` (env, then code default `claude-opus-5-5`); the config value never reaches it (D3) | `MAIN_RED_AUTOFIX_MODEL` (run only) | no |
 | `main_red_autofix.max_attempts` | `3` | fix to CI cycles per red event | `main_red_fixer.py:288` (env, code default `3`); config value never reaches it (D3) | `MAIN_RED_AUTOFIX_MAX_ATTEMPTS` (run only) | no |
 | `main_red_autofix.throttle_minutes` | `15` | minimum minutes between fixer dispatches | `scheduler.sh:176` (code default 15) | `MAIN_RED_AUTOFIX_THROTTLE_MIN` (scheduler) | no |
@@ -289,10 +289,10 @@ nothing; set the variable in `.archon/.env` for it to matter.
 [PR #519](https://github.com/omniscient/dark-factory/pull/519); the measuring nodes write
 them, and the cost report aggregates them); they are run artifacts, not settings. The caps
 file is what the later phases source
-(`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:201`,
+(`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:208`,
 `commands/dark-factory-docs-conformance.md:97`, `commands/dark-factory-code-review.md:110`).
 Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`
-(`workflows/archon-dark-factory.yaml:402,442,716,1115,1205,1482`).
+(`workflows/archon-dark-factory.yaml:422,462,736,1153,1243,1534`).
 
 | Key | Default | Controls | Reader | Env override (scope) |
 |---|---|---|---|---|
@@ -440,7 +440,7 @@ effective.
 | `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` | `scripts/factory_core/providers/model.py:22` (preflight); the `claude` CLI | both files, same as above |
 | `JIRA_TOKEN`, `GITLAB_TOKEN` | `providers/tracker/jira.py:38`, `providers/codehost/gitlab.py:48` | `instance.env` (forwarded) or `.archon/.env` |
 | `INTERNAL_API_TOKEN` | `epic_autopilot.py:634` (scheduler), `main_red_fixer.py:253` (run); optional notifications, no token means silently skipped | respective file |
-| `POLYGON_API_KEY` | `workflows/archon-dark-factory.yaml:965` (preview stack) | `.archon/.env` |
+| `POLYGON_API_KEY` | `workflows/archon-dark-factory.yaml:985` (preview stack) | `.archon/.env` |
 | `AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT` | `providers/model.py:34-57` (preflight alternatives); forwarded (list above) | `instance.env` |
 
 **Provider selection** (all forwarded by `dispatch()`; scheduler preflight reads only `instance.env`)
@@ -479,11 +479,11 @@ containers (`run-compose.yml:31-47`).
 |---|---|---|---|
 | `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:367` (adds the `factory-model-proxy` compose profile) | `instance.env` |
 | `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:39`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
-| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:803,917,1313` (stubs preview and PR creation) | `.archon/.env` / bench harness |
+| `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:823,937,1351` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:56` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:215` | `.archon/.env` |
-| `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:70` | `.archon/.env` |
+| `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:77` | `.archon/.env` |
 
 (The config-derived switches such as `EPIC_AUTOPILOT_ENABLED` are in the Layer 1 tables.)
 
@@ -498,8 +498,8 @@ containers (`run-compose.yml:31-47`).
 | `ARTIFACTS_DIR` | per run | `entrypoint.sh:115`; `budget_gate.sh:31` (required) | |
 | `FACTORY_CORE_CLI`, `FACTORY_PROVIDERS_CLI` | baked paths | `scheduler.sh:19-20`, `entrypoint.sh:9` | override seams |
 | `FACTORY_BLAST_HOLD_FILE` | `$ARTIFACTS_DIR/blast-hold.json` (the entrypoint's own run directory) | `entrypoint.sh` (export, `_handle_blast_hold`), `scripts/blast_gate_check.sh` | hold marker handoff across Archon's per-node `ARTIFACTS_DIR` (#551); never set by hand |
-| `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR`, `BLAST_GATE_BAKED_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:60,69`; `scripts/blast_gate_check.sh` | "never set in the image"; test seams |
-| `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1440`, `entrypoint.sh:89,753` | tests only |
+| `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR`, `BLAST_GATE_BAKED_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:82,91`; `scripts/blast_gate_check.sh` | "never set in the image"; test seams |
+| `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1440`, `entrypoint.sh:89,786` | tests only |
 | `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:26-41`; `run_record.py:27,483` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
 | `FACTORY_EDITS_LABEL`, `FACTORY_REGRESSION_LABEL`, `FACTORY_EMAIL` | `merged-with-edits`, `factory-regression`, `factory@<repo>` | `scripts/fetch_scorecard.py:26-28` | scorecard tooling |
 | `MEM0_SPIKE_STORE_PATH`, `AGENTMEMORY_*` | none | `scripts/mem0_retrieve_adapter.py:46`, `scripts/eval_agentmemory.sh` | memory spike tooling, not part of runs |
@@ -510,9 +510,9 @@ containers (`run-compose.yml:31-47`).
 |---|---|---|---|
 | `REFINE_MAX_RETRIES` | `3` | `scheduler.sh:24` (refine and plan breaker ceiling) | `instance.env` |
 | `STALE_PREVIEW_WARN_COUNT` | `3` | `scheduler.sh:1486-1494` (non-numeric resets to 3) | `instance.env` |
-| `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:42,429`; env-only by design | `.archon/.env` |
+| `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:42,462`; env-only by design | `.archon/.env` |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` | `1200` | `main_red_fixer.py:291` | `.archon/.env` |
-| `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:978`; set via `run-compose.yml:56-57` | `instance.env` |
+| `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:998`; set via `run-compose.yml:56-57` | `instance.env` |
 | `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:110` | `instance.env` |
 | `RUN_ID`, `RUN_STARTED_AT`, `ISSUE_NUM`, `INTENT` | per run | `entrypoint.sh` internal | not operator-settable |
 
@@ -526,7 +526,7 @@ the table below only says how those keys relate to configuration.
 `adapter_defaults.DEFAULTS` (MarketHawk's constants); a file is validated and then
 `_deep_merge`d over the defaults (`adapter.py:209-216`), then the factory-owned boundary floor is
 unioned into `safety.critical_diff_paths` and `safety.migration_seed_auth_patterns`
-(`adapter.py:218-239`, `adapter_defaults.py:122-146`), which no adapter can remove. `adapter.get`
+(`adapter.py:218-239`, `adapter_defaults.py:122-150`), which no adapter can remove. `adapter.get`
 (`:296-302`) resolves a dotted path against the result. Consumers call it at use time and fall
 back to defaults on any error.
 
@@ -548,7 +548,7 @@ back to defaults on any error.
 | `token_optimization` (the only block that overlays `config.yaml`) | Merged over the run's config by `effective_config.resolve` (`effective_config.py:124-142`): baked, then the clone's committed config, then the adapter block. Written to the clone only when the clone has **no** `.claude/skills/refinement/config.yaml` (`effective_config.py:287-320`). When the clone has one it wins unchanged and a drift warning is printed. Fail-open: an invalid adapter skips the overlay | every `token_optimization` reader above |
 | `safety.sensitive_keywords` | unioned with `epic_autopilot.sensitive_keywords` | `epic_autopilot.py:397-410` (adapter directory: `_target_dir()`, see the `epic_autopilot` table) |
 | `safety.hard_exclude_paths` | replaces `epic_autopilot.hard_exclude_paths` in the autopilot's lookup order; the autopilot unions the lookups from `CLONE_DIR`/`.` and from `_target_dir()` (`_effective_exclude_paths`) | `epic_autopilot.py:359-368,383-394,442-462`; `mechanism_candidate.py:381-415` |
-| `safety.critical_diff_paths`, `safety.migration_seed_auth_patterns` | pattern lists for diff ranking and the blast-radius gate, with the floor unioned in | `scripts/diff_rank.py:70-84`, `scripts/gate_blast_radius.py:145-160` |
+| `safety.critical_diff_paths`, `safety.migration_seed_auth_patterns` | pattern lists for diff ranking and the blast-radius gate, with the floor unioned in | `scripts/diff_rank.py:70-84`, `scripts/gate_blast_radius.py:167-182` |
 | `safety.main_red_allowed_paths` | paths the main-red fixer may edit | `main_red_fixer.py:25-33,292` |
 | `safety.dispatch_ceiling_keywords` | **not read from the adapter**: only `adapter_defaults` supplies the fallback to `architecture_slice.py:83` | none effective |
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
@@ -572,7 +572,7 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 | size labels `size: XL/L/M/S` | `scripts/scheduler_lib.sh:37-52` | dispatch ceiling classification |
 | `direct-to-pr` literal | `commands/dark-factory-refine.md:230`, `commands/dark-factory-plan.md:297` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
 | `MAX_SESSION_WINDOW_HOURS = 5` | `scripts/factory_core/session_window.py:137` | cap on a session-window pause |
-| `model: haiku` for `classify-preview` and `summarize-feedback` | `workflows/archon-dark-factory.yaml:847,169` | replaces the unread `preview.model` |
+| `model: haiku` for `classify-preview` and `summarize-feedback` | `workflows/archon-dark-factory.yaml:867,169` | replaces the unread `preview.model` |
 | Epic-selector exclude regex `security\|auth\|authz\|authn\|trading\|ibkr` plus `dark.?factory\|scheduler\|factory.self` | `scripts/factory_core/epic_autopilot.py:188-189` | which epics autopilot may start; factory-self terms drop when `allow_self_improvement` is on |
 | Factory-self path prefixes `dark-factory/ .archon/ scheduler.sh factory_core/` | `epic_autopilot.py:194` | dropped from the exclude list when self-improvement is on |
 | `_DEFAULT_EXCLUDE_PATHS` (four trading/auth paths) | `scripts/architecture_slice.py:85-90` | full-doc redaction fallback when config lacks `hard_exclude_paths` |
@@ -580,7 +580,7 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 | `_HARDCODED` budget fallbacks (`5000/2500`, `1500/750`, `2000/1000`, `6000/3000`, reserve `2000`) | `scripts/budget_enforce.py:29-33` | used when the config cannot be read |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` default `1200` | `main_red_fixer.py:291` | agent wall-clock limit |
 | Compose defaults for MarketHawk identity and model alias pins | `run-compose.yml:31-53`; `scripts/identity.sh:3-18` | applied whenever an identity or alias variable is missing |
-| Hotspot, size and gate fallbacks `5.0`, `400`, `False` | `scripts/gate_blast_radius.py:323-325` | when neither layer sets the key |
+| Hotspot, size and gate fallbacks `5.0`, `400`, `False` | `scripts/gate_blast_radius.py:517-519` | when neither layer sets the key |
 | `GraphQL items(first: 100)`, `labels(first: 10)` | `providers/tracker/github.py:27,37` (the query moved there from `scheduler.sh` in [PR #525](https://github.com/omniscient/dark-factory/pull/525); the scheduler calls `tracker board-items`) | board paging; items are paged 100 at a time; labels beyond the first 10 per item are not seen |
 | `ABOVE_CEILING` keyword fallback copy | `commands/ceiling-revisit.md:95`, `scripts/ceiling_revisit.py` | mirrors the config default for the weekly revisit |
 
@@ -618,13 +618,13 @@ and [#532](https://github.com/omniscient/dark-factory/issues/532) (MarketHawk-sp
 
 | # | Where | The comment says | The code does |
 |---|---|---|---|
-| D1 | `config/config.yaml:10-12` (`session_window_*`), `:6` (`factory_wip_limit`); `entrypoint.sh:32-33` | env overrides config; config supplies the container's value | `entrypoint.sh:34-39` sets bootstrap defaults before `apply_run_config_env … entrypoint` runs, and it (`scripts/run_config_env.sh:40-46`) treats any bootstrap value that differs from config as an "env/bootstrap override" and keeps it. So config can never change `FACTORY_WIP_LIMIT`, `CONFLICT_RESOLUTION_AI_TIER` or `SESSION_WINDOW_*` in a run container, and I confirmed the logic with a replica (config 10 vs default 5 stays 5). For `FACTORY_WIP_LIMIT` it is moot anyway: the container guard at `entrypoint.sh:169-175` runs before the clone and before `apply_run_config_env` (`entrypoint.sh:813`), and the scheduler does not forward the variable, so the container limit is `.archon/.env` or 1. A scheduler limit above 1 without the same value in `.archon/.env` makes the second concurrent run exit with an error |
-| D2 | `config/config.yaml:64` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:35` and `run-config.env` (`effective_config.py:77`) only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:715` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
+| D1 | `config/config.yaml:10-12` (`session_window_*`), `:6` (`factory_wip_limit`); `entrypoint.sh:32-33` | env overrides config; config supplies the container's value | `entrypoint.sh:34-39` sets bootstrap defaults before `apply_run_config_env … entrypoint` runs, and it (`scripts/run_config_env.sh:40-46`) treats any bootstrap value that differs from config as an "env/bootstrap override" and keeps it. So config can never change `FACTORY_WIP_LIMIT`, `CONFLICT_RESOLUTION_AI_TIER` or `SESSION_WINDOW_*` in a run container, and I confirmed the logic with a replica (config 10 vs default 5 stays 5). For `FACTORY_WIP_LIMIT` it is moot anyway: the container guard at `entrypoint.sh:169-175` runs before the clone and before `apply_run_config_env` (`entrypoint.sh:849`), and the scheduler does not forward the variable, so the container limit is `.archon/.env` or 1. A scheduler limit above 1 without the same value in `.archon/.env` makes the second concurrent run exit with an error |
+| D2 | `config/config.yaml:64` (`ai_tier`: "false = only Tier 1") | the flag disables the AI tier | `entrypoint.sh:35` and `run-config.env` (`effective_config.py:77`) only set `CONFLICT_RESOLUTION_AI_TIER`; `entrypoint.sh:748` calls `cli.py deconflict` without `--no-ai-tier` and `deconflict.py` reads no env. Always AI-tier enabled. `scripts/factory_core/side_effect.py:189` repeats the claim in a comment |
 | D3 | `config/config.yaml:124,125,127` (`main_red_autofix.model/max_attempts/ci_wait_minutes`: "container default") | the config value is the container default | `main_red_fixer.py:288-290` reads env then hardcoded defaults; no code path carries the config value into a run container. `read_config` exports `MAIN_RED_AUTOFIX_MODEL`/`MAX_ATTEMPTS` (`effective_config.py:70-71`) into the scheduler, where nothing reads them. `ci_wait_minutes` is not exported at all. The values match today only by coincidence |
 | D4 | `config/config.yaml:193` | `comments.enabled` "NOT consulted ... scheduler.sh exports this value into its own process, which does not reach run containers" | accurate. Also true of `architecture.enabled`, `memory.enabled`, `diff.enabled`, whose exports (`effective_config.py:73-76`) reach nothing, but for those the readers also consult config in the clone, so the keys still work |
 | D5 | `commands/ceiling-revisit.md:88-108` | the revisit writes `ABOVE_CEILING_KEYWORDS` into `.archon/.env` as the effective override | the scheduler reads `ABOVE_CEILING_KEYWORDS` from its own environment (`instance.env`) or config (`read_config`, `scheduler_lib.sh:50`) and never sources `.archon/.env` (`scheduler.sh:53-56` only copies it). The recorded override does not affect dispatch |
 | D6 | `config/config.yaml:15-26` (`refine.skip_labels`, `plan.skip_labels`, `min_issue_body_length`) | present as config | no reader; real lists are hardcoded (`scheduler.sh:9,23`) |
-| D7 | `config/config.yaml:60` (`preview.model: haiku`) | model for the preview classifier | no reader; `workflows/archon-dark-factory.yaml:847` hardcodes `haiku` |
+| D7 | `config/config.yaml:60` (`preview.model: haiku`) | model for the preview classifier | no reader; `workflows/archon-dark-factory.yaml:867` hardcodes `haiku` |
 | D8 (partly resolved by [PR #524](https://github.com/omniscient/dark-factory/pull/524)) | `config/config.yaml:95-98` (`epic_autopilot.hard_exclude_paths` "Kept byte-identical to adapter_defaults") | the config list is what autopilot uses | `epic_autopilot.py:442-462` tries the adapter first and `adapter.get` always returns a list (the defaults if no adapter file), so the config list is only reached if the adapter import fails. The scheduler-side half is fixed: `main_once` now takes the adapter directory from `_target_dir()` (`CLONE_DIR`, else `/workspace/project` when it holds `.factory/adapter.yaml`, else `.`), so the target's adapter is read, and `_effective_exclude_paths` unions in what the cwd lookup gave. What remains is the config-list point above: with an adapter present the `config.yaml` list is still dead. The directory choice is covered by `tests/test_epic_autopilot.py`; not exercised in a live scheduler |
 | D9 | `config/config.yaml:184,195` | `architecture.max_tokens`, `comments.max_tokens` "derivation input, not a live cap" | accurate. Listed to flag that `memory.max_tokens` and `diff.max_review_tokens` are different: they are live caps read directly (`memory_retrieve.py:163-190`, `diff_rank.py:133`) |
 | D10 | `config/config.yaml:189` (`memory.max_entries`: "baked — no env override") | baked | no env override is right, but it is read from the run's config chain (clone's file, then baked: `memory_retrieve.py:100-107,157-160`), so a target-committed or adapter-overlaid value takes effect |
