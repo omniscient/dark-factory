@@ -1452,3 +1452,460 @@ def test_assemble_tolerates_malformed_push_result(tmp_path, monkeypatch):
 
     rec = json.loads(out.read_text())
     assert "push_result" not in rec
+
+
+# ── artifact_check: artifact-less refine/plan scoring (issue #447) ─────────
+
+_NO_GATE_STAGES = [{"stage": "conflict_resolution", "verdict": "none"}]
+_CHECK_PRESENT = {"artifact_present": True}
+_CHECK_CLEAN_ABORT = {"artifact_present": False, "needs_discussion": True, "label_lookup": "ok"}
+_CHECK_SILENT_DEATH = {"artifact_present": False, "needs_discussion": False, "label_lookup": "ok"}
+_CHECK_LOOKUP_ERROR = {"artifact_present": False, "needs_discussion": False, "label_lookup": "error"}
+
+
+def test_policy_version_is_1_1():
+    assert rr.POLICY_VERSION == "1.1"
+
+
+def test_outcome_artifact_present_stays_produced_ungated():
+    out = rr._compute_outcome("completed", _NO_GATE_STAGES, artifact_check=_CHECK_PRESENT)
+    assert out["state"] == "produced_ungated"
+    assert out["score"] == 1.0
+    assert out["evidence"]["ungated"] is True
+    assert out["evidence"]["artifact_check"] == _CHECK_PRESENT
+
+
+def test_outcome_no_artifact_with_needs_discussion_is_clean_abort():
+    out = rr._compute_outcome("completed", [], artifact_check=_CHECK_CLEAN_ABORT)
+    assert out["state"] == "clean_abort"
+    assert out["score"] == 0.0
+    assert out["evidence"]["ungated"] is False
+    assert out["evidence"]["penalties"] == []
+    assert out["evidence"]["artifact_check"] == _CHECK_CLEAN_ABORT
+
+
+def test_outcome_no_artifact_without_label_is_failed():
+    out = rr._compute_outcome("completed", [], artifact_check=_CHECK_SILENT_DEATH)
+    assert out["state"] == "failed"
+    assert out["score"] == 0.0
+    assert out["evidence"]["ungated"] is False
+    assert out["evidence"]["artifact_check"] == _CHECK_SILENT_DEATH
+
+
+def test_outcome_no_artifact_lookup_error_fails_closed():
+    out = rr._compute_outcome("completed", [], artifact_check=_CHECK_LOOKUP_ERROR)
+    assert out["state"] == "failed"
+    assert out["score"] == 0.0
+    assert out["evidence"]["artifact_check"]["label_lookup"] == "error"
+
+
+def test_outcome_without_artifact_check_is_byte_identical_legacy():
+    # R1 regression pin: omitting the kwarg (every non-refine/plan run) yields exactly
+    # the pre-#447 dict — no new evidence key, same state/score.
+    legacy = {
+        "state": "produced_ungated",
+        "score": 1.0,
+        "evidence": {"status": "completed", "gate_stages": [], "penalties": [], "ungated": True},
+    }
+    assert rr._compute_outcome("completed", _NO_GATE_STAGES) == legacy
+    assert rr._compute_outcome("completed", _NO_GATE_STAGES, artifact_check=None) == legacy
+
+
+def test_outcome_artifact_check_never_overrides_status_or_gate_precedence():
+    assert rr._compute_outcome("failed", [], artifact_check=_CHECK_CLEAN_ABORT)["state"] == "failed"
+    blocking = [{"stage": "validation", "verdict": "FAIL"}]
+    assert rr._compute_outcome("completed", blocking, artifact_check=_CHECK_CLEAN_ABORT)["state"] == "blocked"
+    passing = [{"stage": "validation", "verdict": "PASS"}]
+    assert rr._compute_outcome("completed", passing, artifact_check=_CHECK_SILENT_DEATH)["state"] == "delivered_clean"
+
+
+def _economics(tmp_path, artifact_check=None, **overrides):
+    kwargs = dict(
+        run_id="run-447", status="completed", stages=[],
+        totals={"gen_ai.usage.input_tokens": 300, "gen_ai.usage.output_tokens": 200, "cost_usd": 0.1},
+        started_at="2026-11-22T00:00:00Z", completed_at="2026-11-22T00:01:00Z",
+        ledger_path=tmp_path / "no-ledger.jsonl",
+    )
+    kwargs.update(overrides)
+    if artifact_check is None:
+        return rr._compute_harness_economics(**kwargs)
+    return rr._compute_harness_economics(artifact_check=artifact_check, **kwargs)
+
+
+def test_harness_economics_clean_abort_keeps_retry_only_failure_spend(tmp_path):
+    he = _economics(tmp_path, artifact_check=_CHECK_CLEAN_ABORT)
+    assert he["policy_version"] == "1.1"
+    assert he["outcome"]["state"] == "clean_abort"
+    assert he["factory_cpm"] == 0.0
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+
+
+def test_harness_economics_artifactless_failed_is_whole_run_spend(tmp_path):
+    he = _economics(tmp_path, artifact_check=_CHECK_SILENT_DEATH)
+    assert he["outcome"]["state"] == "failed"
+    assert he["factory_cpm"] == 0.0
+    assert he["failure_spend"] == {"tokens": 500, "basis": "whole_run"}
+
+
+def test_harness_economics_artifact_present_scores_like_legacy(tmp_path):
+    he = _economics(tmp_path, artifact_check=_CHECK_PRESENT)
+    assert he["outcome"]["state"] == "produced_ungated"
+    assert he["factory_cpm"] == pytest.approx(2000.0)  # 1.0 * 1e6 / 500 tokens
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+
+
+def test_harness_economics_without_artifact_check_unchanged(tmp_path):
+    he = _economics(tmp_path)
+    assert he["outcome"]["state"] == "produced_ungated"
+    assert "artifact_check" not in he["outcome"]["evidence"]
+    assert he["factory_cpm"] == pytest.approx(2000.0)
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+def _fake_tracker_run(monkeypatch, *, stdout="", returncode=0, exc=None):
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if exc is not None:
+            raise exc
+        return _FakeCompleted(returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr(rr.subprocess, "run", _run)
+    return calls
+
+
+def test_providers_cli_path_resolves_to_real_file():
+    assert rr._PROVIDERS_CLI.is_file()
+    assert rr._PROVIDERS_CLI.parts[-2:] == ("providers", "cli.py")
+
+
+def test_check_needs_discussion_label_present(monkeypatch):
+    labels = {"labels": [{"name": "plan-pending-review"}, {"name": "needs-discussion"}]}
+    calls = _fake_tracker_run(monkeypatch, stdout=json.dumps(labels))
+    assert rr._check_needs_discussion(447) == (True, True)
+    cmd, kwargs = calls[0]
+    assert cmd == [sys.executable, str(rr._PROVIDERS_CLI), "tracker", "get",
+                   "--id", "447", "--fields", "labels"]
+    assert kwargs["timeout"] == rr.LABEL_LOOKUP_TIMEOUT_SECONDS
+    assert kwargs["capture_output"] is True
+
+
+def test_check_needs_discussion_label_absent(monkeypatch):
+    _fake_tracker_run(monkeypatch, stdout=json.dumps({"labels": [{"name": "ready-for-agent"}]}))
+    assert rr._check_needs_discussion(447) == (False, True)
+
+
+def test_check_needs_discussion_no_labels_is_a_successful_lookup(monkeypatch):
+    _fake_tracker_run(monkeypatch, stdout=json.dumps({"labels": []}))
+    assert rr._check_needs_discussion(447) == (False, True)
+
+
+def test_check_needs_discussion_accepts_plain_string_labels(monkeypatch):
+    # JiraTracker.get_item returns labels as bare strings, GitHub as {"name": ...}.
+    _fake_tracker_run(monkeypatch, stdout=json.dumps({"labels": ["needs-discussion"]}))
+    assert rr._check_needs_discussion(447) == (True, True)
+
+
+@pytest.mark.parametrize("stdout,returncode", [
+    ("{}", 0),                       # GitHubTracker.get_item's own gh-failure fallback
+    ("not json {{{", 0),
+    (json.dumps({"labels": None}), 0),
+    (json.dumps({"labels": [{"name": "needs-discussion"}]}), 1),
+])
+def test_check_needs_discussion_fails_closed_on_bad_response(monkeypatch, stdout, returncode):
+    _fake_tracker_run(monkeypatch, stdout=stdout, returncode=returncode)
+    assert rr._check_needs_discussion(447) == (False, False)
+
+
+def test_check_needs_discussion_fails_closed_on_timeout(monkeypatch):
+    import subprocess
+    _fake_tracker_run(monkeypatch, exc=subprocess.TimeoutExpired(cmd="tracker", timeout=30))
+    assert rr._check_needs_discussion(447) == (False, False)
+
+
+def test_check_needs_discussion_fails_closed_on_oserror(monkeypatch):
+    _fake_tracker_run(monkeypatch, exc=OSError("no python"))
+    assert rr._check_needs_discussion(447) == (False, False)
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"run_id": "b5f8d7c0f8bee469b23f19643b208214", "nodes": []}, "b5f8d7c0f8bee469b23f19643b208214"),
+    ({"runId": "wf-run", "nodes": []}, "wf-run"),
+    ({"run_id": "../../etc", "nodes": []}, None),   # _SAFE_RUN_ID_RE path-traversal guard
+    ({"run_id": 42, "nodes": []}, None),
+    ({"nodes": []}, None),
+])
+def test_archon_workflow_run_id_from_cost_json(tmp_path, payload, expected):
+    cost = tmp_path / "cost.json"
+    cost.write_text(json.dumps(payload))
+    assert rr._archon_workflow_run_id(cost) == expected
+
+
+def test_archon_workflow_run_id_missing_or_unparseable(tmp_path):
+    assert rr._archon_workflow_run_id(None) is None
+    assert rr._archon_workflow_run_id(tmp_path / "absent.json") is None
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text("No cost data available for run x (archon-dark-factory).")
+    assert rr._archon_workflow_run_id(garbage) is None
+
+
+def _artifact_assemble_args(tmp_path, monkeypatch, *, intent, status="completed"):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    args = _AssembleArgs(tmp_path, tmp_path / "run-record.json")
+    args.intent = intent
+    args.status = status
+    return args
+
+
+def _split_artifact_dirs(tmp_path, monkeypatch, *, intent):
+    """Production layout: entrypoint's runs/<RUN_ID> (--artifacts-dir) and archon's
+    runs/<workflow run id> (every DAG node's $ARTIFACTS_DIR) are sibling directories."""
+    entry_dir = tmp_path / "runs" / "entry-run"
+    workflow_dir = tmp_path / "runs" / "wf-run"
+    entry_dir.mkdir(parents=True)
+    workflow_dir.mkdir(parents=True)
+    cost = tmp_path / "cost.json"
+    cost.write_text(json.dumps({"run_id": "wf-run", "nodes": []}))
+    args = _artifact_assemble_args(entry_dir, monkeypatch, intent=intent)
+    args.archon_cost_json = str(cost)
+    return args, entry_dir, workflow_dir
+
+
+def _stub_lookup(monkeypatch, result):
+    calls = []
+
+    def _fake(issue):
+        calls.append(issue)
+        return result
+
+    monkeypatch.setattr(rr, "_check_needs_discussion", _fake)
+    return calls
+
+
+def _forbid_lookup(monkeypatch):
+    def _boom(issue):
+        raise AssertionError("_check_needs_discussion must not be called here")
+
+    monkeypatch.setattr(rr, "_check_needs_discussion", _boom)
+
+
+def test_assemble_refine_finds_push_result_in_workflow_run_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    (workflow_dir / "push-result.json").write_text(json.dumps({"node": "refine-push", "pushed": True}))
+    rr.cmd_assemble(args)
+
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": True}
+    # The #473 push_result fold is deliberately unchanged (Design decision 8): it still
+    # reads only --artifacts-dir.
+    assert "push_result" not in rec
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+    assert rec["harness_economics"]["outcome"]["score"] == 1.0
+
+
+def test_assemble_plan_split_dirs_no_push_result_is_failed(tmp_path, monkeypatch):
+    calls = _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="plan")
+    rr.cmd_assemble(args)
+
+    assert calls == [333]
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert rec["artifact_check"] == {
+        "artifact_present": False, "needs_discussion": False,
+        "label_lookup": "ok", "workflow_run_id": "wf-run",
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+    assert "push_result" not in rec
+
+
+def test_assemble_refine_with_push_result_is_produced_ungated(tmp_path, monkeypatch):
+    # Same-directory fallback (no cost JSON -> workflow run id unresolved).
+    # pushed: false is still "artifact found" (R3) — no third branch.
+    _forbid_lookup(monkeypatch)
+    (tmp_path / "push-result.json").write_text(json.dumps({"node": "refine-push", "pushed": False}))
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="refine")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert rec["push_result"] == {"node": "refine-push", "pushed": False}
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+    assert outcome["evidence"]["artifact_check"] == {"artifact_present": True}
+
+
+def test_assemble_malformed_push_result_still_counts_as_artifact(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    (tmp_path / "push-result.json").write_text("not valid json {{{")
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="plan")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+    assert "push_result" not in rec
+
+
+def test_assemble_plan_no_artifact_with_label_is_clean_abort(tmp_path, monkeypatch):
+    calls = _stub_lookup(monkeypatch, (True, True))
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="plan")
+    rr.cmd_assemble(args)
+
+    assert calls == [333]
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    expected = {"artifact_present": False, "needs_discussion": True,
+                "label_lookup": "ok", "workflow_run_id": None}
+    assert rec["artifact_check"] == expected
+    he = rec["harness_economics"]
+    assert he["outcome"]["state"] == "clean_abort"
+    assert he["outcome"]["score"] == 0.0
+    assert he["outcome"]["evidence"]["artifact_check"] == expected
+    assert he["failure_spend"]["basis"] == "retry_only"
+
+
+def test_assemble_refine_no_artifact_no_label_is_failed(tmp_path, monkeypatch):
+    calls = _stub_lookup(monkeypatch, (False, True))
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="refine")
+    rr.cmd_assemble(args)
+
+    assert calls == [333]
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": False, "needs_discussion": False,
+                                     "label_lookup": "ok", "workflow_run_id": None}
+    he = rec["harness_economics"]
+    assert he["outcome"]["state"] == "failed"
+    assert he["outcome"]["score"] == 0.0
+    assert he["failure_spend"]["basis"] == "whole_run"
+
+
+def test_assemble_refine_no_artifact_lookup_error_is_failed(tmp_path, monkeypatch):
+    _stub_lookup(monkeypatch, (False, False))
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="refine")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": False, "needs_discussion": False,
+                                     "label_lookup": "error", "workflow_run_id": None}
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+    assert rec["harness_economics"]["outcome"]["evidence"]["artifact_check"]["label_lookup"] == "error"
+
+
+def test_assemble_refine_lookup_timeout_end_to_end_fails_closed(tmp_path, monkeypatch):
+    # Real _check_needs_discussion, raising subprocess: proves the helper's catch end to end.
+    import subprocess
+    _fake_tracker_run(monkeypatch, exc=subprocess.TimeoutExpired(cmd="tracker", timeout=30))
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="refine")
+    rr.cmd_assemble(args)  # must not raise
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["artifact_check"]["label_lookup"] == "error"
+    assert rec["artifact_check"]["needs_discussion"] is False
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+
+
+def test_assemble_refine_failure_trap_never_looks_up(tmp_path, monkeypatch):
+    # entrypoint.sh's on_failure path: --status failed, no push-result.json.
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="refine", status="failed")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert "artifact_check" not in rec
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+    assert "artifact_check" not in rec["harness_economics"]["outcome"]["evidence"]
+
+
+@pytest.mark.parametrize("intent", ["close", "new", "deconflict", "fix-main"])
+def test_assemble_non_refine_plan_intents_unchanged(tmp_path, monkeypatch, intent):
+    # R1 regression pin at the cmd_assemble level: no lookup, no artifact_check key,
+    # today's unconditional produced_ungated/1.0 for zero gate stages.
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent=intent)
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert "artifact_check" not in rec
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome == {
+        "state": "produced_ungated",
+        "score": 1.0,
+        "evidence": {"status": "completed", "gate_stages": [], "penalties": [], "ungated": True},
+    }
+
+
+def test_assemble_non_refine_plan_ignores_workflow_run_dir(tmp_path, monkeypatch):
+    # The workflow-dir resolution is refine/plan-only: a close run's record is untouched
+    # even when a push-result.json sits in the workflow run's directory.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="close")
+    (workflow_dir / "push-result.json").write_text(json.dumps({"pushed": True}))
+    rr.cmd_assemble(args)
+
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert "artifact_check" not in rec
+    assert "push_result" not in rec
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+
+
+def _stored_refine_record(tmp_path, run_id, **extra):
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    record = {
+        "run_id": run_id, "intent": "refine", "status": "completed",
+        "started_at": "2026-11-22T04:00:00Z", "completed_at": "2026-11-22T04:01:00Z",
+        "stages": [],
+        "totals": {"gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 50, "cost_usd": 0.02},
+    }
+    record.update(extra)
+    path = run_dir / "run-record.json"
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_backfill_keeps_failed_verdict_for_artifactless_refine(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)  # backfill replays, never looks up
+    path = _stored_refine_record(tmp_path, "run-sd", artifact_check=_CHECK_SILENT_DEATH)
+    ok = rr._backfill_run_economics("run-sd", artifacts_root=tmp_path / "runs",
+                                    ledger_path=tmp_path / "no-ledger.jsonl")
+    assert ok is True
+    updated = json.loads(path.read_text())
+    assert updated["artifact_check"] == _CHECK_SILENT_DEATH
+    he = updated["harness_economics"]
+    assert he["policy_version"] == "1.1"
+    assert he["outcome"]["state"] == "failed"
+    assert he["outcome"]["score"] == 0.0
+
+
+def test_backfill_keeps_clean_abort_verdict(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    path = _stored_refine_record(tmp_path, "run-ca", artifact_check=_CHECK_CLEAN_ABORT)
+    rr._backfill_run_economics("run-ca", artifacts_root=tmp_path / "runs",
+                               ledger_path=tmp_path / "no-ledger.jsonl")
+    he = json.loads(path.read_text())["harness_economics"]
+    assert he["outcome"]["state"] == "clean_abort"
+    assert he["failure_spend"]["basis"] == "retry_only"
+
+
+def test_backfill_legacy_record_without_artifact_check_unchanged(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    path = _stored_refine_record(tmp_path, "run-legacy")
+    rr._backfill_run_economics("run-legacy", artifacts_root=tmp_path / "runs",
+                               ledger_path=tmp_path / "no-ledger.jsonl")
+    updated = json.loads(path.read_text())
+    assert "artifact_check" not in updated
+    outcome = updated["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+    assert "artifact_check" not in outcome["evidence"]

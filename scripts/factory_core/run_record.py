@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import traceback
 import urllib.error
@@ -26,7 +27,7 @@ SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/l
 JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
-POLICY_VERSION = "1.0"
+POLICY_VERSION = "1.1"
 GATE_STAGE_NAMES = ("validation", "conformance", "review")
 _BLOCKING_VERDICTS = {
     "validation": {"FAIL"},
@@ -425,13 +426,19 @@ def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     return result
 
 
-def _compute_outcome(status: str, stages: list) -> dict:
-    """Deterministic outcome.state / outcome.score policy (policy_version 1.0).
+def _compute_outcome(status: str, stages: list, *, artifact_check: "dict | None" = None) -> dict:
+    """Deterministic outcome.state / outcome.score policy (policy_version 1.1).
 
-    failed/blocked always score 0.0 regardless of token spend — the mechanical
-    enforcement of "don't reward raw token reduction over correctness." See
-    docs/superpowers/specs/2026-07-16-harness-economics-ledger-cpm-design.md
-    "Outcome-score policy".
+    failed/blocked/clean_abort always score 0.0 regardless of token spend — the
+    mechanical enforcement of "don't reward raw token reduction over correctness." See
+    docs/archive/2026-07-16-harness-economics-ledger-cpm-design.md "Outcome-score
+    policy" (1.0) and docs/superpowers/specs/2026-11-22-run-record-artifact-scoring-design.md
+    (1.1).
+
+    artifact_check is passed by cmd_assemble for refine/plan runs only (#447). With zero
+    gate stages, a run that committed no spec/plan is clean_abort when needs-discussion
+    is on the issue and failed otherwise (including an unknown label state). None keeps
+    the pre-1.1 unconditional produced_ungated scoring for every other intent.
     """
     stage_by_name = {s["stage"]: s for s in stages if s.get("stage") in GATE_STAGE_NAMES}
     gate_stages = [stage_by_name[name] for name in GATE_STAGE_NAMES if name in stage_by_name]
@@ -446,12 +453,17 @@ def _compute_outcome(status: str, stages: list) -> dict:
     ):
         state = "blocked"
     elif not gate_stages:
-        state = "produced_ungated"
+        if artifact_check is None or artifact_check.get("artifact_present"):
+            state = "produced_ungated"
+        elif artifact_check.get("needs_discussion"):
+            state = "clean_abort"
+        else:
+            state = "failed"
     else:
         state = "delivered_with_findings" if (cycles or advisory) else "delivered_clean"
 
     penalties = []
-    if state in ("failed", "blocked"):
+    if state in ("failed", "blocked", "clean_abort"):
         score = 0.0
     elif state == "produced_ungated":
         score = 1.0
@@ -467,16 +479,16 @@ def _compute_outcome(status: str, stages: list) -> dict:
             penalties.append({"reason": "review_advisory", "count": advisory, "delta": delta})
         score = max(SCORE_FLOOR, min(1.0, round(score, 4)))
 
-    return {
-        "state": state,
-        "score": score,
-        "evidence": {
-            "status": status,
-            "gate_stages": gate_stages,
-            "penalties": penalties,
-            "ungated": state == "produced_ungated",
-        },
+    evidence = {
+        "status": status,
+        "gate_stages": gate_stages,
+        "penalties": penalties,
+        "ungated": state == "produced_ungated",
     }
+    if artifact_check is not None:
+        evidence["artifact_check"] = artifact_check
+
+    return {"state": state, "score": score, "evidence": evidence}
 
 
 LEDGER_PATH = pathlib.Path(
@@ -567,13 +579,14 @@ def _compute_ledger_mechanics(rows: list) -> dict:
 def _compute_harness_economics(
     *, run_id: str, status: str, stages: list, totals: dict,
     started_at: str, completed_at: str, ledger_path: pathlib.Path,
+    artifact_check: "dict | None" = None,
 ) -> dict:
     tokens_in = totals.get("gen_ai.usage.input_tokens")
     tokens_out = totals.get("gen_ai.usage.output_tokens")
     tokens_per_task = None if tokens_in is None or tokens_out is None else tokens_in + tokens_out
     cost_per_task = totals.get("cost_usd")
 
-    outcome = _compute_outcome(status, stages)
+    outcome = _compute_outcome(status, stages, artifact_check=artifact_check)
     factory_cpm = (
         outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task else None
     )
@@ -604,6 +617,56 @@ def _compute_harness_economics(
         "ledger_rows_correlated": len(rows),
         "ledger_mechanics": ledger_mechanics,
     }
+
+
+NEEDS_DISCUSSION_LABEL = "needs-discussion"
+LABEL_LOOKUP_TIMEOUT_SECONDS = 30
+# Same providers CLI the refine-push/plan-push-and-advance DAG nodes shell out to
+# ($CLONE_DIR/dark-factory/scripts/factory_core/providers/cli.py — this module's sibling).
+_PROVIDERS_CLI = pathlib.Path(__file__).resolve().parent / "providers" / "cli.py"
+
+
+def _check_needs_discussion(issue) -> tuple:
+    """Live needs-discussion lookup for a completed, artifact-less refine/plan run (#447).
+
+    Returns (needs_discussion, lookup_ok). Fails closed: a timeout, non-zero exit,
+    unparseable output, or a response without a "labels" key (GitHubTracker.get_item
+    returns {} when gh fails) is (False, False) — an unknown label state scores as a
+    failure, never as a clean abort, matching the DAG nodes' own `|| true` direction.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_PROVIDERS_CLI), "tracker", "get",
+             "--id", str(issue), "--fields", "labels"],
+            capture_output=True, text=True, timeout=LABEL_LOOKUP_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            return False, False
+        labels = json.loads(result.stdout)["labels"]
+        names = {label.get("name") if isinstance(label, dict) else label for label in labels}
+    except Exception:
+        return False, False
+    return NEEDS_DISCUSSION_LABEL in names, True
+
+
+def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | None":
+    """Workflow run id from `archon workflow cost --last --json` output, or None.
+
+    Archon gives every DAG node its own $ARTIFACTS_DIR, runs/<workflow run id> (see
+    FACTORY_RUN_CONFIG_JSON in entrypoint.sh), a sibling of the entrypoint's runs/<RUN_ID>
+    that cmd_assemble receives as --artifacts-dir — so refine-push/plan-push-and-advance's
+    push-result.json lives under this id, not under args.artifacts_dir (#447).
+    """
+    if archon_cost_path is None or not archon_cost_path.exists():
+        return None
+    try:
+        run_obj = _find_run_obj(archon_cost_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    run_id = (run_obj or {}).get("run_id") or (run_obj or {}).get("runId")
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID_RE.match(run_id):
+        return None
+    return run_id
 
 
 def cmd_assemble(args) -> None:
@@ -655,6 +718,32 @@ def cmd_assemble(args) -> None:
     except Exception:
         loops = []
 
+    # #447: a refine/plan run's whole deliverable is one committed spec/plan doc.
+    # refine-push/plan-push-and-advance write push-result.json only when
+    # push_gate_check.sh found it — into archon's per-workflow-run $ARTIFACTS_DIR, a
+    # sibling of args.artifacts_dir (see _archon_workflow_run_id). On a completed run its
+    # absence means no artifact; then the live needs-discussion label separates a clean
+    # abort from a silent death. Never looked up on the failure-trap path (--status
+    # failed scores failed anyway).
+    artifact_check = None
+    if args.intent in ("refine", "plan"):
+        artifact_push_path = artifacts_dir / "push-result.json"
+        workflow_run_id = _archon_workflow_run_id(archon_path)
+        if workflow_run_id is not None:
+            workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
+            if workflow_push_path.exists():
+                artifact_push_path = workflow_push_path
+        if artifact_push_path.exists():
+            artifact_check = {"artifact_present": True}
+        elif args.status == "completed":
+            needs_discussion, lookup_ok = _check_needs_discussion(args.issue)
+            artifact_check = {
+                "artifact_present": False,
+                "needs_discussion": needs_discussion,
+                "label_lookup": "ok" if lookup_ok else "error",
+                "workflow_run_id": workflow_run_id,
+            }
+
     run_record = {
         "run_id": args.run_id,
         "issue_number": args.issue,
@@ -673,6 +762,8 @@ def cmd_assemble(args) -> None:
             "cost_usd": totals_cost,
         },
     }
+    if artifact_check is not None:
+        run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
     run_record["harness_economics"] = _compute_harness_economics(
         run_id=args.run_id,
         status=run_record["status"],
@@ -681,6 +772,7 @@ def cmd_assemble(args) -> None:
         started_at=run_record["started_at"],
         completed_at=run_record["completed_at"],
         ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+        artifact_check=artifact_check,
     )
 
     trace_path = artifacts_dir / "memory-trace.json"
@@ -827,6 +919,9 @@ def _backfill_run_economics(run_id: str, *, artifacts_root: pathlib.Path, ledger
         started_at=record.get("started_at", ""),
         completed_at=record.get("completed_at", ""),
         ledger_path=ledger_path,
+        # Replay cmd_assemble's recorded refine/plan input (#447) — never a new lookup.
+        # Absent (pre-1.1 records, other intents) -> None -> legacy scoring.
+        artifact_check=record.get("artifact_check"),
     )
     record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return True
