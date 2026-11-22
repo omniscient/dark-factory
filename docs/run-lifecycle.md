@@ -922,11 +922,13 @@ Only when `archon workflow run` exits 0 (`entrypoint.sh:1080-1107`):
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:609-705`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:672-797`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts, adds
    per-node token and cost figures from the Archon cost JSON, the adapter's `loops`,
    `memory-trace.json` and `push-result.json` when present, and appends one line per
-   stage to `runs.jsonl`. Failure is ignored.
+   stage to `runs.jsonl`. For `refine`/`plan` it also records `artifact_check`
+   (`push-result.json` presence, else a `needs-discussion` label lookup) and scores an
+   artifact-less run `failed` or `clean_abort`. Failure is ignored.
 3. `post_cost_report` (`entrypoint.sh:434-501`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
