@@ -335,8 +335,15 @@ BAKED_WORKFLOW_PATH = pathlib.Path("/opt/dark-factory/workflows/archon-dark-fact
 _NODE_TYPE_KEYS = ("command", "prompt", "bash")
 _AI_NODE_TYPES = ("command", "prompt")
 # Archon's `archon workflow run` progress line: `[<command ?? id>] Started|Completed (..)|
-# Failed: ..|Skipped (..)`. Anchored at line start; the token must be a known name.
-_NODE_LOG_RE = re.compile(r"^\[([A-Za-z0-9_-]+)\]\s+(Started|Completed|Failed|Skipped)\b")
+# Failed: ..|Skipped (..)`. Anchored at line start; the token must be a known name. Each
+# event word is also anchored to its exact trailing shape (bare end-of-line for Started,
+# "(" for Completed/Skipped, ":" for Failed) so a streamed agent/tool line that merely
+# starts with e.g. "[implement] Started <more text>" is not mistaken for Archon's own
+# progress line (df#453 advisory).
+_NODE_LOG_RE = re.compile(
+    r"^\[([A-Za-z0-9_-]+)\]\s+"
+    r"(Started(?=\s*$)|Completed(?=\s*\()|Failed(?=:)|Skipped(?=\s*\())"
+)
 
 
 def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
@@ -409,7 +416,10 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
     missing/no_usage_reported with null cost/tokens (duration kept). A bash: zero is real.
     With a parsed log, a command:/prompt: node that started but is absent from the cost
     report is appended as missing/not_in_cost_report; a Skipped node never ran and is not
-    emitted, and an absent bash: node spent nothing and is not emitted either.
+    emitted, and an absent bash: node spent nothing and is not emitted either. A node that
+    IS reported (present in the cost report, e.g. a `when:`-gated node Archon still lists
+    with zero usage) but whose last log event is Skipped never ran either, so its zero is
+    genuine, not a missing-capture — it is left as completed rather than flagged missing.
     """
     out: list = []
     missing: list = []
@@ -419,7 +429,8 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
             node.get(k)
             for k in ("cost_usd", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
         )
-        if node_types.get(node.get("node_id")) in _AI_NODE_TYPES and zero:
+        skipped = (log_events or {}).get(node.get("node_id")) == "Skipped"
+        if node_types.get(node.get("node_id")) in _AI_NODE_TYPES and zero and not skipped:
             node.update({
                 "gen_ai.usage.input_tokens": None,
                 "gen_ai.usage.output_tokens": None,

@@ -475,7 +475,8 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     """
     status = run_record.get("status") or "completed"
     totals = run_record.get("totals") or {}
-    if totals.get("cost_capture") == "partial":
+    is_partial = totals.get("cost_capture") == "partial"
+    if is_partial:
         # A partial run's fully-measured totals are null (#453): its Subtotal, header
         # total and cumulative marker carry the known_* lower bound, never 0.
         total_cost_raw = totals.get("known_cost_usd")
@@ -504,6 +505,13 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     cum_out = prior["prev_out"] + total_out
     run_count = prior["run_count"] + 1
 
+    # Once an earlier run only partially captured cost, every later cumulative header
+    # total is an undisclosed lower bound (#453 advisory) — the partial-capture note
+    # (emitted below the Subtotal of the partial run itself, which already discloses it
+    # there) is the only durable record of that in the comment thread, so its presence
+    # anywhere in the prior history propagates the caveat forward onto later headers.
+    lower_bound_suffix = " (lower bound)" if "Partial cost capture" in prior_comment_body else ""
+
     savings_block = format_savings_block(budget, deliveries)
 
     # NOTE: `{prior['prior_runs']}` and `{savings_block}` are each on their OWN
@@ -514,7 +522,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 <!-- cumulative: cost={cum_cost} in={cum_in} out={cum_out} -->
 ## Dark Factory — Cost Report
 
-**{run_count} run(s) — Total: ${cum_cost} ({format_tokens_cumulative(cum_in)} in / {format_tokens_cumulative(cum_out)} out)**
+**{run_count} run(s) — Total: ${cum_cost} ({format_tokens_cumulative(cum_in)} in / {format_tokens_cumulative(cum_out)} out){lower_bound_suffix}**
 
 {prior['prior_runs']}
 ### Run: {timestamp} ({intent}, {status})
