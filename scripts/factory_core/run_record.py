@@ -697,6 +697,13 @@ def cmd_assemble(args) -> None:
     archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
     workflow_run_id = _archon_workflow_run_id(archon_path)
     workflow_dir = artifacts_dir.parent / workflow_run_id if workflow_run_id is not None else None
+    # #573 advisory: when the resolved workflow run is this entrypoint's own run,
+    # workflow_dir and artifacts_dir are the same directory — the "sibling" probe below
+    # would compare a gate file's mtime against itself and could log it as both own_dir
+    # and stale. Skip the probe in that case; the plain own_dir lookup already covers it.
+    workflow_dir_is_own_dir = (
+        workflow_dir is not None and workflow_dir.resolve() == artifacts_dir.resolve()
+    )
 
     stages = []
     artifacts: dict = {}
@@ -719,7 +726,7 @@ def cmd_assemble(args) -> None:
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
         source = "own_dir"
-        if name in GATE_STAGE_NAMES and workflow_dir is not None:
+        if name in GATE_STAGE_NAMES and workflow_dir is not None and not workflow_dir_is_own_dir:
             sibling = workflow_dir / f"{name}.md"
             if sibling.exists():
                 if _artifact_is_fresh(sibling, args.started_at):
