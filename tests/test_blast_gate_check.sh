@@ -124,6 +124,21 @@ mkdir -p "$CLONE_DIR/elsewhere"; g mv .claude/skills/x/run.sh elsewhere/run.sh; 
 _run --issue 81 --mode run --out "$WORK/b.md"
 check "triggered file moved out of its directory → exit 1" '[ "$RC" = 1 ]'
 check "moved file → HUMAN_REQUIRED" 'grep -qx "STATUS: HUMAN_REQUIRED" "$WORK/b.md"'
+# Round 2: a path is judged and bound exactly as git names it. Stripping it made
+# "run.sh " (trailing space) ride an approval for run.sh; a name git still C-quotes
+# (tab, quote, newline) matched no trigger, so the checker fails closed on it.
+g checkout -q main; g checkout -qb feat/issue-82-space
+printf 'echo evil\n' > "$CLONE_DIR/.claude/skills/x/run.sh "
+g add -A; g commit -qm space
+_run --issue 82 --mode run --out "$WORK/b.md"
+check "trailing-space sibling → exit 1" '[ "$RC" = 1 ]'
+check "trailing-space sibling is listed under its own name" 'grep -qF "run.sh \"" "$WORK/b.md"'
+g checkout -q main; g checkout -qb feat/issue-83-tab
+printf 'echo x\n' > "$CLONE_DIR/.claude/skills/x/a$(printf '\t')b.sh"
+g add -A; g commit -qm tab
+_run --issue 83 --mode run --out "$WORK/b.md"
+check "path git must quote (tab) → checker failure, exit 2" '[ "$RC" = 2 ]'
+check "quoted path → fail-closed HUMAN_REQUIRED stub" 'grep -qx "STATUS: HUMAN_REQUIRED" "$WORK/b.md"'
 
 echo "--- signed approval passes end to end ---"
 g checkout -q feat/issue-77-risky

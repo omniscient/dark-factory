@@ -688,8 +688,8 @@ called by validate Phase 0, the `blast-gate` node, the `push-and-pr` re-check an
 
 Input: the files changed between the merge base with `refs/blast-gate/trusted-main` (origin
 `main`, fetched by the checker every time) and the head, the added-plus-deleted line
-count, and the hotspot report: the working-tree `docs/codeindex-hotspots.md` in a run,
-`main`'s committed copy at Close. Config is read from the image's baked config layered
+count, and the hotspot report: `main`'s committed `docs/codeindex-hotspots.md`, plus the
+working-tree copy in a run. A changed file name git has to quote fails the check. Config is read from the image's baked config layered
 under the config at the merge base, never from the working tree, so a change cannot
 disable its own gate (`scripts/gate_blast_radius.py:85-125`). The baked script copies are
 preferred over the clone's.

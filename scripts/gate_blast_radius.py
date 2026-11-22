@@ -522,7 +522,10 @@ def main() -> None:
 
     changed_files = []
     if args.changed_files_stdin:
-        changed_files = [ln.strip() for ln in sys.stdin.read().splitlines() if ln.strip()]
+        # One path per "\n"-terminated line, byte for byte as git printed it: stripping
+        # turned "run.sh " into "run.sh", so the blob binding checked the approved file
+        # instead of the new one (operator review of PR #571).
+        changed_files = [ln for ln in sys.stdin.read().split("\n") if ln]
 
     lines_changed = args.lines_changed
     clone_dir = args.clone_dir

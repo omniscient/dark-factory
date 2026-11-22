@@ -152,6 +152,13 @@ _check() {
   # PR #571).
   changed=$(git -C "$wt_dir" -c core.quotePath=false diff --no-renames "$base" "$HEAD_SHA" --name-only 2>/dev/null) \
     || { _fail "git diff --name-only failed"; return 2; }
+  # git still C-quotes a name holding a tab, newline, double quote, backslash or control
+  # character; such a line matches no trigger pattern and cannot be bound to a blob by
+  # name. Fail closed rather than judge a path the gate cannot read.
+  if printf '%s\n' "$changed" | grep -q '^"'; then
+    _fail "a changed file name needs quoting (tab, newline, quote, backslash or control character)"
+    return 2
+  fi
   shortstat=$(git -C "$wt_dir" diff "$base" "$HEAD_SHA" --shortstat 2>/dev/null) \
     || { _fail "git diff --shortstat failed"; return 2; }
   added=$(printf '%s' "$shortstat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
