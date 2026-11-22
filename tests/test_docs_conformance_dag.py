@@ -79,7 +79,8 @@ def test_budget_nodes_use_docs_conformance_scenario():
 
 
 def test_resolve_path_unchanged():
-    assert _nodes()["push-resolve"]["depends_on"] == ["validate"]
+    # docs-conformance never joins the resolve path; push-resolve waits on blast-gate (#551).
+    assert _nodes()["push-resolve"]["depends_on"] == ["blast-gate"]
 
 
 def test_dag_validators_pass():
