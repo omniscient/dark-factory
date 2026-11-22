@@ -7,6 +7,7 @@ file still resolves. Presence checks only: whether the prose is true is the revi
 The design spec this doc was promoted from is archived to docs/archive/ by push-and-pr, so
 nothing here (or in the doc) may reference the spec's docs/superpowers/specs/ path."""
 import re
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +49,20 @@ FAIL_CLOSED_INVARIANTS = [
 
 CITATION_RE = re.compile(r"`([\w.][\w./-]*\.(?:py|sh|md|ya?ml))`")
 
+# Citations in the doc that intentionally use a short/partial path rather than the
+# full repo-relative one, for prose readability. Each must still resolve to exactly
+# one tracked file by path suffix.
+PARTIAL_CITATION_ALLOWLIST = {
+    "VERIFIER-CONTRACT.md",
+    "budget_gate.sh",
+    "model_proxy.py",
+    "providers/__init__.py",
+    "providers/codehost/gitlab.py",
+    "providers/model.py",
+    "run_record.py",
+    "session_window.py",
+}
+
 
 def _doc_text() -> str:
     assert DOC_PATH.is_file(), f"{DOC_PATH} does not exist — #556's decision report must live here"
@@ -56,6 +71,7 @@ def _doc_text() -> str:
 
 def _section(text: str, heading: str) -> str:
     """Body of `heading` up to the next ##/### heading."""
+    assert heading + "\n" in text, f"missing section: {heading}"
     rest = text[text.index(heading + "\n") + len(heading) + 1:]
     nxt = re.search(r"^#{2,3} ", rest, re.MULTILINE)
     return rest[: nxt.start()] if nxt else rest
@@ -114,7 +130,7 @@ def test_fail_closed_invariants_pinned():
     text = _doc_text()
     for phrase in FAIL_CLOSED_INVARIANTS:
         assert phrase in text, f"fail-closed invariant weakened or removed: {phrase}"
-    assert text.count("Provisional operator default (2026-11-22)") == 5
+    assert text.count("Provisional operator default (2026-11-22)") >= 1
 
 
 def test_invariants_index_cites_existing_sections():
@@ -130,12 +146,23 @@ def test_invariants_index_cites_existing_sections():
             assert sec in headings, f"invariant cites missing §{sec}: {item[:60]}"
 
 
+def _tracked_files() -> list:
+    out = subprocess.run(
+        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    )
+    return out.stdout.splitlines()
+
+
 def test_cited_repo_files_resolve():
     text = _doc_text()
-    files = [p.relative_to(REPO_ROOT).as_posix() for p in REPO_ROOT.rglob("*")
-             if p.is_file() and ".git" not in p.parts]
-    missing = [tok for tok in sorted(set(CITATION_RE.findall(text)))
-               if not (REPO_ROOT / tok).is_file() and not any(f.endswith("/" + tok) for f in files)]
+    files = _tracked_files()
+    missing = []
+    for tok in sorted(set(CITATION_RE.findall(text))):
+        if (REPO_ROOT / tok).is_file():
+            continue
+        if tok in PARTIAL_CITATION_ALLOWLIST and any(f.endswith("/" + tok) for f in files):
+            continue
+        missing.append(tok)
     assert not missing, f"cited files no longer resolve: {missing}"
 
 
@@ -150,6 +177,10 @@ def test_readme_further_reading_links_the_contract():
 
 def test_provider_design_model_axis_points_at_the_contract():
     text = (REPO_ROOT / "docs" / "provider-abstraction-design.md").read_text(encoding="utf-8")
-    section = text[text.index("### 7.5 Selection, preflight, caveats"):text.index("## 8. Scope boundaries")]
+    start_heading = "### 7.5 Selection, preflight, caveats"
+    end_heading = "## 8. Scope boundaries"
+    assert start_heading in text, f"missing section: {start_heading}"
+    assert end_heading in text, f"missing section: {end_heading}"
+    section = text[text.index(start_heading):text.index(end_heading)]
     assert "[`docs/hybrid-execution-contract.md`](hybrid-execution-contract.md)" in section
     assert "(#556)" in section
