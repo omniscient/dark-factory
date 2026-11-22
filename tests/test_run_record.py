@@ -2145,6 +2145,126 @@ def test_assemble_conflict_resolution_in_own_dir_still_read(tmp_path, monkeypatc
     assert rec["stages"] == [{"stage": "conflict_resolution", "verdict": "RESOLVED"}]
 
 
+_NO_GATE_WARNING = "WARNING: run-record: no gate-stage artifacts found"
+
+
+def test_assemble_gate_artifact_lookup_records_workflow_run_dir_hits(
+    tmp_path, monkeypatch, capsys
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": ["validation", "conformance", "review"],
+        "stale": [],
+        "own_dir": [],
+    }
+    # Scoring-neutral: never part of the outcome evidence.
+    assert "gate_artifact_lookup" not in rec["harness_economics"]["outcome"]["evidence"]
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_gate_artifact_lookup_sibling_wins_is_not_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    (entry_dir / "validation.md").write_text("STATUS: PASS\n")
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\n"})
+    lookup = _assembled(args, entry_dir)["gate_artifact_lookup"]
+
+    assert lookup["found"] == ["review"]
+    assert lookup["own_dir"] == ["validation"]
+
+
+def test_assemble_stale_gate_stages_are_listed_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": ["validation", "conformance", "review"],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=True)" in err
+
+
+def test_assemble_absent_workflow_run_dir_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    # The id resolves but runs/<id>/ does not exist: the silent path R4 exists to surface.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    workflow_dir.rmdir()
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=False)" in err
+
+
+def test_assemble_no_cost_json_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": None,
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=None, workflow_dir_exists=False)" in err
+
+
+def test_assemble_gate_artifact_lookup_records_own_dir_reads(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    for filename, content in _CLEAN_GATES.items():
+        (tmp_path / filename).write_text(content)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"]["own_dir"] == ["validation", "conformance", "review"]
+    assert rec["gate_artifact_lookup"]["found"] == []
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("intent,status", [
+    ("close", "completed"),
+    ("new", "completed"),
+    ("deconflict", "completed"),
+    ("fix", "failed"),
+    ("continue", "failed"),
+])
+def test_assemble_no_gate_warning_only_for_completed_fix_continue(
+    tmp_path, monkeypatch, capsys, intent, status
+):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent=intent, status=status)
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert "gate_artifact_lookup" in rec
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
 def _stored_refine_record(tmp_path, run_id, **extra):
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)

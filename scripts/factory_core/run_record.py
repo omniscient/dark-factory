@@ -709,18 +709,43 @@ def cmd_assemble(args) -> None:
     # own-dir path is the default and a fresh sibling copy wins. A stale sibling (an
     # earlier workflow run's leftover) is never read: its review.md could score this run
     # blocked. conflict_resolution.md is not a gate stage and keeps its own-dir lookup.
+    gate_artifact_lookup = {
+        "workflow_run_id": workflow_run_id,
+        "workflow_dir_exists": workflow_dir is not None and workflow_dir.is_dir(),
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
+        source = "own_dir"
         if name in GATE_STAGE_NAMES and workflow_dir is not None:
             sibling = workflow_dir / f"{name}.md"
-            if sibling.exists() and _artifact_is_fresh(sibling, args.started_at):
-                md_path = sibling
+            if sibling.exists():
+                if _artifact_is_fresh(sibling, args.started_at):
+                    md_path, source = sibling, "found"
+                else:
+                    gate_artifact_lookup["stale"].append(name)
         if md_path.exists():
+            if name in GATE_STAGE_NAMES:
+                gate_artifact_lookup[source].append(name)
             content = md_path.read_text(encoding="utf-8")
             artifacts[name] = content
             stage = _parse_artifact_stage(name, content)
             if stage:
                 stages.append(stage)
+
+    if (
+        args.status == "completed"
+        and args.intent in ("fix", "continue")
+        and not any(s["stage"] in GATE_STAGE_NAMES for s in stages)
+    ):
+        print(
+            "WARNING: run-record: no gate-stage artifacts found "
+            f"(workflow_run_id={workflow_run_id}, "
+            f"workflow_dir_exists={gate_artifact_lookup['workflow_dir_exists']})",
+            file=sys.stderr,
+        )
 
     stderr_text = ""
     stderr_file = getattr(args, "archon_cost_stderr_file", None)
@@ -800,6 +825,9 @@ def cmd_assemble(args) -> None:
     }
     if artifact_check is not None:
         run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
+    # Scoring-neutral lookup evidence (#573): never passed to _compute_outcome. It is what
+    # separates post-fix records from the historical blind-scored ones (no policy bump).
+    run_record["gate_artifact_lookup"] = gate_artifact_lookup
     run_record["harness_economics"] = _compute_harness_economics(
         run_id=args.run_id,
         status=run_record["status"],
