@@ -552,7 +552,7 @@ back to defaults on any error.
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
 | `deconflict.models_init`, `deconflict.migrations_dir` | Tier-1 conflict resolution file paths | `scripts/factory_core/deconflict.py:21-45` |
-| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:717` |
+| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:735` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
 dispatch ceiling, side-effect levels, main-red autofix) is **not** adapter-overridable. The

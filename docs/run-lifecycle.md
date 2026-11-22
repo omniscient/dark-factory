@@ -922,7 +922,7 @@ Only when `archon workflow run` exits 0 (`entrypoint.sh:1080-1107`):
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:672-797`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:690-848`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts, adds
    per-node token and cost figures from the Archon cost JSON, the adapter's `loops`,
    `memory-trace.json` and `push-result.json` when present, and appends one line per
