@@ -20,7 +20,7 @@ def test_run_lifecycle_documents_nodes_gate_and_recovery():
                   "`docs-conformance`", "`docs-conformance-gate`", "**D2.5. Docs conformance, Gate 2.5**",
                   "scripts/docs_verdict_gate_check.sh", "`doc-impact.md`", "`docs-conformance.md`",
                   "df-docs-conformance-observed", "df-docs-conformance-blocked", "**Recovery:**",
-                  "| `push-and-pr` | bash, 30 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` |"):
+                  "| `push-and-pr` | bash, 180 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` |"):
         assert token in text, token
 
 
