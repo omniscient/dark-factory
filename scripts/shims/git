@@ -450,7 +450,26 @@ for _a in "${VERB_ARGS[@]}"; do
 done
 if _cfg_lines_or_deny '^(remote\..*\.(url|pushurl)|url\..*\.(insteadof|pushinsteadof))$'; then
   case "$CFG_LINES" in *ext::*) deny "$_V (ext:: transport in config)" ;; esac
+  # `<helper>::<address>` as a remote URL or an insteadOf base: see below.
+  grep -qE '^(url\.[A-Za-z0-9][A-Za-z0-9+.-]*::|[^ ]+ [A-Za-z0-9][A-Za-z0-9+.-]*::)' <<<"$CFG_LINES"     && deny "$_V (remote helper address in config)"
 fi
+# Operator review of 62efc98: the helper program itself is the same override one step
+# down. --exec-path / GIT_EXEC_PATH swap the directory git-remote-https is loaded from;
+# a remote-* helper run directly (remote-ext executes its address) skips every URL check
+# above; and `<helper>::<address>` loads git-remote-<helper> from PATH. The address form
+# is judged only on verbs that take a repository, so `git grep 'std::string'` and commit
+# messages are untouched.
+[ -n "${GIT_EXEC_PATH+x}" ] && deny "$_V (exec-path override: GIT_EXEC_PATH)"
+for _a in "${_GLOBAL_OPTS[@]}"; do
+  case "$_a" in --exec-path|--exec-path=*) deny "$_V (exec-path override: --exec-path)" ;; esac
+done
+case "$VERB1" in remote-*) deny "$VERB1 (remote helper)" ;; esac
+case "$VERB1" in
+  ls-remote|fetch|pull|clone|push|archive|fetch-pack|send-pack|remote|submodule|bundle|request-pull)
+    for _a in "${VERB_ARGS[@]}"; do
+      [[ "$_a" =~ ^(--[a-z-]+=)?[A-Za-z0-9][A-Za-z0-9+.-]*:: ]]         && deny "$_V (remote helper address)"
+    done ;;
+esac
 
 [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
 exec "$REAL_GIT" "$@"

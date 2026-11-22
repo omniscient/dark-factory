@@ -91,7 +91,7 @@ export PATH="$SHIM_DIR:$TMP/real:$PATH"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GH_CONFIG_DIR="$TMP/gh-config" XDG_DATA_HOME="$TMP/xdg-data"
 mkdir -p "$GH_CONFIG_DIR" "$XDG_DATA_HOME"
-unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND GIT_CONFIG GIT_CONFIG_COUNT \
+unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_CONFIG GIT_CONFIG_COUNT \
   GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE || true
 export FACTORY_REPO_SLUG=o/r
 "$REAL_GIT_BIN" init -q -b feat "$TMP/repo"
@@ -432,6 +432,27 @@ FACTORY_SIDE_EFFECT_LEVEL=2 check allow git diff --exit-code
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git rebase --exec true main
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -c protocol.ext.allow=never fetch origin
 FACTORY_SIDE_EFFECT_LEVEL=2 check allow git grep 'std::string'
+# Operator review of 62efc98: the helper programs themselves. --exec-path/GIT_EXEC_PATH
+# swap the directory git-remote-https is loaded from; remote-ext run directly executes its
+# address; `<helper>::<address>` loads git-remote-<helper> from PATH.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "exec-path override" git --exec-path=/tmp/e ls-remote https://h/x
+# Without `=` git only prints its exec-path; denied all the same (by whichever check sees it first).
+FACTORY_SIDE_EFFECT_LEVEL=4 check deny git --exec-path /tmp/e ls-remote https://h/x
+GIT_EXEC_PATH=/tmp/e FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "exec-path override" git ls-remote https://h/x
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper" git remote-ext o 'sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper" git remote-fd o 3
+FACTORY_SIDE_EFFECT_LEVEL=4 check_deny_reason "remote helper" git remote-https o https://h/x
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper" git -c alias.rx=remote-ext rx o 'sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" git ls-remote 'evil::x'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git fetch 'evil::x' main
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git clone 'evil::x' d
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "remote helper address" git archive --remote=evil::x HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" \
+  git -c remote.origin.url=evil::x fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "remote helper address" \
+  git -c url.evil::x.insteadOf=https://github.com/ fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git commit -m 'scope::thing'
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git log --grep 'a::b'
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin feat
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow git fetch origin
 # Push destination at level 4: every push URL must be the run's repository (o/r).

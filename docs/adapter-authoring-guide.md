@@ -487,7 +487,9 @@ create`), and every transport-command override on every verb:
 (any abbreviation; `-u` on `ls-remote`/`clone`/`fetch-pack`; `rebase --exec` is not a
 transport and is not covered), `remote.*.uploadpack`/`receivepack`, `core.gitProxy`/
 `GIT_PROXY_COMMAND`, a `protocol.allow` or `protocol.ext.allow` other than `never`,
-`GIT_ALLOW_PROTOCOL`, and any `ext::` address in an argument or a remote URL. At
+`GIT_ALLOW_PROTOCOL`, any `ext::` address in an argument or a remote URL,
+`--exec-path`/`GIT_EXEC_PATH`, the `remote-*` helper verbs, and a `<helper>::<address>`
+repository argument or remote URL. At
 levels 1–4 `gh extension install|upgrade|exec` and running an installed extension are
 denied. At level 4 every push URL (`remote get-url --push --all`, so `pushurl` and
 `insteadOf` count) must be `https://github.com/${FACTORY_REPO_SLUG}`. Without
