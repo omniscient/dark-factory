@@ -212,7 +212,7 @@ so one poll normally starts one run.
 | — | Main-red sentinel (`:1606-1616`) | — | — | `main-is-red` exists | Sets `MAIN_IS_RED=true`. Unless paused, may dispatch `Recheck main` and `Fix main` (see [Main-red](#main-red-detection-recheck-and-autofix)) | — | Recheck and fixer throttles |
 | — | Dependency-health loop (`deps_audit_check`) | — | — | `DEPS_AUDIT_ENABLED=true` in the scheduler's environment, no session-window pause, nothing dispatched yet in this poll, no `Audit deps` container of this instance running, the interval has elapsed and no `deps/audit-` PR is open | Dispatches `Audit deps` and touches `deps-audit-last-run`. Runs whether or not main is red. Ships off | — | `DEPS_AUDIT_INTERVAL_HOURS` (default 24), scheduler environment only |
 | P1.5 | `stage_conflict_resolve` (`:1058-1122`) | In review | `red_or_paused`; `CONFLICT_RESOLUTION_ENABLED` | Not in `CI_BLOCKED`, not running, breaker checks pass, PR exists and mergeability is `CONFLICTING`. `UNKNOWN` is logged and skipped | Dispatches `Deconflict issue #N` | Global skip | Retry key `N:resolve`, ceiling `MAX_RETRIES` |
-| P1 | `stage_review_triage` (`:1125-1158`) | In review | `none` | Not in `CI_BLOCKED`. First `end_gate_check`; if that does not act, new comments since the last factory comment are classified | End gate or verdict `MERGE` → `Close issue #N`. `CHANGES_REQUESTED` or verdict `CONTINUE` → `Continue issue #N` (only if not already running) and reset retry key `N`. `SKIP` → nothing | Global skip | None |
+| P1 | `stage_review_triage` (`:1125-1158`) | In review | `none` | Not in `CI_BLOCKED`. First `end_gate_check`; if that does not act, new comments since the last factory comment are classified | End gate or verdict `MERGE` → `Close issue #N` via `dispatch_close` (only if not already running; counts on `N:close`, trips to Blocked past `MAX_RETRIES`). `CHANGES_REQUESTED` or verdict `CONTINUE` → `Continue issue #N` (only if not already running) and reset retry key `N`. `SKIP` → nothing | Global skip | None |
 | P2 | `stage_ready_implement` (`:1161-1207`) | Ready | `red_or_paused` | In progress and In review columns are under their WIP limits, dependencies are met, not running, not above the dispatch ceiling | Dispatches `Fix issue #N`. Above-ceiling items are labelled, moved to Blocked and commented on instead | Global skip | `MAX_IN_PROGRESS`, `MAX_IN_REVIEW` (stage stops), dependency gate, dispatch ceiling |
 | P3 | `stage_blocked_retry` (`:1210-1264`) | Blocked | `red_or_paused` | Not rescued this poll, no `above-ceiling` label, not running, breaker checks pass | Dispatches `Continue issue #N` if a `feat/issue-N-*` branch or an open PR exists, else `Fix issue #N` | Global skip; `above-ceiling` label; `RESCUED` | Retry key `N`, ceiling `MAX_RETRIES` |
 | P4 | `stage_plan` (`:1267-1328`) | Refined | `paused_only` | Not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `plan-pending-review` **and** `direct-to-pr` go to `plan_advance_check` instead | Comments "Starting plan generation" and dispatches `Plan issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:plan`, ceiling `REFINE_MAX_RETRIES` |
@@ -246,7 +246,8 @@ Status names are compared case-insensitively.
 - `end_gate_check` (`scheduler.sh:323-355`) applies only to `direct-to-pr` tickets with
   an open PR. It reads the last review whose state is `APPROVED` or `CHANGES_REQUESTED`
   (`providers/codehost/github.py` `get_change_reviews()`). `APPROVED` dispatches
-  `Close issue #N`; `CHANGES_REQUESTED` dispatches `Continue issue #N`. Any other state
+  `Close issue #N` through `dispatch_close` (`:363`), the same guard and `N:close` breaker
+  the `MERGE` verdict uses; `CHANGES_REQUESTED` dispatches `Continue issue #N`. Any other state
   falls through to comment classification.
 - `get_new_comments` (`:756-779`) returns the issue comments after the last one matching
   `Posted by <product> Dark Factory`; if there is no such comment, all comments.
@@ -437,7 +438,8 @@ Because retry state is on the volume, counters survive a scheduler restart
 
 ### Circuit breaker
 
-What trips it (all in the four breaker-checked stages):
+What trips it (all in the four breaker-checked stages; review triage's `Close` dispatch,
+`dispatch_close` (`:363`), checks the retry ceiling only):
 
 1. **Retry ceiling.** The counter for the phase is already at its ceiling
    (`evaluate_stop`). Reason text: `retry limit of N reached`.
