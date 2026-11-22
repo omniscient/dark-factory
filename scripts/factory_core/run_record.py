@@ -327,6 +327,59 @@ def _parse_archon_cost_with_capture(
     return nodes, {"ok": True, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
 
+# --- Per-node cost capture (#453) -------------------------------------------------
+# The workflow YAML Archon actually executes: the clone's own copy, else the baked one
+# (entrypoint.sh copies the baked workflows into a target clone that has none).
+WORKFLOW_YAML_REL = pathlib.Path(".archon") / "workflows" / "archon-dark-factory.yaml"
+BAKED_WORKFLOW_PATH = pathlib.Path("/opt/dark-factory/workflows/archon-dark-factory.yaml")
+_NODE_TYPE_KEYS = ("command", "prompt", "bash")
+
+
+def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
+    """(node_id -> "command"|"prompt"|"bash", log token -> node_id), or None.
+
+    Archon names a command: node by its command: value in its log lines
+    (`[dark-factory-implement] Started` for id `implement`) and every other node by its
+    id:, so both are log tokens. A token two nodes claim is dropped as ambiguous. None
+    when neither the clone's nor the baked workflow YAML loads — node types are then
+    unknown and nothing may be classified (an unknown type is never treated as bash).
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    for path in (pathlib.Path(clone_dir or ".") / WORKFLOW_YAML_REL, BAKED_WORKFLOW_PATH):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        wf_nodes = doc.get("nodes") if isinstance(doc, dict) else None
+        if not isinstance(wf_nodes, list):
+            continue
+        node_types: dict = {}
+        log_tokens: dict = {}
+        ambiguous: set = set()
+        for n in wf_nodes:
+            if not isinstance(n, dict) or not isinstance(n.get("id"), str):
+                continue
+            node_id = n["id"]
+            kind = next((k for k in _NODE_TYPE_KEYS if k in n), None)
+            if kind:
+                node_types[node_id] = kind
+            names = [node_id]
+            if isinstance(n.get("command"), str):
+                names.append(n["command"])
+            for name in names:
+                if log_tokens.get(name, node_id) != node_id:
+                    ambiguous.add(name)
+                log_tokens[name] = node_id
+        for name in ambiguous:
+            log_tokens.pop(name, None)
+        if node_types:
+            return node_types, log_tokens
+    return None
+
+
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     """Extract stage verdict and metadata from a verdict artifact .md file.
 

@@ -43,6 +43,10 @@ def _hermetic_scheduler_state_dir(tmp_path, monkeypatch):
     assert on the durable-write path itself.
     """
     monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
+    # #453: cmd_assemble now emits health events and falls back to the baked workflow
+    # YAML — keep both off the real Seq endpoint and the image's /opt copy.
+    monkeypatch.setattr(rr, "SEQ_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(rr, "BAKED_WORKFLOW_PATH", tmp_path / "no-baked-workflow.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -1979,3 +1983,181 @@ def test_backfill_legacy_record_without_artifact_check_unchanged(tmp_path, monke
     assert outcome["state"] == "produced_ungated"
     assert outcome["score"] == 1.0
     assert "artifact_check" not in outcome["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# per-node cost capture (#453)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_WORKFLOW_FIXTURE = """\
+name: archon-dark-factory
+nodes:
+  - id: parse-intent
+    prompt: classify the request
+  - id: fetch-issue
+    bash: echo fetch
+  - id: digest-comments
+    bash: echo digest
+  - id: implement
+    command: dark-factory-implement
+  - id: classify-preview
+    prompt: classify the preview
+  - id: validate
+    command: dark-factory-validate
+  - id: conformance
+    command: dark-factory-conformance
+  - id: push-and-pr
+    bash: echo push
+"""
+
+
+def _clone_with_workflow(root, text=_WORKFLOW_FIXTURE):
+    wf_dir = root / "clone" / ".archon" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "archon-dark-factory.yaml").write_text(text)
+    return root / "clone"
+
+
+def _cost_node(node_id, tin=0, tout=0, cost=0, ms=1000):
+    return {"nodeId": node_id, "inputTokens": tin, "outputTokens": tout,
+            "costUsd": cost, "durationMs": ms, "modelUsage": {}}
+
+
+# MarketHawk #388 (2026-09-26 17:28Z, fix, failed): `implement` completed in 25m 55s
+# with zero reported usage; the four other AI nodes account for the whole $1.89.
+_COST_388 = {
+    "runId": "wf388",
+    "nodes": [
+        _cost_node("parse-intent", 20, 297, 0.0097, 5200),
+        _cost_node("fetch-issue", ms=1800),
+        _cost_node("implement", ms=1_555_000),
+        _cost_node("classify-preview", 40, 600, 0.0203, 6000),
+        _cost_node("validate", 30, 9000, 0.62, 240_000),
+        _cost_node("conformance", 22, 17800, 1.24, 300_000),
+    ],
+}
+
+# Archon names command: nodes by command name, everything else by id (#453).
+_LOG_388 = """\
+Starting dark factory: Fix issue #388
+[parse-intent] Started
+[parse-intent] Completed (5.2s)
+[fetch-issue] Started
+[fetch-issue] Completed (1.8s)
+[digest-comments] Skipped (when_condition)
+[dark-factory-implement] Started
+  agent output quoting [dark-factory-plan] Started mid-line
+[not-a-node] Started
+[dark-factory-implement] Completed (25m 55s)
+[classify-preview] Started
+[classify-preview] Completed (6.0s)
+[dark-factory-validate] Started
+[dark-factory-validate] Completed (4m 0s)
+[dark-factory-conformance] Started
+[dark-factory-conformance] Completed (5m 0s)
+"""
+
+_COST_HEALTHY = {
+    "runId": "wfok",
+    "nodes": [
+        _cost_node("parse-intent", 20, 270, 0.0207, 7800),
+        _cost_node("fetch-issue", ms=1800),
+        _cost_node("implement", 300, 52000, 4.1, 1_200_000),
+    ],
+}
+
+_LOG_HEALTHY = """\
+[parse-intent] Started
+[parse-intent] Completed (7.8s)
+[fetch-issue] Started
+[fetch-issue] Completed (1.8s)
+[digest-comments] Skipped (when_condition)
+[dark-factory-implement] Started
+[dark-factory-implement] Completed (20m 0s)
+"""
+
+
+@pytest.fixture
+def health_events(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        rr, "emit_health_event",
+        lambda event, issue, run_id, detail: events.append((event, detail)),
+    )
+    return events
+
+
+def _assemble_with_capture(root, monkeypatch, cost_obj, *, log_text=None, clone=None,
+                           status="completed", exit_code=0):
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(rr, "JSONL_PATH", root / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", root / "no-ledger.jsonl")
+    cost_json = root / "cost.json"
+    cost_json.write_text(json.dumps(cost_obj))
+    out = root / "run-record.json"
+    args = _AssembleArgs(root, out)
+    args.intent = "fix"
+    args.status = status
+    args.archon_cost_json = str(cost_json)
+    args.archon_cost_exit_code = exit_code
+    args.clone_dir = str(clone if clone is not None else _clone_with_workflow(root))
+    if log_text is not None:
+        log = root / "archon-run.log"
+        log.write_text(log_text)
+        args.archon_log_file = str(log)
+    rr.cmd_assemble(args)
+    return json.loads(out.read_text())
+
+
+def _by_id(rec):
+    return {n["node_id"]: n for n in rec["nodes"]}
+
+
+def test_node_maps_from_clone_workflow(tmp_path):
+    clone = _clone_with_workflow(tmp_path)
+    node_types, log_tokens = rr._load_workflow_node_maps(clone)
+    assert node_types["implement"] == "command"
+    assert node_types["parse-intent"] == "prompt"
+    assert node_types["fetch-issue"] == "bash"
+    assert log_tokens["dark-factory-implement"] == "implement"
+    assert log_tokens["parse-intent"] == "parse-intent"
+
+
+def test_node_maps_real_workflow_keys_command_nodes_by_command_name(tmp_path):
+    # Guards the rejected draft's bug: Archon logs `[dark-factory-implement]`, the cost
+    # report says `implement` — the map must join the two for the shipped DAG.
+    real = (_REPO_ROOT / "workflows" / "archon-dark-factory.yaml").read_text()
+    node_types, log_tokens = rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, real))
+    assert log_tokens["dark-factory-implement"] == "implement"
+    assert log_tokens["dark-factory-conformance"] == "conformance"
+    assert node_types["implement"] == "command"
+    assert node_types["classify-preview"] == "prompt"
+    assert node_types["fetch-issue"] == "bash"
+
+
+def test_node_maps_fall_back_to_baked_workflow(tmp_path, monkeypatch):
+    baked = tmp_path / "baked.yaml"
+    baked.write_text(_WORKFLOW_FIXTURE)
+    monkeypatch.setattr(rr, "BAKED_WORKFLOW_PATH", baked)
+    (tmp_path / "bare-clone").mkdir()
+    node_types, _ = rr._load_workflow_node_maps(tmp_path / "bare-clone")
+    assert node_types["implement"] == "command"
+
+
+def test_node_maps_none_when_no_workflow_loads(tmp_path):
+    assert rr._load_workflow_node_maps(tmp_path / "nowhere") is None
+    assert rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, "nodes: [broken")) is None
+
+
+def test_node_maps_drop_ambiguous_log_token(tmp_path):
+    text = (
+        "nodes:\n"
+        "  - id: a\n    command: shared-cmd\n"
+        "  - id: b\n    command: shared-cmd\n"
+    )
+    _, log_tokens = rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, text))
+    assert "shared-cmd" not in log_tokens
+    assert log_tokens["a"] == "a"
