@@ -394,5 +394,63 @@ case "$_RC" in
   *) deny "$_V (config lookup failed)" ;;
 esac
 
+# Gate 3 on PR #569 (high): sshCommand is not the only transport-command override. The
+# program a transport runs on the other end (--upload-pack / --receive-pack / --exec and
+# their config forms), a git:// proxy command, and the ext:: transport (whose address IS a
+# command line) each ran an arbitrary command from an allowed read verb at level 2 -- and
+# git puts its exec-path ahead of this shim on that command's PATH. Denied at every level,
+# on every verb, tighten-only. `rebase --exec` is not a transport and stays #565's.
+[ -n "${GIT_PROXY_COMMAND+x}" ] && deny "$_V (transport command override: GIT_PROXY_COMMAND)"
+_cfg_lines_or_deny() {  # sets CFG_LINES to the matching "key value" lines; 0 some / 1 none
+  local rc=0
+  CFG_LINES=$(_git_config --get-regexp "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -le 1 ] || deny "$_V (config lookup failed)"
+  return "$rc"
+}
+_cfg_lines_or_deny '^remote\..*\.(uploadpack|receivepack)$' \
+  && deny "$_V (transport command override: remote.*.uploadpack/receivepack)"
+_cfg_lines_or_deny '^core\.gitproxy$' && deny "$_V (transport command override: core.gitProxy)"
+for _a in "${VERB_ARGS[@]}"; do
+  # git accepts any unambiguous prefix of a long option (`--upload-pa=`, `--exe=`), so
+  # every prefix that can only resolve to one of the three is matched. None of these
+  # prefixes is a complete option of any git command.
+  case "$_a" in
+    --u|--u=*|--up|--up=*|--upl*|--r|--r=*|--re|--re=*|--rec|--rec=*|--rece*)
+      deny "$_V (transport command override: ${_a%%=*})" ;;
+    --e|--e=*|--ex|--ex=*|--exe*)
+      [ "$VERB1" = "rebase" ] || deny "$_V (transport command override: ${_a%%=*})" ;;
+  esac
+done
+# -u is --upload-pack only for these verbs (elsewhere it is --set-upstream, --update,
+# --untracked-files...). Alone, clustered (`-qu`) or with a glued value (`-ux`).
+case "$VERB1" in
+  ls-remote|clone|fetch-pack)
+    for _a in "${VERB_ARGS[@]}"; do
+      case "$_a" in
+        --) break ;;
+        --*) : ;;
+        -*u*) deny "$_V (transport command override: -u)" ;;
+      esac
+    done ;;
+esac
+# ext:: is refused by git itself unless the protocol policy is opened, so the policy
+# override is what is denied; an ext:: address is denied as well, whatever the policy.
+[ -n "${GIT_ALLOW_PROTOCOL+x}" ] && deny "$_V (protocol policy override: GIT_ALLOW_PROTOCOL)"
+for _k in protocol.allow protocol.ext.allow; do
+  _RC=0
+  _PV=$(_git_config --get "$_k" 2>/dev/null) || _RC=$?
+  case "$_RC" in
+    0) [ "$_PV" = "never" ] || deny "$_V (protocol policy override: $_k)" ;;
+    1) : ;;
+    *) deny "$_V (config lookup failed)" ;;
+  esac
+done
+for _a in "${VERB_ARGS[@]}"; do
+  case "$_a" in ext::*|*=ext::*) deny "$_V (ext:: transport)" ;; esac
+done
+if _cfg_lines_or_deny '^(remote\..*\.(url|pushurl)|url\..*\.(insteadof|pushinsteadof))$'; then
+  case "$CFG_LINES" in *ext::*) deny "$_V (ext:: transport in config)" ;; esac
+fi
+
 [ "$_CLASSIFY_ONLY" = "1" ] && exit 0
 exec "$REAL_GIT" "$@"

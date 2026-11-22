@@ -91,7 +91,7 @@ export PATH="$SHIM_DIR:$TMP/real:$PATH"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GH_CONFIG_DIR="$TMP/gh-config" XDG_DATA_HOME="$TMP/xdg-data"
 mkdir -p "$GH_CONFIG_DIR" "$XDG_DATA_HOME"
-unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_CONFIG GIT_CONFIG_COUNT \
+unset GH_TOKEN GITHUB_TOKEN GIT_SSH GIT_SSH_COMMAND GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND GIT_CONFIG GIT_CONFIG_COUNT \
   GIT_CONFIG_PARAMETERS GIT_DIR GIT_WORK_TREE || true
 export FACTORY_REPO_SLUG=o/r
 "$REAL_GIT_BIN" init -q -b feat "$TMP/repo"
@@ -378,6 +378,60 @@ FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "sshCommand" \
   git -c core.sshCommand=x archive --remote=ssh://h/x HEAD
 GIT_SSH_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "sshCommand" \
   git maintenance run --task=prefetch
+# Gate 3 on PR #569 (high): the helper program a transport runs is an override too --
+# `ls-remote --upload-pack='sh -c ...'` ran an arbitrary command at level 2.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git ls-remote --upload-pack='sh -c "id"' .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --upload-pack x .
+FACTORY_SIDE_EFFECT_LEVEL=1 check_deny_reason "transport command override" git fetch --upload-pack=x origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git pull --upload-pack=x origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git clone --upload-pack=x . d
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --receive-pack=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --exec=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --exec=x .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git archive --exec=x --remote=. HEAD
+# git accepts any unambiguous prefix of a long option.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --upload-pa=x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --u=x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote --exe=x .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --rece=x origin feat
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git push --e=x origin feat
+# Short form, alone, clustered or with a glued value -- only where -u means upload-pack.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -u x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -qu x .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git ls-remote -ux .
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" git clone -u x . d
+# The same override from config, and through an alias.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git -c remote.origin.uploadpack=x fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "transport command override" \
+  git -c remote.origin.receivepack=x push origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" \
+  git -c 'alias.lr=ls-remote --upload-pack=x' lr .
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git -c core.gitProxy=x fetch origin
+GIT_PROXY_COMMAND=x FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "transport command override" git fetch origin
+# ext:: runs its address as a command; git refuses it unless the protocol policy is opened.
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" \
+  git -c protocol.ext.allow=always ls-remote 'ext::sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git -c protocol.ext.allow=user status
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git -c protocol.allow=always fetch origin
+GIT_ALLOW_PROTOCOL=ext FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "protocol policy override" git fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "ext:: transport" git ls-remote 'ext::sh -c id'
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "ext:: transport" git fetch 'ext::sh -c id' main
+FACTORY_SIDE_EFFECT_LEVEL=5 check_deny_reason "ext:: transport" git archive '--remote=ext::sh -c id' HEAD
+FACTORY_SIDE_EFFECT_LEVEL=2 check_deny_reason "ext:: transport" \
+  git -c 'remote.origin.url=ext::sh -c id' fetch origin
+# Controls: -u keeps its other meanings, rebase --exec is #565's, never is the default.
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push -u origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git add -u
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git commit -uno -m x
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git fetch -u origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git ls-remote --heads origin
+FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push --recurse-submodules=check origin feat
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git diff --exit-code
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git rebase --exec true main
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git -c protocol.ext.allow=never fetch origin
+FACTORY_SIDE_EFFECT_LEVEL=2 check allow git grep 'std::string'
 FACTORY_SIDE_EFFECT_LEVEL=5 check allow git push origin feat
 FACTORY_SIDE_EFFECT_LEVEL=1 check allow git fetch origin
 # Push destination at level 4: every push URL must be the run's repository (o/r).
