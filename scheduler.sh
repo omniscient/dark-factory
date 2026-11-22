@@ -114,7 +114,9 @@ evaluate_stop() {
 # --- Duplicate dispatch prevention ---
 is_issue_running() {
   local issue_num="$1"
-  docker ps --no-trunc --format '{{.Command}}' 2>/dev/null | grep -q "#${issue_num}" && return 0
+  # Anchored so "#711" doesn't substring-match "#71" (a running Close issue #711
+  # must not make #71 look like it's running too).
+  docker ps --no-trunc --format '{{.Command}}' 2>/dev/null | grep -qE "#${issue_num}([^0-9]|$)" && return 0
   return 1
 }
 
@@ -358,8 +360,11 @@ end_gate_check() {
 # The only place `Close issue #N` is dispatched — stage_review_triage's MERGE case and
 # end_gate_check's APPROVED case both call it, so the two paths share one guard and one
 # `N:close` counter (ceiling MAX_RETRIES). No reset_retry: the count is cleared only by
-# trip_to_blocked. Returns non-zero when skipped or tripped, else dispatch's exit code —
-# callers MUST use `if dispatch_close ...; then`.
+# trip_to_blocked. This lifetime cap (never reset on a successful-but-returned Close,
+# e.g. merge refused on red CI then later re-approved) is intentional, not an oversight —
+# see docs/archive/2026-11-22-close-dispatch-breaker-guard-design.md Requirement 3.
+# Returns non-zero when skipped or tripped, else dispatch's exit code — callers MUST
+# use `if dispatch_close ...; then`.
 dispatch_close() {
   local issue_num="$1"
   is_issue_running "$issue_num" && return 1

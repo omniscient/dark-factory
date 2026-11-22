@@ -2364,10 +2364,15 @@ export -f get_pr_for_issue dispatch is_issue_running
 
 # Static drift lock: dispatch_close is the only raw Close dispatch, and both Close sites
 # route through it — a third Close site would have to bypass this lock to go unguarded.
+# Regexes are loose on purpose (quote style, spacing, call form) so reformatting or an
+# `||`/variable-based call doesn't silently defeat the lock: AB9a matches any
+# `dispatch "Close issue` / `dispatch 'Close issue` call (the raw dispatch, which must
+# live only inside dispatch_close); AB9b matches any invocation of dispatch_close itself,
+# guarded by `if` or not.
 assert_eq "AB9a: exactly one raw Close dispatch in scheduler.sh (inside dispatch_close)" \
-  "1" "$(grep -c 'dispatch "Close issue #' "$SCHED")"
+  "1" "$(grep -cE 'dispatch[[:space:]]+["'"'"']Close issue' "$SCHED")"
 assert_eq "AB9b: both Close sites route through dispatch_close" \
-  "2" "$(grep -c 'if dispatch_close "' "$SCHED")"
+  "2" "$(grep -vE '^[[:space:]]*#' "$SCHED" | grep -cE 'dispatch_close[[:space:]]+\S')"
 
 
 # ==========================================
