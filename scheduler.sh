@@ -333,7 +333,7 @@ end_gate_check() {
   case "$review_state" in
     APPROVED)
       echo "[$(date -u +%FT%TZ)] end_gate issue=#${issue_num} pr=#${pr_num} state=APPROVED action=Close"
-      if dispatch "Close issue #${issue_num}"; then
+      if dispatch_close "$issue_num"; then
         DISPATCHED="Close issue #${issue_num}"
       fi
       return 0

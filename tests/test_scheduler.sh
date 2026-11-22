@@ -2268,6 +2268,62 @@ assert_eq "AB5c: MERGE dispatch never calls reset_retry" \
   "0" "$(grep -c '^reset_retry' "$STUB_LOG" || true)"
 
 
+# AB2: APPROVED end-gate while a container for the issue is running → skipped, still
+# returns 0, breaker not consulted
+> "$STUB_LOG"
+is_issue_running() { return 0; }; export -f is_issue_running
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+_AB_RC=0; end_gate_check 712 "$_AB_DTP_712_ITEM" || _AB_RC=$?
+assert_eq "AB2a: APPROVED + running → end_gate_check still returns 0" "0" "$_AB_RC"
+assert_eq "AB2b: APPROVED + running → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB2c: APPROVED + running → breaker not consulted" \
+  "0" "$(grep -c '^evaluate_stop 712' "$STUB_LOG" || true)"
+is_issue_running() { return 1; }; export -f is_issue_running
+
+# AB4: APPROVED end-gate at the ceiling → trips with phase close, returns 0, and
+# stage_review_triage never falls through to comment classification
+> "$STUB_LOG"
+AB_EVAL_OUT="stopped=true reason=max_retries"
+IN_REVIEW="$_AB_DTP_712"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB4a: APPROVED at ceiling → trip_to_blocked phase close" \
+  "1" "$(grep -c '^trip_to_blocked 712 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB4b: APPROVED at ceiling → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB4c: APPROVED at ceiling → no fall-through to classify_comments" \
+  "0" "$(grep -c '^classify_comments 712' "$STUB_LOG" || true)"
+_AB_RC=0; end_gate_check 712 "$_AB_DTP_712_ITEM" || _AB_RC=$?
+assert_eq "AB4d: APPROVED at ceiling → end_gate_check still returns 0" "0" "$_AB_RC"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB5 (APPROVED half): under the ceiling → Close dispatched, no reset_retry
+> "$STUB_LOG"
+IN_REVIEW="$_AB_DTP_712"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB5d: APPROVED under ceiling → Close dispatched" \
+  "1" "$(grep -c 'dispatch Close issue #712' "$STUB_LOG" || true)"
+assert_eq "AB5e: APPROVED under ceiling → DISPATCHED set" "Close issue #712" "$DISPATCHED"
+assert_eq "AB5f: APPROVED dispatch never calls reset_retry" \
+  "0" "$(grep -c '^reset_retry' "$STUB_LOG" || true)"
+
+# AB6: the same issue reaching Close via MERGE and then via APPROVED consults one
+# shared counter — identical evaluate_stop argv both times
+> "$STUB_LOG"
+IN_REVIEW='[{"content":{"number":716,"title":"t"},"labels":[],"status":"In review"}]'
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+IN_REVIEW='[{"content":{"number":716,"title":"t"},"labels":["direct-to-pr"],"status":"In review"}]'
+DISPATCHED=""; PROVIDERS_CLI_OUTPUT="APPROVED"
+stage_review_triage
+assert_eq "AB6a: MERGE and APPROVED both consult evaluate_stop 716 close 3" \
+  "2" "$(grep -c '^evaluate_stop 716 close 3$' "$STUB_LOG" || true)"
+assert_eq "AB6b: no other evaluate_stop phase for 716" \
+  "2" "$(grep -c '^evaluate_stop 716 ' "$STUB_LOG" || true)"
+assert_eq "AB6c: both paths dispatched Close for 716" \
+  "2" "$(grep -c 'dispatch Close issue #716' "$STUB_LOG" || true)"
+
+
 # AB7: evaluate_stop CLI error (empty output) → fails open and dispatches, same as the
 # existing implement/plan/refine sites
 > "$STUB_LOG"
