@@ -1127,9 +1127,10 @@ def test_boundary_floor_constants_shape():
         r"^\.factory/hooks/", r"^\.factory/adapter\.yaml$", r"^\.claude/",
         r"^workflows/", r"^commands/", r"^\.archon/commands/",
         r"^\.archon/workflows/", r"^dark-factory/scripts/",
+        r"^\.factory/blast-approvers\.asc$",
     ):
         assert pat in floor, f"{pat} missing from FACTORY_OWNED_CRITICAL_DIFF_FLOOR"
-    assert len(floor) == 8
+    assert len(floor) == 9
     # adapter.yaml itself and workflows/commands are visibility-only (OD1/OD2):
     # present in the critical-diff floor, excluded from the blocking floor.
     for visibility_only in (r"^\.factory/adapter\.yaml$", r"^workflows/", r"^commands/"):
@@ -1137,9 +1138,10 @@ def test_boundary_floor_constants_shape():
     for hard_trigger in (
         r"^\.factory/hooks/", r"^\.claude/", r"^\.archon/commands/",
         r"^\.archon/workflows/", r"^dark-factory/scripts/",
+        r"^\.factory/blast-approvers\.asc$",
     ):
         assert hard_trigger in blocking
-    assert len(blocking) == 5
+    assert len(blocking) == 6
     # blocking floor is derived from the critical-diff floor, not hand-duplicated
     assert set(blocking) <= set(floor)
 

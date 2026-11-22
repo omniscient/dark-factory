@@ -130,6 +130,10 @@ FACTORY_OWNED_CRITICAL_DIFF_FLOOR = [
     r"^\.archon/commands/",
     r"^\.archon/workflows/",
     r"^dark-factory/scripts/",
+    # The blast-radius approver public key(s) (#551): changing who may approve a
+    # HUMAN_REQUIRED diff always needs a human. Not visibility-only, so it lands in the
+    # blocking floor below.
+    r"^\.factory/blast-approvers\.asc$",
 ]
 
 # migration_seed_auth_patterns is the hard-blocking (HUMAN_REQUIRED) list.

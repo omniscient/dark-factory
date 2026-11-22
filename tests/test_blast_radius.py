@@ -285,6 +285,13 @@ def test_skill_md_now_triggers_via_broadened_claude_floor(run_script):
     assert out["TRIGGER"] == "skill-security"
 
 
+def test_blast_approvers_key_is_a_hard_trigger(run_script):
+    """#551 Requirement 9: changing the approver key set always needs a human."""
+    out = run_script([".factory/blast-approvers.asc"])
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert ".factory/blast-approvers.asc (category: migration-seed)" in out["_stdout"]
+
+
 def test_migration_file_trigger_label_still_migration_seed(run_script):
     out = run_script(["alembic/versions/abc123_add_col.py"])
     assert out["STATUS"] == "HUMAN_REQUIRED"
