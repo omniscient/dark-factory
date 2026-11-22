@@ -346,6 +346,7 @@ def trip_to_blocked(
         "refine": f"Refine issue #{issue_num}",
         "plan": f"Plan issue #{issue_num}",
         "resolve": f"Deconflict issue #{issue_num}",
+        "close": f"Close issue #{issue_num}",
     }
     retry_cmd = retry_cmds.get(phase, f"Fix issue #{issue_num}")
 
