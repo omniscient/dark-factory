@@ -2431,3 +2431,19 @@ def test_partial_capture_leaves_outcome_scoring_untouched(tmp_path, monkeypatch,
     assert he["tokens_per_task"] is None
     assert he["cost_per_task"] is None
     assert healthy["harness_economics"]["factory_cpm"] is not None
+
+
+def test_healthy_run_comment_is_byte_identical_to_pre_453_shape(tmp_path, monkeypatch, health_events):
+    from factory_core import cost_report as cr
+
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=_LOG_HEALTHY)
+    legacy = json.loads(json.dumps(rec))  # the record as cmd_assemble wrote it before #453
+    for key in ("cost_capture", "node_log", "known_cost_usd", "known_input_tokens",
+                "known_output_tokens", "missing_nodes"):
+        del legacy["totals"][key]
+    for node in legacy["nodes"]:
+        del node["cost_capture"]
+    render = lambda r: cr.render(r, prior_comment_body="", timestamp="2026-11-22 12:00 UTC",
+                                 intent="fix")
+    assert render(rec) == render(legacy)
+    assert "| **Subtotal** | | **320** | **52.2K** |" in render(rec)
