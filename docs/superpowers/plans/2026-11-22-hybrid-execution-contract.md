@@ -2,6 +2,8 @@
 
 **Issue:** #556
 
+**Revised:** 2026-11-22 (operator amendment after plan gate review)
+
 **Goal:** Publish the reviewed #556 hybrid cloud + local execution contract as a durable,
 drift-guarded decision report at `docs/hybrid-execution-contract.md`, linked from the README and
 from the model-endpoint axis of `docs/provider-abstraction-design.md`, so it survives the
@@ -130,6 +132,7 @@ def test_header_carries_issue_version_and_acceptance_status():
     assert '**Contract version:** `hybrid_contract: "1.0"`' in head
     assert "**Status:** Proposed" in head
     assert "merge of the #556 PR by a human reviewer" in head
+    assert "provisional operator defaults pending owner confirmation" in head
 
 
 def test_required_sections_present_in_order():
@@ -176,6 +179,7 @@ def test_fail_closed_invariants_pinned():
     text = _doc_text()
     for phrase in FAIL_CLOSED_INVARIANTS:
         assert phrase in text, f"fail-closed invariant weakened or removed: {phrase}"
+    assert text.count("Provisional operator default (2026-11-22)") == 5
 
 
 def test_invariants_index_cites_existing_sections():
@@ -268,7 +272,7 @@ section governs.
 6. A local-routed dispatch never retries on, or falls back to, cloud. Every local failure,
    timeout or cancellation resolves to a #238 failure class and abstains or escalates (§4.3,
    §4.6).
-7. `local_only` work never auto-merges; the merge is always a human action (§4.3, §4.11).
+7. `local_only` work never auto-merges; the merge is always a human action (§4.3; provisional operator default, §4.11 decision 5).
 8. Secrets are referenced by `secret_reference` and never appear in the correlation envelope,
    a ledger row, a run record, a log line or an issue comment (§4.3).
 9. Capability evidence is authored only by #562's certification run against #561's pinned
@@ -410,7 +414,7 @@ with:
 ```markdown
 it runs, but coding quality is a separate, measured question, not an assumed equivalence.
 
-> **Hybrid cloud + local (#556).** Adding a *local* endpoint alongside the cloud paths is governed by [`docs/hybrid-execution-contract.md`](hybrid-execution-contract.md), not by the gateway design above. v1 supports one local server that speaks the Anthropic Messages API through `ANTHROPIC_BASE_URL` (no translation layer), isolates endpoints per dispatched run container, keeps every independent checker on a separate cloud-routed dispatch, and never falls back from a local failure to cloud. The contract is a decision report: nothing in it is implemented yet (#557–#564).
+> **Hybrid cloud + local (#556).** Adding a *local* endpoint alongside the cloud paths is governed by [`docs/hybrid-execution-contract.md`](hybrid-execution-contract.md), not by the gateway design above. As a provisional operator default pending owner confirmation (§4.11 of the contract), v1 supports one local server that speaks the Anthropic Messages API through `ANTHROPIC_BASE_URL` (no translation layer), isolates endpoints per dispatched run container, keeps every independent checker on a separate cloud-routed dispatch, and never falls back from a local failure to cloud. The contract is a decision report: nothing in it is implemented yet (#557–#564).
 
 ## 8. Scope boundaries
 ```
@@ -474,15 +478,15 @@ Expected: `ARCHIVE-SAFE`.
 - [ ] **Step 3: Confirm the archived layout still passes**
 
 ```bash
-git status --porcelain | grep -q . && { echo "tree not clean"; exit 1; }
+git status --porcelain --untracked-files=no | grep -q . && { echo "tree not clean"; exit 1; }
 mkdir -p docs/archive
 git mv docs/superpowers/specs/2026-11-21-hybrid-execution-contract-design.md docs/archive/
 PYTHONPATH=scripts python -m pytest tests/test_hybrid_execution_contract_doc.py -q
 git mv docs/archive/2026-11-21-hybrid-execution-contract-design.md docs/superpowers/specs/
-git status --porcelain
+git status --porcelain --untracked-files=no
 ```
 
-Expected: `12 passed`, and the final `git status --porcelain` prints nothing (the trial move is
+Expected: `12 passed`, and the final `git status --porcelain --untracked-files=no` prints nothing (the trial move is
 fully undone — the real archive move belongs to `push-and-pr`, not to this task).
 
 - [ ] **Step 4: Confirm scope**
