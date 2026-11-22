@@ -243,6 +243,61 @@ def _escalate(issue_num: int, owner: str, repo: str, reason: str) -> None:
     )
 
 
+def _untracked_py(clone_dir: str, rel_dir: str) -> set:
+    """Untracked, non-ignored *.py paths (clone-relative) under rel_dir."""
+    out = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "--", rel_dir],
+        cwd=clone_dir, capture_output=True, text=True, check=True,
+    ).stdout
+    return {p for p in out.splitlines() if p.endswith(".py")}
+
+
+def _alembic_multihead_check(issue_num: int, clone_dir: str, conflicted: list) -> str | None:
+    """Merge alembic heads after Tier 1. Returns an escalation reason, or None to continue.
+
+    No alembic.ini at deconflict.alembic_ini: skip (logged), unless a conflicted file
+    is a migration, which means the configured path is wrong.
+    """
+    ini_rel = _deconflict_alembic_ini(clone_dir)
+    ini_path = os.path.join(clone_dir, ini_rel)
+    if not os.path.isfile(ini_path):
+        print(f"[deconflict] alembic check skipped: {ini_rel} not found", flush=True)
+        migrations_dir = _deconflict_migrations_dir(clone_dir)
+        migration_conflicts = [f for f in conflicted
+                               if migrations_dir in f and f.endswith(".py")]
+        if migration_conflicts:
+            return (f"Conflicted migration files ({', '.join(migration_conflicts)}) but no "
+                    f"alembic.ini at {ini_rel}; check deconflict.alembic_ini.")
+        return None
+
+    backend_dir = os.path.dirname(ini_path)
+    backend_rel = os.path.relpath(backend_dir, clone_dir)
+    try:
+        r3 = subprocess.run(
+            ["python", "-m", "alembic", "heads"],
+            cwd=backend_dir, capture_output=True, text=True, check=True,
+        )
+        heads = [ln for ln in r3.stdout.splitlines()
+                 if ln and ln[:1] in "0123456789abcdef"]
+        if len(heads) > 1:
+            before = _untracked_py(clone_dir, backend_rel)
+            subprocess.run(
+                ["python", "-m", "alembic", "merge", "heads",
+                 "-m", f"merge_branches_issue_{issue_num}"],
+                cwd=backend_dir, capture_output=True, check=True,
+            )
+            generated = sorted(_untracked_py(clone_dir, backend_rel) - before)
+            if not generated:
+                raise RuntimeError("alembic merge heads produced no new revision file")
+            # If this add fails, `git merge --abort` leaves the revision untracked in
+            # the throwaway clone; harmless, as the clone is discarded.
+            subprocess.run(["git", "add", "--", *generated],
+                           cwd=clone_dir, capture_output=True, check=True)
+    except Exception as exc:
+        return f"Alembic multi-head check failed unexpectedly: {exc}"
+    return None
+
+
 def resolve_merge_conflicts(
     issue_num: int,
     clone_dir: str,
@@ -291,21 +346,13 @@ def resolve_merge_conflicts(
             tier2_needed.append(f)
 
     # Alembic multi-head check after tier1
-    backend_dir = os.path.join(clone_dir, "backend")
-    r3 = subprocess.run(
-        ["python", "-m", "alembic", "heads"],
-        cwd=backend_dir, capture_output=True, text=True,
-    )
-    heads = [ln for ln in r3.stdout.splitlines()
-             if ln and ln[:1] in "0123456789abcdef"]
-    if len(heads) > 1:
-        subprocess.run(
-            ["python", "-m", "alembic", "merge", "heads",
-             "-m", f"merge_branches_issue_{issue_num}"],
-            cwd=backend_dir, capture_output=True,
-        )
-        subprocess.run(["git", "add", "backend/alembic/versions/"],
-                       cwd=clone_dir, capture_output=True)
+    alembic_failure = _alembic_multihead_check(issue_num, clone_dir, conflicted)
+    if alembic_failure:
+        subprocess.run(["git", "merge", "--abort"], cwd=clone_dir, capture_output=True)
+        _escalate(issue_num, owner, repo, alembic_failure)
+        _write_artifact(artifact_path, "escalate", len(conflicted),
+                        tier1_count, 0, 1)
+        return 1
 
     tier2_count = 0
     ai_uncertain = []
