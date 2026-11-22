@@ -173,6 +173,26 @@ def test_trip_to_blocked_adds_both_labels(tmp_path, monkeypatch):
     assert any("factory-regression" in c for c in edit_cmds)
 
 
+def test_trip_to_blocked_close_phase_retry_cmd_and_clear(tmp_path, monkeypatch):
+    # #414: a close-phase trip must name the Close workflow in its re-run command
+    # (not the default `Fix issue #N`) and clear the N:close counter it tripped on.
+    sf = tmp_path / "state.json"
+    for _ in range(3):
+        increment_retry("42:close", sf)
+    calls = []
+    monkeypatch.setattr(subprocess, "run",
+        lambda cmd, **kw: (calls.append(cmd),
+                           subprocess.CompletedProcess([], 0, stdout="", stderr=""))[1])
+    with patch("factory_core.board.set_board_status"):
+        trip_to_blocked(42, "close", "retry limit of 3 reached for close/merge", sf)
+    bodies = [c[c.index("--body") + 1] for c in calls if "comment" in c and "--body" in c]
+    assert len(bodies) == 1
+    assert '"Close issue #42"' in bodies[0]
+    assert "Fix issue #42" not in bodies[0]
+    assert "(`close`)" in bodies[0]
+    assert get_retry_count("42:close", sf) == 0
+
+
 from factory_core.breaker import record_failure_signature
 
 

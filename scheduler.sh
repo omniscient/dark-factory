@@ -114,7 +114,9 @@ evaluate_stop() {
 # --- Duplicate dispatch prevention ---
 is_issue_running() {
   local issue_num="$1"
-  docker ps --no-trunc --format '{{.Command}}' 2>/dev/null | grep -q "#${issue_num}" && return 0
+  # Anchored so "#711" doesn't substring-match "#71" (a running Close issue #711
+  # must not make #71 look like it's running too).
+  docker ps --no-trunc --format '{{.Command}}' 2>/dev/null | grep -qE "#${issue_num}([^0-9]|$)" && return 0
   return 1
 }
 
@@ -333,7 +335,7 @@ end_gate_check() {
   case "$review_state" in
     APPROVED)
       echo "[$(date -u +%FT%TZ)] end_gate issue=#${issue_num} pr=#${pr_num} state=APPROVED action=Close"
-      if dispatch "Close issue #${issue_num}"; then
+      if dispatch_close "$issue_num"; then
         DISPATCHED="Close issue #${issue_num}"
       fi
       return 0
@@ -352,6 +354,29 @@ end_gate_check() {
       return 1
       ;;
   esac
+}
+
+# --- Close dispatch: running-issue guard + close-phase circuit breaker (#414) ---
+# The only place `Close issue #N` is dispatched — stage_review_triage's MERGE case and
+# end_gate_check's APPROVED case both call it, so the two paths share one guard and one
+# `N:close` counter (ceiling MAX_RETRIES). No reset_retry: the count is cleared only by
+# trip_to_blocked. This lifetime cap (never reset on a successful-but-returned Close,
+# e.g. merge refused on red CI then later re-approved) is intentional, not an oversight —
+# see docs/archive/2026-11-22-close-dispatch-breaker-guard-design.md Requirement 3.
+# Returns non-zero when skipped or tripped, else dispatch's exit code — callers MUST
+# use `if dispatch_close ...; then`.
+dispatch_close() {
+  local issue_num="$1"
+  is_issue_running "$issue_num" && return 1
+  local eval_result
+  eval_result=$(evaluate_stop "$issue_num" "close" "$MAX_RETRIES")
+  case "$eval_result" in
+    *stopped=true*)
+      trip_to_blocked "$issue_num" "close" "retry limit of ${MAX_RETRIES} reached for close/merge"
+      return 1
+      ;;
+  esac
+  dispatch "Close issue #${issue_num}"
 }
 
 # --- Dispatch ---
@@ -385,7 +410,7 @@ set_board_status() {
 }
 
 # --- Universal circuit-breaker (thin adapter — logic lives in factory_core/breaker.py) ---
-# Usage: trip_to_blocked <issue_num> <phase: implement|plan|refine|resolve> <reason>
+# Usage: trip_to_blocked <issue_num> <phase: implement|plan|refine|resolve|close> <reason>
 trip_to_blocked() {
   local issue_num="$1"
   local phase="$2"
@@ -1120,7 +1145,7 @@ stage_review_triage() {
 
     case "$VERDICT" in
       MERGE)
-        if dispatch "Close issue #${ISSUE}"; then
+        if dispatch_close "$ISSUE"; then
           DISPATCHED="Close issue #${ISSUE}"
         fi
         ;;
