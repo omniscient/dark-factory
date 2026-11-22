@@ -482,7 +482,12 @@ same checks as the literal form (an alias can add a denial, never remove one). D
 outright: shell aliases (`!…`), external `git-<verb>` commands and any verb git does not
 list in `--list-cmds=main` (so `git lfs` is denied for phase agents), a global option the
 shim does not know (`git --no-advice push`), a flag before the `gh` command (`gh -R o/r pr
-create`), and `core.sshCommand`/`GIT_SSH_COMMAND`/`GIT_SSH` on every verb. At
+create`), and every transport-command override on every verb:
+`core.sshCommand`/`GIT_SSH_COMMAND`/`GIT_SSH`, `--upload-pack`/`--receive-pack`/`--exec`
+(any abbreviation; `-u` on `ls-remote`/`clone`/`fetch-pack`; `rebase --exec` is not a
+transport and is not covered), `remote.*.uploadpack`/`receivepack`, `core.gitProxy`/
+`GIT_PROXY_COMMAND`, a `protocol.allow` or `protocol.ext.allow` other than `never`,
+`GIT_ALLOW_PROTOCOL`, and any `ext::` address in an argument or a remote URL. At
 levels 1–4 `gh extension install|upgrade|exec` and running an installed extension are
 denied. At level 4 every push URL (`remote get-url --push --all`, so `pushurl` and
 `insteadOf` count) must be `https://github.com/${FACTORY_REPO_SLUG}`. Without
