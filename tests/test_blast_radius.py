@@ -1,4 +1,7 @@
 """Tests for gate_blast_radius.py — deterministic file classifier."""
+import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -597,3 +600,369 @@ def test_boundary_diff_file_absent_at_resolvable_base_ref_is_not_an_error(tmp_pa
     )
     assert proc.returncode == 0, proc.stderr
     assert "STATUS: PASS" in proc.stdout
+
+
+# ── Signed, content-bound approval (#551) ─────────────────────────────────────
+# Throwaway keys are generated here; the operator's real key is never needed. The
+# tests fail (not skip) without gpg -- the spec requires it.
+
+import gate_blast_radius as gbr  # noqa: E402
+
+_APPROVAL_REPO = "omniscient/dark-factory"
+_APPROVAL_BRANCH = "feat/issue-551-x"
+_TRUSTED = "refs/blast-gate/trusted-main"
+_SKILL = ".claude/skills/x/run.sh"
+_MIGRATION = "alembic/versions/a.py"
+
+
+def _gpg(home, *args, input=None):
+    return subprocess.run(["gpg", "--homedir", str(home), "--batch", *args],
+                          capture_output=True, input=input, check=True)
+
+
+@pytest.fixture(scope="module")
+def keys():
+    """`op` (the approver), `other` (never in the trusted blob), `old` (created in 2020
+    with a one-day expiry, so it is expired now)."""
+    assert shutil.which("gpg"), "gpg is required for the #551 approval tests"
+    base = Path(tempfile.mkdtemp(prefix="bgk-"))
+    homes = {}
+    for name in ("op", "other", "old"):
+        home = base / name
+        home.mkdir(mode=0o700)
+        faked = ["--faked-system-time", "20200101T000000"] if name == "old" else []
+        _gpg(home, *faked, "--passphrase", "", "--quick-gen-key",
+             f"{name} <{name}@example.test>", "ed25519", "sign", "1d" if name == "old" else "1y")
+        homes[name] = home
+    yield homes
+    for home in homes.values():
+        subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], capture_output=True)
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def _pubkey(home) -> bytes:
+    return _gpg(home, "--armor", "--export").stdout
+
+
+def _sign(home, data: bytes, faked=None) -> bytes:
+    extra = ["--faked-system-time", faked] if faked else []
+    return _gpg(home, *extra, "--detach-sign", "-o", "-", input=data).stdout
+
+
+class _ApprovalRepo:
+    """main (with the trusted key blob) -> feat/issue-551-x editing two floor paths."""
+
+    def __init__(self, root: Path, keys, key_blob: bytes, commit_key=True):
+        self.root, self.keys = root, keys
+        self.approvals = root.parent / f"{root.name}-approvals"
+        self.approvals.mkdir()
+        _init_repo(root)
+        _write_config(root)
+        for rel, text in ((_SKILL, "echo v0\n"), (_MIGRATION, "v0 = 0\n"),
+                          ("src/app.py", "print(0)\n"), (".claude/skills/x/old.sh", "old\n")):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text)
+        key_path = root / ".factory" / "blast-approvers.asc"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(key_blob)
+        if not commit_key:
+            _git(root, "add", "-A", "--", ".", ":!.factory/blast-approvers.asc")
+        else:
+            _git(root, "add", "-A")
+        _git(root, "commit", "-q", "-m", "main")
+        _git(root, "update-ref", _TRUSTED, "main")
+        _git(root, "checkout", "-q", "-b", _APPROVAL_BRANCH)
+        self.edit({_SKILL: "echo v1\n", _MIGRATION: "v0 = 1\n"}, "feat")
+
+    def edit(self, files: dict, msg: str):
+        for rel, text in files.items():
+            (self.root / rel).write_text(text)
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", msg)
+
+    def git(self, *args) -> str:
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def base(self) -> str:
+        return self.git("merge-base", _TRUSTED, "HEAD")
+
+    def record(self, paths=(_SKILL, _MIGRATION), **overrides) -> dict:
+        base = self.base()
+        rec = {
+            "schema": 1, "issue": 551, "repo": _APPROVAL_REPO, "branch": _APPROVAL_BRANCH,
+            "head_sha": self.git("rev-parse", "HEAD"), "base_sha": base,
+            "files": {p: {"base": gbr.blob_entry(str(self.root), base, p),
+                          "head": gbr.blob_entry(str(self.root), "HEAD", p)} for p in paths},
+            "size": None, "trigger": "skill-security", "approved_at": "2026-11-21T14:03:00Z",
+            "approved_by": "Test Operator", "approvals_count": 1, "previous_head_sha": None,
+        }
+        rec.update(overrides)
+        return rec
+
+    def write(self, rec, signer="op", data=None, sign_data=None, faked=None, sig=True):
+        data = gbr.canonical_bytes(rec) if data is None else data
+        (self.approvals / "551.json").write_bytes(data)
+        if sig:
+            sig_bytes = _sign(self.keys[signer], data if sign_data is None else sign_data, faked)
+            (self.approvals / "551.json.sig").write_bytes(sig_bytes)
+
+    def run(self, issue=551, repo=_APPROVAL_REPO, branch=_APPROVAL_BRANCH, lines=10,
+            approval_args=True) -> dict:
+        base = self.base()
+        changed = self.git("diff", "--name-only", base, "HEAD")
+        hot = self.root.parent / f"{self.root.name}-hot.md"
+        hot.write_text("")
+        cmd = [sys.executable, str(SCRIPT), "--changed-files-stdin",
+               "--lines-changed", str(lines), "--hotspots", str(hot),
+               "--config", _CONFIG_REL, "--clone-dir", str(self.root), "--base-ref", base]
+        if approval_args:
+            cmd += ["--issue", str(issue), "--repo", repo, "--branch", branch,
+                    "--trusted-ref", _TRUSTED, "--head-ref", "HEAD",
+                    "--approvals-dir", str(self.approvals)]
+        proc = subprocess.run(cmd, input=changed, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return _parse(proc.stdout)
+
+
+@pytest.fixture
+def arepo(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    return _ApprovalRepo(root, keys, _pubkey(keys["op"]) + _pubkey(keys["old"]))
+
+
+def test_approval_matched_turns_human_required_into_pass(arepo):
+    arepo.write(arepo.record())
+    out = arepo.run()
+    assert out["STATUS"] == "PASS"
+    assert out["SEVERITY"] == "none"
+    head = arepo.git("rev-parse", "HEAD")
+    assert out["APPROVAL"] == f"matched (Test Operator at 2026-11-21T14:03:00Z, head {head})"
+    assert out["TRIGGER"] == "skill-security"
+    assert f"  - {_SKILL} (category: skill-security)" in out["_stdout"]
+    assert sorted(json.loads(out["TRIGGERED_PATHS"])) == sorted([_MIGRATION, _SKILL])
+
+
+def test_approval_no_record_is_none(arepo):
+    out = arepo.run()
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["APPROVAL"] == "none"
+
+
+def test_approval_without_issue_is_byte_identical_and_ignores_records(arepo):
+    arepo.write(arepo.record())
+    out = arepo.run(approval_args=False)
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert "APPROVAL" not in out and "TRIGGERED_PATHS" not in out
+    assert out["_stdout"].splitlines()[-1].startswith("LINES_CHANGED: ")
+
+
+def test_approval_missing_sig_is_signature_error(arepo):
+    arepo.write(arepo.record(), sig=False)
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (signature)")
+
+
+def test_approval_signed_by_untrusted_key_is_signature_error(arepo):
+    arepo.write(arepo.record(), signer="other")
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (signature)")
+
+
+def test_approval_tampered_record_is_signature_error(arepo):
+    good = gbr.canonical_bytes(arepo.record())
+    tampered = gbr.canonical_bytes(arepo.record(approved_by="Mallory"))
+    arepo.write(None, data=tampered, sign_data=good)
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (signature)")
+
+
+def test_approval_expired_key_is_signature_error(arepo):
+    arepo.write(arepo.record(), signer="old", faked="20200101T010000")
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (signature)")
+
+
+def test_approval_key_only_in_working_tree_is_signature_error(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = _ApprovalRepo(root, keys, _pubkey(keys["op"]), commit_key=False)
+    assert (root / ".factory" / "blast-approvers.asc").is_file()
+    repo.write(repo.record())
+    out = repo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (signature)")
+
+
+def test_approval_non_canonical_bytes_is_record_error(arepo):
+    pretty = (json.dumps(arepo.record(), indent=2, sort_keys=True) + "\n").encode()
+    arepo.write(None, data=pretty)
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "error (record)")
+
+
+def test_approval_wrong_schema_is_record_error(arepo):
+    arepo.write(arepo.record(schema=2))
+    assert arepo.run()["APPROVAL"] == "error (record)"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("issue", 552), ("repo", "omniscient/markethawk"), ("branch", "feat/issue-551-other"),
+])
+def test_approval_identity_mismatch_is_stale(arepo, field, value):
+    arepo.write(arepo.record(**{field: value}))
+    out = arepo.run()
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "stale (identity)")
+
+
+def test_approval_new_trigger_is_stale(arepo):
+    arepo.write(arepo.record(paths=(_SKILL,)))
+    out = arepo.run()
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["APPROVAL"] == f"stale (new trigger: {_MIGRATION})"
+
+
+def test_approval_may_list_more_paths_than_currently_triggered(arepo):
+    arepo.write(arepo.record(paths=(_SKILL, _MIGRATION, ".claude/skills/x/old.sh")))
+    assert arepo.run()["STATUS"] == "PASS"
+
+
+def test_approval_head_blob_changed_is_stale(arepo):
+    arepo.write(arepo.record())
+    arepo.edit({_SKILL: "echo v2\n"}, "later edit")
+    out = arepo.run()
+    assert out["STATUS"] == "HUMAN_REQUIRED"
+    assert out["APPROVAL"] == f"stale (changed since approval: {_SKILL})"
+
+
+def test_approval_base_blob_changed_is_stale(arepo):
+    """main changes the triggered file underneath; the branch keeps its own content."""
+    arepo.write(arepo.record())
+    arepo.git("checkout", "-q", "main")
+    arepo.edit({_SKILL: "echo main-v1\n"}, "main moves")
+    arepo.git("update-ref", _TRUSTED, "main")
+    arepo.git("checkout", "-q", _APPROVAL_BRANCH)
+    arepo.git("merge", "-q", "-s", "ours", "-m", "merge main", "main")
+    assert (arepo.root / _SKILL).read_text() == "echo v1\n"
+    out = arepo.run()
+    assert out["APPROVAL"] == f"stale (changed since approval: {_SKILL})"
+
+
+def test_approval_unrelated_later_commit_still_matches(arepo):
+    arepo.write(arepo.record())
+    arepo.edit({"src/app.py": "print(1)\n"}, "unrelated")
+    assert arepo.run()["STATUS"] == "PASS"
+
+
+def test_approval_mode_only_change_is_stale(arepo):
+    arepo.write(arepo.record())
+    os.chmod(arepo.root / _SKILL, 0o755)
+    _git(arepo.root, "add", "-A")
+    _git(arepo.root, "commit", "-q", "-m", "chmod +x")
+    assert arepo.run()["APPROVAL"] == f"stale (changed since approval: {_SKILL})"
+
+
+def test_approval_deleted_file_binds_absent(arepo):
+    old = ".claude/skills/x/old.sh"
+    _git(arepo.root, "rm", "-q", old)
+    _git(arepo.root, "commit", "-q", "-m", "delete")
+    rec = arepo.record(paths=(_SKILL, _MIGRATION, old))
+    assert rec["files"][old]["head"] == "absent"
+    assert rec["files"][old]["base"].startswith("100644 ")
+    arepo.write(rec)
+    assert arepo.run()["STATUS"] == "PASS"
+    arepo.write(arepo.record(paths=(_SKILL, _MIGRATION)))
+    assert arepo.run()["APPROVAL"] == f"stale (new trigger: {old})"
+
+
+def test_approval_reindented_line_is_stale(arepo):
+    """#551 review: a patch-id ignores whitespace; the blob binding must not."""
+    arepo.edit({_SKILL: "if x; then\n  echo v1\nfi\n"}, "inside if")
+    arepo.write(arepo.record())
+    arepo.edit({_SKILL: "if x; then\necho v1\nfi\n"}, "dedent")
+    assert arepo.run()["APPROVAL"] == f"stale (changed since approval: {_SKILL})"
+
+
+def test_approval_relocated_hunk_is_stale(arepo):
+    """#551 review: the same hunk in another block has the same patch-id."""
+    arepo.edit({_SKILL: "job_a:\n  run: build\njob_b:\n  run: test\n  extra: 1\n"}, "hunk in job_b")
+    arepo.write(arepo.record())
+    arepo.edit({_SKILL: "job_a:\n  run: build\n  extra: 1\njob_b:\n  run: test\n"}, "hunk in job_a")
+    assert arepo.run()["APPROVAL"] == f"stale (changed since approval: {_SKILL})"
+
+
+def test_approval_boundary_escalation_requires_adapter_entry(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = _ApprovalRepo(root, keys, _pubkey(keys["op"]))
+    (root / ".factory" / "adapter.yaml").write_text(yaml.dump({"safety": {"x": 1}}))
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "escalate")
+    repo.write(repo.record())
+    out = repo.run()
+    assert out["TRIGGER"] == "boundary-escalation"
+    assert out["APPROVAL"] == "stale (new trigger: .factory/adapter.yaml)"
+    repo.write(repo.record(paths=(_SKILL, _MIGRATION, ".factory/adapter.yaml")))
+    assert repo.run()["STATUS"] == "PASS"
+
+
+def _size_repo(tmp_path, keys, monkeypatch):
+    monkeypatch.setenv("FACTORY_CONFIG_PATH", str(tmp_path / "absent-baked.yaml"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = _ApprovalRepo(root, keys, _pubkey(keys["op"]))
+    _write_config(root, {"size_budget_blocks": True, "size_budget_lines": 5})
+    _git(root, "checkout", "-q", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "size blocks")
+    _git(root, "update-ref", _TRUSTED, "main")
+    _git(root, "checkout", "-q", _APPROVAL_BRANCH)
+    _git(root, "merge", "-q", "-m", "merge main", "main")
+    return repo
+
+
+def _size_of(repo, lines=50):
+    return {"lines_changed": lines,
+            "head_tree": repo.git("rev-parse", "HEAD^{tree}"),
+            "base_tree": repo.git("rev-parse", f"{repo.base()}^{{tree}}")}
+
+
+def test_approval_size_trigger_matches_both_trees(tmp_path, keys, monkeypatch):
+    repo = _size_repo(tmp_path, keys, monkeypatch)
+    repo.write(repo.record(size=_size_of(repo)))
+    out = repo.run(lines=50)
+    assert "[size] 50 lines > 5 budget" in out["_stdout"]
+    assert out["STATUS"] == "PASS"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda s: None,
+    lambda s: {**s, "lines_changed": 49},
+    lambda s: {**s, "head_tree": "0" * 40},
+    lambda s: {**s, "base_tree": "0" * 40},
+])
+def test_approval_size_trigger_mismatch_is_stale(tmp_path, keys, monkeypatch, mutate):
+    repo = _size_repo(tmp_path, keys, monkeypatch)
+    repo.write(repo.record(size=mutate(_size_of(repo))))
+    out = repo.run(lines=50)
+    assert (out["STATUS"], out["APPROVAL"]) == ("HUMAN_REQUIRED", "stale (size)")
+
+
+def test_approval_never_consulted_for_pass(arepo, tmp_path):
+    """A PASS diff is never looked up -- not even an APPROVAL: none line."""
+    _git(arepo.root, "checkout", "-q", "main")
+    _git(arepo.root, "checkout", "-q", "-b", "clean")
+    arepo.edit({"src/app.py": "print(2)\n"}, "clean change")
+    out = arepo.run(branch="clean")
+    assert out["STATUS"] == "PASS"
+    assert "APPROVAL" not in out
+
+
+def test_evaluate_approval_never_raises(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(gbr, "_match_approval", boom)
+    assert gbr.evaluate_approval(None, [], False, 0) == "error (RuntimeError)"
