@@ -2161,3 +2161,39 @@ def test_node_maps_drop_ambiguous_log_token(tmp_path):
     _, log_tokens = rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, text))
     assert "shared-cmd" not in log_tokens
     assert log_tokens["a"] == "a"
+
+
+# --- _parse_node_log ---
+
+_TOKENS = {"parse-intent": "parse-intent", "dark-factory-implement": "implement",
+           "implement": "implement", "digest-comments": "digest-comments",
+           "dark-factory-validate": "validate", "validate": "validate"}
+
+
+def test_parse_node_log_maps_command_names_and_ignores_noise(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text(_LOG_388)
+    events = rr._parse_node_log(str(log), _TOKENS)
+    assert events == {
+        "parse-intent": "Completed",
+        "digest-comments": "Skipped",
+        "implement": "Completed",
+        "validate": "Completed",
+    }
+    assert list(events) == ["parse-intent", "digest-comments", "implement", "validate"]
+
+
+def test_parse_node_log_reads_failed_with_colon(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("[dark-factory-implement] Started\n"
+                   "[dark-factory-implement] Failed: blast radius HUMAN_REQUIRED\n")
+    assert rr._parse_node_log(str(log), _TOKENS) == {"implement": "Failed"}
+
+
+def test_parse_node_log_none_when_unusable(tmp_path):
+    assert rr._parse_node_log(None, _TOKENS) is None
+    assert rr._parse_node_log("", _TOKENS) is None
+    assert rr._parse_node_log(str(tmp_path / "absent.log"), _TOKENS) is None
+    noise = tmp_path / "noise.log"
+    noise.write_text("hello\n  [dark-factory-implement] Started\n[unknown] Started\n")
+    assert rr._parse_node_log(str(noise), _TOKENS) is None

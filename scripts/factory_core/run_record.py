@@ -333,6 +333,9 @@ def _parse_archon_cost_with_capture(
 WORKFLOW_YAML_REL = pathlib.Path(".archon") / "workflows" / "archon-dark-factory.yaml"
 BAKED_WORKFLOW_PATH = pathlib.Path("/opt/dark-factory/workflows/archon-dark-factory.yaml")
 _NODE_TYPE_KEYS = ("command", "prompt", "bash")
+# Archon's `archon workflow run` progress line: `[<command ?? id>] Started|Completed (..)|
+# Failed: ..|Skipped (..)`. Anchored at line start; the token must be a known name.
+_NODE_LOG_RE = re.compile(r"^\[([A-Za-z0-9_-]+)\]\s+(Started|Completed|Failed|Skipped)\b")
 
 
 def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
@@ -378,6 +381,24 @@ def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
         if node_types:
             return node_types, log_tokens
     return None
+
+
+def _parse_node_log(log_file, log_tokens: dict) -> "dict | None":
+    """node_id -> last Started/Completed/Failed/Skipped event from the tee'd
+    `archon workflow run` output ($TMP_OUT), in first-seen order. None when the file is
+    absent/unreadable or no line names a known node."""
+    if not log_file:
+        return None
+    try:
+        text = pathlib.Path(log_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    events: dict = {}
+    for line in text.splitlines():
+        m = _NODE_LOG_RE.match(line)
+        if m and m.group(1) in log_tokens:
+            events[log_tokens[m.group(1)]] = m.group(2)
+    return events or None
 
 
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
