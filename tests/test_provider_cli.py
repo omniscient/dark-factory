@@ -397,3 +397,27 @@ def test_codehost_close_keyword_empty_prints_blank_line(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "close-keyword", "--id", "42"])
     cli_mod.main()
     assert capsys.readouterr().out.strip() == ""
+
+
+def test_codehost_merge_match_head_passed_through_and_omitted_when_absent(monkeypatch):
+    """#551: --match-head reaches merge_change; without it the kwarg is not passed at all,
+    so a provider that predates the parameter keeps working."""
+    import factory_core.providers.cli as cli_mod
+
+    calls = []
+
+    class _FakeCodeHost:
+        def merge_change(self, id, **kw):
+            calls.append((id, kw))
+            return True
+    monkeypatch.setattr(cli_mod, "get_codehost", lambda: _FakeCodeHost())
+
+    monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "merge", "--id", "7",
+                                      "--match-head", "b" * 40])
+    cli_mod.main()
+    monkeypatch.setattr(sys, "argv", ["cli.py", "codehost", "merge", "--id", "7"])
+    cli_mod.main()
+
+    assert calls[0] == ("7", {"strategy": "merge", "delete_branch": True, "repo": None,
+                              "match_head": "b" * 40})
+    assert calls[1] == ("7", {"strategy": "merge", "delete_branch": True, "repo": None})
