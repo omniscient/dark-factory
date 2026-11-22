@@ -354,6 +354,26 @@ end_gate_check() {
   esac
 }
 
+# --- Close dispatch: running-issue guard + close-phase circuit breaker (#414) ---
+# The only place `Close issue #N` is dispatched — stage_review_triage's MERGE case and
+# end_gate_check's APPROVED case both call it, so the two paths share one guard and one
+# `N:close` counter (ceiling MAX_RETRIES). No reset_retry: the count is cleared only by
+# trip_to_blocked. Returns non-zero when skipped or tripped, else dispatch's exit code —
+# callers MUST use `if dispatch_close ...; then`.
+dispatch_close() {
+  local issue_num="$1"
+  is_issue_running "$issue_num" && return 1
+  local eval_result
+  eval_result=$(evaluate_stop "$issue_num" "close" "$MAX_RETRIES")
+  case "$eval_result" in
+    *stopped=true*)
+      trip_to_blocked "$issue_num" "close" "retry limit of ${MAX_RETRIES} reached for close/merge"
+      return 1
+      ;;
+  esac
+  dispatch "Close issue #${issue_num}"
+}
+
 # --- Dispatch ---
 # Returns the docker compose exit code. Callers MUST use `if dispatch ...; then` —
 # a bare call under set -e exits the daemon on non-zero.

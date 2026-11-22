@@ -2192,6 +2192,83 @@ get_pr_for_issue() { echo ""; }
 export -f get_pr_for_issue
 
 # ==========================================
+# AB: Close-dispatch guard + shared close-phase breaker (#414)
+# ==========================================
+# Both Close sites — stage_review_triage's MERGE case and end_gate_check's APPROVED
+# case — route through dispatch_close (is_issue_running → evaluate_stop close →
+# trip_to_blocked | dispatch). AB1-AB7 stub the breaker adapters and log every call;
+# AB8 runs the real evaluate_stop against $STATE_FILE. scheduler.sh's `set -e` is live in
+# this runner, so non-zero returns are captured as `_AB_RC=0; f || _AB_RC=$?`.
+echo ""
+echo "--- AB: dispatch_close — guard + close-phase breaker at both Close sites ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; CI_BLOCKED=""
+_AB_REAL_EVALUATE_STOP=$(declare -f evaluate_stop)
+_AB_REAL_TRIP_TO_BLOCKED=$(declare -f trip_to_blocked)
+_AB_REAL_RESET_RETRY=$(declare -f reset_retry)
+# Generic python3 stub (same body section Y restores): end_gate_check reads the PR
+# review state from PROVIDERS_CLI_OUTPUT via the providers CLI.
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+AB_EVAL_OUT="stopped=false reason=none"
+evaluate_stop()     { echo "evaluate_stop $*" >> "$STUB_LOG"; echo "$AB_EVAL_OUT"; }
+trip_to_blocked()   { echo "trip_to_blocked $*" >> "$STUB_LOG"; }
+reset_retry()       { echo "reset_retry $*" >> "$STUB_LOG"; }
+dispatch()          { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_new_comments()  { echo '[{"id":"IC_414","author":{"login":"human"},"body":"ship it"}]'; }
+classify_comments() { echo "classify_comments $1" >> "$STUB_LOG"; echo "MERGE"; }
+get_pr_for_issue()  { echo "99"; }
+is_issue_running()  { return 1; }
+export -f python3 evaluate_stop trip_to_blocked reset_retry dispatch \
+  get_new_comments classify_comments get_pr_for_issue is_issue_running
+
+_AB_MERGE_711='[{"content":{"number":711,"title":"t"},"labels":[],"status":"In review"}]'
+_AB_DTP_712='[{"content":{"number":712,"title":"t"},"labels":["direct-to-pr"],"status":"In review"}]'
+_AB_DTP_712_ITEM=$(echo "$_AB_DTP_712" | jq -c '.[0]')
+# AB7: evaluate_stop CLI error (empty output) → fails open and dispatches, same as the
+# existing implement/plan/refine sites
+> "$STUB_LOG"
+AB_EVAL_OUT=""
+_AB_RC=0; dispatch_close 717 || _AB_RC=$?
+assert_eq "AB7a: empty evaluate_stop output → Close dispatched (fail open)" \
+  "1" "$(grep -c 'dispatch Close issue #717' "$STUB_LOG" || true)"
+assert_eq "AB7b: dispatch_close returns dispatch's exit code" "0" "$_AB_RC"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB8: real evaluate_stop against $STATE_FILE (trip_to_blocked still stubbed) — three
+# dispatches count on N:close, the fourth trips and does not dispatch
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+eval "$_AB_REAL_EVALUATE_STOP"; export -f evaluate_stop
+for _ab_i in 1 2 3; do dispatch_close 718 || true; done
+assert_eq "AB8a: three dispatch_close calls under the ceiling dispatch" \
+  "3" "$(grep -c 'dispatch Close issue #718' "$STUB_LOG" || true)"
+assert_eq "AB8b: attempts counted on the 718:close key" "3" "$(get_retry_count "718:close")"
+assert_eq "AB8c: bare implement key untouched" "0" "$(get_retry_count "718")"
+> "$STUB_LOG"
+_AB_RC=0; dispatch_close 718 || _AB_RC=$?
+assert_eq "AB8d: 4th call trips with phase close" \
+  "1" "$(grep -c '^trip_to_blocked 718 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB8e: no dispatch on trip" \
+  "0" "$(grep -c 'dispatch Close issue #718' "$STUB_LOG" || true)"
+assert_eq "AB8f: dispatch_close returns non-zero on trip" "1" "$_AB_RC"
+
+# Restore stubs to section defaults
+eval "$_AB_REAL_TRIP_TO_BLOCKED"; eval "$_AB_REAL_RESET_RETRY"
+export -f evaluate_stop trip_to_blocked reset_retry
+reset_python3_stub
+get_pr_for_issue() { echo ""; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+is_issue_running() { return 1; }
+export -f get_pr_for_issue dispatch is_issue_running
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
