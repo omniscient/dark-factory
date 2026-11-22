@@ -1729,6 +1729,76 @@ def test_assemble_plan_split_dirs_no_push_result_is_failed(tmp_path, monkeypatch
     assert "push_result" not in rec
 
 
+# _AssembleArgs.started_at, as an epoch — the freshness check compares the sibling
+# push-result.json's mtime against it (_push_result_is_fresh, review fixup of #447).
+_ASSEMBLE_STARTED_EPOCH = 1781236800  # 2026-06-12T04:00:00Z
+
+
+def _write_workflow_push_result(workflow_dir, *, mtime):
+    push = workflow_dir / "push-result.json"
+    push.write_text(json.dumps({"node": "refine-push", "pushed": True}))
+    os.utime(push, (mtime, mtime))
+    return push
+
+
+def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypatch):
+    # `archon workflow cost --last` handed back an EARLIER workflow run's id: its
+    # push-result.json predates this run's --started-at, so it is not this run's artifact.
+    calls = _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    assert args.started_at == "2026-06-12T04:00:00Z"
+    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH - 1)
+    rr.cmd_assemble(args)
+
+    assert calls == [333]
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert rec["artifact_check"] == {
+        "artifact_present": False, "needs_discussion": False,
+        "label_lookup": "ok", "workflow_run_id": "wf-run",
+    }
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "failed"
+    assert outcome["score"] == 0.0
+
+
+@pytest.mark.parametrize("offset", [0, 1])  # mtime == started_at counts as fresh (>=)
+def test_assemble_refine_fresh_workflow_push_result_is_produced_ungated(
+    tmp_path, monkeypatch, offset
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    assert args.started_at == "2026-06-12T04:00:00Z"
+    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH + offset)
+    rr.cmd_assemble(args)
+
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert rec["artifact_check"] == {"artifact_present": True}
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+
+
+@pytest.mark.parametrize("started_at", ["", "not-a-timestamp", "2026-06-12 04:00:00"])
+def test_assemble_refine_unparseable_started_at_ignores_workflow_push_result(
+    tmp_path, monkeypatch, started_at
+):
+    # Direction pinned: an unparseable --started-at fails STRICT. The sibling
+    # push-result.json cannot be proven to belong to this run, so it is not counted and
+    # the run scores failed (never a spurious produced_ungated/1.0) — even though the
+    # file was written just now. A delivered run can score failed this way.
+    calls = _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    (workflow_dir / "push-result.json").write_text(json.dumps({"node": "refine-push", "pushed": True}))
+    args.started_at = started_at
+    rr.cmd_assemble(args)
+
+    assert calls == [333]
+    rec = json.loads((entry_dir / "run-record.json").read_text())
+    assert rec["artifact_check"]["artifact_present"] is False
+    assert rec["artifact_check"]["workflow_run_id"] == "wf-run"
+    assert rec["harness_economics"]["outcome"]["state"] == "failed"
+
+
 def test_assemble_refine_with_push_result_is_produced_ungated(tmp_path, monkeypatch):
     # Same-directory fallback (no cost JSON -> workflow run id unresolved).
     # pushed: false is still "artifact found" (R3) — no third branch.
