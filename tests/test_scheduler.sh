@@ -2362,6 +2362,14 @@ export -f get_pr_for_issue dispatch is_issue_running
 > "$STUB_LOG"; echo '{}' > "$STATE_FILE"
 
 
+# Static drift lock: dispatch_close is the only raw Close dispatch, and both Close sites
+# route through it — a third Close site would have to bypass this lock to go unguarded.
+assert_eq "AB9a: exactly one raw Close dispatch in scheduler.sh (inside dispatch_close)" \
+  "1" "$(grep -c 'dispatch "Close issue #' "$SCHED")"
+assert_eq "AB9b: both Close sites route through dispatch_close" \
+  "2" "$(grep -c 'if dispatch_close "' "$SCHED")"
+
+
 # ==========================================
 # Cleanup
 # ==========================================

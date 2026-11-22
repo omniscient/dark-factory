@@ -405,7 +405,7 @@ set_board_status() {
 }
 
 # --- Universal circuit-breaker (thin adapter — logic lives in factory_core/breaker.py) ---
-# Usage: trip_to_blocked <issue_num> <phase: implement|plan|refine|resolve> <reason>
+# Usage: trip_to_blocked <issue_num> <phase: implement|plan|refine|resolve|close> <reason>
 trip_to_blocked() {
   local issue_num="$1"
   local phase="$2"
