@@ -922,17 +922,30 @@ negative or above 90000 s) and re-run the whole workflow
 
 ## 7. After the workflow
 
-Only when `archon workflow run` exits 0 (`entrypoint.sh:1080-1107`):
+When `archon workflow run` exits 0 (`entrypoint.sh:1080-1107`), the steps below run in
+order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:552-571`), with
+`--status failed`, which scores the run `failed`:
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:690-848`): it parses `validation.md`,
-   `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts, adds
+   (`scripts/factory_core/run_record.py:692-894`): it parses `validation.md`,
+   `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
+   validate, conformance and code-review nodes write the first three into Archon's
+   per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
+   `run_id`), a sibling of the entrypoint's `ARTIFACTS_DIR`. Assemble reads each from
+   there when the copy is not older than the run's start, else from the entrypoint's
+   own directory (#573); `conflict_resolution.md` is read from the entrypoint's directory
+   only. The scoring-neutral `gate_artifact_lookup` field records the workflow run id,
+   whether its directory exists, and which of the three were read from it (`found`),
+   present but too old (`stale`) or read from the entrypoint's directory (`own_dir`). A
+   completed `fix`/`continue` run with no gate stage prints
+   `WARNING: run-record: no gate-stage artifacts found` to stderr. Assemble also adds
    per-node token and cost figures from the Archon cost JSON, the adapter's `loops`,
    `memory-trace.json` and `push-result.json` when present, and appends one line per
    stage to `runs.jsonl`. For `refine`/`plan` it also records `artifact_check`
-   (`push-result.json` presence, else a `needs-discussion` label lookup) and scores an
-   artifact-less run `failed` or `clean_abort`. Failure is ignored.
+   (`push-result.json` presence, resolved the same two-directory way, else a
+   `needs-discussion` label lookup), folds `push_result` from that resolved path, and
+   scores an artifact-less run `failed` or `clean_abort`. Failure is ignored.
 3. `post_cost_report` (`entrypoint.sh:434-501`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
@@ -974,7 +987,7 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `refine_issue_context.md`, `refine_qa_history.md`, `refine_question.md`, `refine_product_owner_prompt.md` | refine command | Product-owner subagent prompt |
 | `architect_prompt_body.md`, `architect_prompt.md`, `conformance_prompt.md`, `spec_content.md` | plan command | Reviewer subagent prompts |
 | `refinement-status.md` | refine and plan commands | Conformance and code-review spec lookup; failure classification |
-| `push-result.json` | `refine-push`, `plan-push-and-advance` | `run-record assemble` |
+| `push-result.json` | `refine-push`, `plan-push-and-advance` | `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)) |
 | `plan.md` | implement command | Post-mortem evidence |
 | `implementation.md` | implement command | validate, conformance, `budget-conformance`, `report`, post-mortem |
 | `doc-impact.md` | implement command (Phase 4) | docs-conformance command (audited as a claim, never trusted); `budget-docs-conformance` |
@@ -982,16 +995,16 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `failure-diagnosis.md` | implement command (blocked exit) | Posted as an issue comment; failure classification |
 | `preview_env.sh`, `preview_build.log` | `preview-up`, `preview-up-resolve` | validate, `push-and-pr`, `report` |
 | `blast.md` | validate command (from `gate_blast_radius.py`) | validate command; `report` |
-| `validation.md` | validate command | `run-record assemble` |
+| `validation.md` | validate command | `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)) |
 | `conformance_artifact_content.md`, `conformance_prompt.md`, `no_spec_issue_body.md`, `conformance_reconcile_diff.txt` | conformance command | Reviewer subagent prompt |
 | `diff-ranking.json` | `diff_rank.py` (conformance, then docs conformance, then code review) | `context_budget.py`; humans debugging a zero-content block |
-| `conformance.md` | conformance command | `conformance-gate`, `report`, `run-record assemble`, post-mortem |
+| `conformance.md` | conformance command | `conformance-gate`, `report`, `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)), post-mortem |
 | `docs_conformance_diff.txt`, `docs_conformance_doc_files.md`, `docs_conformance_doc_impact.md`, `docs_conformance_prompt.md`, `docs_conformance_review.md`, `docs-conformance-baseline/` | docs-conformance command | Reviewer subagent prompt and Read targets |
 | `docs-conformance.md` | docs-conformance command | `docs-conformance-gate` |
 | `docs-conformance-pre-head.txt`, `docs-conformance-pre-index.txt`, `docs-conformance-pre-status.txt` | `budget-docs-conformance` (HEAD, `git write-tree` and `git status --porcelain` before the docs-conformance node runs) | `docs-conformance-gate` (read-only baseline comparison) |
 | `review_diff.txt`, `code_review_issue_context.md`, `code_review_prompt.md`, `review_findings.md` | code-review command | Reviewer subagent; `code_review_payload.py`; revise-advisory |
 | `review_result.json`, `review_payload.json` | code-review command | GitHub review POST; revise-advisory |
-| `review.md` | code-review command | `review-gate`, `report`, `run-record assemble`, post-mortem |
+| `review.md` | code-review command | `review-gate`, `report`, `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)), post-mortem |
 | `revise_advisory_*.md`, `revise_summary.txt`, `revise_advisory.md` | revise-advisory command | Fix subagent; PR comment |
 | `conflict_resolution.md` | `deconflict.py`; overwritten by the entrypoint deconflict success path | `report`; `run-record assemble`; failure classification |
 | `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:400-403`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
