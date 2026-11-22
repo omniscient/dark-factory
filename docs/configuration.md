@@ -498,7 +498,7 @@ containers (`run-compose.yml:31-47`).
 | `FACTORY_CORE_CLI`, `FACTORY_PROVIDERS_CLI` | baked paths | `scheduler.sh:19-20`, `entrypoint.sh:9` | override seams |
 | `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:60,69` | "never set in the image"; test seams |
 | `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1440`, `entrypoint.sh:89,753` | tests only |
-| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:26-41`; `run_record.py:27,483` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
+| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:26-41`; `run_record.py:28,494` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
 | `FACTORY_EDITS_LABEL`, `FACTORY_REGRESSION_LABEL`, `FACTORY_EMAIL` | `merged-with-edits`, `factory-regression`, `factory@<repo>` | `scripts/fetch_scorecard.py:26-28` | scorecard tooling |
 | `MEM0_SPIKE_STORE_PATH`, `AGENTMEMORY_*` | none | `scripts/mem0_retrieve_adapter.py:46`, `scripts/eval_agentmemory.sh` | memory spike tooling, not part of runs |
 
@@ -524,7 +524,7 @@ the table below only says how those keys relate to configuration.
 `adapter_defaults.DEFAULTS` (MarketHawk's constants); a file is validated and then
 `_deep_merge`d over the defaults (`adapter.py:209-216`), then the factory-owned boundary floor is
 unioned into `safety.critical_diff_paths` and `safety.migration_seed_auth_patterns`
-(`adapter.py:218-239`, `adapter_defaults.py:122-146`), which no adapter can remove. `adapter.get`
+(`adapter.py:218-239`, `adapter_defaults.py:123-147`), which no adapter can remove. `adapter.get`
 (`:296-302`) resolves a dotted path against the result. Consumers call it at use time and fall
 back to defaults on any error.
 
@@ -551,8 +551,8 @@ back to defaults on any error.
 | `safety.dispatch_ceiling_keywords` | **not read from the adapter**: only `adapter_defaults` supplies the fallback to `architecture_slice.py:83` | none effective |
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
-| `deconflict.models_init`, `deconflict.migrations_dir` | Tier-1 conflict resolution file paths | `scripts/factory_core/deconflict.py:21-45` |
-| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:654` |
+| `deconflict.models_init`, `deconflict.migrations_dir`, `deconflict.alembic_ini` | Tier-1 conflict resolution file paths; the alembic.ini whose directory the post-Tier-1 multi-head check runs in (not a file: check skipped, unless a migration file is conflicted, which escalates) | `scripts/factory_core/deconflict.py:22-55` |
+| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:735` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
 dispatch ceiling, side-effect levels, main-red autofix) is **not** adapter-overridable. The
