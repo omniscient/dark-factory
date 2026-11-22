@@ -552,7 +552,7 @@ back to defaults on any error.
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
 | `deconflict.models_init`, `deconflict.migrations_dir`, `deconflict.alembic_ini` | Tier-1 conflict resolution file paths; the alembic.ini whose directory the post-Tier-1 multi-head check runs in (not a file: check skipped, unless a migration file is conflicted, which escalates) | `scripts/factory_core/deconflict.py:22-55` |
-| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:735` |
+| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:784` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
 dispatch ceiling, side-effect levels, main-red autofix) is **not** adapter-overridable. The

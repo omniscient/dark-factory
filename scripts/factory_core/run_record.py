@@ -649,19 +649,20 @@ def _check_needs_discussion(issue) -> tuple:
     return NEEDS_DISCUSSION_LABEL in names, True
 
 
-def _push_result_is_fresh(push_path: pathlib.Path, started_at: str) -> bool:
-    """True if push_path's mtime is not older than this run's --started-at (#447 advisory).
+def _artifact_is_fresh(path: pathlib.Path, started_at: str) -> bool:
+    """True if path's mtime is not older than this run's --started-at (#447 advisory, #573).
 
     `archon workflow cost --last` can hand back an earlier workflow run's id when the
     current run was never recorded there (see _archon_workflow_run_id) — without this
-    check, that earlier run's push-result.json in the sibling directory would be
-    mistaken for this run's artifact. Unparseable started_at or an unreadable mtime
-    fails closed (not fresh): a spurious produced_ungated/1.0 is the failure mode #447
-    exists to remove, so an unverifiable timestamp must not be treated as evidence.
+    check, that earlier run's push-result.json or gate-stage .md file in the sibling
+    directory would be mistaken for this run's artifact. Unparseable started_at or an
+    unreadable mtime fails closed (not fresh): an unverifiable timestamp must not be
+    treated as evidence (a stale review.md could score this run blocked, a stale
+    push-result.json a spurious produced_ungated/1.0).
     """
     try:
         started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        mtime = datetime.fromtimestamp(push_path.stat().st_mtime, tz=timezone.utc)
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     except (ValueError, TypeError, OSError):
         return False
     return mtime >= started
@@ -673,7 +674,8 @@ def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | N
     Archon gives every DAG node its own $ARTIFACTS_DIR, runs/<workflow run id> (see
     FACTORY_RUN_CONFIG_JSON in entrypoint.sh), a sibling of the entrypoint's runs/<RUN_ID>
     that cmd_assemble receives as --artifacts-dir — so refine-push/plan-push-and-advance's
-    push-result.json lives under this id, not under args.artifacts_dir (#447).
+    push-result.json (#447) and the validate/conformance/code-review nodes' gate-stage
+    .md files (#573) live under this id, not under args.artifacts_dir.
     """
     if archon_cost_path is None or not archon_cost_path.exists():
         return None
@@ -691,20 +693,67 @@ def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)
 
+    # Resolved once, shared by the gate-stage loop and the push-result.json block (#573).
+    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
+    workflow_run_id = _archon_workflow_run_id(archon_path)
+    workflow_dir = artifacts_dir.parent / workflow_run_id if workflow_run_id is not None else None
+    # #573 advisory: when the resolved workflow run is this entrypoint's own run,
+    # workflow_dir and artifacts_dir are the same directory — the "sibling" probe below
+    # would compare a gate file's mtime against itself and could log it as both own_dir
+    # and stale. Skip the probe in that case; the plain own_dir lookup already covers it.
+    workflow_dir_is_own_dir = (
+        workflow_dir is not None and workflow_dir.resolve() == artifacts_dir.resolve()
+    )
+
     stages = []
     artifacts: dict = {}
     artifact_names = ["validation", "conformance", "review", "conflict_resolution"]
 
+    # #573: the validate, conformance and code-review DAG nodes write validation.md,
+    # conformance.md and review.md into archon's per-workflow-run $ARTIFACTS_DIR, a
+    # sibling of args.artifacts_dir (see _archon_workflow_run_id), never into the
+    # entrypoint's own directory. Same resolution as #447's push-result.json below: the
+    # own-dir path is the default and a fresh sibling copy wins. A stale sibling (an
+    # earlier workflow run's leftover) is never read: its review.md could score this run
+    # blocked. conflict_resolution.md is not a gate stage and keeps its own-dir lookup.
+    gate_artifact_lookup = {
+        "workflow_run_id": workflow_run_id,
+        "workflow_dir_exists": workflow_dir is not None and workflow_dir.is_dir(),
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
+        source = "own_dir"
+        if name in GATE_STAGE_NAMES and workflow_dir is not None and not workflow_dir_is_own_dir:
+            sibling = workflow_dir / f"{name}.md"
+            if sibling.exists():
+                if _artifact_is_fresh(sibling, args.started_at):
+                    md_path, source = sibling, "found"
+                else:
+                    gate_artifact_lookup["stale"].append(name)
         if md_path.exists():
+            if name in GATE_STAGE_NAMES:
+                gate_artifact_lookup[source].append(name)
             content = md_path.read_text(encoding="utf-8")
             artifacts[name] = content
             stage = _parse_artifact_stage(name, content)
             if stage:
                 stages.append(stage)
 
-    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
+    if (
+        args.status == "completed"
+        and args.intent in ("fix", "continue")
+        and not any(s["stage"] in GATE_STAGE_NAMES for s in stages)
+    ):
+        print(
+            "WARNING: run-record: no gate-stage artifacts found "
+            f"(workflow_run_id={workflow_run_id}, "
+            f"workflow_dir_exists={gate_artifact_lookup['workflow_dir_exists']})",
+            file=sys.stderr,
+        )
+
     stderr_text = ""
     stderr_file = getattr(args, "archon_cost_stderr_file", None)
     if stderr_file:
@@ -744,12 +793,11 @@ def cmd_assemble(args) -> None:
     # abort from a silent death. Never looked up on the failure-trap path (--status
     # failed scores failed anyway).
     artifact_check = None
+    artifact_push_path = artifacts_dir / "push-result.json"
     if args.intent in ("refine", "plan"):
-        artifact_push_path = artifacts_dir / "push-result.json"
-        workflow_run_id = _archon_workflow_run_id(archon_path)
-        if workflow_run_id is not None:
-            workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
-            if workflow_push_path.exists() and _push_result_is_fresh(
+        if workflow_dir is not None:
+            workflow_push_path = workflow_dir / "push-result.json"
+            if workflow_push_path.exists() and _artifact_is_fresh(
                 workflow_push_path, args.started_at
             ):
                 artifact_push_path = workflow_push_path
@@ -784,6 +832,9 @@ def cmd_assemble(args) -> None:
     }
     if artifact_check is not None:
         run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
+    # Scoring-neutral lookup evidence (#573): never passed to _compute_outcome. It is what
+    # separates post-fix records from the historical blind-scored ones (no policy bump).
+    run_record["gate_artifact_lookup"] = gate_artifact_lookup
     run_record["harness_economics"] = _compute_harness_economics(
         run_id=args.run_id,
         status=run_record["status"],
@@ -805,10 +856,12 @@ def cmd_assemble(args) -> None:
     # Written by refine-push/plan-push-and-advance (#473): the verified push outcome
     # (pushed, branch, local/remote sha, captured error). Same optional, schema-free
     # fold as memory-trace.json — these are plain DAG bash steps, not verdict gates.
-    push_path = artifacts_dir / "push-result.json"
-    if push_path.exists():
+    # Folded from artifact_push_path: for refine/plan, the fresh sibling copy in archon's
+    # workflow-run directory when the artifact_check block above found one (#573); every
+    # other intent reads --artifacts-dir only (no implement-path node writes the file).
+    if artifact_push_path.exists():
         try:
-            run_record["push_result"] = json.loads(push_path.read_text(encoding="utf-8"))
+            run_record["push_result"] = json.loads(artifact_push_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 

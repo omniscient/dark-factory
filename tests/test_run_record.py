@@ -1707,9 +1707,8 @@ def test_assemble_refine_finds_push_result_in_workflow_run_dir(tmp_path, monkeyp
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
     assert rec["artifact_check"] == {"artifact_present": True}
-    # The #473 push_result fold is deliberately unchanged (Design decision 8): it still
-    # reads only --artifacts-dir.
-    assert "push_result" not in rec
+    # #573 R2b: the push_result fold reads the same resolved path as artifact_check.
+    assert rec["push_result"] == {"node": "refine-push", "pushed": True}
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
     assert rec["harness_economics"]["outcome"]["score"] == 1.0
 
@@ -1729,16 +1728,34 @@ def test_assemble_plan_split_dirs_no_push_result_is_failed(tmp_path, monkeypatch
     assert "push_result" not in rec
 
 
-# _AssembleArgs.started_at, as an epoch — the freshness check compares the sibling
-# push-result.json's mtime against it (_push_result_is_fresh, review fixup of #447).
+# _AssembleArgs.started_at, as an epoch — the freshness check compares a sibling
+# artifact's mtime against it (_artifact_is_fresh; review fixup of #447, generalized by #573).
 _ASSEMBLE_STARTED_EPOCH = 1781236800  # 2026-06-12T04:00:00Z
 
 
-def _write_workflow_push_result(workflow_dir, *, mtime):
-    push = workflow_dir / "push-result.json"
-    push.write_text(json.dumps({"node": "refine-push", "pushed": True}))
-    os.utime(push, (mtime, mtime))
-    return push
+def _write_workflow_artifact(directory, filename, content, *, mtime=None):
+    path = directory / filename
+    path.write_text(content)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, False), (0, True), (1, True)])
+def test_artifact_is_fresh_compares_mtime_to_started_at(tmp_path, offset, expected):
+    path = _write_workflow_artifact(
+        tmp_path, "review.md", "STATUS: PASS\n", mtime=_ASSEMBLE_STARTED_EPOCH + offset
+    )
+    assert rr._artifact_is_fresh(path, "2026-06-12T04:00:00Z") is expected
+
+
+def test_artifact_is_fresh_fails_closed(tmp_path):
+    path = _write_workflow_artifact(tmp_path, "review.md", "STATUS: PASS\n")
+    assert rr._artifact_is_fresh(path, "not-a-timestamp") is False
+    assert rr._artifact_is_fresh(path, "") is False
+    assert rr._artifact_is_fresh(tmp_path / "absent.md", "2026-06-12T04:00:00Z") is False
+    # #573 R3: renamed, not aliased — the helper is no longer push-result-specific.
+    assert not hasattr(rr, "_push_result_is_fresh")
 
 
 def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypatch):
@@ -1747,7 +1764,10 @@ def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypa
     calls = _stub_lookup(monkeypatch, (False, True))
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH - 1)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH - 1,
+    )
     rr.cmd_assemble(args)
 
     assert calls == [333]
@@ -1768,7 +1788,10 @@ def test_assemble_refine_fresh_workflow_push_result_is_produced_ungated(
     _forbid_lookup(monkeypatch)
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH + offset)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH + offset,
+    )
     rr.cmd_assemble(args)
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
@@ -1927,6 +1950,383 @@ def test_assemble_non_refine_plan_ignores_workflow_run_dir(tmp_path, monkeypatch
     assert "artifact_check" not in rec
     assert "push_result" not in rec
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+
+
+# ── gate-stage artifacts in archon's workflow-run directory (issue #573) ───
+
+_FRESH_EPOCH = _ASSEMBLE_STARTED_EPOCH + 1
+_STALE_EPOCH = _ASSEMBLE_STARTED_EPOCH - 1
+_CLEAN_GATES = {
+    "validation.md": "STATUS: PASS\n",
+    "conformance.md": "STATUS: PASS\nCYCLES: 0\n",
+    "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n",
+}
+_BLOCKED_REVIEW = "STATUS: BLOCKED\nBLOCKERS: 1\nADVISORY: 0\n"
+
+
+def _write_gates(directory, files, *, mtime=_FRESH_EPOCH):
+    for filename, content in files.items():
+        _write_workflow_artifact(directory, filename, content, mtime=mtime)
+
+
+def _assembled(args, entry_dir):
+    rr.cmd_assemble(args)
+    return json.loads((entry_dir / "run-record.json").read_text())
+
+
+@pytest.mark.parametrize("intent", ["fix", "continue"])
+def test_assemble_reads_gate_stages_from_workflow_run_dir(tmp_path, monkeypatch, intent):
+    # Direct #573 regression: in production the three gate files exist ONLY in archon's
+    # workflow-run directory. Before the fix, stages stayed [] and every completed
+    # implement run scored produced_ungated/1.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent=intent)
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    assert rec["artifacts"]["review"] == _CLEAN_GATES["review.md"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+    assert outcome["evidence"]["ungated"] is False
+    assert "artifact_check" not in rec
+
+
+def test_assemble_workflow_run_dir_gate_findings_are_penalized(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {
+        "validation.md": "STATUS: PASS\n",
+        "conformance.md": "STATUS: PASS\nCYCLES: 2\n",
+        "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 1\n",
+    })
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_with_findings"
+    assert outcome["score"] == 0.75
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("review.md", _BLOCKED_REVIEW),
+    ("conformance.md", "STATUS: BLOCKED\n"),
+    ("validation.md", "STATUS: FAIL\n"),
+], ids=["review", "conformance", "validation"])
+def test_assemble_blocking_verdict_in_workflow_run_dir_is_blocked(
+    tmp_path, monkeypatch, filename, content
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, filename: content})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "blocked"
+    assert outcome["score"] == 0.0
+
+
+def test_assemble_review_blocker_count_without_blocked_verdict_is_not_blocked(
+    tmp_path, monkeypatch
+):
+    # The verdict blocks, not the count (_BLOCKING_VERDICTS).
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": "STATUS: PASS\nBLOCKERS: 1\n"})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+
+
+def test_assemble_stale_workflow_run_dir_gate_stages_are_ignored(tmp_path, monkeypatch):
+    # `archon workflow cost --last` handed back an EARLIER workflow run's id: its
+    # BLOCKED review.md predates this run's --started-at and must not score it blocked.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW}, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["artifacts"] == {}
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+
+
+@pytest.mark.parametrize("started_at", ["", "not-a-timestamp", "2026-06-12 04:00:00"])
+def test_assemble_unparseable_started_at_ignores_workflow_run_dir_gate_stages(
+    tmp_path, monkeypatch, started_at
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    args.started_at = started_at
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+
+
+def test_assemble_fresh_workflow_run_dir_copy_wins_over_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 0}]
+    assert rec["artifacts"]["review"] == "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_own_dir_gate_stage_used_when_workflow_run_dir_lacks_it(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "validation.md").write_text("STATUS: FAIL\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "FAIL"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "blocked"
+
+
+def test_assemble_failure_trap_reads_workflow_run_dir_gate_stages(tmp_path, monkeypatch):
+    # entrypoint.sh's on_failure call site (--status failed): stages are now populated,
+    # the state stays failed/0.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    args.status = "failed"
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "failed"
+    assert outcome["score"] == 0.0
+
+
+# Shape of commands/dark-factory-validate.md's free-form report: no STATUS: line.
+_FREEFORM_VALIDATION = (
+    "# Validation Results\n\n"
+    "- Unit tests: PASS\n"
+    "- Endpoint tests: FAIL (2 failures)\n\n"
+    "Final status: FAIL\n"
+)
+
+
+def test_assemble_freeform_validation_md_pins_substring_heuristic(tmp_path, monkeypatch):
+    # Known parser gap (#573 spec, Assumptions): with no STATUS: line, the substring
+    # heuristic in _parse_artifact_stage sees "PASS" first and reads this FAIL report as
+    # PASS. Pinned as-is so the follow-up that fixes the heuristic changes it deliberately.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {"validation.md": _FREEFORM_VALIDATION})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "PASS"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_conflict_resolution_in_workflow_run_dir_not_read(tmp_path, monkeypatch):
+    # Known gap, left for a follow-up ticket: conflict_resolution.md keeps its own-dir
+    # lookup. Pinned so widening it is a deliberate change.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    _write_gates(workflow_dir, {"conflict_resolution.md": "CONFLICT_VERDICT=RESOLVED\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert "conflict_resolution" not in rec["artifacts"]
+    assert rec["stages"] == []
+
+
+def test_assemble_conflict_resolution_in_own_dir_still_read(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    (entry_dir / "conflict_resolution.md").write_text("CONFLICT_VERDICT=RESOLVED\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifacts"]["conflict_resolution"] == "CONFLICT_VERDICT=RESOLVED\n"
+    assert rec["stages"] == [{"stage": "conflict_resolution", "verdict": "RESOLVED"}]
+
+
+_NO_GATE_WARNING = "WARNING: run-record: no gate-stage artifacts found"
+
+
+def test_assemble_gate_artifact_lookup_records_workflow_run_dir_hits(
+    tmp_path, monkeypatch, capsys
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": ["validation", "conformance", "review"],
+        "stale": [],
+        "own_dir": [],
+    }
+    # Scoring-neutral: never part of the outcome evidence.
+    assert "gate_artifact_lookup" not in rec["harness_economics"]["outcome"]["evidence"]
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_gate_artifact_lookup_sibling_wins_is_not_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    (entry_dir / "validation.md").write_text("STATUS: PASS\n")
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\n"})
+    lookup = _assembled(args, entry_dir)["gate_artifact_lookup"]
+
+    assert lookup["found"] == ["review"]
+    assert lookup["own_dir"] == ["validation"]
+
+
+def test_assemble_stale_gate_stages_are_listed_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": ["validation", "conformance", "review"],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=True)" in err
+
+
+def test_assemble_absent_workflow_run_dir_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    # The id resolves but runs/<id>/ does not exist: the silent path R4 exists to surface.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    workflow_dir.rmdir()
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=False)" in err
+
+
+def test_assemble_no_cost_json_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": None,
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=None, workflow_dir_exists=False)" in err
+
+
+def test_assemble_gate_artifact_lookup_records_own_dir_reads(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    for filename, content in _CLEAN_GATES.items():
+        (tmp_path / filename).write_text(content)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"]["own_dir"] == ["validation", "conformance", "review"]
+    assert rec["gate_artifact_lookup"]["found"] == []
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mtime", [_FRESH_EPOCH, _STALE_EPOCH])
+def test_assemble_workflow_run_dir_equal_to_own_dir_is_own_dir_only(tmp_path, monkeypatch, mtime):
+    # The cost JSON's run_id names the entrypoint's own directory: the sibling probe is
+    # skipped, so a gate file is listed once, as own_dir — never as found (fresh) nor as
+    # both stale and own_dir (stale). The own-dir read has no freshness guard.
+    _forbid_lookup(monkeypatch)
+    entry_dir = tmp_path / "runs" / "entry-run"
+    entry_dir.mkdir(parents=True)
+    cost = tmp_path / "cost.json"
+    cost.write_text(json.dumps({"run_id": "entry-run", "nodes": []}))
+    args = _artifact_assemble_args(entry_dir, monkeypatch, intent="fix")
+    args.archon_cost_json = str(cost)
+    _write_gates(entry_dir, _CLEAN_GATES, mtime=mtime)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "entry-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": [],
+        "own_dir": ["validation", "conformance", "review"],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+@pytest.mark.parametrize("intent,status", [
+    ("close", "completed"),
+    ("new", "completed"),
+    ("deconflict", "completed"),
+    ("fix", "failed"),
+    ("continue", "failed"),
+])
+def test_assemble_no_gate_warning_only_for_completed_fix_continue(
+    tmp_path, monkeypatch, capsys, intent, status
+):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent=intent, status=status)
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert "gate_artifact_lookup" in rec
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_plan_folds_fresh_failed_push_result_from_workflow_run_dir(
+    tmp_path, monkeypatch
+):
+    # #573 R2b: a fresh sibling {"pushed": false} is folded, so cost_report.py's
+    # **Push:** FAILED line can fire for a real run.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="plan")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"pushed": False, "error": "x"}),
+        mtime=_FRESH_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert rec["push_result"] == {"pushed": False, "error": "x"}
+
+
+def test_assemble_refine_stale_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_STALE_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"]["artifact_present"] is False
+    assert "push_result" not in rec
+
+
+def test_assemble_refine_malformed_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(workflow_dir, "push-result.json", "not valid json {{{", mtime=_FRESH_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert "push_result" not in rec
 
 
 def _stored_refine_record(tmp_path, run_id, **extra):
