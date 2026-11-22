@@ -2245,6 +2245,31 @@ def test_assemble_gate_artifact_lookup_records_own_dir_reads(tmp_path, monkeypat
     assert _NO_GATE_WARNING not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("mtime", [_FRESH_EPOCH, _STALE_EPOCH])
+def test_assemble_workflow_run_dir_equal_to_own_dir_is_own_dir_only(tmp_path, monkeypatch, mtime):
+    # The cost JSON's run_id names the entrypoint's own directory: the sibling probe is
+    # skipped, so a gate file is listed once, as own_dir — never as found (fresh) nor as
+    # both stale and own_dir (stale). The own-dir read has no freshness guard.
+    _forbid_lookup(monkeypatch)
+    entry_dir = tmp_path / "runs" / "entry-run"
+    entry_dir.mkdir(parents=True)
+    cost = tmp_path / "cost.json"
+    cost.write_text(json.dumps({"run_id": "entry-run", "nodes": []}))
+    args = _artifact_assemble_args(entry_dir, monkeypatch, intent="fix")
+    args.archon_cost_json = str(cost)
+    _write_gates(entry_dir, _CLEAN_GATES, mtime=mtime)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "entry-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": [],
+        "own_dir": ["validation", "conformance", "review"],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
 @pytest.mark.parametrize("intent,status", [
     ("close", "completed"),
     ("new", "completed"),
