@@ -585,8 +585,9 @@ ${SUMMARY_LINE}"
   # before the loop's branch is reached. So the hold is recognised here, before anything
   # is recorded as failed. _handle_blast_hold trusts only this run's own marker,
   # corroborated by the tracker's needs-discussion label; otherwise it returns 1 and the
-  # failure path below runs unchanged.
-  if _handle_blast_hold; then
+  # failure path below runs unchanged. Only while the workflow's own output file exists
+  # (as for the pause above): a failure before or after the workflow is never a hold.
+  if [ -n "${TMP_OUT:-}" ] && [ -f "$TMP_OUT" ] && _handle_blast_hold; then
     rm -f "${TMP_OUT:-}" 2>/dev/null || true
     exit 0
   fi
