@@ -579,6 +579,18 @@ ${SUMMARY_LINE}"
     return
   fi
 
+  # #551: a blast-radius hold is not a failure. This trap -- not the workflow loop's own
+  # hold branch -- is what runs when the workflow pipeline fails: bash fires ERR on it even
+  # under `set +e`, and the `set -e` below then ends the shell with archon's exit code
+  # before the loop's branch is reached. So the hold is recognised here, before anything
+  # is recorded as failed. _handle_blast_hold trusts only this run's own marker,
+  # corroborated by the tracker's needs-discussion label; otherwise it returns 1 and the
+  # failure path below runs unchanged.
+  if _handle_blast_hold; then
+    rm -f "${TMP_OUT:-}" 2>/dev/null || true
+    exit 0
+  fi
+
   # Capture partial-failure record before any other action (non-fatal)
   # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
   # P3 cleanup, baked self-contained fallback copy afterwards (df#14)

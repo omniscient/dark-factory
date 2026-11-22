@@ -138,6 +138,55 @@ RC=$?
 check "returns 1" '[ "$RC" = 1 ]'
 ARTIFACTS_DIR="$SAVED"
 
+echo "--- E: the ERR trap is what runs on a failed workflow; a hold must still exit 0 ---"
+# bash fires the ERR trap on the failing `archon ... | tee` pipeline even under `set +e`,
+# and on_failure re-enables errexit, so the loop's own hold branch (section D) is never
+# reached in production. This runs the real on_failure around the loop's own construct.
+E_DIR=$(mktemp -d /tmp/ep-bh-e-XXXXXX)
+_trapped_run() {  # _trapped_run <run-id>; exit status is what the container would exit with
+  (
+    RUN_ID="$1"
+    _write_error_signature() { : > "$E_DIR/sig.$RUN_ID"; }
+    run_post_mortem() { : > "$E_DIR/pm.$RUN_ID"; }
+    post_cost_report() { echo x >> "$E_DIR/cost.$RUN_ID"; }
+    archon() { return 1; }
+    python3() {
+      case "$*" in
+        *providers/cli.py*tracker\ get*) echo "$STUB_TRACKER_LABELS"; return 0 ;;
+        *providers/cli.py*) return 0 ;;
+        *) "$_REAL_PY3" "$@" ;;
+      esac
+    }
+    set -eo pipefail
+    trap on_failure ERR
+    set +e
+    TMP_OUT=$(mktemp)
+    false | tee "$TMP_OUT" >/dev/null
+    EXIT_CODE=${PIPESTATUS[0]}
+    set -e
+    if [ "$EXIT_CODE" -ne 0 ]; then
+      if _handle_blast_hold; then exit 0; fi
+    fi
+    exit 97
+  ) >/dev/null 2>&1
+}
+_rows() { grep "\"run_id\": \"$1\"" "$SCHEDULER_STATE_DIR/runs.jsonl" 2>/dev/null; }
+echo '{"issue":551,"head_sha":"trapped01","exit":1}' > "$ARTIFACTS_DIR/blast-hold.json"
+_trapped_run test-run-bh-E1; RC=$?
+check "failed workflow + hold marker → exits 0" '[ "$RC" = 0 ]'
+check "hold: no error signature, no post-mortem" '[ ! -e "$E_DIR/sig.test-run-bh-E1" ] && [ ! -e "$E_DIR/pm.test-run-bh-E1" ]'
+check "hold: no failed run-record row" '! _rows test-run-bh-E1 | grep -q "\"stage\": \"failed\""'
+check "hold: exactly one blast_hold row" '[ "$(_rows test-run-bh-E1 | grep -c "\"stage\": \"blast_hold\"")" = 1 ]'
+check "hold: exactly one cost report" '[ "$(wc -l < "$E_DIR/cost.test-run-bh-E1")" = 1 ]'
+rm -f "$ARTIFACTS_DIR/blast-hold.json"
+_trapped_run test-run-bh-E2; RC=$?
+check "failed workflow, no marker → still a failure (non-zero exit)" '[ "$RC" != 0 ]'
+check "no marker: failed run-record row, no blast_hold row" '_rows test-run-bh-E2 | grep -q "\"stage\": \"failed\"" && ! _rows test-run-bh-E2 | grep -q blast_hold'
+echo '{"issue":551,"head_sha":"nolabel02","exit":1}' > "$ARTIFACTS_DIR/blast-hold.json"
+STUB_TRACKER_LABELS='{"labels":[]}' _trapped_run test-run-bh-E3; RC=$?
+check "marker without needs-discussion → still a failure" '[ "$RC" != 0 ] && ! _rows test-run-bh-E3 | grep -q blast_hold'
+rm -rf "$E_DIR"; rm -f "$ARTIFACTS_DIR/blast-hold.json"
+
 echo "--- D: main loop checks the hold right after the session-window pause ---"
 LOOP=$(awk '/^while true; do$/,/^done$/' "$REPO_ROOT/entrypoint.sh")
 SW=$(printf '%s\n' "$LOOP" | grep -n '_handle_session_window_pause "\$TMP_OUT"' | head -1 | cut -d: -f1)
