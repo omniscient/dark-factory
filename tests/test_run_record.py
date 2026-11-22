@@ -2415,3 +2415,19 @@ def test_assemble_cli_accepts_archon_log_file(monkeypatch):
     ])
     rr.main()
     assert seen["archon_log_file"] == "/tmp/a/archon-run.log"
+
+
+def test_partial_capture_leaves_outcome_scoring_untouched(tmp_path, monkeypatch, health_events):
+    # #447/#453: outcome.state/score read stages + status only; a partial token sum must
+    # never feed factory_cpm or tokens_per_task.
+    partial = _assemble_with_capture(tmp_path / "partial", monkeypatch, _COST_388,
+                                     log_text=_LOG_388)
+    healthy = _assemble_with_capture(tmp_path / "healthy", monkeypatch, _COST_HEALTHY,
+                                     log_text=_LOG_HEALTHY)
+    he = partial["harness_economics"]
+    assert he["outcome"] == healthy["harness_economics"]["outcome"]
+    assert he["outcome"]["state"] == "produced_ungated"
+    assert he["factory_cpm"] is None
+    assert he["tokens_per_task"] is None
+    assert he["cost_per_task"] is None
+    assert healthy["harness_economics"]["factory_cpm"] is not None
