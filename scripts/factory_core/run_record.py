@@ -333,6 +333,7 @@ def _parse_archon_cost_with_capture(
 WORKFLOW_YAML_REL = pathlib.Path(".archon") / "workflows" / "archon-dark-factory.yaml"
 BAKED_WORKFLOW_PATH = pathlib.Path("/opt/dark-factory/workflows/archon-dark-factory.yaml")
 _NODE_TYPE_KEYS = ("command", "prompt", "bash")
+_AI_NODE_TYPES = ("command", "prompt")
 # Archon's `archon workflow run` progress line: `[<command ?? id>] Started|Completed (..)|
 # Failed: ..|Skipped (..)`. Anchored at line start; the token must be a known name.
 _NODE_LOG_RE = re.compile(r"^\[([A-Za-z0-9_-]+)\]\s+(Started|Completed|Failed|Skipped)\b")
@@ -399,6 +400,53 @@ def _parse_node_log(log_file, log_tokens: dict) -> "dict | None":
         if m and m.group(1) in log_tokens:
             events[log_tokens[m.group(1)]] = m.group(2)
     return events or None
+
+
+def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | None") -> "tuple[list, list]":
+    """Mark each node cost_capture completed/missing (#453). Returns (nodes, missing).
+
+    A reported command:/prompt: node with all-zero usage lost its usage in Archon: it is
+    missing/no_usage_reported with null cost/tokens (duration kept). A bash: zero is real.
+    With a parsed log, a command:/prompt: node that started but is absent from the cost
+    report is appended as missing/not_in_cost_report; a Skipped node never ran and is not
+    emitted, and an absent bash: node spent nothing and is not emitted either.
+    """
+    out: list = []
+    missing: list = []
+    for node in nodes:
+        node = dict(node)
+        zero = not any(
+            node.get(k)
+            for k in ("cost_usd", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
+        )
+        if node_types.get(node.get("node_id")) in _AI_NODE_TYPES and zero:
+            node.update({
+                "gen_ai.usage.input_tokens": None,
+                "gen_ai.usage.output_tokens": None,
+                "cost_usd": None,
+                "cost_capture": "missing",
+                "reason": "no_usage_reported",
+            })
+            missing.append({"node_id": node.get("node_id", ""), "reason": "no_usage_reported"})
+        else:
+            node["cost_capture"] = "completed"
+        out.append(node)
+    reported = {n.get("node_id") for n in nodes}
+    for node_id, event in (log_events or {}).items():
+        if node_id in reported or event == "Skipped" or node_types.get(node_id) not in _AI_NODE_TYPES:
+            continue
+        out.append({
+            "node_id": node_id,
+            "model": "",
+            "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
+            "cost_capture": "missing",
+            "reason": "not_in_cost_report",
+        })
+        missing.append({"node_id": node_id, "reason": "not_in_cost_report"})
+    return out, missing
 
 
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":

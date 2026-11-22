@@ -2197,3 +2197,88 @@ def test_parse_node_log_none_when_unusable(tmp_path):
     noise = tmp_path / "noise.log"
     noise.write_text("hello\n  [dark-factory-implement] Started\n[unknown] Started\n")
     assert rr._parse_node_log(str(noise), _TOKENS) is None
+
+
+# --- _classify_node_capture ---
+
+_TYPES = {"parse-intent": "prompt", "fetch-issue": "bash", "digest-comments": "bash",
+          "implement": "command", "validate": "command", "push-and-pr": "bash"}
+
+
+def _rec_node(node_id, tin=0, tout=0, cost=0, ms=1000):
+    return {"node_id": node_id, "model": "", "gen_ai.usage.input_tokens": tin,
+            "gen_ai.usage.output_tokens": tout, "cost_usd": cost, "duration_ms": ms}
+
+
+def test_classify_bash_zero_stays_completed():
+    nodes, missing = rr._classify_node_capture([_rec_node("fetch-issue")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert nodes[0]["cost_usd"] == 0
+    assert missing == []
+
+
+def test_classify_ai_node_with_usage_is_completed():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", 10, 20, 0.5)], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert "reason" not in nodes[0]
+    assert missing == []
+
+
+def test_classify_zero_command_node_is_missing_no_usage_reported():
+    # The #388 shape: present in the cost report, real duration, all-zero usage.
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", ms=1_555_000)], _TYPES, None)
+    node = nodes[0]
+    assert node["cost_capture"] == "missing"
+    assert node["reason"] == "no_usage_reported"
+    assert node["cost_usd"] is None
+    assert node["gen_ai.usage.input_tokens"] is None
+    assert node["gen_ai.usage.output_tokens"] is None
+    assert node["duration_ms"] == 1_555_000
+    assert missing == [{"node_id": "implement", "reason": "no_usage_reported"}]
+
+
+def test_classify_zero_prompt_node_is_missing():
+    nodes, _ = rr._classify_node_capture([_rec_node("parse-intent")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "missing"
+
+
+def test_classify_node_not_in_workflow_is_not_flagged():
+    nodes, missing = rr._classify_node_capture([_rec_node("target-loop-x")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert missing == []
+
+
+@pytest.mark.parametrize("event", ["Started", "Completed", "Failed"])
+def test_classify_ran_but_absent_node_is_missing_not_in_cost_report(event):
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES,
+        {"parse-intent": "Completed", "validate": event})
+    assert [n["node_id"] for n in nodes] == ["parse-intent", "validate"]
+    added = nodes[1]
+    assert added["cost_capture"] == "missing"
+    assert added["reason"] == "not_in_cost_report"
+    assert added["cost_usd"] is None
+    assert added["duration_ms"] is None
+    assert missing == [{"node_id": "validate", "reason": "not_in_cost_report"}]
+
+
+def test_classify_skipped_node_is_omitted():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES, {"digest-comments": "Skipped"})
+    assert [n["node_id"] for n in nodes] == ["parse-intent"]
+    assert missing == []
+
+
+def test_classify_failed_bash_node_absent_from_report_is_not_missing():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES, {"push-and-pr": "Failed"})
+    assert [n["node_id"] for n in nodes] == ["parse-intent"]
+    assert missing == []
+
+
+def test_classify_does_not_mutate_input_nodes():
+    original = [_rec_node("implement")]
+    rr._classify_node_capture(original, _TYPES, None)
+    assert original == [_rec_node("implement")]
