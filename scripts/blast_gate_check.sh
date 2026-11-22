@@ -55,8 +55,11 @@ APPROVALS_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/blast-approvals"
 # that attacker repo's main and .factory/blast-approvers.asc the trusted base/key, yet pushes
 # (and the PR they open) would still land on the real repo -- a convincing false PASS. The
 # attack needs pushurl to still be correct (otherwise nothing real ever lands), so resolving
-# the push URL and fetching/pushing through that -- instead of the bare remote name -- is
-# resistant to it even when url and pushurl have been split.
+# the push URL and fetching/pushing through that -- instead of the bare remote name -- holds
+# when url and pushurl have been split. It does not hold against url.*.insteadOf or
+# refs/replace/* planted in the same clone: in-run tampering by a hostile agent is out of
+# this check's reach (spec, known limits); the close-time check in a fresh clone is the
+# enforcement point.
 TRUSTED_URL="$(git -C "$CLONE" remote get-url --push origin 2>/dev/null)"
 BRANCH="" HEAD_SHA="" REASON="" RESULT="" WT=""
 
@@ -124,12 +127,18 @@ _check() {
       || { WT=""; _fail "could not check out ${HEAD_SHA} in a worktree"; return 2; }
     wt_dir="$WT"
   fi
-  # Hotspot membership feeds classify_file, so it must come from the same trusted main in
-  # both modes -- not the mutable working tree in run mode -- or run-time and close-time
-  # verdicts can disagree (e.g. a file hotspot-flagged only because of uncommitted/other
-  # local edits to docs/codeindex-hotspots.md).
+  # Hotspot membership feeds classify_file. Trusted main's report always counts. In run
+  # mode the working tree's report counts as well (spec B.4: "as today, no change to what
+  # triggers in-run") -- the run regenerates it, so a file this branch has just made a
+  # hotspot is only listed there. Reading main alone in run mode let such a file pass
+  # where validate Phase 0 used to hold (operator review of PR #571). The union can only
+  # add a trigger, never remove one.
   HOT_TMP=$(mktemp /tmp/blast-gate-hot-XXXXXX)
   git -C "$CLONE" show "${TRUSTED_REF}:docs/codeindex-hotspots.md" > "$HOT_TMP" 2>/dev/null || : > "$HOT_TMP"
+  if [ "$MODE" = "run" ] && [ -f "$CLONE/docs/codeindex-hotspots.md" ]; then
+    { echo; cat "$CLONE/docs/codeindex-hotspots.md"; } >> "$HOT_TMP" 2>/dev/null ||
+      { _fail "could not read the working-tree hotspot report"; return 2; }
+  fi
   hot="$HOT_TMP"
   echo "HEAD_SHA=${HEAD_SHA}"
 
@@ -137,7 +146,11 @@ _check() {
   base=$(git -C "$wt_dir" merge-base "$TRUSTED_REF" "$HEAD_SHA" 2>/dev/null) \
     || { _fail "no merge-base between ${TRUSTED_REF} and ${HEAD_SHA}"; return 2; }
   # Three-dot semantics, as validate Phase 0 always computed them.
-  changed=$(git -C "$wt_dir" diff "$base" "$HEAD_SHA" --name-only 2>/dev/null) \
+  # core.quotePath=false: a non-ASCII path is otherwise C-quoted and no anchored trigger
+  # pattern matches it. --no-renames: with rename detection only the destination is
+  # listed, so moving a triggered file out of its directory hid it (operator review of
+  # PR #571).
+  changed=$(git -C "$wt_dir" -c core.quotePath=false diff --no-renames "$base" "$HEAD_SHA" --name-only 2>/dev/null) \
     || { _fail "git diff --name-only failed"; return 2; }
   shortstat=$(git -C "$wt_dir" diff "$base" "$HEAD_SHA" --shortstat 2>/dev/null) \
     || { _fail "git diff --shortstat failed"; return 2; }

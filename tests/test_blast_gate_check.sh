@@ -97,14 +97,33 @@ check "HUMAN_REQUIRED → exit 1" '[ "$RC" = 1 ]'
 check "HUMAN_REQUIRED → APPROVAL: none" 'grep -qx "APPROVAL: none" "$WORK/b.md"'
 check "no --hold → no tracker calls" '[ ! -s "$STUB_LOG" ]'
 
-echo "--- hotspots always come from trusted main, in both modes ---"
+echo "--- hotspots: working tree (plus trusted main) in run mode, trusted main in close mode ---"
+# Operator review of PR #571: run mode must keep triggering on the regenerated
+# working-tree hotspot report exactly as validate Phase 0 always did (spec B.4).
 g checkout -q feat/issue-78-clean
 mkdir -p "$CLONE_DIR/docs"; echo "  9.0  src/app.py  (1d / 1t)  1 loc" > "$CLONE_DIR/docs/codeindex-hotspots.md"
-_run --issue 78 --mode run
-check "working-tree-only hotspot ignored in run mode (main has none) → exit 0" '[ "$RC" = 0 ]'
+_run --issue 78 --mode run --out "$WORK/b.md"
+check "working-tree hotspot → exit 1 in run mode" '[ "$RC" = 1 ]'
+check "working-tree hotspot → HUMAN_REQUIRED" 'grep -qx "STATUS: HUMAN_REQUIRED" "$WORK/b.md"'
 _run --issue 78 --mode close
 check "close mode reads main's hotspots (none) → exit 0" '[ "$RC" = 0 ]'
 rm -rf "$CLONE_DIR/docs"
+
+echo "--- path triggers survive a non-ASCII name and a rename ---"
+# Operator review of PR #571: `git diff --name-only` C-quotes a non-ASCII path, so no
+# anchored pattern matched it, and rename detection reported only the destination, so
+# moving a triggered file out of its directory passed.
+g checkout -q main; g checkout -qb feat/issue-80-nonascii
+printf 'echo x\n' > "$CLONE_DIR/.claude/skills/x/$(printf '\303\251').sh"
+g add -A; g commit -qm nonascii
+_run --issue 80 --mode run --out "$WORK/b.md"
+check "non-ASCII path under a triggered directory → exit 1" '[ "$RC" = 1 ]'
+check "non-ASCII path → HUMAN_REQUIRED" 'grep -qx "STATUS: HUMAN_REQUIRED" "$WORK/b.md"'
+g checkout -q main; g checkout -qb feat/issue-81-moved
+mkdir -p "$CLONE_DIR/elsewhere"; g mv .claude/skills/x/run.sh elsewhere/run.sh; g commit -qm moved
+_run --issue 81 --mode run --out "$WORK/b.md"
+check "triggered file moved out of its directory → exit 1" '[ "$RC" = 1 ]'
+check "moved file → HUMAN_REQUIRED" 'grep -qx "STATUS: HUMAN_REQUIRED" "$WORK/b.md"'
 
 echo "--- signed approval passes end to end ---"
 g checkout -q feat/issue-77-risky
