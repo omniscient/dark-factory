@@ -418,3 +418,27 @@ def test_resolve_escalates_on_migration_conflict_without_alembic_ini(tmp_path, m
     assert "deconflict.alembic_ini" in escalations[0][3]
     assert (["git", "merge", "--abort"], str(tmp_path)) in calls
     assert "CONFLICT_VERDICT=escalate" in artifact
+
+
+def test_resolve_alembic_listing_path_is_clone_relative_for_symlinked_clone(tmp_path, monkeypatch):
+    # The ini path is realpath'd; the clone dir must be too, or the listing pathspec
+    # becomes "../<real>/backend", which is outside the repository for git.
+    real = tmp_path / "real"
+    real.mkdir()
+    _write_ini(real)
+    link = tmp_path / "link"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not available")
+    rev = "backend/app/alembic/versions/ccc333_merge_branches_issue_42.py"
+    calls = []
+    rc, _, escalations = _run_resolve(
+        link, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="aaa111 (head)\nbbb222 (head)\n",
+                             untracked=["", rev + "\n"]))
+    assert rc == 0
+    assert escalations == []
+    listings = [c for c, _ in calls if c[:3] == ["git", "ls-files", "--others"]]
+    assert listings and all(c[-2:] == ["--", "backend"] for c in listings)
+    assert (["git", "add", "--", rev], str(link)) in calls

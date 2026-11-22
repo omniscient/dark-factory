@@ -295,7 +295,7 @@ def _alembic_multihead_check(issue_num: int, clone_dir: str, conflicted: list) -
         return None
 
     backend_dir = os.path.dirname(ini_path)
-    backend_rel = os.path.relpath(backend_dir, clone_dir)
+    backend_rel = os.path.relpath(backend_dir, os.path.realpath(clone_dir))
     try:
         r3 = subprocess.run(
             ["python", "-m", "alembic", "heads"],
