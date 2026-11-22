@@ -236,3 +236,254 @@ def test_resolve_escalation_on_no_conflicted_files(tmp_path, monkeypatch):
     artifact = (artifact_dir / "conflict_resolution.md").read_text()
     assert "CONFLICT_VERDICT=escalate" in artifact
     assert "ESCALATED=1" in artifact
+
+
+# ---------------------------------------------------------------------------
+# resolve_merge_conflicts — alembic multi-head check (#576)
+# ---------------------------------------------------------------------------
+
+_HEADS = ["python", "-m", "alembic", "heads"]
+_MERGE_HEADS = ["python", "-m", "alembic", "merge", "heads"]
+
+
+def _cp(rc=0, stdout=""):
+    return subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
+
+
+def _fake_conflicted_run(calls, conflicted=("codeindex.json",), heads_stdout="",
+                         untracked=(), heads_exc=None):
+    """subprocess.run fake: merge origin/main conflicts on `conflicted`; Tier 1
+    resolves them; `alembic heads` prints heads_stdout (or raises heads_exc);
+    each `git ls-files --others` call returns the next entry of `untracked`."""
+    listings = list(untracked)
+
+    def fake_run(cmd, **kw):
+        cmd = list(cmd)
+        cwd = kw.get("cwd")
+        calls.append((cmd, cwd))
+        if cwd is not None and not os.path.isdir(cwd):
+            # real subprocess.run raises before exec on a missing cwd (the #576 crash)
+            raise FileNotFoundError(2, "No such file or directory", cwd)
+        if cmd[:2] == ["git", "merge"] and "origin/main" in cmd:
+            return _cp(1, "CONFLICT")
+        if cmd[:2] == ["git", "diff"] and "--diff-filter=U" in cmd:
+            return _cp(0, "\n".join(conflicted) + "\n")
+        if cmd[:4] == _HEADS:
+            if heads_exc is not None:
+                raise heads_exc
+            return _cp(0, heads_stdout)
+        if cmd[:3] == ["git", "ls-files", "--others"]:
+            return _cp(0, listings.pop(0) if listings else "")
+        return _cp(0)
+
+    return fake_run
+
+
+def _run_resolve(tmp_path, monkeypatch, fake_run):
+    """Run resolve_merge_conflicts against tmp_path; return (rc, artifact, escalations)."""
+    from factory_core import deconflict as dc
+    escalations = []
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(dc, "_escalate", lambda *a: escalations.append(a))
+    artifact_dir = tmp_path / "artifacts"
+    rc = dc.resolve_merge_conflicts(42, str(tmp_path), "omniscient", "dark-factory",
+                                    str(artifact_dir))
+    artifact = (artifact_dir / "conflict_resolution.md").read_text()
+    return rc, artifact, escalations
+
+
+def _alembic_calls(calls):
+    return [(c, cwd) for c, cwd in calls if "alembic" in c]
+
+
+def _write_ini(tmp_path, rel="backend/alembic.ini"):
+    ini = tmp_path / rel
+    ini.parent.mkdir(parents=True, exist_ok=True)
+    ini.write_text("[alembic]\nscript_location = app/alembic\n")
+    return ini
+
+
+def test_resolve_skips_alembic_check_when_no_backend(tmp_path, monkeypatch, capsys):
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch, _fake_conflicted_run(calls))
+    assert rc == 0
+    assert _alembic_calls(calls) == []
+    assert escalations == []
+    assert "CONFLICT_VERDICT=tier1" in artifact
+    assert any(c[:2] == ["git", "commit"] for c, _ in calls)
+    assert "[deconflict] alembic check skipped: backend/alembic.ini not found" \
+        in capsys.readouterr().out
+
+
+def test_resolve_skips_alembic_check_when_backend_has_no_ini(tmp_path, monkeypatch, capsys):
+    (tmp_path / "backend").mkdir()
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch, _fake_conflicted_run(calls))
+    assert rc == 0
+    assert _alembic_calls(calls) == []
+    assert escalations == []
+    assert "CONFLICT_VERDICT=tier1" in artifact
+    assert "alembic check skipped: backend/alembic.ini not found" in capsys.readouterr().out
+
+
+def test_resolve_alembic_check_respects_adapter_override(tmp_path, monkeypatch):
+    _write_ini(tmp_path, "services/api/alembic.ini")
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "adapter.yaml").write_text(
+        "deconflict:\n  alembic_ini: 'services/api/alembic.ini'\n")
+    calls = []
+    rc, _, escalations = _run_resolve(
+        tmp_path, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="abc123 (head)\n"))
+    assert rc == 0
+    assert escalations == []
+    assert _alembic_calls(calls) == [(_HEADS, str(tmp_path / "services" / "api"))]
+
+
+@pytest.mark.parametrize("exc", [
+    OSError("No module named alembic"),
+    subprocess.CalledProcessError(1, _HEADS),
+])
+def test_resolve_escalates_on_alembic_check_failure(tmp_path, monkeypatch, exc):
+    _write_ini(tmp_path)
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch, _fake_conflicted_run(calls, heads_exc=exc))
+    assert rc == 1
+    assert len(escalations) == 1
+    assert "Alembic multi-head check failed unexpectedly" in escalations[0][3]
+    assert (["git", "merge", "--abort"], str(tmp_path)) in calls
+    assert not any(c[:2] == ["git", "commit"] for c, _ in calls)
+    assert "CONFLICT_VERDICT=escalate" in artifact
+    assert "ESCALATED=1" in artifact
+
+
+def test_resolve_alembic_single_head_does_not_merge(tmp_path, monkeypatch):
+    _write_ini(tmp_path)
+    calls = []
+    rc, _, escalations = _run_resolve(
+        tmp_path, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="abc123 (head)\n"))
+    assert rc == 0
+    assert escalations == []
+    assert _alembic_calls(calls) == [(_HEADS, str(tmp_path / "backend"))]
+    assert not any(c[:3] == ["git", "add", "--"] for c, _ in calls)
+
+
+def test_resolve_alembic_multi_head_merges_and_stages_generated_revision(tmp_path, monkeypatch):
+    _write_ini(tmp_path)
+    stray = "backend/app/alembic/versions/stray_local.py"
+    rev = "backend/app/alembic/versions/ccc333_merge_branches_issue_42.py"
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="aaa111 (head)\nbbb222 (head)\n",
+                             untracked=[stray + "\n", f"{stray}\n{rev}\n"]))
+    assert rc == 0
+    assert escalations == []
+    backend = str(tmp_path / "backend")
+    merge = [(c, cwd) for c, cwd in calls if c[:5] == _MERGE_HEADS]
+    assert merge == [(_MERGE_HEADS + ["-m", "merge_branches_issue_42"], backend)]
+    listings = [c for c, _ in calls if c[:3] == ["git", "ls-files", "--others"]]
+    assert listings and all(c[-2:] == ["--", "backend"] for c in listings)
+    assert (["git", "add", "--", rev], str(tmp_path)) in calls
+    assert "CONFLICT_VERDICT=tier1" in artifact
+
+
+def test_resolve_escalates_when_alembic_merge_generates_no_file(tmp_path, monkeypatch):
+    _write_ini(tmp_path)
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="aaa111 (head)\nbbb222 (head)\n",
+                             untracked=["", ""]))
+    assert rc == 1
+    assert len(escalations) == 1
+    assert "produced no new revision file" in escalations[0][3]
+    assert (["git", "merge", "--abort"], str(tmp_path)) in calls
+    assert "CONFLICT_VERDICT=escalate" in artifact
+
+
+def test_resolve_escalates_on_migration_conflict_without_alembic_ini(tmp_path, monkeypatch):
+    migration = "backend/app/alembic/versions/abc123_add_col.py"
+    calls = []
+    rc, artifact, escalations = _run_resolve(
+        tmp_path, monkeypatch, _fake_conflicted_run(calls, conflicted=(migration,)))
+    assert rc == 1
+    assert _alembic_calls(calls) == []
+    assert len(escalations) == 1
+    assert migration in escalations[0][3]
+    assert "deconflict.alembic_ini" in escalations[0][3]
+    assert (["git", "merge", "--abort"], str(tmp_path)) in calls
+    assert "CONFLICT_VERDICT=escalate" in artifact
+
+
+def test_resolve_alembic_listing_path_is_clone_relative_for_symlinked_clone(tmp_path, monkeypatch):
+    # The ini path is realpath'd; the clone dir must be too, or the listing pathspec
+    # becomes "../<real>/backend", which is outside the repository for git.
+    real = tmp_path / "real"
+    real.mkdir()
+    _write_ini(real)
+    link = tmp_path / "link"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not available")
+    rev = "backend/app/alembic/versions/ccc333_merge_branches_issue_42.py"
+    calls = []
+    rc, _, escalations = _run_resolve(
+        link, monkeypatch,
+        _fake_conflicted_run(calls, heads_stdout="aaa111 (head)\nbbb222 (head)\n",
+                             untracked=["", rev + "\n"]))
+    assert rc == 0
+    assert escalations == []
+    listings = [c for c, _ in calls if c[:3] == ["git", "ls-files", "--others"]]
+    assert listings and all(c[-2:] == ["--", "backend"] for c in listings)
+    assert (["git", "add", "--", rev], str(link)) in calls
+
+
+# ---------------------------------------------------------------------------
+# path checks behind the alembic multi-head check (#576 review fixup)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("filepath, expected", [
+    ("backend/app/alembic/versions/abc123_add_col.py", True),
+    ("alembic/versions/abc123_add_col.py", True),
+    ("alembic/versions/sub/abc123_add_col.py", True),
+    # Narrower than tier1, whose `migrations_dir in filepath` substring test
+    # does match this path: components must align on directory boundaries.
+    ("myalembic/versions/x.py", False),
+    ("backend/app/models/__init__.py", False),
+])
+def test_is_under_migrations_dir_matches_whole_components(filepath, expected):
+    from factory_core import deconflict as dc
+    assert dc._is_under_migrations_dir(filepath, "alembic/versions/") is expected
+
+
+def test_is_under_migrations_dir_empty_pattern_matches_nothing():
+    from factory_core import deconflict as dc
+    assert dc._is_under_migrations_dir("alembic/versions/x.py", "") is False
+
+
+@pytest.mark.parametrize("ini_rel", ["../../etc/passwd", "/etc/passwd"])
+def test_resolve_alembic_ini_path_escaping_clone_falls_back_to_default(tmp_path, capsys, ini_rel):
+    from factory_core import deconflict as dc
+    resolved = dc._resolve_alembic_ini_path(str(tmp_path), ini_rel)
+    assert resolved == os.path.realpath(str(tmp_path / "backend" / "alembic.ini"))
+    assert "escapes clone_dir; using default" in capsys.readouterr().out
+
+
+def test_resolve_alembic_ini_path_keeps_path_inside_clone(tmp_path):
+    from factory_core import deconflict as dc
+    resolved = dc._resolve_alembic_ini_path(str(tmp_path), "services/api/alembic.ini")
+    assert resolved == os.path.realpath(str(tmp_path / "services" / "api" / "alembic.ini"))
+
+
+def test_deconflict_alembic_ini_empty_string_falls_back_to_default(tmp_path):
+    from factory_core import deconflict as dc
+    (tmp_path / ".factory").mkdir()
+    (tmp_path / ".factory" / "adapter.yaml").write_text(
+        "deconflict:\n  alembic_ini: ''\n")
+    assert dc._deconflict_alembic_ini(str(tmp_path)) == "backend/alembic.ini"
