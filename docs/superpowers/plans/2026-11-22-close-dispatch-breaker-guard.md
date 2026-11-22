@@ -2,9 +2,11 @@
 
 **Issue:** #414
 
+**Revised:** 2026-11-22 (operator amendment after plan gate review)
+
 > **For agentic workers:** Execute task-by-task, in order. Each task is TDD: write the failing
 > test, watch it fail with the exact output shown, implement, watch it pass, commit. Touch only
-> the four files in the File Structure table.
+> the eight files in the File Structure table.
 
 **Goal:** Stop the unguarded, unbudgeted `Close issue #N` loop. Both Close-dispatch sites in
 `scheduler.sh` (`stage_review_triage`'s `MERGE` case and `end_gate_check`'s `APPROVED` case)
@@ -27,7 +29,10 @@ state-file schema change, no new CLI surface. Spec:
 
 **Owner acknowledgement (from the spec):** this also guards the direct-to-pr end-gate auto-merge
 dispatch, which the issue does not name; tighten-only; the PR is held for the owner's explicit
-acknowledgement before merge. Repeat this sentence in the PR description.
+acknowledgement before merge. The implement agent does not write the PR description (it is a
+fixed template in the workflow's `push-and-pr` node), so carry this sentence in the Task 4
+commit message body and in the decisions bullet of `$ARTIFACTS_DIR/implementation.md`; the
+operator adds it to the PR description before merge.
 
 ---
 
@@ -39,12 +44,17 @@ acknowledgement before merge. Repeat this sentence in the PR description.
 | `tests/test_factory_core_breaker.py` | Modify (append 1 test after `test_trip_to_blocked_adds_both_labels`) | CI-run coverage: `close` trip comment + `N:close` cleared (spec test 7) |
 | `scheduler.sh` | Modify (new `dispatch_close()`; `MERGE` case; `APPROVED` case; `trip_to_blocked` usage comment) | Guard + breaker for both Close sites |
 | `tests/test_scheduler.sh` | Modify (new section `AB`, inserted directly above the `# Cleanup` section) | Spec tests 1-6 and 8, fail-open check, drift lock |
+| `docs/scheduler.md` | Modify (line citations re-mapped; known-issue item 13; `N:close` counter row) | Reference doc stays true of the code (Task 5b) |
+| `docs/features.md` | Modify (line citations re-mapped only) | Task 5b |
+| `docs/configuration.md` | Modify (line citations re-mapped only) | Task 5b |
+| `docs/run-lifecycle.md` | Modify (line citations re-mapped; `Close issue #N` row) | Task 5b |
 
 Nothing else changes. In particular: `CONTINUE` and `CHANGES_REQUESTED` are untouched; no
 `check_failure_signature` for `close` (spec Alternative 4, deferred); no config or workflow
-edits; `deploy/**` and `.github/workflows/**` are never touched. (The one docs touch the
-implement phase may make — marking `docs/scheduler.md`'s stale known-issue item resolved — is
-covered in Task 6 Step 5.)
+edits; `deploy/**` and `.github/workflows/**` are never touched. The docs changes are exactly
+those of Task 5b (mandatory): `dispatch_close` inserts 20 lines at `scheduler.sh:357` and Task 1
+inserts one at `breaker.py:350`, which shifts about 190 line citations in the four reference
+docs; `docs_refs_check.py` checks ranges only and would not notice.
 
 ## Facts the steps rely on (verified against this checkout)
 
@@ -598,7 +608,8 @@ bash tests/test_scheduler.sh 2>&1 | grep -E "FAIL|Results|J1"
 
 ```bash
 git add scheduler.sh tests/test_scheduler.sh
-git commit -m "fix(scheduler): direct-to-pr APPROVED end-gate dispatches Close via dispatch_close (#414)"
+git commit -m "fix(scheduler): direct-to-pr APPROVED end-gate dispatches Close via dispatch_close (#414)" \
+  -m "Owner acknowledgement: this also guards the direct-to-pr end-gate auto-merge dispatch, which the issue does not name; tighten-only; the PR is held for the owner's explicit acknowledgement before merge."
 ```
 
 ---
@@ -684,12 +695,171 @@ git commit -m "test(scheduler): drift-lock Close dispatch to dispatch_close; lis
 
 ---
 
+## Task 5b: Re-map the reference docs' line citations (mandatory)
+
+**Files:**
+- Modify: `docs/scheduler.md`, `docs/features.md`, `docs/configuration.md`, `docs/run-lifecycle.md`
+
+Tasks 1-5 inserted 20 lines into `scheduler.sh` starting at old line 357 (the `dispatch_close`
+block, directly above `# --- Dispatch ---`) and one line into `scripts/factory_core/breaker.py`
+at old line 350 (the `"close"` entry). Every doc citation at or past those lines must move by
+the same amount. The helper below does it mechanically; it lives in `/tmp` and must never be
+committed.
+
+- [ ] **Step 1: Confirm the shift.** Run:
+
+```bash
+grep -n '^# --- Close dispatch\|^dispatch_close()\|^# --- Dispatch ---\|^dispatch()\|^trip_to_blocked()\|^stage_review_triage()' scheduler.sh
+git diff origin/main HEAD --numstat -- scheduler.sh scripts/factory_core/breaker.py
+```
+
+  Expected grep output, in file order: 357 (Close-dispatch header), 363 (`dispatch_close()`),
+  377 (`# --- Dispatch ---`), 383 (`dispatch()`), 409 (`trip_to_blocked()`), 1125
+  (`stage_review_triage()`). Expected numstat: `23 3 scheduler.sh` and
+  `1 0 scripts/factory_core/breaker.py`. If any number differs (for example `main` moved under
+  you), do not run the script with the arguments below: the insertion point or size is not what
+  this task assumes — go to Step 4's fallback.
+
+- [ ] **Step 2: Write the helper to `/tmp` (outside the repo).**
+
+```bash
+cat > /tmp/remap-414.py <<'PYEOF'
+"""Shift doc line citations after an insertion. Usage:
+   remap.py <target-basename> <first-shifted-old-line> <delta> <default-doc> <doc>...
+Bare `:N` spans follow the last file named earlier in the same table row / paragraph;
+in <default-doc> a row/paragraph that names no file yet means <target-basename>."""
+import re, sys, pathlib
+target, start, delta, default_doc = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+TOK = re.compile(r'`(?:(?P<path>[\w./-]*\w\.(?:sh|py|ya?ml|md|json|toml|env)|workflow|Dockerfile)(?::(?P<n1>\d[\d,\-]*))?|:(?P<n2>\d[\d,\-]*))`')
+def shift(nums):
+    return re.sub(r'\d+', lambda m: str(int(m.group()) + delta) if int(m.group()) >= start else m.group(), nums)
+total = 0
+for doc in sys.argv[5:]:
+    p = pathlib.Path(doc); out = []; ctx = None; changed = 0
+    for line in p.read_text(encoding='utf-8').split('\n'):
+        if line.startswith('|') or not line.strip() or line.startswith('#'):
+            ctx = target if doc == default_doc else None
+        def rep(m):
+            global ctx, changed
+            if m.group('path'):
+                nums = m.group('n1')
+                if nums or doc != default_doc:
+                    ctx = m.group('path').rsplit('/', 1)[-1]
+                elif not nums:
+                    return m.group()
+            else:
+                nums = m.group('n2')
+            if ctx != target or not nums:
+                return m.group()
+            new = shift(nums)
+            if new != nums:
+                changed += 1
+            return m.group().replace(':' + nums, ':' + new)
+        out.append(TOK.sub(rep, line))
+    p.write_text('\n'.join(out), encoding='utf-8', newline='\n')
+    print(f"{doc}: {changed} citation(s) shifted"); total += changed
+print(f"total: {total}")
+PYEOF
+```
+
+- [ ] **Step 3: Run it — each command exactly once** (a second run shifts everything again;
+  if that happens, `git checkout -- docs/` and start this step over):
+
+```bash
+python3 /tmp/remap-414.py scheduler.sh 357 20 docs/scheduler.md docs/scheduler.md docs/features.md docs/configuration.md docs/run-lifecycle.md
+python3 /tmp/remap-414.py breaker.py 350 1 none docs/scheduler.md docs/features.md docs/configuration.md docs/run-lifecycle.md
+```
+
+  Expected output of the first command:
+
+```
+docs/scheduler.md: 113 citation(s) shifted
+docs/features.md: 52 citation(s) shifted
+docs/configuration.md: 19 citation(s) shifted
+docs/run-lifecycle.md: 8 citation(s) shifted
+total: 192
+```
+
+  Expected output of the second: `0`, `0`, `0`, `1` and `total: 1` (the one change is
+  `breaker.py:333-383` → `breaker.py:333-384` in `docs/run-lifecycle.md`).
+
+- [ ] **Step 4: Confirm by content, not by count alone.**
+
+```bash
+grep -n '^dispatch()\|^trip_to_blocked()\|^stage_rescue_blocked()\|^stage_conflict_resolve()\|^stage_review_triage()' scheduler.sh
+grep -n -o 'stage_review_triage` (`scheduler.sh:[0-9]*\|stage_rescue_blocked` (`scheduler.sh:[0-9]*\|stage_conflict_resolve` (`scheduler.sh:[0-9]*' docs/features.md
+grep -n -o 'scheduler.sh:[0-9,-]*' docs/run-lifecycle.md
+```
+
+  Expected: the first grep prints 383, 409, 1009, 1058, 1125; `docs/features.md` cites
+  `stage_rescue_blocked` at `scheduler.sh:1009`, `stage_conflict_resolve` at
+  `scheduler.sh:1058` and `stage_review_triage` at `scheduler.sh:1125`;
+  `docs/run-lifecycle.md` shows `scheduler.sh:383-401`, `262,1390`, `298,1323`, `1203,1259`,
+  `344,1149,1255`, `336,1143`, `1113`, `157`, `183`, `1113`.
+
+  **Fallback — if any count in Step 3 or any line in Step 1 or Step 4 differs:** stop shifting
+  blindly. `git checkout -- docs/`, then for each `scheduler.sh` / `breaker.py` citation in the
+  four docs find where the cited code actually is now (`grep -n '<function or distinctive text>'
+  scheduler.sh`) and cite that line. `git diff origin/main HEAD -- scheduler.sh` tells you
+  exactly which old lines moved and by how much. Record in `$ARTIFACTS_DIR/implementation.md`
+  that the mechanical re-map was not used and why.
+
+- [ ] **Step 5: Three content edits** (the docs must describe the new behavior, not only point
+  at the right lines). Line numbers below are the post-re-map ones.
+
+  1. `docs/scheduler.md`, known-issue item 13. Replace the whole item — from the line
+     ``13. **`Close` dispatches are not deduplicated against a running container.**`` through
+     the line ending ``started while the first is still running (the verdict is cached, so it repeats).`` —
+     with:
+
+```markdown
+13. **Resolved by #414: `Close` dispatches are deduplicated and budgeted.**
+    `end_gate_check` (`:336`) and the `MERGE` branch (`:1143`) both call `dispatch_close`
+    (`:363`), which skips while `is_issue_running` reports a container for the issue and
+    counts each dispatch on `N:close` (ceiling `MAX_RETRIES`); the attempt after the ceiling
+    trips the ticket to Blocked instead of dispatching.
+```
+
+  2. `docs/scheduler.md`, the retry-counter table. Directly after the row that starts with
+     ``| `N:resolve` |`` insert:
+
+```markdown
+| `N:close` | Each `Close` dispatch through `dispatch_close` (`evaluate_stop`, `:367`) | `MAX_RETRIES` | Breaker trip |
+```
+
+  3. `docs/run-lifecycle.md`, the `Close issue #N` row of the dispatch table. Replace
+     ``(`scheduler.sh:336,1143`)`` with
+     ``(`scheduler.sh:374`, via `dispatch_close` from `:336`, `:1143`)``.
+
+  Confirm: `grep -n 'if dispatch_close "\|dispatch "Close issue\|evaluate_stop "$issue_num"\|^dispatch_close()' scheduler.sh`
+  prints 336, 363, 367, 374, 1143.
+
+- [ ] **Step 6: Delete the helper, run the docs check.**
+
+```bash
+rm -f /tmp/remap-414.py
+git status --short
+python scripts/docs_refs_check.py docs/run-lifecycle.md docs/scheduler.md docs/features.md docs/configuration.md
+```
+
+  Expected: `git status --short` lists exactly the four docs as modified and nothing untracked
+  (no `remap-414.py` anywhere in the repo); `Docs reference check passed for 4 doc(s).`
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add docs/scheduler.md docs/features.md docs/configuration.md docs/run-lifecycle.md
+git commit -m "docs: re-map scheduler.sh citations after dispatch_close (#414)"
+```
+
+---
+
 ## Task 6: Full verification (no code changes)
 
 **Files:** none modified.
 
 - [ ] **Step 1: CI pytest.** `PYTHONPATH=scripts python -m pytest tests/ -q` → expected: all pass
-  (dry run on this tree: `3023 passed`; the exact count may differ slightly if `main` moved).
+  (dry run on `origin/main` 105ddc7 plus this plan: `3074 passed`; the exact count may differ slightly if `main` moved).
 - [ ] **Step 2: CI scheduler shell test.** `bash tests/test_scheduler_lib.sh` → expected
   `Results: 20 passed, 0 failed`.
 - [ ] **Step 3: CI docs/DAG checks.**
@@ -706,18 +876,16 @@ python scripts/docs_refs_check.py docs/run-lifecycle.md docs/scheduler.md docs/f
   independently after the branch forked):
   `git diff --stat origin/main HEAD -- . ':!docs/superpowers' ':!docs/archive' ':!.archon/memory'` → exactly
   `scheduler.sh`, `scripts/factory_core/breaker.py`, `tests/test_factory_core_breaker.py`,
-  `tests/test_scheduler.sh` — plus `docs/scheduler.md` only if the implement phase's documentation
-  step updated it (see Step 5).
-- [ ] **Step 5: PR description** must include the spec's owner-acknowledgement sentence (see the
-  header above), state that `tests/test_scheduler.sh` is not CI-gated and was run by hand
-  (`298 passed, 2 failed` — G2/I2 pre-existing), and list the deferred follow-up from the spec's
-  open questions (Close workflow writing a failure-signature drop file → `check_failure_signature`
-  for `close`). Documentation: `docs/scheduler.md`'s known-issue item about `Close` dispatches
-  not being deduplicated against a running container (cites `:336`, `:1123`) is resolved by this
-  change, and its `scheduler.sh` line citations shift by ~20 lines. The spec names no docs change,
-  so this plan adds no task for it; the implement phase's documentation step may mark that item
-  resolved (documentation-exception housekeeping, not scope creep) — otherwise list it in the PR as
-  a follow-up. `docs_refs_check.py` passes either way.
+  `tests/test_scheduler.sh`, `docs/scheduler.md`, `docs/features.md`, `docs/configuration.md`,
+  `docs/run-lifecycle.md` — eight files, no others.
+- [ ] **Step 5: Hand-off notes.** The implement agent does not write the PR description (the
+  workflow's `push-and-pr` node builds it from a fixed template). In the decisions bullet of
+  `$ARTIFACTS_DIR/implementation.md` record: the spec's owner-acknowledgement sentence verbatim
+  (see the header above; it is also in the Task 4 commit body), that `tests/test_scheduler.sh` is
+  not CI-gated and was run by hand (`298 passed, 2 failed` — G2/I2 pre-existing), and the
+  deferred follow-up from the spec's open questions (Close workflow writing a failure-signature
+  drop file → `check_failure_signature` for `close`). The operator adds the acknowledgement
+  sentence to the PR description before merge.
 
 ---
 
@@ -738,3 +906,5 @@ python scripts/docs_refs_check.py docs/run-lifecycle.md docs/scheduler.md docs/f
 | Tests 1-6, 8 (`tests/test_scheduler.sh`) | AB1, AB2, AB3, AB4, AB5, AB6, AB8 |
 | Test 7 (pytest, CI-run) | Task 1 |
 | `evaluate_stop wired 4x` stays 4 | Task 5 Step 4 |
+| Owner-acknowledgement note | Task 4 commit body; Task 6 Step 5 (`implementation.md`) |
+| Reference docs stay true (plan-gate amendment; spec names no docs change) | Task 5b |
