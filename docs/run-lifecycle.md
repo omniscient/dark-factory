@@ -183,7 +183,7 @@ No Archon workflow is involved. The side-effect config says the same:
    copies, then check the branch out; verify `HEAD` is on it (`:937-953`). Either
    failing: escalate.
 4. Resolve (`factory_core/cli.py deconflict`, implemented in
-   `scripts/factory_core/deconflict.py:301-397`):
+   `scripts/factory_core/deconflict.py:325-421`):
    - `git merge origin/main --no-edit --no-ff`. Clean merge: done, verdict `none`.
    - **Tier 1 (mechanical)**, per conflicted file (`scripts/factory_core/deconflict.py:58-115`): take
      `--theirs` for `codeindex.json`, `symbolindex.json`, `docs/codeindex-hotspots.md`,
@@ -191,13 +191,13 @@ No Archon workflow is involved. The side-effect config says the same:
      models `__init__` file, strip markers and de-duplicate import lines. The models
      file and migrations directory come from the adapter (`deconflict.models_init`,
      `deconflict.migrations_dir`).
-   - **Alembic multi-head check** (`:246-298`, called at `:348-355`): skipped, with an
+   - **Alembic multi-head check** (`:246-322`, called at `:372-379`): skipped, with an
      `alembic check skipped` log line, when `deconflict.alembic_ini` (default
      `backend/alembic.ini`) is not a file; but a conflicted migration file with no
      alembic.ini escalates. Otherwise, in the ini's directory, if more than one alembic
      head exists run `alembic merge heads` and stage the new revision file. Any failure
      in the check: `git merge --abort`, escalate, return 1.
-   - **Tier 2 (AI)**, for files Tier 1 did not handle (`:118-188`, `:357-366`): a
+   - **Tier 2 (AI)**, for files Tier 1 did not handle (`:118-188`, `:381-390`): a
      `claude -p --model sonnet` session resolves each file. The resolver has an
      `ai_tier` switch, but nothing turns it off today; see
      [oddity 14](#open-questions-and-oddities).
@@ -1149,7 +1149,7 @@ The scheduler-side oddities are tracked in
    downstream on the `continue` path waits for it or checks its result. Whether Archon
    runs the two branches concurrently in one working tree could not be determined here.
    On escalation `deconflict.py` moves the board to Blocked and returns 1
-   (`scripts/factory_core/deconflict.py:370-379`), but the only node depending on
+   (`scripts/factory_core/deconflict.py:394-404`), but the only node depending on
    `de-conflict` is `preview-up-resolve`.
 
 3. **The blast-radius block has no enforcing DAG node.** The validate command writes
