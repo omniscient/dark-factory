@@ -2,6 +2,12 @@
 
 **Issue:** #556
 
+**Revised:** 2026-11-22 — spec-gate review amendments: harness-enforced checker independence
+(§4.2), payload/destination predicate and default classes (§4.3), normative `role` values (§4.4),
+minimum failure outcomes (§4.6), budget/breaker/session-window invariants (§4.10), v1 selected
+path and provisional operator defaults (§4.11), risks and rollout/rollback rules (§4.12), #564 row
+(§4.1), and a corrected #288 taxonomy citation (Alternatives 6).
+
 ---
 
 ## Overview / Problem Statement
@@ -41,7 +47,8 @@ Phase 6 issue comment):
 
 1. Publish a durable decision report with current-state evidence, a responsibility map, explicit
    invariants, a compatibility matrix, versioned configuration/request/result/capability
-   contracts, risks, and rollout/rollback rules. (§Architecture, all subsections)
+   contracts, risks, and rollout/rollback rules. (§Architecture, all subsections; selected
+   runtime/protocol path and tier resolution in §4.11; risks and rollout/rollback in §4.12)
 2. Map the nine initiative slices and the existing #239/#238/#234 owners to acceptance
    predicates; keep protocol translation, route eligibility, and retry policy separate. (§4.1)
 3. Specify how a local worker and a separately cloud-routed checker coexist, including nested
@@ -166,7 +173,7 @@ Phase 6 issue comment):
 | Slice (roadmap owner) | What it owns | Acceptance predicate this contract sets |
 |---|---|---|
 | Endpoint registry, secrets, preflight (#557) | Named endpoints, hosting location, destination class, secret references, timeout bounds, `required_env()`-style preflight | A registry entry is valid only with: id, hosting location, destination class(es), model identity, timeout bounds, secret reference, `schema_version`. Preflight hard-fails on any missing field (mirrors today's `providers/model.py` posture for `databricks`/`openai`) |
-| Runtime adapter/gateway (#558) | The minimum code path that actually dispatches a request to a non-Anthropic-shape local backend, preserving proxy/ledger and cloud parity | Must preserve §4.3's credential-stripping and correlation-envelope contract; must enforce §4.2's timeout/cancellation policy; must not introduce in-process cross-endpoint mixing (Q1) |
+| Runtime adapter/gateway (#558) | The minimum code path that dispatches a request to the v1 local endpoint (an Anthropic-Messages-compatible local server, no translation layer — §4.11), preserving proxy/ledger and cloud parity | Must preserve §4.3's credential-stripping and correlation-envelope contract; must enforce §4.6's timeout/cancellation policy; must not introduce in-process cross-endpoint mixing (Q1) |
 | Worker/orchestrator/checker isolation (#559) | Enforcing that a checker dispatch is a separate container with a different endpoint | Consumes Q1's dispatch-record independence proof; must refuse (not silently downgrade) a nested-subagent checker claim |
 | Local deployment profile/runbook (#560) | Connectivity/resource controls, operator documentation | Owns the actual timeout/resource numbers Q3(c) defers; no production default changes |
 | Capability/role-isolation fixtures (#561) | The pinned test suite #562 runs | Must cover every capability dimension in Q3(a)'s result map, including timeout/cancel behavior |
@@ -174,6 +181,7 @@ Phase 6 issue comment):
 | Feature-demand routing (#239, re-refinement) | Which endpoint a given task class is eligible for | Consumes §4.9's exact spec delta; stays parked (`needs-discussion`) until this contract is accepted |
 | Failure-policy alignment (#238) | Typed failure classes, retry/fallback bounds, no-export-on-outage | Consumes Q2's confidentiality default and Q3(c)'s failure-class requirement; this contract does not duplicate #238's taxonomy, only the invariants it must satisfy |
 | Isolated/shadow economics comparison (#563, under #234) | Cost/quality measurement before promotion | Reads the versioned ledger extension in §4.7; not a prerequisite for #557–#562 |
+| Local workload canary and cloud rollback drill (#564, under #234) | One operator-run, opt-in local workload and a rehearsed return to cloud | `ready-for-human`; never scheduler-dispatched; exercises §4.12's rollback rule end to end and records the outcome in the run record; no production default changes |
 
 **Separation of concerns (requirement 2):** protocol translation (how a request's shape is
 converted — #558's job), route eligibility (which task classes may use which endpoint — #239's
@@ -187,7 +195,9 @@ Building on Q1:
 
 - **Roles.** `actor` (does the work), `checker`/`verifier` (independently judges the work),
   `human` (accepts/rejects). A `monitor` role (fast/slow, per the #288 taxonomy) is advisory-only
-  and distinct from all three — it never dispatches work itself.
+  and distinct from all three — it never dispatches work itself. `worker` and `orchestrator` are
+  kinds of `actor`, and `verifier` is a synonym for `checker`; the normative value set for the
+  correlation envelope's `role` field is in §4.4.
 - **Endpoint-role binding happens at dispatch, not at the Agent-tool call.** A dispatched run
   container is assigned exactly one endpoint (cloud or a certified local endpoint) and may host
   `actor`/`worker`/`orchestrator` roles for that dispatch. It may never also host an independent
@@ -202,8 +212,20 @@ Building on Q1:
   and the orchestrating container is local-routed, the orchestrator **must refuse the
   delegation** — it cannot spawn that checker in-process and call it independent — and instead
   record an `UNCERTAIN`/abstain outcome requesting a separately-dispatched, cloud-routed checker
-  run. This refusal is itself a `deterministic_check`-provenance event, not a judgment call by
-  the orchestrator's own model.
+  run.
+- **The refusal is enforced by the harness, not by the model.** A local-routed orchestrator
+  declining to spawn a checker is only `self_report`; it is not what the contract relies on. The
+  testable rule is: a gate verdict is accepted only if the dispatch record of the run that
+  produced it has `hosting_location: cloud` and an `endpoint_id` different from the actor's
+  dispatch. A verdict produced inside a local-routed container is void — it can neither pass nor
+  fail a gate — and the ticket escalates to `ready-for-human`. That check is a
+  `deterministic_check`-provenance event evaluated outside the agent.
+- **Consequence for today's DAG.** `conformance`, `docs-conformance` and `code-review` are nodes
+  of the same run (same container, same `.archon/.env`) as `implement`, and `refine`/`plan` spawn
+  their checkers in-process. No existing gated phase can therefore be local-routed under this
+  contract (§4.11 decision 3). Splitting gates into a separately dispatched run changes
+  `scheduler.sh` dispatch and the workflow DAG; that is gate-adjacent, out of scope here, and
+  requires its own human-reviewed spec.
 - **The existing tier-pin pattern is preserved, not replaced.** `VERIFIER-CONTRACT.md`'s rule
   ("never let the gating checker subagent inherit the orchestrator's model") continues to govern
   *which alias* a checker subagent uses within one endpoint. This contract adds the orthogonal
@@ -218,9 +240,20 @@ Per Q2 and Q3(c):
   only by operator-controlled config — never by a label, comment, or model output (all of which
   are `self_report` under #288's taxonomy).
 - **Destination class** is declared per endpoint-registry entry (#557): hosting location
-  (`local`/`cloud`) and which payload classes it may receive.
-- **Dispatch-time check:** payload class must match destination class, evaluated once,
-  deterministically, before dispatch. Unknown on either side → block + escalate. This check's
+  (`hosting_location`: `local`/`cloud`) and which payload classes it may receive
+  (`accepts_payload_classes`, a non-empty subset of `cloud_ok`/`local_only`). A `cloud` entry
+  may never list `local_only`.
+- **Dispatch-time check:** a dispatch is allowed if and only if the payload class is a member of
+  the target entry's `accepts_payload_classes`. `local_only` is therefore eligible for local
+  entries only; `cloud_ok` is eligible for either. Evaluated once, deterministically, before
+  dispatch. Unknown or missing on either side → block + escalate.
+- **Default classes (§4.11 decision 4):** a ticket with no explicit class is `cloud_ok` when
+  dispatched to cloud, exactly as today. Any dispatch to a local entry is treated as `local_only`
+  from dispatch onward, whatever the ticket's class — it never retries on, or falls back to,
+  cloud.
+- **No auto-merge for `local_only` (§4.11 decision 5):** work whose payload class is
+  `local_only` never auto-merges (no `direct-to-pr` end-gate auto-merge, no grace-timer advance
+  to merge); the merge is always a human action. This check's
   decision (payload class, endpoint id, secret reference, allow/deny, reason) is recorded in the
   existing run-record ledger extension (§4.7), never a new store.
 - **Non-exporting outage behavior:** a `local_only` dispatch that fails (outage, OOM, protocol
@@ -229,8 +262,8 @@ Per Q2 and Q3(c):
   escalates. Two local failures, a model's stated confidence, or text in the task itself cannot
   grant export permission — only operator-controlled config can (same rule as the payload-class
   grant above).
-- **Credential stripping:** secrets never travel in the request-correlation envelope (§4.3's
-  header) or in any ledger row — they are referenced by `secret_reference` (a lookup key into
+- **Credential stripping:** secrets never travel in the request-correlation envelope (§4.4's
+  header), in any ledger row, run record, log line or issue comment — they are referenced by `secret_reference` (a lookup key into
   gitignored instance/gateway config, per #202's existing invariant), never inlined. This mirrors
   `model_proxy.py`'s existing `redact_headers()` posture (`authorization`/`x-api-key`/`api-key`/
   `x-factory-*-(token|secret)` redaction) and extends it: any new per-persona/correlation header
@@ -248,6 +281,11 @@ an older/non-adapter-routed call), recorded explicitly as `correlation: "inferre
 rather than silently upgraded to a `deterministic_check`-equivalent confidence level. A row with
 `correlation: "unknown"` can never be cited as the dispatch-record proof of independence
 required by §4.2.
+
+The envelope's `role` field takes exactly one of `actor`, `checker`, `monitor`. Workers and
+orchestrators report `actor`; `verifier` is not a separate value; `human` is never a request
+role. Any other value is recorded as `correlation: "unknown"`. This supersedes the looser
+`[actor/worker/checker]` shorthand in the Q3(c) answer above.
 
 ### 4.5 Capability evidence
 
@@ -284,6 +322,11 @@ its own timeout. Every timeout or cancellation event resolves to one of #238's n
 classes and is written to the run record — never a silent hang, never an unclassified error,
 never an implicit retry to a different endpoint.
 
+The class names are #238's to choose, but its taxonomy must distinguish at least these
+local-endpoint outcomes: endpoint unreachable; timeout (connect, time-to-first-token, idle,
+total); cancellation; protocol incompatibility; capability evidence missing, expired or
+mismatched; destination-policy denial. None of them is retryable against a different endpoint.
+
 ### 4.7 Versioned contracts and ledger extension
 
 Per Q3(b). Four independently-versioned contracts (`schema_version` each, `"MAJOR.MINOR"`,
@@ -309,12 +352,12 @@ The issue requires this contract to decide the boundary explicitly:
 
 | Capability | Native cloud (Anthropic/Bedrock/Vertex) | Certified local endpoint (v1) |
 |---|---|---|
-| Actor/worker dispatch | Yes (today) | Yes, once #557–#562 ship and the endpoint is certified |
+| Actor/worker dispatch | Yes (today) | v1: checker-free helper dispatches only, once #557–#562 ship and the endpoint is certified; none of the existing gated phases (§4.11 decision 3) |
 | Independent checker/verifier role | Yes (today) | **No — always a separate cloud dispatch** (§4.2) |
-| Nested nested Agent-tool subagent fanout | Yes, inherits parent endpoint | Yes for further actor/worker work only; refused for checker claims (§4.2) |
+| Nested Agent-tool subagent fanout | Yes, inherits parent endpoint | Yes for further actor/worker work only; refused for checker claims (§4.2) |
 | Tool-use / MCP fidelity | Assumed (reference implementation) | Must be proven by #561 fixtures before any dispatch (§4.5) — never assumed |
 | Streaming | Yes | Must be proven by #561 fixtures |
-| Cost/token accounting | Exact (Claude pricing) | Approximate until #558 extends the ledger per endpoint (mirrors the existing Databricks/OpenAI caveat in `docs/provider-abstraction-design.md` §7.5) |
+| Cost/token accounting | Exact (Claude pricing) | Token counts recorded; `cost_usd` is `null` (never zero, never Claude-priced) until #558 extends the ledger per endpoint (§4.10; avoids the mislabeled-dollar Databricks/OpenAI caveat in `docs/provider-abstraction-design.md` §7.5) |
 | Cloud fallback on failure | N/A (already cloud) | **Never automatic** — fails closed to abstain/escalate (§4.3) |
 
 A native OpenAI/Databricks helper (already the explicit non-goal boundary in
@@ -333,16 +376,93 @@ eleven items #288's archived spec §4.9 already lists, #239's spec must add:
     the specific endpoint being considered — never on the task's own text, a label, or a model's
     self-reported capability claim (restates Q3(a) in #239's own terms, since #239 owns the
     routing decision itself).
-13. Any routing outcome that would select a `local` endpoint for a task whose payload class is
-    `cloud_ok`-only-by-default (i.e., no explicit `local_only`) must not be treated as a
-    cost-saving opportunity by itself — §4.3's payload/destination match is a hard gate #239's
-    router evaluates, not a preference it can override.
+13. §4.3's payload/destination predicate is a hard gate #239's router evaluates before any cost
+    consideration, never a preference it can override: a `local_only` payload is eligible for
+    local entries only, and a `cloud_ok` payload routed to a local entry is treated as
+    `local_only` from dispatch onward (no cloud retry). A cost saving alone never makes a task
+    eligible for a `local` endpoint.
 14. §4.2's rule that an independent checker is never a nested subagent, and never shares a
     dispatch with a local-routed actor, is a routing-time constraint #239 must enforce when it
     decides whether a task is eligible for local-endpoint dispatch at all (a task requiring a
     checker in the same dispatch is categorically ineligible for `local`).
 15. §4.7's versioned request/result contracts are the data #239's calibration cohorts (per
     #288 §4.9 item 2) must be built from — #239 may not invent a parallel telemetry shape.
+
+### 4.10 Budgets, breaker and session-window invariants
+
+Local routing changes no budget, breaker, session-window or `gate_*` behaviour, and this contract
+authorizes no change to any of them:
+
+- Local-routed runs count toward WIP limits, dispatch ceilings and the retry breaker exactly like
+  cloud runs. A local endpoint is not a way around any of them.
+- Token budgets (`token_optimization.*`, `budget_gate.sh`) apply unchanged to local-routed runs.
+- Local token counts are recorded. Local cost is recorded as `cost_usd: null` — never zero and
+  never Claude-priced — so economics reports cannot read local work as free (§4.8).
+- An active session-window pause keeps gating all dispatch, local included. Exempting local
+  dispatches from the pause would be a scheduler change and is not part of this contract.
+- A local endpoint's rate-limit or HTTP 429 must never write the shared session-window pause
+  sentinel: `session_window.py` detects exhaustion from 429/rate-limit text in a run's captured
+  stdout, so a local fault could otherwise pause cloud work. Such an event is a local failure
+  under §4.6. The change that guarantees this touches session-window logic and therefore needs
+  its own human-reviewed ticket; it may not land as a side effect of #557–#561.
+- Any change a downstream ticket needs to budgets, the breaker, the session-window pause,
+  `gate_*`, tool allow/deny lists, side-effect levels or `deploy/**` requires its own
+  human-reviewed spec. Neither this contract nor comment-channel input authorizes one.
+
+### 4.11 v1 selected path and provisional operator defaults
+
+The issue requires this contract to select the minimum supported cloud + one local path and to
+define model/tier resolution. The five decisions below are each a **Provisional operator default
+(2026-11-22), pending owner confirmation at PR review**. Downstream tickets build against them as
+written; a changed decision is a revision of this spec, not a downstream re-decision.
+
+1. **v1 local protocol** — *Provisional operator default (2026-11-22), pending owner
+   confirmation at PR review.* The cloud path is unchanged (`anthropic`, plus the existing native
+   `bedrock`/`vertex` paths). The one supported local path is a local server that speaks the
+   Anthropic Messages API, reached through `ANTHROPIC_BASE_URL`, with no translation layer. An
+   OpenAI-shape or other non-Messages backend is out of scope for v1; #558 builds no translator.
+2. **Tier resolution on a local endpoint** — *Provisional operator default (2026-11-22), pending
+   owner confirmation at PR review.* All four tier aliases
+   (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`) resolve to the one certified local model
+   named in the registry entry's model identity. An unset alias, or one that resolves to anything
+   other than the certified model, fails preflight. Cloud alias pins in `run-compose.yml` are
+   untouched.
+3. **v1 local-eligible work** — *Provisional operator default (2026-11-22), pending owner
+   confirmation at PR review.* None of the existing gated phases (refine, plan, implement,
+   conformance, docs-conformance, code-review) may be local-routed, because each runs its
+   checker in the same container (§4.2). Only new helper dispatches that have no checker are
+   eligible. Running a real phase locally needs gates split into a separate dispatch; that is its
+   own reviewed gate ticket and is out of scope for this contract and for #557–#561.
+4. **Default payload class** — *Provisional operator default (2026-11-22), pending owner
+   confirmation at PR review.* An unmarked ticket is `cloud_ok` on cloud, as today. Anything
+   dispatched locally is `local_only` (§4.3).
+5. **Merge authority for `local_only` work** — *Provisional operator default (2026-11-22),
+   pending owner confirmation at PR review.* `local_only` work never auto-merges; the merge is
+   always a human action (§4.3).
+
+### 4.12 Risks and rollout/rollback rules
+
+| Risk | Control in this contract |
+|---|---|
+| A local model does lower-quality work unnoticed | Capability evidence before any dispatch (§4.5); v1 limited to checker-free helper dispatches (§4.11) |
+| Private payload is exported to cloud | Membership predicate, stricter-only classes, fail-closed on unknown, no cloud retry (§4.3) |
+| Checker independence is asserted rather than proven | Harness-side dispatch-record check; a local-routed verdict is void (§4.2) |
+| A local fault pauses or miscounts cloud work | §4.10 invariants |
+| Local work reads as free in economics reports | `cost_usd: null`, never zero (§4.10) |
+| Evidence goes stale after a model or runtime change | `invalidated_by` and `expires_at`, no grace period (§4.5) |
+| An endpoint credential leaks | References only; never in envelope, ledger, run record, log or comment (§4.3) |
+
+**Rollout rules.** Downstream tickets are opted in one at a time, in the order of their
+`Depends on:` lines. Merging any of them activates nothing: local endpoint selection is off by
+default, and is enabled only by operator-controlled instance config (a human-only surface —
+`deploy/instances/**` is never edited by a factory agent) after #562 has produced valid
+capability evidence for that endpoint. #562 and #564 are human-run and never scheduler-dispatched.
+
+**Rollback rule.** Rollback is unsetting the local endpoint selection in that operator-controlled
+config. With it unset, behaviour is byte-identical to today's `github/github/anthropic` default;
+no data migration is involved and run records are retained. A local run in flight at rollback
+fails closed and escalates; it is never re-run on cloud automatically. #564 rehearses this rule
+once before any wider use.
 
 ## Alternatives Considered
 
@@ -372,7 +492,9 @@ eleven items #288's archived spec §4.9 already lists, #239's spec must add:
 6. **Trust a model's self-reported capability or confidence as dispatch authorization**
    (e.g., "I can handle this locally"). Rejected directly by the accepted #288 decision's
    `signal_source` taxonomy — `self_report` can never authorize a consequential action; only
-   `empirical_calibration`/`verifier_evidence` (here, #562's human certification) may.
+   `verifier_evidence` (here, #562's certification, `authority: human`) may.
+   (`empirical_calibration` is a value of #288 §4.9's `confidence_source` taxonomy for #239, not
+   of `signal_source`.)
 
 ## Open Questions (non-blocking)
 
@@ -402,5 +524,6 @@ eleven items #288's archived spec §4.9 already lists, #239's spec must add:
   is read as a hard v1 invariant, not a target-state aspiration — §4.2 and §4.8 encode it as
   such throughout.
 - The nine "initiative slices" in acceptance criterion 2 are read as the nine rows of §4.1's
-  responsibility map (#557, #558, #559, #560, #561, #562, #239, #238, #563/#564 combined); no
+  responsibility map, counting #563 and #564 (both under #234) as one slice shown as two rows
+  (#557, #558, #559, #560, #561, #562, #239, #238, #563+#564); no
   other explicit enumeration of "nine slices" exists in the issue body or linked issues.
