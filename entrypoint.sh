@@ -367,6 +367,18 @@ _handle_blast_hold() {
   held_issue=$(jq -r '.issue // ""' "$marker" 2>/dev/null || echo "")
   [ -n "${ISSUE_NUM:-}" ] && [ "$held_issue" = "$ISSUE_NUM" ] || return 1
   head=$(jq -r '.head_sha // ""' "$marker" 2>/dev/null || echo "")
+  # The marker alone is not proof: any agent phase can write a JSON file at this path.
+  # Corroborate it against the needs-discussion label blast_gate_check.sh's own hold step
+  # (_hold() in scripts/blast_gate_check.sh) adds through the real tracker -- a signal an
+  # incidental/accidental marker write cannot also produce. (blast.md itself is not usable
+  # here: it is written to the bash node's own per-node $ARTIFACTS_DIR, which Archon gives
+  # a different path from this run's $ARTIFACTS_DIR that _handle_blast_hold reads from.)
+  local has_needs_discussion
+  has_needs_discussion=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/providers/cli.py" \
+      tracker get --id "$ISSUE_NUM" --fields labels 2>/dev/null \
+    | jq -r '.labels[].name' 2>/dev/null \
+    | grep -Fxc 'needs-discussion' || true)
+  [ "${has_needs_discussion:-0}" -gt 0 ] || return 1
   echo "blast-radius hold for issue #${ISSUE_NUM:-?} at ${head:-<unknown>} — waiting for operator approval (not a failure)"
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record record \
     --run-id "${RUN_ID:-unknown}" \

@@ -25,6 +25,21 @@ export -f docker
 claude() { echo "stub"; return 0; }
 export -f claude
 
+# _handle_blast_hold corroborates the marker against the tracker's real needs-discussion
+# label (providers/cli.py tracker get --fields labels) before trusting it. Stub only that
+# one provider call -- real python3 still runs factory_core/cli.py run-record record (so
+# the run-record assertions below stay meaningful) and anything else unrelated.
+_REAL_PY3="$(command -v python3)"
+export _REAL_PY3
+export STUB_TRACKER_LABELS='{"labels":[{"name":"needs-discussion"}]}'
+python3() {
+  case "$*" in
+    *providers/cli.py*tracker\ get*) echo "$STUB_TRACKER_LABELS"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+export -f python3
+
 # Never inherit a live run's hold-marker path (#551 architect cycle 2).
 unset FACTORY_BLAST_HOLD_FILE
 CURRENT_RUN_DIR=$(mktemp -d /tmp/ep-bh-rundir-XXXXXX)
@@ -87,6 +102,13 @@ FACTORY_BLAST_HOLD_FILE="$NODE_DIR/missing.json" _handle_blast_hold
 RC=$?
 check "exported path wins over ARTIFACTS_DIR (absent there -> 1)" '[ "$RC" = 1 ]'
 rm -rf "$NODE_DIR"
+
+echo "--- A2b: marker present but the tracker never got needs-discussion -> not trusted ---"
+echo '{"issue":551,"head_sha":"nolabel","exit":1}' > "$ARTIFACTS_DIR/blast-hold.json"
+COST_REPORT_CALLS=0
+STUB_TRACKER_LABELS='{"labels":[]}' _handle_blast_hold
+RC=$?
+check "uncorroborated marker → returns 1" '[ "$RC" = 1 ] && [ "$COST_REPORT_CALLS" = 0 ]'
 
 echo "--- A3: a marker for another issue is ignored ---"
 echo '{"issue":77,"head_sha":"0ther","exit":1}' > "$ARTIFACTS_DIR/blast-hold.json"

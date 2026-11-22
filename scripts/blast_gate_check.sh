@@ -31,19 +31,33 @@ TRUSTED_REF="refs/blast-gate/trusted-main"
 HEAD_REF="refs/blast-gate/head"
 HOLD_MARKER="<!-- df-blast-hold -->"
 
-ISSUE="" MODE="" OUT="" HOLD=false
+ISSUE="" MODE="" OUT="" HOLD=false PR_NUM=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --issue) ISSUE="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
     --hold) HOLD=true; shift ;;
+    # Close mode only: the PR's headRefName, when the caller (close-preview) already
+    # resolved it, is more reliable than the feat/issue-<N>-* glob -- a stale branch from
+    # an earlier attempt would otherwise make the glob ambiguous and fail closed for no
+    # real reason. The glob stays as a fallback when --pr is absent or the lookup fails.
+    --pr) PR_NUM="${2:-}"; shift 2 ;;
     *) echo "blast_gate_check.sh: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
 
 CLONE="${CLONE_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 APPROVALS_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/blast-approvals"
+# Explicit URL, not the named "origin" remote's fetch direction: .git/config is writable by
+# earlier agent phases (validate/conformance run with repo write access), so a remote whose
+# `url` points at an attacker repo while `pushurl` still points at the real one would make
+# that attacker repo's main and .factory/blast-approvers.asc the trusted base/key, yet pushes
+# (and the PR they open) would still land on the real repo -- a convincing false PASS. The
+# attack needs pushurl to still be correct (otherwise nothing real ever lands), so resolving
+# the push URL and fetching/pushing through that -- instead of the bare remote name -- is
+# resistant to it even when url and pushurl have been split.
+TRUSTED_URL="$(git -C "$CLONE" remote get-url --push origin 2>/dev/null)"
 BRANCH="" HEAD_SHA="" REASON="" RESULT="" WT=""
 
 _cleanup() {
@@ -73,22 +87,33 @@ _check() {
     [ -n "$BRANCH" ] && [ -n "$HEAD_SHA" ] || { _fail "no current branch/HEAD in ${CLONE}"; return 2; }
   fi
 
-  # Trusted base: created here, every time, never the clone's own main/origin/main.
-  if ! timeout 60 git -C "$CLONE" fetch --no-tags --quiet origin \
+  # Trusted base: created here, every time, never the clone's own main/origin/main, and
+  # fetched from an explicit URL rather than the "origin" remote (see TRUSTED_URL above).
+  if ! timeout 60 git -C "$CLONE" fetch --no-tags --quiet "$TRUSTED_URL" \
       "+refs/heads/main:${TRUSTED_REF}"; then
     _fail "could not fetch origin main into ${TRUSTED_REF}"; return 2
   fi
 
   if [ "$MODE" = "run" ]; then
     wt_dir="$CLONE"
-    hot="$CLONE/docs/codeindex-hotspots.md"
   else
-    local heads count
-    heads=$(timeout 30 git -C "$CLONE" ls-remote --heads origin "refs/heads/feat/issue-${ISSUE}-*" 2>/dev/null \
-      | awk -v p="refs/heads/feat/issue-${ISSUE}-" 'index($2, p) == 1 {print $2}')
-    count=$(printf '%s' "$heads" | grep -c . || true)
-    [ "$count" -eq 1 ] || { _fail "expected exactly one feat/issue-${ISSUE}-* branch on origin, found ${count}"; return 2; }
-    BRANCH="${heads#refs/heads/}"
+    local heads count pr_branch=""
+    # Prefer the PR's own headRefName when the caller already knows PR_NUM: exact and
+    # unambiguous even when a stale feat/issue-<N>-* branch from an earlier attempt is
+    # still on origin. Falls back to the glob below on any lookup failure.
+    if [ -n "$PR_NUM" ]; then
+      pr_branch=$(timeout 15 gh pr view "$PR_NUM" --repo "$FACTORY_REPO_SLUG" \
+        --json headRefName -q .headRefName 2>/dev/null || true)
+    fi
+    if [ -n "$pr_branch" ]; then
+      BRANCH="$pr_branch"
+    else
+      heads=$(timeout 30 git -C "$CLONE" ls-remote --heads origin "refs/heads/feat/issue-${ISSUE}-*" 2>/dev/null \
+        | awk -v p="refs/heads/feat/issue-${ISSUE}-" 'index($2, p) == 1 {print $2}')
+      count=$(printf '%s' "$heads" | grep -c . || true)
+      [ "$count" -eq 1 ] || { _fail "expected exactly one feat/issue-${ISSUE}-* branch on origin, found ${count}"; return 2; }
+      BRANCH="${heads#refs/heads/}"
+    fi
     if ! timeout 60 git -C "$CLONE" fetch --no-tags --quiet origin "+refs/heads/${BRANCH}:${HEAD_REF}"; then
       _fail "could not fetch ${BRANCH}"; return 2
     fi
@@ -98,10 +123,14 @@ _check() {
     git -C "$CLONE" worktree add --detach --quiet "$WT" "$HEAD_SHA" >/dev/null 2>&1 \
       || { WT=""; _fail "could not check out ${HEAD_SHA} in a worktree"; return 2; }
     wt_dir="$WT"
-    HOT_TMP=$(mktemp /tmp/blast-gate-hot-XXXXXX)
-    git -C "$CLONE" show "${TRUSTED_REF}:docs/codeindex-hotspots.md" > "$HOT_TMP" 2>/dev/null || : > "$HOT_TMP"
-    hot="$HOT_TMP"
   fi
+  # Hotspot membership feeds classify_file, so it must come from the same trusted main in
+  # both modes -- not the mutable working tree in run mode -- or run-time and close-time
+  # verdicts can disagree (e.g. a file hotspot-flagged only because of uncommitted/other
+  # local edits to docs/codeindex-hotspots.md).
+  HOT_TMP=$(mktemp /tmp/blast-gate-hot-XXXXXX)
+  git -C "$CLONE" show "${TRUSTED_REF}:docs/codeindex-hotspots.md" > "$HOT_TMP" 2>/dev/null || : > "$HOT_TMP"
+  hot="$HOT_TMP"
   echo "HEAD_SHA=${HEAD_SHA}"
 
   local base changed shortstat added deleted lines gate
@@ -155,8 +184,8 @@ _push_branch() {
   # BENCH_MODE=stub never pushes (push-and-pr's own contract).
   [ "${BENCH_MODE:-}" = "stub" ] && { PUSH_NOTE="BENCH_MODE=stub: not pushed"; return 1; }
   local err rc remote
-  err=$(timeout 30 git -C "$CLONE" push -u origin "$BRANCH" 2>&1); rc=$?
-  remote=$(timeout 10 git -C "$CLONE" ls-remote --exit-code --heads origin "refs/heads/$BRANCH" 2>/dev/null \
+  err=$(timeout 30 git -C "$CLONE" push "$TRUSTED_URL" "$BRANCH" 2>&1); rc=$?
+  remote=$(timeout 10 git -C "$CLONE" ls-remote --exit-code --heads "$TRUSTED_URL" "refs/heads/$BRANCH" 2>/dev/null \
     | awk -v r="refs/heads/$BRANCH" '$2==r{print $1; exit}')
   if [ -n "$remote" ] && [ "$remote" = "$HEAD_SHA" ]; then
     return 0
@@ -182,7 +211,7 @@ _write_request() {
 }
 
 _hold() {
-  local rc="$1" pushed=true where body files branch_line
+  local rc="$1" pushed=true where body files branch_line marker_ok=true
   case "$ISSUE" in ''|*[!0-9]*) echo "blast_gate_check.sh: cannot hold a non-numeric issue" >&2; return ;; esac
 
   # The marker records the decision, so it is written first: a node timeout in any later
@@ -195,14 +224,23 @@ _hold() {
   fi
 
   if [ "$MODE" = "run" ]; then
-    _push_branch || pushed=false
+    _push_branch || { pushed=false; marker_ok=false; }
   fi
   _write_request || echo "blast_gate_check.sh: WARNING: could not write ${APPROVALS_DIR}/${ISSUE}.request.json" >&2
   python3 "$_PCLI" tracker label --id "$ISSUE" --add needs-discussion >&2 \
-    || echo "blast_gate_check.sh: WARNING: could not add needs-discussion to #${ISSUE}" >&2
+    || { echo "blast_gate_check.sh: WARNING: could not add needs-discussion to #${ISSUE}" >&2; marker_ok=false; }
   if [ "$MODE" = "run" ]; then
     python3 "$_PCLI" tracker set-status --id "$ISSUE" --status blocked >&2 \
       || echo "blast_gate_check.sh: WARNING: could not set #${ISSUE} to Blocked" >&2
+  fi
+
+  # A push rejection (e.g. missing `workflow` scope) or a failed label leaves nothing a
+  # human can act on: the clone's commits are unreviewable (not on origin), or the tracker
+  # never actually shows needs-discussion. Remove the marker so entrypoint.sh's
+  # _handle_blast_hold does not swallow this run as a hold -- it falls through to the
+  # normal failure path (error signature, breaker accounting) instead.
+  if [ "$MODE" = "run" ] && [ "$marker_ok" = false ] && [ -n "$marker" ]; then
+    rm -f "$marker" 2>/dev/null || true
   fi
 
   if [ "$MODE" = "run" ]; then

@@ -248,10 +248,13 @@ nodes:
       # Without a valid signed approval for a HUMAN_REQUIRED diff the merge is refused,
       # whatever the labels say; a checker failure also refuses (fail closed). The merge is
       # pinned to the head that was checked, so a push in between cannot merge unchecked.
+      # --pr: this node already resolved PR_NUM above, so the checker can resolve the head
+      # from the PR's own headRefName instead of the feat/issue-<N>-* glob, which a stale
+      # branch from an earlier attempt could make ambiguous (the glob stays as its fallback).
       _BGC=/opt/dark-factory/scripts/blast_gate_check.sh
       [ -f "$_BGC" ] || _BGC="${CLONE_DIR:-.}/dark-factory/scripts/blast_gate_check.sh"  # TARGET-PATH
       BLAST_RC=0
-      BLAST_OUT=$(bash "$_BGC" --issue "$ISSUE" --mode close --out "$ARTIFACTS_DIR/blast.md" --hold) || BLAST_RC=$?
+      BLAST_OUT=$(bash "$_BGC" --issue "$ISSUE" --mode close --pr "$PR_NUM" --out "$ARTIFACTS_DIR/blast.md" --hold) || BLAST_RC=$?
       BLAST_HEAD=$(printf '%s\n' "$BLAST_OUT" | sed -n 's/^HEAD_SHA=//p' | tail -1)
       if [ "$BLAST_RC" -ne 0 ] || [ -z "$BLAST_HEAD" ]; then
         echo "close-preview: BLOCKED — blast-radius check did not pass for issue #$ISSUE (exit $BLAST_RC); see the df-blast-hold comment"
