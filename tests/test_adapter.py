@@ -1068,6 +1068,23 @@ def test_deconflict_migrations_dir_adapter_override(tmp_path):
     assert dc._deconflict_migrations_dir(str(tmp_path)) == "db/migrations/"
 
 
+def test_deconflict_alembic_ini_default_parity(tmp_path):
+    """Without adapter file, _deconflict_alembic_ini returns DEFAULTS deconflict.alembic_ini."""
+    sys.path.insert(0, "scripts")
+    from factory_core import deconflict as dc
+    assert dc._deconflict_alembic_ini(str(tmp_path)) == adapter_defaults.DEFAULTS["deconflict"]["alembic_ini"]
+
+
+def test_deconflict_alembic_ini_adapter_override(tmp_path):
+    """With adapter override, returns overridden alembic_ini path."""
+    d = tmp_path / ".factory"; d.mkdir()
+    (d / "adapter.yaml").write_text(
+        "deconflict:\n  alembic_ini: 'services/api/alembic.ini'\n")
+    sys.path.insert(0, "scripts")
+    from factory_core import deconflict as dc
+    assert dc._deconflict_alembic_ini(str(tmp_path)) == "services/api/alembic.ini"
+
+
 # ── Skill-security safety globs (#46) ──────────────────────────────────────
 
 def test_skill_security_globs_in_defaults_hard_exclude_paths():
