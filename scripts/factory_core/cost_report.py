@@ -421,6 +421,47 @@ def _passthrough_num(value) -> str:
 
 COST_MARKER = "<!-- dark-factory-cost-report -->"
 
+# Token/duration cell for a node whose usage Archon did not report (#453) — never "0".
+MISSING_CELL = "—"
+
+
+def format_node_row(node: dict) -> str:
+    """One per-node table row. A cost-missing node (#453) shows its reason in the cost
+    cell and MISSING_CELL for its token cells (and for a duration it never reported),
+    never a misleading $0/0/0; every other node renders exactly as before."""
+    if node.get("cost_capture") == "missing":
+        duration_ms = node.get("duration_ms")
+        duration = MISSING_CELL if duration_ms is None else format_duration(duration_ms)
+        return (
+            f"| {node.get('node_id', '')} | {node.get('model') or ''} | "
+            f"{MISSING_CELL} | {MISSING_CELL} | "
+            f"missing ({node.get('reason') or 'unknown'}) | {duration} |"
+        )
+    return (
+        f"| {node.get('node_id', '')} | {node.get('model') or ''} | "
+        f"{format_tokens_table(node.get('gen_ai.usage.input_tokens', 0) or 0)} | "
+        f"{format_tokens_table(node.get('gen_ai.usage.output_tokens', 0) or 0)} | "
+        f"{format_cost(node.get('cost_usd', 0) or 0)} | "
+        f"{format_duration(node.get('duration_ms', 0) or 0)} |"
+    )
+
+
+def format_partial_capture_note(totals: dict) -> str:
+    """Partial-capture warning line under the Subtotal row (#453); "" unless
+    totals.cost_capture == "partial", so a complete run's body is unchanged."""
+    if totals.get("cost_capture") != "partial":
+        return ""
+    missing = totals.get("missing_nodes") or []
+    noun = "node" if len(missing) == 1 else "nodes"
+    listed = ", ".join(f"{m.get('node_id', '')}: {m.get('reason', '')}" for m in missing)
+    return (
+        f"> ⚠️ Partial cost capture — {len(missing)} {noun} unreported ({listed}). "
+        f"Known spend: {format_cost(totals.get('known_cost_usd') or 0)} "
+        f"({format_tokens_cumulative(totals.get('known_input_tokens') or 0)} in / "
+        f"{format_tokens_cumulative(totals.get('known_output_tokens') or 0)} out); "
+        f"true total is higher."
+    )
+
 
 def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: str,
            product_name: str = "Dark Factory", budget: "dict | list | None" = None,
@@ -434,28 +475,28 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     """
     status = run_record.get("status") or "completed"
     totals = run_record.get("totals") or {}
-    total_cost_raw = totals.get("cost_usd")
+    if totals.get("cost_capture") == "partial":
+        # A partial run's fully-measured totals are null (#453): its Subtotal, header
+        # total and cumulative marker carry the known_* lower bound, never 0.
+        total_cost_raw = totals.get("known_cost_usd")
+        total_in = totals.get("known_input_tokens") or 0
+        total_out = totals.get("known_output_tokens") or 0
+    else:
+        total_cost_raw = totals.get("cost_usd")
+        total_in = totals.get("gen_ai.usage.input_tokens") or 0
+        total_out = totals.get("gen_ai.usage.output_tokens") or 0
     if total_cost_raw is None:
         total_cost_raw = 0
     total_cost_str = _passthrough_num(total_cost_raw)
-    total_in = totals.get("gen_ai.usage.input_tokens") or 0
-    total_out = totals.get("gen_ai.usage.output_tokens") or 0
+    partial_note = format_partial_capture_note(totals)
+    partial_segment = f"\n\n{partial_note}" if partial_note else ""
 
     economics_line = format_economics_line(run_record)
     economics_segment = f"\n{economics_line}" if economics_line else ""
     push_line = format_push_line(run_record)
     push_segment = f"\n\n{push_line}" if push_line else ""
 
-    row_lines = []
-    for node in run_record.get("nodes") or []:
-        row_lines.append(
-            f"| {node.get('node_id', '')} | {node.get('model') or ''} | "
-            f"{format_tokens_table(node.get('gen_ai.usage.input_tokens', 0) or 0)} | "
-            f"{format_tokens_table(node.get('gen_ai.usage.output_tokens', 0) or 0)} | "
-            f"{format_cost(node.get('cost_usd', 0) or 0)} | "
-            f"{format_duration(node.get('duration_ms', 0) or 0)} |"
-        )
-    run_rows = "\n".join(row_lines)
+    run_rows = "\n".join(format_node_row(node) for node in run_record.get("nodes") or [])
 
     prior = parse_prior_cumulative(prior_comment_body)
     cum_cost = _bc_add(prior["prev_cost"], total_cost_str)
@@ -481,7 +522,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 | Step | Model | In tokens | Out tokens | Cost | Duration |
 |------|-------|-----------|------------|------|----------|
 {run_rows}
-| **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **${total_cost_str}** | |
+| **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **${total_cost_str}** | |{partial_segment}
 {economics_segment}{push_segment}
 
 ---

@@ -712,3 +712,125 @@ def test_cli_render_aggregates_artifacts_dir(tmp_path, capsys):
         run_record_file=str(rr), prior_body_file="", timestamp="t", intent="new",
         product_name="X", budget_file="", artifacts_dir=str(tmp_path)))
     assert "**Context savings: 4.5K tokens (37.5%)**" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# cost-missing nodes and partial capture (#453)
+# ---------------------------------------------------------------------------
+
+def test_format_node_row_completed_node_unchanged():
+    node = {"node_id": "parse-intent", "model": "", "gen_ai.usage.input_tokens": 20,
+            "gen_ai.usage.output_tokens": 270, "cost_usd": 0.0207, "duration_ms": 7800,
+            "cost_capture": "completed"}
+    assert cr.format_node_row(node) == "| parse-intent |  | 20 | 270 | $0.0207 | 7.8s |"
+
+
+def test_format_node_row_missing_node_never_renders_zero():
+    node = {"node_id": "implement", "model": "", "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None, "cost_usd": None, "duration_ms": 1_555_000,
+            "cost_capture": "missing", "reason": "no_usage_reported"}
+    assert cr.format_node_row(node) == (
+        "| implement |  | — | — | missing (no_usage_reported) | 25m 55s |"
+    )
+
+
+def test_format_node_row_unreported_node_without_duration():
+    node = {"node_id": "validate", "model": "", "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None, "cost_usd": None, "duration_ms": None,
+            "cost_capture": "missing", "reason": "not_in_cost_report"}
+    assert cr.format_node_row(node) == (
+        "| validate |  | — | — | missing (not_in_cost_report) | — |"
+    )
+
+
+def test_format_partial_capture_note_only_for_partial():
+    assert cr.format_partial_capture_note({}) == ""
+    assert cr.format_partial_capture_note({"cost_capture": "complete"}) == ""
+    assert cr.format_partial_capture_note({"cost_capture": "unknown"}) == ""
+    two = cr.format_partial_capture_note({
+        "cost_capture": "partial", "known_cost_usd": 0.5, "known_input_tokens": 10,
+        "known_output_tokens": 2000,
+        "missing_nodes": [{"node_id": "implement", "reason": "no_usage_reported"},
+                          {"node_id": "validate", "reason": "not_in_cost_report"}],
+    })
+    assert two == (
+        "> ⚠️ Partial cost capture — 2 nodes unreported (implement: no_usage_reported, "
+        "validate: not_in_cost_report). Known spend: $0.5 (10 in / 2.0K out); "
+        "true total is higher."
+    )
+
+
+def test_render_complete_run_with_453_fields_matches_golden_a():
+    # Byte-identical guard: the new per-node/totals fields change nothing on a
+    # complete run.
+    record = json.loads(json.dumps(RUN_RECORD_A))
+    record["totals"].update({
+        "cost_capture": "complete", "node_log": "parsed", "known_cost_usd": 0.0207,
+        "known_input_tokens": 20, "known_output_tokens": 270, "missing_nodes": [],
+    })
+    for node in record["nodes"]:
+        node["cost_capture"] = "completed"
+    body = cr.render(record, prior_comment_body="", timestamp="2026-07-22 13:02 UTC",
+                     intent="fix")
+    assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
+
+
+RUN_RECORD_PARTIAL_388 = {
+    "status": "failed",
+    "totals": {
+        "gen_ai.usage.input_tokens": None, "gen_ai.usage.output_tokens": None,
+        "cost_usd": None, "cost_capture": "partial", "node_log": "parsed",
+        "known_cost_usd": 1.89, "known_input_tokens": 112, "known_output_tokens": 27400,
+        "missing_nodes": [{"node_id": "implement", "reason": "no_usage_reported"}],
+    },
+    "nodes": [
+        {"node_id": "parse-intent", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 297, "cost_usd": 0.0097, "duration_ms": 5200,
+         "cost_capture": "completed"},
+        {"node_id": "implement", "model": "", "gen_ai.usage.input_tokens": None,
+         "gen_ai.usage.output_tokens": None, "cost_usd": None, "duration_ms": 1_555_000,
+         "cost_capture": "missing", "reason": "no_usage_reported"},
+        {"node_id": "conformance", "model": "", "gen_ai.usage.input_tokens": 92,
+         "gen_ai.usage.output_tokens": 27103, "cost_usd": 1.8803, "duration_ms": 300_000,
+         "cost_capture": "completed"},
+    ],
+    "harness_economics": {"factory_cpm": None, "outcome": {"state": "failed", "score": 0.0}},
+    "archon_cost_capture": {"ok": True},
+}
+
+GOLDEN_PARTIAL_388 = (
+    "<!-- dark-factory-cost-report -->\n"
+    "<!-- cumulative: cost=1.89 in=112 out=27400 -->\n"
+    "## Dark Factory — Cost Report\n\n"
+    "**1 run(s) — Total: $1.89 (112 in / 27.4K out)**\n\n\n"
+    "### Run: 2026-09-26 17:28 UTC (fix, failed)\n\n"
+    "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+    "|------|-------|-----------|------------|------|----------|\n"
+    "| parse-intent |  | 20 | 297 | $0.0097 | 5.2s |\n"
+    "| implement |  | — | — | missing (no_usage_reported) | 25m 55s |\n"
+    "| conformance |  | 92 | 27.1K | $1.8803 | 5m 0s |\n"
+    "| **Subtotal** | | **112** | **27.4K** | **$1.89** | |\n\n"
+    "> ⚠️ Partial cost capture — 1 node unreported (implement: no_usage_reported). "
+    "Known spend: $1.89 (112 in / 27.4K out); true total is higher.\n\n"
+    "**Factory CPM:** n/a | **Outcome:** failed (score 0.0)\n\n"
+    "---\n"
+    "*Updated by Dark Factory Dark Factory*"
+)
+
+
+def test_render_partial_run_uses_known_totals_and_note():
+    body = cr.render(RUN_RECORD_PARTIAL_388, prior_comment_body="",
+                     timestamp="2026-09-26 17:28 UTC", intent="fix")
+    assert body == GOLDEN_PARTIAL_388
+
+
+def test_partial_run_cumulative_is_a_lower_bound_never_zero():
+    parsed = cr.parse_prior_cumulative(GOLDEN_PARTIAL_388)
+    assert (parsed["prev_cost"], parsed["prev_in"], parsed["prev_out"]) == ("1.89", 112, 27400)
+    assert parsed["run_count"] == 1
+    assert "missing (no_usage_reported)" in parsed["prior_runs"]
+    # The next run's header total adds onto the partial run's known spend.
+    nxt = cr.render(RUN_RECORD_A, prior_comment_body=GOLDEN_PARTIAL_388,
+                    timestamp="2026-09-27 09:00 UTC", intent="fix")
+    assert "<!-- cumulative: cost=1.9107 in=132 out=27670 -->" in nxt
+    assert "**2 run(s) — Total: $1.9107" in nxt
