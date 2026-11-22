@@ -649,19 +649,20 @@ def _check_needs_discussion(issue) -> tuple:
     return NEEDS_DISCUSSION_LABEL in names, True
 
 
-def _push_result_is_fresh(push_path: pathlib.Path, started_at: str) -> bool:
-    """True if push_path's mtime is not older than this run's --started-at (#447 advisory).
+def _artifact_is_fresh(path: pathlib.Path, started_at: str) -> bool:
+    """True if path's mtime is not older than this run's --started-at (#447 advisory, #573).
 
     `archon workflow cost --last` can hand back an earlier workflow run's id when the
     current run was never recorded there (see _archon_workflow_run_id) — without this
-    check, that earlier run's push-result.json in the sibling directory would be
-    mistaken for this run's artifact. Unparseable started_at or an unreadable mtime
-    fails closed (not fresh): a spurious produced_ungated/1.0 is the failure mode #447
-    exists to remove, so an unverifiable timestamp must not be treated as evidence.
+    check, that earlier run's push-result.json or gate-stage .md file in the sibling
+    directory would be mistaken for this run's artifact. Unparseable started_at or an
+    unreadable mtime fails closed (not fresh): an unverifiable timestamp must not be
+    treated as evidence (a stale review.md could score this run blocked, a stale
+    push-result.json a spurious produced_ungated/1.0).
     """
     try:
         started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        mtime = datetime.fromtimestamp(push_path.stat().st_mtime, tz=timezone.utc)
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     except (ValueError, TypeError, OSError):
         return False
     return mtime >= started
@@ -673,7 +674,8 @@ def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | N
     Archon gives every DAG node its own $ARTIFACTS_DIR, runs/<workflow run id> (see
     FACTORY_RUN_CONFIG_JSON in entrypoint.sh), a sibling of the entrypoint's runs/<RUN_ID>
     that cmd_assemble receives as --artifacts-dir — so refine-push/plan-push-and-advance's
-    push-result.json lives under this id, not under args.artifacts_dir (#447).
+    push-result.json (#447) and the validate/conformance/code-review nodes' gate-stage
+    .md files (#573) live under this id, not under args.artifacts_dir.
     """
     if archon_cost_path is None or not archon_cost_path.exists():
         return None
@@ -749,7 +751,7 @@ def cmd_assemble(args) -> None:
         workflow_run_id = _archon_workflow_run_id(archon_path)
         if workflow_run_id is not None:
             workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
-            if workflow_push_path.exists() and _push_result_is_fresh(
+            if workflow_push_path.exists() and _artifact_is_fresh(
                 workflow_push_path, args.started_at
             ):
                 artifact_push_path = workflow_push_path

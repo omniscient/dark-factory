@@ -1729,16 +1729,34 @@ def test_assemble_plan_split_dirs_no_push_result_is_failed(tmp_path, monkeypatch
     assert "push_result" not in rec
 
 
-# _AssembleArgs.started_at, as an epoch — the freshness check compares the sibling
-# push-result.json's mtime against it (_push_result_is_fresh, review fixup of #447).
+# _AssembleArgs.started_at, as an epoch — the freshness check compares a sibling
+# artifact's mtime against it (_artifact_is_fresh; review fixup of #447, generalized by #573).
 _ASSEMBLE_STARTED_EPOCH = 1781236800  # 2026-06-12T04:00:00Z
 
 
-def _write_workflow_push_result(workflow_dir, *, mtime):
-    push = workflow_dir / "push-result.json"
-    push.write_text(json.dumps({"node": "refine-push", "pushed": True}))
-    os.utime(push, (mtime, mtime))
-    return push
+def _write_workflow_artifact(directory, filename, content, *, mtime=None):
+    path = directory / filename
+    path.write_text(content)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, False), (0, True), (1, True)])
+def test_artifact_is_fresh_compares_mtime_to_started_at(tmp_path, offset, expected):
+    path = _write_workflow_artifact(
+        tmp_path, "review.md", "STATUS: PASS\n", mtime=_ASSEMBLE_STARTED_EPOCH + offset
+    )
+    assert rr._artifact_is_fresh(path, "2026-06-12T04:00:00Z") is expected
+
+
+def test_artifact_is_fresh_fails_closed(tmp_path):
+    path = _write_workflow_artifact(tmp_path, "review.md", "STATUS: PASS\n")
+    assert rr._artifact_is_fresh(path, "not-a-timestamp") is False
+    assert rr._artifact_is_fresh(path, "") is False
+    assert rr._artifact_is_fresh(tmp_path / "absent.md", "2026-06-12T04:00:00Z") is False
+    # #573 R3: renamed, not aliased — the helper is no longer push-result-specific.
+    assert not hasattr(rr, "_push_result_is_fresh")
 
 
 def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypatch):
@@ -1747,7 +1765,10 @@ def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypa
     calls = _stub_lookup(monkeypatch, (False, True))
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH - 1)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH - 1,
+    )
     rr.cmd_assemble(args)
 
     assert calls == [333]
@@ -1768,7 +1789,10 @@ def test_assemble_refine_fresh_workflow_push_result_is_produced_ungated(
     _forbid_lookup(monkeypatch)
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH + offset)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH + offset,
+    )
     rr.cmd_assemble(args)
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
