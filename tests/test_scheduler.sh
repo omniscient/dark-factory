@@ -2230,6 +2230,44 @@ export -f python3 evaluate_stop trip_to_blocked reset_retry dispatch \
 _AB_MERGE_711='[{"content":{"number":711,"title":"t"},"labels":[],"status":"In review"}]'
 _AB_DTP_712='[{"content":{"number":712,"title":"t"},"labels":["direct-to-pr"],"status":"In review"}]'
 _AB_DTP_712_ITEM=$(echo "$_AB_DTP_712" | jq -c '.[0]')
+# AB1: MERGE verdict while a container for the issue is running → skipped before the
+# breaker is consulted (no dispatch, no close attempt consumed)
+> "$STUB_LOG"
+is_issue_running() { return 0; }; export -f is_issue_running
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB1a: MERGE + running → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB1b: MERGE + running → breaker not consulted" \
+  "0" "$(grep -c '^evaluate_stop 711' "$STUB_LOG" || true)"
+assert_eq "AB1c: MERGE + running → DISPATCHED stays empty" "" "$DISPATCHED"
+is_issue_running() { return 1; }; export -f is_issue_running
+
+# AB3: MERGE verdict at the ceiling → trips with phase close, no dispatch
+> "$STUB_LOG"
+AB_EVAL_OUT="stopped=true reason=max_retries"
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB3a: MERGE consults the close counter at MAX_RETRIES" \
+  "1" "$(grep -c '^evaluate_stop 711 close 3$' "$STUB_LOG" || true)"
+assert_eq "AB3b: MERGE at ceiling → trip_to_blocked phase close" \
+  "1" "$(grep -c '^trip_to_blocked 711 close retry limit of 3 reached for close/merge$' "$STUB_LOG" || true)"
+assert_eq "AB3c: MERGE at ceiling → no Close dispatch" \
+  "0" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB3d: MERGE at ceiling → DISPATCHED stays empty" "" "$DISPATCHED"
+AB_EVAL_OUT="stopped=false reason=none"
+
+# AB5 (MERGE half): under the ceiling → Close dispatched, DISPATCHED set
+> "$STUB_LOG"
+IN_REVIEW="$_AB_MERGE_711"; DISPATCHED=""; PROVIDERS_CLI_OUTPUT=""
+stage_review_triage
+assert_eq "AB5a: MERGE under ceiling → Close dispatched" \
+  "1" "$(grep -c 'dispatch Close issue #711' "$STUB_LOG" || true)"
+assert_eq "AB5b: MERGE under ceiling → DISPATCHED set" "Close issue #711" "$DISPATCHED"
+assert_eq "AB5c: MERGE dispatch never calls reset_retry" \
+  "0" "$(grep -c '^reset_retry' "$STUB_LOG" || true)"
+
+
 # AB7: evaluate_stop CLI error (empty output) → fails open and dispatches, same as the
 # existing implement/plan/refine sites
 > "$STUB_LOG"

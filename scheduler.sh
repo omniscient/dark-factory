@@ -1140,7 +1140,7 @@ stage_review_triage() {
 
     case "$VERDICT" in
       MERGE)
-        if dispatch "Close issue #${ISSUE}"; then
+        if dispatch_close "$ISSUE"; then
           DISPATCHED="Close issue #${ISSUE}"
         fi
         ;;
