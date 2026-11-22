@@ -141,3 +141,15 @@ def test_cited_repo_files_resolve():
 
 def test_doc_does_not_cite_the_pre_archive_spec_path():
     assert "docs/superpowers/specs/2026-11-21-hybrid-execution-contract-design.md" not in _doc_text()
+
+
+def test_readme_further_reading_links_the_contract():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "[`docs/hybrid-execution-contract.md`](docs/hybrid-execution-contract.md)" in readme
+
+
+def test_provider_design_model_axis_points_at_the_contract():
+    text = (REPO_ROOT / "docs" / "provider-abstraction-design.md").read_text(encoding="utf-8")
+    section = text[text.index("### 7.5 Selection, preflight, caveats"):text.index("## 8. Scope boundaries")]
+    assert "[`docs/hybrid-execution-contract.md`](hybrid-execution-contract.md)" in section
+    assert "(#556)" in section
