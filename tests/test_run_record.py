@@ -1707,9 +1707,8 @@ def test_assemble_refine_finds_push_result_in_workflow_run_dir(tmp_path, monkeyp
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
     assert rec["artifact_check"] == {"artifact_present": True}
-    # The #473 push_result fold is deliberately unchanged (Design decision 8): it still
-    # reads only --artifacts-dir.
-    assert "push_result" not in rec
+    # #573 R2b: the push_result fold reads the same resolved path as artifact_check.
+    assert rec["push_result"] == {"node": "refine-push", "pushed": True}
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
     assert rec["harness_economics"]["outcome"]["score"] == 1.0
 
@@ -2263,6 +2262,46 @@ def test_assemble_no_gate_warning_only_for_completed_fix_continue(
     rec = json.loads((tmp_path / "run-record.json").read_text())
     assert "gate_artifact_lookup" in rec
     assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_plan_folds_fresh_failed_push_result_from_workflow_run_dir(
+    tmp_path, monkeypatch
+):
+    # #573 R2b: a fresh sibling {"pushed": false} is folded, so cost_report.py's
+    # **Push:** FAILED line can fire for a real run.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="plan")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"pushed": False, "error": "x"}),
+        mtime=_FRESH_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert rec["push_result"] == {"pushed": False, "error": "x"}
+
+
+def test_assemble_refine_stale_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_STALE_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"]["artifact_present"] is False
+    assert "push_result" not in rec
+
+
+def test_assemble_refine_malformed_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(workflow_dir, "push-result.json", "not valid json {{{", mtime=_FRESH_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert "push_result" not in rec
 
 
 def _stored_refine_record(tmp_path, run_id, **extra):

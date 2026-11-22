@@ -849,10 +849,12 @@ def cmd_assemble(args) -> None:
     # Written by refine-push/plan-push-and-advance (#473): the verified push outcome
     # (pushed, branch, local/remote sha, captured error). Same optional, schema-free
     # fold as memory-trace.json — these are plain DAG bash steps, not verdict gates.
-    push_path = artifacts_dir / "push-result.json"
-    if push_path.exists():
+    # Folded from artifact_push_path: for refine/plan, the fresh sibling copy in archon's
+    # workflow-run directory when the artifact_check block above found one (#573); every
+    # other intent reads --artifacts-dir only (no implement-path node writes the file).
+    if artifact_push_path.exists():
         try:
-            run_record["push_result"] = json.loads(push_path.read_text(encoding="utf-8"))
+            run_record["push_result"] = json.loads(artifact_push_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
