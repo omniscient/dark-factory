@@ -112,7 +112,7 @@ first so that a contradiction stops the run before any code is written.
 
 - [ ] **Step 3: Decide and record.** Write one of these three outcomes to
   `$ARTIFACTS_DIR/implementation.md` under a `## Requirement 6 verification` heading. Copy it
-  into the PR description in Task 11.
+  into the PR description in Task 9.
   - **FOUND:** a captured failed-run log has a line that begins `verdict_gate_check.sh: `.
     Record the path and proceed.
   - **NOT AVAILABLE FROM THE RUN CONTAINER:** there are no hits, and no captured
@@ -794,7 +794,7 @@ first so that a contradiction stops the run before any code is written.
 `error_signature.py:37-64`. Several refs in `docs/run-lifecycle.md` and `docs/features.md`
 point into `commands/dark-factory-conformance.md` past old line 296, or into
 `scripts/verdict_gate_check.sh`. Tasks 2–6 shift all of them. Refs at or before
-conformance line 296 do not move: `:60`–`:77`, `:151-220`, `:181`, `:208`, `:210`, `:284`.
+conformance line 296 do not move: `:60`–`:77`, `:151-220`, `:181`, `:208`, `:210`, `:277`, `:284`.
 `scripts/docs_refs_check.py` only range-checks line numbers, so CI stays green either way;
 the refs still have to be true.
 
