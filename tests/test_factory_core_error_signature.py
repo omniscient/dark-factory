@@ -270,3 +270,61 @@ def test_verdict_missing_ignores_quiet_branch_status_blocked():
     assert alone != "substantive:verdict_missing"
     with_preview = _classify(text=_BENIGN_PREVIEW + _QUIET_BLOCKED_LINE + "\n")
     assert with_preview == "environmental:preview_infra"
+
+
+_GATE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "verdict_gate_check.sh"
+
+
+def _silent_death_echo():
+    lines = _GATE_SCRIPT.read_text(encoding="utf-8").splitlines()
+    hits = [i for i, line in enumerate(lines)
+            if line.startswith("echo ") and "true silent death" in line]
+    assert len(hits) == 1, f"expected one silent-death echo in {_GATE_SCRIPT}, got {hits}"
+    return lines, hits[0]
+
+
+def test_verdict_missing_regex_matches_gate_script_wording():
+    # Rewording either verdict_gate_check.sh's echo or _VERDICT_MISSING_RE fails here
+    # instead of silently breaking the classification (#373).
+    import re
+    from factory_core.error_signature import _VERDICT_MISSING_RE
+    lines, i = _silent_death_echo()
+    m = re.match(r'echo "(.*)" >&2$', lines[i])
+    assert m, lines[i]
+    rendered = (m.group(1)
+                .replace("${GATE_LABEL}", "Conformance (Gate 2)")
+                .replace("${ISSUE_NUM}", "197"))
+    assert _VERDICT_MISSING_RE.search(rendered), rendered  # printed only when it does NOT match
+    sig = _classify(text=rendered)
+    assert sig == "substantive:verdict_missing"
+
+
+def test_gate_script_silent_death_echo_carries_classifier_cross_reference():
+    lines, i = _silent_death_echo()
+    assert "error_signature.py" in "\n".join(lines[max(0, i - 4):i])
+
+
+def test_verdict_missing_regex_matches_gate_script_quiet_branch_wording():
+    # Couples the regex to the quiet-branch echo too: STATUS=missing must match,
+    # STATUS=BLOCKED (a real verdict) must not.
+    import re
+    from factory_core.error_signature import _VERDICT_MISSING_RE
+    hits = [line.strip() for line in _GATE_SCRIPT.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("echo ") and "upstream already communicated" in line]
+    assert len(hits) == 1, f"expected one quiet-branch echo in {_GATE_SCRIPT}, got {len(hits)}"
+    m = re.match(r'echo "(.*)" >&2$', hits[0])
+    assert m, hits[0]
+    assert "${STATUS:-missing}" in m.group(1), "quiet-branch echo no longer prints STATUS"
+
+    def render(status):
+        return (m.group(1)
+                .replace("${GATE_LABEL}", "Conformance (Gate 2)")
+                .replace("${ISSUE_NUM}", "197")
+                .replace("${STATUS:-missing}", status))
+
+    missing_matches = bool(_VERDICT_MISSING_RE.search(render("missing")))
+    assert missing_matches, "quiet-branch STATUS=missing wording drifted from the regex"
+    sig = _classify(text=render("missing"))
+    assert sig == "substantive:verdict_missing"
+    blocked_matches = bool(_VERDICT_MISSING_RE.search(render("BLOCKED")))
+    assert not blocked_matches, "a STATUS=BLOCKED quiet-branch line must not match"
