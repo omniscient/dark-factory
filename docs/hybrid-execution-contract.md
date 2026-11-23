@@ -490,10 +490,16 @@ authorizes no change to any of them:
 - An active session-window pause keeps gating all dispatch, local included. Exempting local
   dispatches from the pause would be a scheduler change and is not part of this contract.
 - A local endpoint's rate-limit or HTTP 429 must never write the shared session-window pause
-  sentinel: `session_window.py` detects exhaustion from 429/rate-limit text in a run's captured
-  stdout, so a local fault could otherwise pause cloud work. Such an event is a local failure
-  under §4.6. The change that guarantees this touches session-window logic and therefore needs
-  its own human-reviewed ticket; it may not land as a side effect of #557–#561.
+  sentinel: `session_window.py` detects session-window exhaustion from usage/session/credit-
+  exhaustion phrasing or a rejected structured `claude.rate_limit_event` marker
+  (`is_session_window_failure`) — not from a bare HTTP 429 (a bare 429 only feeds the breaker's
+  `environmental:rate_limit` signature via the separate, broader `RATE_LIMIT_RE`, never the
+  stricter session-pause detector). A local endpoint that emits usage/session/credit-exhaustion
+  phrasing, or a fabricated `claude.rate_limit_event` marker, in captured stdout could still trip
+  the shared pause by coincidence. Such an event is a local failure under §4.6. The change that
+  makes the session-window detector local-endpoint-aware touches session-window logic and
+  therefore needs its own human-reviewed ticket (#586), a rollout precondition in §4.12, and may
+  not land as a side effect of #557–#561.
 - Any change a downstream ticket needs to budgets, the breaker, the session-window pause,
   `gate_*`, tool allow/deny lists, side-effect levels or `deploy/**` requires its own
   human-reviewed spec. Neither this contract nor comment-channel input authorizes one.
