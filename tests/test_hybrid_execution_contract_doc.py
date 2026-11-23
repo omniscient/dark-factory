@@ -29,7 +29,7 @@ REQUIRED_SECTIONS = [
     "### 4.8 Compatibility matrix — helper boundary vs. full Claude-harness compatibility",
     "### 4.9 Exact spec delta for #239",
     "### 4.10 Budgets, breaker and session-window invariants",
-    "### 4.11 v1 selected path and provisional operator defaults",
+    "### 4.11 v1 selected path and accepted operator defaults",
     "### 4.12 Risks and rollout/rollback rules",
     "## Alternatives Considered",
 ]
@@ -37,7 +37,7 @@ REQUIRED_SECTIONS = [
 SLICE_OWNERS = ["#557", "#558", "#559", "#560", "#561", "#562", "#239", "#238", "#563", "#564"]
 
 FAIL_CLOSED_INVARIANTS = [
-    "Unknown or missing on either side → block + escalate.",
+    "blocks and escalates — it is never silently rerouted",
     "A verdict produced inside a local-routed container is void",
     "never retries against a cloud",
     "`local_only` work never auto-merges",
@@ -78,12 +78,12 @@ def _section(text: str, heading: str) -> str:
 
 
 def test_header_carries_issue_version_and_acceptance_status():
-    head = _doc_text().split("\n## ", 1)[0]
+    head = " ".join(_doc_text().split("\n## ", 1)[0].split())
     assert "**Issue:** #556" in head
     assert '**Contract version:** `hybrid_contract: "1.0"`' in head
-    assert "**Status:** Proposed" in head
-    assert "merge of the #556 PR by a human reviewer" in head
-    assert "provisional operator defaults pending owner confirmation" in head
+    assert "**Status:** Accepted" in head
+    assert "the #556 PR merged and this is the accepted copy on `main`" in head
+    assert "confirmed as written by the owner in #580" in head
 
 
 def test_required_sections_present_in_order():
@@ -114,10 +114,12 @@ def test_four_contracts_are_independently_versioned():
 def test_capability_evidence_schema_never_qualifies_a_checker():
     section = _section(_doc_text(), "### 4.5 Capability evidence")
     assert 'schema_version: "1.0"' in section
-    assert "qualified_roles: [worker]" in section
+    roles = re.search(r"^\s*qualified_roles: \[([^\]]*)\]", section, re.MULTILINE)
+    assert roles and [r.strip() for r in roles.group(1).split(",")] == ["actor"]
     for field in ("endpoint_id:", "model_identity:", "fixture_suite_version:", "expires_at:",
-                  "invalidated_by:"):
+                  "invalidated_by:", "harness_version:"):
         assert field in section, f"capability-evidence field {field} missing"
+    assert "unsupported" in section
 
 
 def test_spec_delta_for_239_lists_items_12_to_15():
@@ -127,10 +129,18 @@ def test_spec_delta_for_239_lists_items_12_to_15():
 
 
 def test_fail_closed_invariants_pinned():
-    text = _doc_text()
+    text = " ".join(_doc_text().split())
     for phrase in FAIL_CLOSED_INVARIANTS:
         assert phrase in text, f"fail-closed invariant weakened or removed: {phrase}"
-    assert text.count("Provisional operator default (2026-11-22)") >= 1
+
+
+def test_section_4_11_has_five_accepted_decisions():
+    section = _section(_doc_text(), "### 4.11 v1 selected path and accepted operator defaults")
+    items = re.split(r"^\d+\. ", section, flags=re.MULTILINE)[1:]
+    assert len(items) == 5, f"expected five §4.11 decisions, found {len(items)}"
+    for n, item in enumerate(items, 1):
+        assert "Accepted operator default (2026-11-22" in " ".join(item.split()), (
+            f"§4.11 decision {n} does not carry the accepted-default marker")
 
 
 def test_invariants_index_cites_existing_sections():
@@ -155,9 +165,11 @@ def _tracked_files() -> list:
 
 def test_cited_repo_files_resolve():
     text = _doc_text()
+    unfenced = re.sub(r"^```.*?^```", "", text, flags=re.M | re.S)
+    collapsed = re.sub(r"`([^`]*)`", lambda m: "`" + re.sub(r"\s+", "", m.group(1)) + "`", unfenced)
     files = _tracked_files()
     missing = []
-    for tok in sorted(set(CITATION_RE.findall(text))):
+    for tok in sorted(set(CITATION_RE.findall(collapsed))):
         if (REPO_ROOT / tok).is_file():
             continue
         if tok in PARTIAL_CITATION_ALLOWLIST and any(f.endswith("/" + tok) for f in files):
