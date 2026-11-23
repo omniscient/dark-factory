@@ -15,6 +15,19 @@ _PREVIEW_INFRA_RE = re.compile(
     r"preview stack|failed to build preview",
     re.IGNORECASE,
 )
+# Matches the two stderr lines scripts/verdict_gate_check.sh prints when a gate phase
+# never wrote its verdict (#373): the "true silent death" line (verdict missing/unparseable,
+# no needs-discussion label) and the quiet-branch line when it reports STATUS=missing
+# (needs-discussion present). A quiet-branch STATUS=BLOCKED line is a real verdict and
+# must not match. Anchored on that script's own "verdict_gate_check.sh: " log prefix and a
+# literal issue number, so a transcript that merely quotes the phrase (e.g. `cat` of the
+# script, whose source has "#${ISSUE_NUM}") is not mis-signed. Wording is coupled to both
+# echoes; tests/test_factory_core_error_signature.py fails CI if either side drifts.
+# Deliberately no re.IGNORECASE: it is our own literal.
+_VERDICT_MISSING_RE = re.compile(
+    r"verdict_gate_check\.sh: .{0,80}"
+    r"(?:verdict missing/unparseable for issue #\d+|blocks issue #\d+ \(STATUS=missing\))"
+)
 _OOS_FILES_RE = re.compile(r"OOS gate|out-of-scope", re.IGNORECASE)
 _BUILD_FAILURE_RE = re.compile(
     r"npm err!|build failed|compilation error|modulenotfounderror|importerror|syntaxerror",
@@ -32,6 +45,11 @@ _TEST_FAILURE_RE = re.compile(
 # a reader can find by grepping the module, mirroring how "environmental:delivery_failure" is
 # both classify()'s return value and retry_or_skip_delivery_failure()'s bash literal.
 SESSION_WINDOW_PAUSE_SIGNATURE = "environmental:session_window_pause"
+# Precedence note (#373): _VERDICT_MISSING_RE's place in classify() cannot race this path.
+# entrypoint.sh's _handle_session_window_pause() runs before classify() is ever invoked
+# and, on a genuine match, writes this signature directly and returns — a real
+# session-window pause never reaches classify()'s regex chain. There is no ordering
+# conflict between the two paths to "fix".
 
 
 def classify(
@@ -51,10 +69,17 @@ def classify(
         and not artifact_present
     ):
         return "environmental:delivery_failure"
-    if _PREVIEW_INFRA_RE.search(text):
-        return "environmental:preview_infra"
     if _RATE_LIMIT_RE.search(text):
         return "environmental:rate_limit"
+    # Above _PREVIEW_INFRA_RE: the degraded-preview path every self-target run takes leaves
+    # non-fatal toolchain output (docker compose, buildkit) early in the transcript, which
+    # used to shadow the run-ending missing verdict (#197). Below _RATE_LIMIT_RE: a
+    # rate-limit death that ends in a missing verdict stays environmental and never counts
+    # toward the breaker's two-consecutive-substantive trip (operator decision, #373).
+    if _VERDICT_MISSING_RE.search(text):
+        return "substantive:verdict_missing"
+    if _PREVIEW_INFRA_RE.search(text):
+        return "environmental:preview_infra"
     if _OOS_FILES_RE.search(text):
         return f"substantive:oos_files:{exit_code}"
     if _BUILD_FAILURE_RE.search(text):

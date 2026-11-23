@@ -104,6 +104,23 @@ assert_true "classified substantive:test_failure" \
 rm -f "${ARTIFACTS_DIR}/implementation.md"
 
 echo ""
+echo "--- C2: a missing conformance verdict outranks earlier preview-infra noise (#373) ---"
+# #197 shape: degraded-preview toolchain output early, the gate's silent-death line last.
+# The gate line is split across two adjacent quoted strings so this file never contains
+# it contiguously (a run that prints this test must not itself sign verdict_missing).
+rm -rf "$SCHEDULER_STATE_DIR"; SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-es-statedir2b-XXXXXX)
+echo "placeholder" > "${ARTIFACTS_DIR}/implementation.md"
+{
+  echo "preview: docker compose up failed — continuing in degraded mode"
+  echo "verdict_gate_check.sh"": Conformance (Gate 2) verdict missing/unparseable for issue #33 and no needs-discussion label — true silent death, posting failure comment."
+} > "$TMP_OUT"
+_write_error_signature "implement" 1 "$TMP_OUT"
+SIG_FILE="${SCHEDULER_STATE_DIR}/error-signatures/33.implement.sig"
+assert_true "classified substantive:verdict_missing" \
+  "grep -q 'substantive:verdict_missing' '$SIG_FILE'"
+rm -f "${ARTIFACTS_DIR}/implementation.md"
+
+echo ""
 echo "--- D: pre-existing workflow context files must NOT count as artifact_present (#279 regression) ---"
 # issue.json / context-budget.<scenario>.json / token-opt-caps.env are written into ARTIFACTS_DIR by
 # the workflow runner BEFORE the phase command ever executes — present on every run,

@@ -200,3 +200,73 @@ def test_cli_session_window_pause_signature_write_independent_of_classify(tmp_pa
     assert result.returncode == 0
     sig_file = tmp_path / "error-signatures" / "20.refine.sig"
     assert json.loads(sig_file.read_text())["signature"] == "environmental:session_window_pause"
+
+
+# --- #373: substantive:verdict_missing ---------------------------------------------
+# The gate line is assembled at runtime so this source file never contains it
+# contiguously: a run that prints this file (cat, a pytest failure dump) must not
+# itself classify as verdict_missing.
+_GATE_PREFIX = "verdict_gate_check.sh" + ": "
+_GATE_LINE = (
+    _GATE_PREFIX + "Conformance (Gate 2) verdict missing/unparseable for issue #197 and no "
+    "needs-discussion label — true silent death, posting failure comment."
+)
+# Degraded-preview noise every self-target implement run leaves early in its transcript.
+# "docker compose" is a real _PREVIEW_INFRA_RE alternative (the human-facing sentence
+# "Preview environment failed to start" is not).
+_BENIGN_PREVIEW = "preview: docker compose up failed — continuing in degraded mode\n"
+# Same string test_rate_limit() above already proves classifies as rate_limit.
+_RATE_LIMIT_TEXT = "Error: you have hit your usage limit for this session"
+# The gate's quiet branch (needs-discussion present). It reports a missing verdict as
+# STATUS=missing — the shape #197 most likely took — and a real one as STATUS=BLOCKED.
+_QUIET_HEAD = _GATE_PREFIX + "Conformance (Gate 2) blocks issue #197 (STATUS="
+_QUIET_TAIL = "); upstream already communicated, no comment needed."
+_QUIET_MISSING_LINE = _QUIET_HEAD + "missing" + _QUIET_TAIL
+_QUIET_BLOCKED_LINE = _QUIET_HEAD + "BLOCKED" + _QUIET_TAIL
+
+
+def test_verdict_missing_fixture_preview_text_alone_is_preview_infra():
+    # Proves the #197 fixture below really exercises the ordering.
+    assert _classify(text=_BENIGN_PREVIEW) == "environmental:preview_infra"
+
+
+def test_verdict_missing_outranks_earlier_preview_infra_noise():
+    # #197 shape: non-fatal preview warning early, the gate's silent-death line last.
+    text = _BENIGN_PREVIEW + "implement: all 7 plan tasks complete, pushed\n" + _GATE_LINE + "\n"
+    sig = _classify(text=text)  # bind first: keep the fixture text out of a failure dump
+    assert sig == "substantive:verdict_missing"
+
+
+def test_verdict_missing_requires_gate_script_prefix():
+    bare = "Conformance (Gate 2) verdict missing/unparseable for issue #197 and no needs-discussion label"
+    assert _classify(text=bare) != "substantive:verdict_missing"
+    # The gate script's own source line (as `cat` would print it) has no digits after '#'.
+    source = 'echo "verdict_gate_check.sh: ${GATE_LABEL} verdict missing/unparseable for issue #${ISSUE_NUM} and"'
+    assert _classify(text=source) != "substantive:verdict_missing"
+
+
+def test_rate_limit_outranks_verdict_missing_in_either_order():
+    # Operator decision (2026-11-23): a rate-limit death that ends in a missing verdict
+    # stays environmental and never counts toward the breaker's substantive trip.
+    for text in (_RATE_LIMIT_TEXT + "\n" + _GATE_LINE, _GATE_LINE + "\n" + _RATE_LIMIT_TEXT):
+        sig = _classify(text=text)
+        assert sig == "environmental:rate_limit"
+
+
+def test_rate_limit_outranks_preview_infra():
+    # Pins the one intentional reordering of the two pre-existing environmental checks.
+    assert _classify(text=_BENIGN_PREVIEW + _RATE_LIMIT_TEXT) == "environmental:rate_limit"
+
+
+def test_verdict_missing_matches_quiet_branch_status_missing():
+    # Second operator amendment (#373): the quiet-branch line also signs verdict_missing.
+    sig = _classify(text=_BENIGN_PREVIEW + _QUIET_MISSING_LINE + "\n")
+    assert sig == "substantive:verdict_missing"
+
+
+def test_verdict_missing_ignores_quiet_branch_status_blocked():
+    # A real BLOCKED verdict is not a missing one: today's classification is unchanged.
+    alone = _classify(text=_QUIET_BLOCKED_LINE + "\n")
+    assert alone != "substantive:verdict_missing"
+    with_preview = _classify(text=_BENIGN_PREVIEW + _QUIET_BLOCKED_LINE + "\n")
+    assert with_preview == "environmental:preview_infra"
