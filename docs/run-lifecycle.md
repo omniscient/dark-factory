@@ -928,7 +928,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:552-573
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:900-1103`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:914-1117`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
    validate, conformance and code-review nodes write the first three into Archon's
    per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
