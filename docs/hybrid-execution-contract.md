@@ -568,6 +568,13 @@ authorizes no change to any of them:
 - Token budgets (`token_optimization.*`, `budget_gate.sh`) apply unchanged to local-routed runs.
 - Local token counts are recorded. Local cost is recorded as `cost_usd: null` — never zero and
   never Claude-priced — so economics reports cannot read local work as free (§4.8).
+  `run_record.py` still parses a missing node cost as `0`
+  (`n.get("costUsd") or n.get("cost_usd") or 0`); since #453 it then re-records a command or
+  prompt node that reported no usage, or that started but is absent from the cost report, as
+  `cost_capture: "missing"` with `cost_usd: null`. That does not cover a local-routed node for
+  which the harness reports a Claude-priced figure: #558 owns recording `null` for every node
+  of a local-routed run, and that lands before any local run is recorded in `runs.jsonl` or a
+  cost report.
 - An active session-window pause keeps gating all dispatch, local included. Exempting local
   dispatches from the pause would be a scheduler change and is not part of this contract.
 - A local endpoint's rate-limit or HTTP 429 must never write the shared session-window pause
