@@ -89,5 +89,5 @@ def _run(docker_ps_output: str, issue_num: str, state_dir: Path) -> subprocess.C
 def test_is_issue_running(docker_ps_output, issue_num, expected_result, tmp_path):
     result = _run(docker_ps_output, issue_num, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
-    tokens = [l for l in result.stdout.splitlines() if l.startswith("RESULT=")]
+    tokens = [line for line in result.stdout.splitlines() if line.startswith("RESULT=")]
     assert tokens == [f"RESULT={expected_result}"], result.stdout + result.stderr
