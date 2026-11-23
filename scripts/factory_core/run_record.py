@@ -392,20 +392,33 @@ def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
 
 
 def _parse_node_log(log_file, log_tokens: dict) -> "dict | None":
-    """node_id -> last Started/Completed/Failed/Skipped event from the tee'd
-    `archon workflow run` output ($TMP_OUT), in first-seen order. None when the file is
-    absent/unreadable or no line names a known node."""
+    """node_id -> last Started/Completed/Failed event from the tee'd
+    `archon workflow run` output ($TMP_OUT), in first-seen order; Skipped only when it is
+    the node's sole event. None when the file is absent/unreadable or no line names a
+    known node.
+
+    The log also carries every agent's streamed output, so a line start is a real "\n"
+    only (a trailing "\r" is dropped): a bare "\r" or a Unicode separator such as U+2028
+    inside agent prose does not begin a line. A node that ran never reads as Skipped: a
+    Skipped line seen alongside a Started/Completed/Failed one for the same node is
+    ignored, so a prose `[<name>] Skipped (..)` line cannot turn a node whose usage Archon
+    lost back into a genuine zero (the #388 shape).
+    """
     if not log_file:
         return None
     try:
-        text = pathlib.Path(log_file).read_text(encoding="utf-8", errors="replace")
+        text = pathlib.Path(log_file).read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return None
     events: dict = {}
-    for line in text.splitlines():
-        m = _NODE_LOG_RE.match(line)
-        if m and m.group(1) in log_tokens:
-            events[log_tokens[m.group(1)]] = m.group(2)
+    for line in text.split("\n"):
+        m = _NODE_LOG_RE.match(line[:-1] if line.endswith("\r") else line)
+        if not m or m.group(1) not in log_tokens:
+            continue
+        node_id, event = log_tokens[m.group(1)], m.group(2)
+        if event == "Skipped" and events.get(node_id, "Skipped") != "Skipped":
+            continue
+        events[node_id] = event
     return events or None
 
 
@@ -418,8 +431,9 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
     report is appended as missing/not_in_cost_report; a Skipped node never ran and is not
     emitted, and an absent bash: node spent nothing and is not emitted either. A node that
     IS reported (present in the cost report, e.g. a `when:`-gated node Archon still lists
-    with zero usage) but whose last log event is Skipped never ran either, so its zero is
-    genuine, not a missing-capture — it is left as completed rather than flagged missing.
+    with zero usage) but whose only log event is Skipped never ran either, so its zero is
+    genuine, not a missing-capture — it is left as completed rather than flagged missing
+    (_parse_node_log reports Skipped only for a node with no other event).
     """
     out: list = []
     missing: list = []

@@ -505,12 +505,13 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     cum_out = prior["prev_out"] + total_out
     run_count = prior["run_count"] + 1
 
-    # Once an earlier run only partially captured cost, every later cumulative header
-    # total is an undisclosed lower bound (#453 advisory) — the partial-capture note
-    # (emitted below the Subtotal of the partial run itself, which already discloses it
-    # there) is the only durable record of that in the comment thread, so its presence
-    # anywhere in the prior history propagates the caveat forward onto later headers.
-    lower_bound_suffix = " (lower bound)" if "Partial cost capture" in prior_comment_body else ""
+    # A partial run's cumulative header total is a lower bound, and so is every later
+    # one (#453 advisory). The partial-capture note under that run's Subtotal is the only
+    # durable record of it in the comment thread, so its presence anywhere in the prior
+    # history carries the caveat forward onto later headers.
+    lower_bound_suffix = (
+        " (lower bound)" if is_partial or "Partial cost capture" in prior_comment_body else ""
+    )
 
     savings_block = format_savings_block(budget, deliveries)
 

@@ -802,7 +802,7 @@ GOLDEN_PARTIAL_388 = (
     "<!-- dark-factory-cost-report -->\n"
     "<!-- cumulative: cost=1.89 in=112 out=27400 -->\n"
     "## Dark Factory — Cost Report\n\n"
-    "**1 run(s) — Total: $1.89 (112 in / 27.4K out)**\n\n\n"
+    "**1 run(s) — Total: $1.89 (112 in / 27.4K out) (lower bound)**\n\n\n"
     "### Run: 2026-09-26 17:28 UTC (fix, failed)\n\n"
     "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
     "|------|-------|-----------|------------|------|----------|\n"
@@ -834,3 +834,33 @@ def test_partial_run_cumulative_is_a_lower_bound_never_zero():
                     timestamp="2026-09-27 09:00 UTC", intent="fix")
     assert "<!-- cumulative: cost=1.9107 in=132 out=27670 -->" in nxt
     assert "**2 run(s) — Total: $1.9107" in nxt
+
+
+def _header_line(body):
+    return next(line for line in body.splitlines() if "run(s) — Total:" in line)
+
+
+def test_partial_run_own_header_is_marked_lower_bound():
+    # The partial run's own cumulative header already excludes the missing node's spend.
+    body = cr.render(RUN_RECORD_PARTIAL_388, prior_comment_body="",
+                     timestamp="2026-09-26 17:28 UTC", intent="fix")
+    assert _header_line(body) == "**1 run(s) — Total: $1.89 (112 in / 27.4K out) (lower bound)**"
+
+
+def test_run_after_a_partial_run_keeps_the_lower_bound_marker():
+    nxt = cr.render(RUN_RECORD_A, prior_comment_body=GOLDEN_PARTIAL_388,
+                    timestamp="2026-09-27 09:00 UTC", intent="fix")
+    assert _header_line(nxt).endswith(" out) (lower bound)**")
+    third = cr.render(RUN_RECORD_A, prior_comment_body=nxt,
+                      timestamp="2026-09-28 09:00 UTC", intent="fix")
+    assert _header_line(third).startswith("**3 run(s)")
+    assert _header_line(third).endswith(" out) (lower bound)**")
+
+
+def test_complete_history_header_has_no_lower_bound_marker():
+    first = cr.render(RUN_RECORD_A, prior_comment_body="",
+                      timestamp="2026-09-27 09:00 UTC", intent="fix")
+    second = cr.render(RUN_RECORD_A, prior_comment_body=first,
+                       timestamp="2026-09-28 09:00 UTC", intent="fix")
+    assert "lower bound" not in first
+    assert "lower bound" not in second

@@ -2599,6 +2599,44 @@ def test_parse_node_log_none_when_unusable(tmp_path):
     assert rr._parse_node_log(str(noise), _TOKENS) is None
 
 
+def _log(tmp_path, text):
+    log = tmp_path / "run.log"
+    log.write_bytes(text.encode("utf-8"))
+    return str(log)
+
+
+def test_parse_node_log_started_with_trailing_text_is_not_a_started_event(tmp_path):
+    # Archon prints a bare "[<name>] Started"; an agent line that goes on is prose.
+    assert rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Started more text\n"), _TOKENS) is None
+    assert rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Completed soon\n"
+                       "[dark-factory-implement] Failed badly\n"
+                       "[dark-factory-implement] Skipped it\n"), _TOKENS) is None
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x0b", "\x0c", "\x85", "\r"])
+def test_parse_node_log_only_a_newline_starts_a_line(tmp_path, sep):
+    text = f"agent prose{sep}[dark-factory-implement] Started\n"
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) is None
+
+
+def test_parse_node_log_reads_crlf_lines(tmp_path):
+    text = "[dark-factory-implement] Started\r\n[dark-factory-implement] Completed (1s)\r\n"
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) == {"implement": "Completed"}
+
+
+def test_parse_node_log_skipped_never_overrides_a_real_event(tmp_path):
+    text = ("[dark-factory-implement] Started\n"
+            "[dark-factory-implement] Completed (25m 55s)\n"
+            "[dark-factory-implement] Skipped (x)\n"
+            "[dark-factory-validate] Skipped (x)\n"
+            "[dark-factory-validate] Started\n"
+            "[digest-comments] Skipped (when_condition)\n")
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) == {
+        "implement": "Completed", "validate": "Started", "digest-comments": "Skipped"}
+
+
 # --- _classify_node_capture ---
 
 _TYPES = {"parse-intent": "prompt", "fetch-issue": "bash", "digest-comments": "bash",
@@ -2662,6 +2700,30 @@ def test_classify_ran_but_absent_node_is_missing_not_in_cost_report(event):
     assert added["cost_usd"] is None
     assert added["duration_ms"] is None
     assert missing == [{"node_id": "validate", "reason": "not_in_cost_report"}]
+
+
+def test_reported_zero_usage_ai_node_only_skipped_in_log_is_not_missing(tmp_path):
+    # A when:-gated node Archon still lists with zero usage never ran: its zero is real.
+    events = rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Skipped (when_condition)\n"), _TOKENS)
+    nodes, missing = rr._classify_node_capture([_rec_node("implement")], _TYPES, events)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert nodes[0]["cost_usd"] == 0
+    assert missing == []
+
+
+def test_prose_skipped_line_does_not_hide_a_388_shaped_node(tmp_path):
+    # #388: implement ran to completion and Archon reported zero usage. A later agent
+    # line shaped like a Skipped progress line must not turn that back into a real $0.
+    events = rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Started\n"
+                       "[dark-factory-implement] Completed (25m 55s)\n"
+                       "[dark-factory-implement] Skipped (x)\n"), _TOKENS)
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", ms=1_555_000)], _TYPES, events)
+    assert nodes[0]["cost_capture"] == "missing"
+    assert nodes[0]["cost_usd"] is None
+    assert missing == [{"node_id": "implement", "reason": "no_usage_reported"}]
 
 
 def test_classify_skipped_node_is_omitted():
