@@ -645,10 +645,21 @@ decision is a revision of this contract, not a downstream re-decision.
 | An endpoint credential leaks | References only; never in envelope, ledger, run record, log or comment (§4.3) |
 
 **Rollout rules.** Downstream tickets are opted in one at a time, in the order of their
-`Depends on:` lines. Merging any of them activates nothing: local endpoint selection is off by
-default, and is enabled only by operator-controlled instance config (a human-only surface —
-`deploy/instances/**` is never edited by a factory agent) after #562 has produced valid
-capability evidence for that endpoint. #562 and #564 are human-run and never scheduler-dispatched.
+`Depends on:` lines. Merging any of them activates nothing. #562's certification run and #563's
+offline/shadow runner are not dispatches in this contract's sense: they run outside the
+scheduler against non-sensitive fixtures, so the no-evidence-no-dispatch rule does not apply to
+them. #562's GO covers offline/shadow evaluation only (no production routing, no alias change);
+#563 extends that comparison with economics data, still with no write authority over production
+routing. A real workload runs locally only inside #564's canary, under the operator's prior
+written approval of that one lane. That approval requires #563's comparison, #239's static
+routing and #238's failure policy active for the lane, the first helper dispatch (#587), the
+no-auto-merge end-gate (#585) and the local-cost fix (#558, §4.10; #453's missing-cost fix has
+landed); the lane is enabled only via operator-controlled instance config (a human-only
+surface — `deploy/instances/**` is never edited by a factory agent). #564's signed GO/NO-GO is
+required before any wider use. A rollout precondition not owned by #557–#564: the
+session-window detector must be made local-endpoint-aware (#586, §4.10) before any local
+dispatch runs, so a local fault's captured stdout cannot trip the shared pause sentinel. #562
+and #564 are human-run and never scheduler-dispatched.
 
 **Rollback rule.** Rollback is unsetting the local endpoint selection in that operator-controlled
 config. With it unset, behaviour is byte-identical to today's `github/github/anthropic` default;
