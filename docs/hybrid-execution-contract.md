@@ -106,8 +106,11 @@ section governs.
 
 Dark Factory's model endpoint is today a single axis: `FACTORY_MODEL_PROVIDER` (default
 `anthropic`), documented in `docs/provider-abstraction-design.md` §7. Every dispatched run
-container gets exactly one `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` pair from
-`.archon/.env`, read once by Claude Code at process start; `ANTHROPIC_DEFAULT_{OPUS,SONNET,
+container's auth comes from exactly one `.archon/.env` by default — `CLAUDE_CODE_OAUTH_TOKEN`/
+`ANTHROPIC_API_KEY`, not `ANTHROPIC_AUTH_TOKEN` (which nothing on `main` sets), and with
+`ANTHROPIC_BASE_URL` unset (today's direct-to-Anthropic default; `ANTHROPIC_BASE_URL` is set
+only when opting into the `model_proxy.py` ledger via `FACTORY_MODEL_PROXY_ENABLED`) — read
+once by Claude Code at process start; `ANTHROPIC_DEFAULT_{OPUS,SONNET,
 HAIKU,FABLE}_MODEL` (`run-compose.yml`) likewise resolve the four tier aliases once per
 container. `scripts/factory_core/model_proxy.py` (shipped via #208) is an opt-in transparent
 Anthropic passthrough plus a request ledger — it forwards unchanged and tags every row
@@ -620,6 +623,14 @@ decision is a revision of this contract, not a downstream re-decision.
    named in the registry entry's model identity. An unset alias, or one that resolves to anything
    other than the certified model, fails preflight. Cloud alias pins in `run-compose.yml` are
    untouched.
+
+   Note (#580): the literal cloud model IDs pinned in `config/config.yaml` —
+   `conformance.shadow_model` (`claude-fable-5-1`) and `epic_autopilot.model`,
+   `main_red_autofix.model` and `deps_audit.model` (`claude-opus-5-5`) — are untouched and do
+   not resolve through the tier-alias mapping above, so the alias preflight does not see them. A
+   request from a local-routed container that names any model other than the certified one,
+   including a literal cloud model ID, is refused, never remapped (#559).
+
 3. **v1 local-eligible work** — *Accepted operator default (2026-11-22; confirmed by the
    owner in #580).* None of the existing gated phases (refine, plan, implement, conformance,
    docs-conformance, code-review) may be local-routed, because each runs its checker in the same
@@ -696,8 +707,9 @@ once before any wider use.
    an advisory, evadable regex over ticket text, fine as a stricter-only signal (§4.3) but not
    an egress control; a dedicated, operator-controlled payload-class field is the actual gate.
 4. **Reuse `side_effect.phase_levels` to express destination policy.** Rejected — that config
-   governs which tools/commands a phase may execute (#196's unbuilt enforcement scope), an
-   orthogonal concern to where model-request data is sent; conflating the two would make a
+   governs which tools/commands a phase may execute (enforced today by the per-level permission
+   profiles in `scripts/factory_core/side_effect.py`, #196), an orthogonal concern to where
+   model-request data is sent; conflating the two would make a
    confidentiality change look like (and require the review bar of) a side-effect/gate change.
 5. **One shared `schema_version` across configuration/request/result/capability contracts.**
    Rejected — the four contracts have different owners (#557/#558/#558/#561-#562) and change at
@@ -727,8 +739,8 @@ once before any wider use.
 - This checkout's state (`docs/provider-abstraction-design.md`, `scripts/factory_core/
   providers/model.py`, `scripts/factory_core/model_proxy.py`, `run-compose.yml`) was read live on
   2026-11-21 and is assumed representative of `main`; the branch head at refinement time matches
-  the merge-base with `main` (no stale-branch drift of the kind `docs/superpowers/specs/
-  2026-11-19-effective-config-widening-design.md` had to correct for).
+  the merge-base with `main` (no stale-branch drift of the kind the 2026-11-19
+  effective-config-widening refinement, #180, had to correct for).
 - Issues #202, #234, #238, #239, #288 (archived spec), #557–#564 were read live via `gh issue
   view` at refinement time (2026-11-21) and are assumed stable; if any has since been
   substantially re-scoped, §4.1's responsibility map and §4.9's delta should be re-checked

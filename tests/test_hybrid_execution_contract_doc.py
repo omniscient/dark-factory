@@ -165,9 +165,10 @@ def _tracked_files() -> list:
 
 def test_cited_repo_files_resolve():
     text = _doc_text()
+    collapsed = re.sub(r"`([^`]*)`", lambda m: "`" + re.sub(r"\s+", "", m.group(1)) + "`", text)
     files = _tracked_files()
     missing = []
-    for tok in sorted(set(CITATION_RE.findall(text))):
+    for tok in sorted(set(CITATION_RE.findall(collapsed))):
         if (REPO_ROOT / tok).is_file():
             continue
         if tok in PARTIAL_CITATION_ALLOWLIST and any(f.endswith("/" + tok) for f in files):
