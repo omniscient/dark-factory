@@ -84,15 +84,20 @@ first so that a contradiction stops the run before any code is written.
 
   ```bash
   grep -rn 'STATUS=\${STATUS:-missing}' scripts/
-  grep -rln 'STATUS=missing' scripts/ entrypoint.sh workflows/ commands/ | grep -v '^scripts/verdict_gate_check.sh$' || echo "no other emitter"
+  grep -rln 'STATUS=missing' scripts/ entrypoint.sh workflows/ commands/ | grep -vE '^scripts/(docs_)?verdict_gate_check\.sh$' || echo "no other emitter"
   ```
 
-  Expected: the first command prints one hit, `scripts/verdict_gate_check.sh` (the
-  quiet-branch `echo ... >&2`). The second prints `no other emitter`. Why this matters: the
-  issue body (#197) and the MarketHawk #439 comment both quote `STATUS=missing` from
-  captured container logs. The container log is `entrypoint.sh`'s stdout, which is the `tee`
-  of the Archon output, so the gate script's stderr reached that stream at least on the
-  quiet branch. That is indirect evidence.
+  Expected: the first command prints **two** hits, one per `bash:` verdict-gate script:
+  - `scripts/docs_verdict_gate_check.sh` (`_WHY="STATUS=${STATUS:-missing}"`, which that
+    script writes to stderr);
+  - `scripts/verdict_gate_check.sh` (the quiet-branch `echo ... >&2`).
+
+  The second command prints `no other emitter`. Its `grep -vE` drops both gate scripts.
+  Why this matters: the issue body (#197) and the MarketHawk #439 comment both quote
+  `STATUS=missing` from captured container logs. The container log is `entrypoint.sh`'s
+  stdout, the `tee` of the Archon output. That text is emitted only by the two `bash:`
+  verdict-gate scripts' stderr, so a `bash:` gate node's stderr reached that stream. In both
+  quoted cases it was `conformance-gate`'s quiet branch. This is indirect evidence.
 
 - [ ] **Step 2: Look for a captured log of a real failed run that you can read from
   inside the container.**
@@ -165,7 +170,8 @@ first so that a contradiction stops the run before any code is written.
   def test_verdict_missing_outranks_earlier_preview_infra_noise():
       # #197 shape: non-fatal preview warning early, the gate's silent-death line last.
       text = _BENIGN_PREVIEW + "implement: all 7 plan tasks complete, pushed\n" + _GATE_LINE + "\n"
-      assert _classify(text=text) == "substantive:verdict_missing"
+      sig = _classify(text=text)  # bind first: keep the fixture text out of a failure dump
+      assert sig == "substantive:verdict_missing"
 
 
   def test_verdict_missing_requires_gate_script_prefix():
@@ -180,7 +186,8 @@ first so that a contradiction stops the run before any code is written.
       # Operator decision (2026-11-23): a rate-limit death that ends in a missing verdict
       # stays environmental and never counts toward the breaker's substantive trip.
       for text in (_RATE_LIMIT_TEXT + "\n" + _GATE_LINE, _GATE_LINE + "\n" + _RATE_LIMIT_TEXT):
-          assert _classify(text=text) == "environmental:rate_limit"
+          sig = _classify(text=text)
+          assert sig == "environmental:rate_limit"
 
 
   def test_rate_limit_outranks_preview_infra():
@@ -339,8 +346,9 @@ first so that a contradiction stops the run before any code is written.
       rendered = (m.group(1)
                   .replace("${GATE_LABEL}", "Conformance (Gate 2)")
                   .replace("${ISSUE_NUM}", "197"))
-      assert _VERDICT_MISSING_RE.search(rendered), rendered
-      assert _classify(text=rendered) == "substantive:verdict_missing"
+      assert _VERDICT_MISSING_RE.search(rendered), rendered  # printed only when it does NOT match
+      sig = _classify(text=rendered)
+      assert sig == "substantive:verdict_missing"
 
 
   def test_gate_script_silent_death_echo_carries_classifier_cross_reference():
@@ -783,23 +791,42 @@ first so that a contradiction stops the run before any code is written.
 ## Task 7: Doc map — signature class list and shifted line refs
 
 `docs/run-lifecycle.md:1107-1112` lists the signature classes and cites
-`error_signature.py:37-64`. `docs/features.md:111` cites `emit_verdict` at
-`dark-factory-conformance.md:553` and `:701`. Tasks 2 and 4–6 move both.
+`error_signature.py:37-64`. Several refs in `docs/run-lifecycle.md` and `docs/features.md`
+point into `commands/dark-factory-conformance.md` past old line 296, or into
+`scripts/verdict_gate_check.sh`. Tasks 2–6 shift all of them. Refs at or before
+conformance line 296 do not move: `:60`–`:77`, `:151-220`, `:181`, `:208`, `:210`, `:284`.
 `scripts/docs_refs_check.py` only range-checks line numbers, so CI stays green either way;
 the refs still have to be true.
 
 **Files:** `docs/run-lifecycle.md`, `docs/features.md`
 
-- [ ] **Step 1: Get the new line numbers.**
+- [ ] **Step 1: Get the new line numbers.** Run this in one Bash call. Each anchor is the
+  text at the old cited line, and `head -1` takes the first match:
 
   ```bash
-  grep -n '^def classify' scripts/factory_core/error_signature.py
-  grep -n 'return f"substantive:unknown' scripts/factory_core/error_signature.py
-  grep -n 'emit_verdict "conformance"' commands/dark-factory-conformance.md
+  C=commands/dark-factory-conformance.md
+  _at() { grep -nF -- "$1" "$2" | head -1 | cut -d: -f1; }
+  echo "S=$(grep -n '^def classify' scripts/factory_core/error_signature.py | cut -d: -f1)   # old 37"
+  echo "E=$(grep -n 'return f"substantive:unknown' scripts/factory_core/error_signature.py | cut -d: -f1)   # old 64"
+  echo "SH5A_START=$(_at '5a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second' $C)   # old 300"
+  echo "SH5A_END=$(_at 'If `$SHADOW_MODEL_PIN` is empty, skip this step entirely for this cycle.' $C)   # old 316"
+  echo "P=$(_at 'emit_verdict "conformance" "PASS"' $C)   # old 553"
+  echo "P4_OOS_START=$(_at 'printf "VERDICT: %s\nCYCLES: %s\nNO_SPEC' $C)   # old 554"
+  echo "P4_OOS_END=$(_at '"${OOS_EXCISED:-0}" "${OOS_TICKETS:-}"' $C)   # old 556"
+  echo "P4SH_START=$(_at 'if [ -n "${SHADOW_MODEL_PIN:-}" ]; then' $C)   # old 560"
+  echo "P4SH_END=$(_at 'SHADOW_MODEL: ${SHADOW_MODEL_PIN}' $C)   # old 574"
+  echo "MEM=$(_at 'write_memory_entry "$TARGET"' $C)   # old 623"
+  echo "B=$(_at 'emit_verdict "conformance" "BLOCKED"' $C)   # old 701"
+  echo "P5X_START=$(_at '5. Exit non-zero (`exit 1`)' $C)   # old 715"
+  echo "P5X_END=$(_at 'internal `exit 1` does not reliably surface as node failure to the DAG executor (#212, #271).' $C)   # old 719"
+  echo "SPILL=$(_at 'SPILLOVER_TICKETS=""' $C)   # old 444"
+  echo "EXCISED=$(_at 'EXCISED_COUNT=<number of successfully excised changes>' $C)   # old 502"
+  D=$(_at '5. Re-get the diff:' $C); echo "REDIFF=$D-$((D+4))   # old 526-530"
+  echo "GATE_END=$(wc -l < scripts/verdict_gate_check.sh)   # old 86"
   ```
 
-  Note the `classify` start line (S), the `unknown` return line (E), and the two
-  `emit_verdict` lines (P for PASS, B for BLOCKED).
+  Every value must be non-empty and greater than its old number. If one is empty, the
+  anchor text was changed by mistake: re-check the task that touched it.
 
 - [ ] **Step 2: Edit `docs/run-lifecycle.md`.** Replace the class sentence:
 
@@ -823,9 +850,22 @@ the refs still have to be true.
      (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:S-E`).
   ```
 
-- [ ] **Step 3: Edit `docs/features.md:111`.** Change `dark-factory-conformance.md:553` to
-  `dark-factory-conformance.md:P`, and change the following `` `:701` `` to `` `:B` ``,
-  using the values from Step 1. Change nothing else on that row.
+- [ ] **Step 3: Replace the shifted refs** with the Step 1 values. Change only the numbers,
+  never the surrounding prose:
+
+  | Doc line (today) | Old ref text | New ref text |
+  |---|---|---|
+  | `docs/features.md:107` | `` `commands/dark-factory-conformance.md:300`-`:316` and `:560`-`:574` `` | `` `commands/dark-factory-conformance.md:SH5A_START`-`:SH5A_END` and `:P4SH_START`-`:P4SH_END` `` |
+  | `docs/features.md:111` | `` `dark-factory-conformance.md:553` and `:701` `` | `` `dark-factory-conformance.md:P` and `:B` `` |
+  | `docs/features.md:134` | `` `dark-factory-conformance.md:623` `` | `` `dark-factory-conformance.md:MEM` `` |
+  | `docs/run-lifecycle.md:786` | `` `commands/dark-factory-conformance.md:715-719` `` and `` `scripts/verdict_gate_check.sh:36-86` `` | `` `commands/dark-factory-conformance.md:P5X_START-P5X_END` `` and `` `scripts/verdict_gate_check.sh:36-GATE_END` `` |
+  | `docs/run-lifecycle.md:1214` | `` `commands/dark-factory-conformance.md:715-719` `` | `` `commands/dark-factory-conformance.md:P5X_START-P5X_END` `` |
+  | `docs/run-lifecycle.md:1289-1290` | `` `commands/dark-factory-conformance.md:554-556` ``, `` (`:444`, `:502`) `` | `` `commands/dark-factory-conformance.md:P4_OOS_START-P4_OOS_END` ``, `` (`:SPILL`, `:EXCISED`) `` |
+  | `docs/run-lifecycle.md:1297` | `` (`:526-530`) `` | `` (`:REDIFF`) `` |
+
+  (The `docs/run-lifecycle.md` line numbers are from before Step 2. Step 2 grows lines
+  1107–1112 by two lines, so 786 stays where it is, and 1214, 1289–1290 and 1297 each move
+  down by 2. Find them by their text.)
 
 - [ ] **Step 4: Verify.**
 
@@ -834,7 +874,12 @@ the refs still have to be true.
   sed -n "$(grep -n '^def classify' scripts/factory_core/error_signature.py | cut -d: -f1)p" scripts/factory_core/error_signature.py
   ```
 
-  Expected: `docs_refs_check.py` exits 0 with no errors, and the `sed` prints `def classify(`.
+  ```bash
+  grep -nE 'dark-factory-conformance\.md:(553|623|715-719|554-556)|md:300`-`:316|:560`-`:574|verdict_gate_check\.sh:36-86|error_signature\.py:37-64|\(`:444`, `:502`\)|\(`:526-530`\)' docs/run-lifecycle.md docs/features.md || echo "no stale refs"
+  ```
+
+  Expected: `docs_refs_check.py` exits 0 with no errors, the `sed` prints `def classify(`,
+  and the last command prints `no stale refs`.
 
 - [ ] **Step 5: Commit.**
 
@@ -919,8 +964,9 @@ writes.
 
   ## Unverified assumptions (for the human merger)
   - The Archon executor forwards the `conformance-gate` `bash:` node's stderr into the stream
-    `entrypoint.sh` tees to `TMP_OUT`. Indirect evidence: `STATUS=missing`, which only
-    `verdict_gate_check.sh`'s stderr emits, is quoted from container logs in #373 and #439.
+    `entrypoint.sh` tees to `TMP_OUT`. Indirect evidence: `STATUS=missing` is quoted from
+    container logs in #373 and #439, and that text is emitted only by the two `bash:`
+    verdict-gate scripts' stderr (`verdict_gate_check.sh`, `docs_verdict_gate_check.sh`).
   - Requirements 8/9 are agent instructions, not enforced mechanisms; the tests are static
     text checks only.
 
@@ -932,6 +978,11 @@ writes.
     regex does not match. Since #551 the DAG only reaches conformance after `blast-gate`
     passes, so that combination should now be rare. Whether the quiet-branch
     `STATUS=missing` line should also classify is a separate decision.
+  - `verdict_gate_check.sh` also backs `review-gate` (Gate 3,
+    `workflows/archon-dark-factory.yaml`), so a missing code-review verdict is also signed
+    `substantive:verdict_missing`. That is intended by the spec's `<gate label>` wording.
+    `docs_verdict_gate_check.sh` lines never contain `verdict missing/unparseable`, so they
+    do not match.
   ```
 
 ---
@@ -943,12 +994,14 @@ writes.
   Step 1; R4 → Task 2 Step 1; R5 → Task 2 Step 6; R6 → Task 2 Step 2 (part 1) + Task 1 +
   Task 9 (part 2); R7 → Task 5; R8 → Task 4; R9 → Task 6; R10 → Tasks 4–6
   (`tests/test_conformance_command_artifact_guard.py`); R11 → Task 3 Step 4 + Task 8 Step 4.
-- [x] No placeholders. The only runtime-computed values are Task 7's line numbers, and
-  Step 1 gives the exact command for each. Task 9's outcome text is copied from Task 1.
+- [x] No placeholders. The only runtime-computed values are Task 7's line numbers. Step 1
+  gives the exact anchor command for each, and Step 3 maps each one to its doc ref. Task 9's outcome text is copied from Task 1.
 - [x] No file in this plan's edits contains the gate's log line contiguously.
 - [x] Dry run (planner, 2026-11-23, scratch worktree off `2d9c7cf`): every edit block in
   Tasks 2–7 applied cleanly as written. Each "verify fail" step failed exactly as stated and
   each "verify pass" step passed. The full suite gave 3271 passed. Also green:
   `test_entrypoint_error_signature.sh` (14/0), `test_verdict_gate_check.sh`,
   `docs_refs_check.py` and `check_workflow_dag.py`. The Task 8 Step 5 self-classification
-  scan found no hits.
+  scan found no hits. After architect cycle 1, the revised Task 1 grep and Task 7's
+  anchor script were dry-run again. All 17 anchors resolved to the expected shifted lines,
+  and the Step 4 stale-ref grep printed `no stale refs`.
