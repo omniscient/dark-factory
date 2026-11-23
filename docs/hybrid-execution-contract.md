@@ -41,7 +41,10 @@ refinement.
 The body keeps its refinement-time wording. Statements about what "this phase" may output
 describe the refinement phase that produced it. References to precedents "reproduced below"
 (#189, #207) and to "§Scope boundary" point at refinement-time context that is not reproduced
-here; this contract's own scope limits are Requirement 7 and §4.10.
+here; this contract's own scope limits are Requirement 7 and §4.10. Where a Brainstorming Q&A
+answer differs from §4.1–§4.12 as revised by #580, the section governs — notably Q1's
+"different secret reference" proof, Q2's unscoped checker-endpoint check and "unknown on either
+side" wording, and Q3(a)'s `qualified_roles` and result states.
 
 ## Invariants (index)
 
@@ -50,12 +53,16 @@ section governs.
 
 1. Endpoint isolation is per dispatched run container; one container never mixes cloud and
    local endpoints in-process (Q1, §4.2).
-2. An independent checker is always a separate dispatch, cloud-routed by default. A nested
-   Agent-tool subagent of a local-routed parent is never a checker, and a verdict produced
-   inside a local-routed container is void (§4.2).
-3. Checker independence is proven by the dispatch record (`hosting_location: cloud` and an
-   `endpoint_id` different from the actor's), never by an agent's own claim; a row with
-   `correlation: "unknown"` is never that proof (§4.2, §4.4).
+2. For a local-routed actor's work, an independent checker is always a separate dispatch,
+   cloud-routed by default. A nested Agent-tool subagent of a local-routed parent is never a
+   checker, and a verdict produced inside a local-routed container is void (§4.2).
+3. This independence check applies only to a local-routed actor's work: for such work, a gate
+   verdict is accepted only if the dispatch record of the run that produced it shows
+   `hosting_location: cloud` and an `endpoint_id` different from the actor's dispatch, proven
+   by the record, never by an agent's own claim; a row with `correlation: "unknown"` is never
+   that proof. A cloud-routed actor's same-run checker (today's `conformance`/
+   `docs-conformance`/`code-review` nodes, and `refine`/`plan`'s in-process subagent checkers)
+   is unchanged by this contract (§4.2, §4.4).
 4. A dispatch is allowed only if the payload class is a member of the target entry's
    `accepts_payload_classes`; unknown or missing on either side blocks and escalates (§4.3).
 5. Payload class is stricter-only: no label, comment or model output can loosen it; only
@@ -250,7 +257,7 @@ Phase 6 issue comment):
 |---|---|---|
 | Endpoint registry, secrets, preflight (#557) | Named endpoints, hosting location, destination class, secret references, timeout bounds, `required_env()`-style preflight | A registry entry is valid only with: id, hosting location, destination class(es), model identity, timeout bounds, secret reference, `schema_version`. Preflight hard-fails on any missing field (mirrors today's `providers/model.py` posture for `databricks`/`openai`) |
 | Runtime adapter/gateway (#558) | The minimum code path that dispatches a request to the v1 local endpoint (an Anthropic-Messages-compatible local server, no translation layer — §4.11), preserving proxy/ledger and cloud parity | Must preserve §4.3's credential-stripping and correlation-envelope contract; must enforce §4.6's timeout/cancellation policy; must not introduce in-process cross-endpoint mixing (Q1) |
-| Worker/orchestrator/checker isolation (#559) | Enforcing that a checker dispatch is a separate container with a different endpoint | Consumes Q1's dispatch-record independence proof; must refuse (not silently downgrade) a nested-subagent checker claim |
+| Worker/orchestrator/checker isolation (#559) | Enforcing that a checker dispatch is a separate container with a different endpoint | Consumes §4.2's dispatch-record independence proof; must refuse (not silently downgrade) a nested-subagent checker claim |
 | Local deployment profile/runbook (#560) | Connectivity/resource controls, operator documentation | Owns the actual timeout/resource numbers Q3(c) defers; no production default changes |
 | Capability/role-isolation fixtures (#561) | The pinned test suite #562 runs | Must cover every capability dimension in Q3(a)'s result map, including timeout/cancel behavior |
 | Operator endpoint certification (#562) | The only valid author of capability evidence | `ready-for-human`, hard-blocked; never scheduler-dispatched; no production activation |
@@ -276,10 +283,10 @@ Building on Q1:
   correlation envelope's `role` field is in §4.4.
 - **Endpoint-role binding happens at dispatch, not at the Agent-tool call.** A dispatched run
   container is assigned exactly one endpoint (cloud or a certified local endpoint) and may host
-  `actor`/`worker`/`orchestrator` roles for that dispatch. It may never also host an independent
-  `checker` for the same unit of work — that checker must be a **separate dispatch**, and by
-  default remains cloud-routed (per the issue's "independent verification stays correctly
-  cloud-routed" definition of done).
+  `actor`/`worker`/`orchestrator` roles for that dispatch. A local-routed container may never
+  also host an independent `checker` for the same unit of work — that checker must be a
+  **separate dispatch**, and by default remains cloud-routed (per the issue's "independent
+  verification stays correctly cloud-routed" definition of done).
 - **Nested Agent-tool subagents inherit their parent's endpoint unconditionally** (this is
   native Claude Code behavior, not something this contract can change). Consequently: a
   local-routed orchestrator spawning an Agent-tool subagent may only label that subagent as
@@ -291,11 +298,17 @@ Building on Q1:
   run.
 - **The refusal is enforced by the harness, not by the model.** A local-routed orchestrator
   declining to spawn a checker is only `self_report`; it is not what the contract relies on. The
-  testable rule is: a gate verdict is accepted only if the dispatch record of the run that
-  produced it has `hosting_location: cloud` and an `endpoint_id` different from the actor's
-  dispatch. A verdict produced inside a local-routed container is void — it can neither pass nor
-  fail a gate — and the ticket escalates to `ready-for-human`. That check is a
-  `deterministic_check`-provenance event evaluated outside the agent.
+  testable rule is: **for work produced by a local-routed actor**, a gate verdict is accepted
+  only if the dispatch record of the run that produced it has `hosting_location: cloud` and an
+  `endpoint_id` different from the actor's dispatch (the dispatch record's schema —
+  `hosting_location`, `endpoint_id`, `correlation` — is #558's Result-contract row, §4.7). This
+  bullet is the single, normative statement of the proof; Invariant 3 restates it. A verdict
+  produced inside a local-routed container is void — it can neither pass nor fail a gate — and
+  the ticket escalates to `ready-for-human`. That check is a `deterministic_check`-provenance
+  event evaluated outside the agent. A cloud-routed actor's checker that happens to run in the
+  same dispatch (today's `conformance`/`docs-conformance`/`code-review` nodes, and
+  `refine`/`plan`'s in-process subagent checkers) needs no separate dispatch and is unaffected:
+  this rule changes nothing about today's all-cloud path.
 - **Consequence for today's DAG.** `conformance`, `docs-conformance` and `code-review` are nodes
   of the same run (same container, same `.archon/.env`) as `implement`, and `refine`/`plan` spawn
   their checkers in-process. No existing gated phase can therefore be local-routed under this
