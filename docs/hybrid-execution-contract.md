@@ -4,16 +4,26 @@
 
 **Contract version:** `hybrid_contract: "1.0"`
 
-**Status:** Proposed; accepted on the merge of the #556 PR by a human reviewer. Until that
-merge, no downstream implementation spec (#557–#564, or #239's re-refinement) may be written
-against this contract; the copy of this file on `main` is the accepted one. The five §4.11
-decisions are provisional operator defaults pending owner confirmation at that review.
+**Status:** Accepted — the #556 PR merged and this is the accepted copy on `main`. The five
+§4.11 decisions, carried at merge as provisional operator defaults pending owner confirmation,
+were confirmed as written by the owner in #580 (2026-11-22); downstream implementation specs
+(#557–#564, #239's re-refinement) may be written against this contract.
 
 **Revised:** 2026-11-22 — spec-gate review amendments: harness-enforced checker independence
 (§4.2), payload/destination predicate and default classes (§4.3), normative `role` values (§4.4),
 minimum failure outcomes (§4.6), budget/breaker/session-window invariants (§4.10), v1 selected
 path and provisional operator defaults (§4.11), risks and rollout/rollback rules (§4.12), #564 row
 (§4.1), and a corrected #288 taxonomy citation (Alternatives 6).
+
+**Revised (#580):** 2026-11-23 — post-merge independent-review amendments: acceptance status
+(header, §4.11), checker-independence scope (§4.2, Invariant 3), session-window citation and
+rollout precondition (§4.10, §4.12), credential invariant (§4.3, new Invariant 16),
+helper-dispatch definition (§4.11 decision 3), `local_only`/local-pinned split (§4.3,
+Invariants 4–7), mechanism owners (§4.2, §4.3, §4.7), §4.6/#238 interim enumeration,
+capability-evidence storage/vocabulary (§4.5), `cost_usd` owner (§4.10), rollout alignment
+(§4.12), keyword-signal scope (§4.3), and nits (Overview, About this document, §4.11
+decision 2, Alternatives 4, Assumptions, Invariant 5, the test's line-wrapped-citation and
+five-decisions checks, and the `docs/provider-abstraction-design.md` §7.5 pointer).
 
 ---
 
@@ -475,35 +485,35 @@ authorizes no change to any of them:
   `gate_*`, tool allow/deny lists, side-effect levels or `deploy/**` requires its own
   human-reviewed spec. Neither this contract nor comment-channel input authorizes one.
 
-### 4.11 v1 selected path and provisional operator defaults
+### 4.11 v1 selected path and accepted operator defaults
 
 The issue requires this contract to select the minimum supported cloud + one local path and to
-define model/tier resolution. The five decisions below are each a **Provisional operator default
-(2026-11-22), pending owner confirmation at PR review**. Downstream tickets build against them as
-written; a changed decision is a revision of this spec, not a downstream re-decision.
+define model/tier resolution. The five decisions below are accepted operator defaults, confirmed
+as written by the owner in #580. Downstream tickets build against them as written; a changed
+decision is a revision of this contract, not a downstream re-decision.
 
-1. **v1 local protocol** — *Provisional operator default (2026-11-22), pending owner
-   confirmation at PR review.* The cloud path is unchanged (`anthropic`, plus the existing native
+1. **v1 local protocol** — *Accepted operator default (2026-11-22; confirmed by the owner
+   in #580).* The cloud path is unchanged (`anthropic`, plus the existing native
    `bedrock`/`vertex` paths). The one supported local path is a local server that speaks the
    Anthropic Messages API, reached through `ANTHROPIC_BASE_URL`, with no translation layer. An
    OpenAI-shape or other non-Messages backend is out of scope for v1; #558 builds no translator.
-2. **Tier resolution on a local endpoint** — *Provisional operator default (2026-11-22), pending
-   owner confirmation at PR review.* All four tier aliases
+2. **Tier resolution on a local endpoint** — *Accepted operator default (2026-11-22; confirmed
+   by the owner in #580).* All four tier aliases
    (`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`) resolve to the one certified local model
    named in the registry entry's model identity. An unset alias, or one that resolves to anything
    other than the certified model, fails preflight. Cloud alias pins in `run-compose.yml` are
    untouched.
-3. **v1 local-eligible work** — *Provisional operator default (2026-11-22), pending owner
-   confirmation at PR review.* None of the existing gated phases (refine, plan, implement,
+3. **v1 local-eligible work** — *Accepted operator default (2026-11-22; confirmed by the
+   owner in #580).* None of the existing gated phases (refine, plan, implement,
    conformance, docs-conformance, code-review) may be local-routed, because each runs its
    checker in the same container (§4.2). Only new helper dispatches that have no checker are
    eligible. Running a real phase locally needs gates split into a separate dispatch; that is its
    own reviewed gate ticket and is out of scope for this contract and for #557–#561.
-4. **Default payload class** — *Provisional operator default (2026-11-22), pending owner
-   confirmation at PR review.* An unmarked ticket is `cloud_ok` on cloud, as today. Anything
+4. **Default payload class** — *Accepted operator default (2026-11-22; confirmed by the owner
+   in #580).* An unmarked ticket is `cloud_ok` on cloud, as today. Anything
    dispatched locally is `local_only` (§4.3).
-5. **Merge authority for `local_only` work** — *Provisional operator default (2026-11-22),
-   pending owner confirmation at PR review.* `local_only` work never auto-merges; the merge is
+5. **Merge authority for `local_only` work** — *Accepted operator default (2026-11-22;
+   confirmed by the owner in #580).* `local_only` work never auto-merges; the merge is
    always a human action (§4.3).
 
 ### 4.12 Risks and rollout/rollback rules

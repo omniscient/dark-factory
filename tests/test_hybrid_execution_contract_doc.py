@@ -29,7 +29,7 @@ REQUIRED_SECTIONS = [
     "### 4.8 Compatibility matrix — helper boundary vs. full Claude-harness compatibility",
     "### 4.9 Exact spec delta for #239",
     "### 4.10 Budgets, breaker and session-window invariants",
-    "### 4.11 v1 selected path and provisional operator defaults",
+    "### 4.11 v1 selected path and accepted operator defaults",
     "### 4.12 Risks and rollout/rollback rules",
     "## Alternatives Considered",
 ]
@@ -78,12 +78,12 @@ def _section(text: str, heading: str) -> str:
 
 
 def test_header_carries_issue_version_and_acceptance_status():
-    head = _doc_text().split("\n## ", 1)[0]
+    head = " ".join(_doc_text().split("\n## ", 1)[0].split())
     assert "**Issue:** #556" in head
     assert '**Contract version:** `hybrid_contract: "1.0"`' in head
-    assert "**Status:** Proposed" in head
-    assert "merge of the #556 PR by a human reviewer" in head
-    assert "provisional operator defaults pending owner confirmation" in head
+    assert "**Status:** Accepted" in head
+    assert "the #556 PR merged and this is the accepted copy on `main`" in head
+    assert "confirmed as written by the owner in #580" in head
 
 
 def test_required_sections_present_in_order():
@@ -127,10 +127,18 @@ def test_spec_delta_for_239_lists_items_12_to_15():
 
 
 def test_fail_closed_invariants_pinned():
-    text = _doc_text()
+    text = " ".join(_doc_text().split())
     for phrase in FAIL_CLOSED_INVARIANTS:
         assert phrase in text, f"fail-closed invariant weakened or removed: {phrase}"
-    assert text.count("Provisional operator default (2026-11-22)") >= 1
+
+
+def test_section_4_11_has_five_accepted_decisions():
+    section = _section(_doc_text(), "### 4.11 v1 selected path and accepted operator defaults")
+    items = re.split(r"^\d+\. ", section, flags=re.MULTILINE)[1:]
+    assert len(items) == 5, f"expected five §4.11 decisions, found {len(items)}"
+    for n, item in enumerate(items, 1):
+        assert "Accepted operator default (2026-11-22" in " ".join(item.split()), (
+            f"§4.11 decision {n} does not carry the accepted-default marker")
 
 
 def test_invariants_index_cites_existing_sections():
