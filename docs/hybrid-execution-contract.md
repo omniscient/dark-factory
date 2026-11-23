@@ -532,11 +532,20 @@ decision is a revision of this contract, not a downstream re-decision.
    other than the certified model, fails preflight. Cloud alias pins in `run-compose.yml` are
    untouched.
 3. **v1 local-eligible work** — *Accepted operator default (2026-11-22; confirmed by the
-   owner in #580).* None of the existing gated phases (refine, plan, implement,
-   conformance, docs-conformance, code-review) may be local-routed, because each runs its
-   checker in the same container (§4.2). Only new helper dispatches that have no checker are
-   eligible. Running a real phase locally needs gates split into a separate dispatch; that is its
-   own reviewed gate ticket and is out of scope for this contract and for #557–#561.
+   owner in #580).* None of the existing gated phases (refine, plan, implement, conformance,
+   docs-conformance, code-review) may be local-routed, because each runs its checker in the same
+   container (§4.2). Only new **helper dispatches** are eligible — defined here concretely: a
+   helper dispatch is a separately scheduled run container with its own endpoint config, doing
+   non-gating work with no in-container checker, whose output is only an artifact until a
+   cloud-routed check in a *different* dispatch accepts it (proven by the dispatch record,
+   §4.2). In v1 a helper dispatch is limited to work whose declared payload class is `cloud_ok`
+   or absent (§4.3). No ticket among #557–#564 builds the first concrete helper-dispatch
+   instance — their scopes are registry/preflight, runtime adapter, route isolation, deploy
+   profile, fixtures, certification, offline/shadow economics comparison, and the opt-in
+   canary. #587 builds it, and depends on #585 (the no-auto-merge end-gate) and #586
+   (local-aware session-window detection). Running a real phase locally needs gates split into
+   a separate dispatch; that is its own reviewed gate ticket and is out of scope for this
+   contract and for #557–#561.
 4. **Default payload class** — *Accepted operator default (2026-11-22; confirmed by the owner
    in #580).* An unmarked ticket is `cloud_ok` on cloud, as today. Anything
    dispatched locally is `local_only` (§4.3).
