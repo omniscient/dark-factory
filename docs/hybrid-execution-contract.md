@@ -453,10 +453,14 @@ its own timeout. Every timeout or cancellation event resolves to one of #238's n
 classes and is written to the run record — never a silent hang, never an unclassified error,
 never an implicit retry to a different endpoint.
 
-The class names are #238's to choose, but its taxonomy must distinguish at least these
-local-endpoint outcomes: endpoint unreachable; timeout (connect, time-to-first-token, idle,
-total); cancellation; protocol incompatibility; capability evidence missing, expired or
-mismatched; destination-policy denial. None of them is retryable against a different endpoint.
+The class names are #238's to choose. Until #238 lands, the list below is this contract's
+**interim enumeration**, which #558 implements directly (#558 depends only on #557, not on
+#238, so it is not blocked waiting for #238's taxonomy). #238's taxonomy must distinguish at
+least these local-endpoint outcomes: endpoint unreachable; timeout (connect,
+time-to-first-token, idle, total); cancellation; protocol incompatibility; capability evidence
+missing, expired or mismatched; destination-policy denial. None of them is retryable against a
+different endpoint. When #238 ships its own class names, #558's interim enumeration is
+superseded by them, not duplicated alongside them.
 
 ### 4.7 Versioned contracts and ledger extension
 
