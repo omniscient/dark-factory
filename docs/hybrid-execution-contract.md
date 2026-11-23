@@ -399,6 +399,16 @@ Per Q2 and Q3(c):
   with push/comment/label scope) unless its own reviewed implementation spec explicitly grants
   one — #557 and #558 already require this for the endpoint/runtime-adapter surfaces they own;
   this contract states it as a cross-cutting invariant so #559–#564 inherit it too.
+- **`safety.sensitive_keywords` reuse (stricter-only, local-eligibility only):**
+  `.factory/adapter.yaml`'s existing `safety.sensitive_keywords` regex may be reused as a
+  *stricter-only* signal restricted to **local-eligibility decisions**: a hit never changes the
+  declared class and is evaluated only when a ticket is considered for a local dispatch. That
+  dispatch's output is then treated as declared-`local_only` (human or local check only, so not
+  a v1 helper-dispatch candidate) and the ticket escalates. It never authorizes anything, never
+  affects a cloud-routed dispatch (today's `github/github/anthropic` path is completely
+  unchanged by this signal), and never loosens any class. It is advisory/evadable regex over
+  ticket text — not an egress control — so it is never the sole mechanism gating a local
+  dispatch; the dispatch-time predicate above is.
 - **Unqualified/unverifiable routes must abstain or escalate, never fail open.** This applies
   uniformly to: missing capability evidence (§4.5), payload/destination mismatch, correlation
   that cannot be attributed (§4.4), and any local endpoint timeout/cancellation (§4.6).
