@@ -90,6 +90,9 @@ section governs.
 15. Merging a downstream ticket activates nothing. Rollback is unsetting the local endpoint
     selection in operator-controlled config, which restores today's default byte for byte; an
     in-flight local run fails closed and is never re-run on cloud automatically (§4.12).
+16. A local-routed run container holds no cloud model credential and sends none to the local
+    endpoint; it holds no tracker or code-host write credential unless its own reviewed spec
+    explicitly grants one (§4.3).
 
 ---
 
@@ -357,6 +360,12 @@ Per Q2 and Q3(c):
   `model_proxy.py`'s existing `redact_headers()` posture (`authorization`/`x-api-key`/`api-key`/
   `x-factory-*-(token|secret)` redaction) and extends it: any new per-persona/correlation header
   this contract specifies must be added to that redaction set by whichever ticket implements it.
+- **Credential scope for a local-routed container.** A local-routed container is issued no
+  cloud model credential at all (not merely stripped before forwarding) and sends none to the
+  local endpoint. It is issued no tracker or code-host write credential (e.g. no `GH_TOKEN`
+  with push/comment/label scope) unless its own reviewed implementation spec explicitly grants
+  one — #557 and #558 already require this for the endpoint/runtime-adapter surfaces they own;
+  this contract states it as a cross-cutting invariant so #559–#564 inherit it too.
 - **Unqualified/unverifiable routes must abstain or escalate, never fail open.** This applies
   uniformly to: missing capability evidence (§4.5), payload/destination mismatch, correlation
   that cannot be attributed (§4.4), and any local endpoint timeout/cancellation (§4.6).
