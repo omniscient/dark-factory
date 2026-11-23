@@ -187,8 +187,9 @@ Named by mechanism — the string "bypass" does not appear in the enforcement co
   governs here specifically.) Even when `enabled: false`, it never suppresses the floor or
   the semantic adapter diff — it suppresses only the hotspot and size triggers.
 - **The self-target instance cannot substitute its own gate script.**
-  `commands/dark-factory-validate.md` prefers the image-baked
-  `/opt/dark-factory/scripts/gate_blast_radius.py`, falling back to the clone's own
+  `scripts/blast_gate_check.sh` (called by validate Phase 0, `blast-gate`, the
+  `push-and-pr` re-check and `close-preview`; each prefers the baked checker too) runs the
+  image-baked `/opt/dark-factory/scripts/gate_blast_radius.py`, falling back to the clone's own
   `dark-factory/scripts/gate_blast_radius.py` only if the baked copy is absent — a target
   that tracks its own `dark-factory/scripts/` is not the copy that decides its own gate.
 
@@ -270,11 +271,12 @@ writing:
   bare `4`, not `scripts/factory_core/side_effect.py::FACTORY_OWNED_MIN_LEVEL`, and no test
   pins the two together (`tests/test_side_effect.py` pins only `scripts/factory_core/verifier.py`'s
   private copy). Retuning the constant would silently leave adapter validation at 4.
-- **#374** — a `HUMAN_REQUIRED` block from `scripts/gate_blast_radius.py` has no approval
-  memory; re-running validate after an operator clears `needs-discussion` re-blocks
-  identically.
-- **#407** — nothing deterministic consumes `blast.md`; `scripts/verdict_gate_check.sh`
-  only guards `conformance.md`/`review.md`.
+- **#374, #407 — resolved by #551.** A `HUMAN_REQUIRED` block is cleared only by a signed,
+  content-bound approval record (`approve-blast.sh`, operator host), and
+  `scripts/blast_gate_check.sh` enforces it deterministically in the `blast-gate` node,
+  the `push-and-pr` re-check and the `close-preview` merge check. The approver key path
+  (`blast-approvers.asc` under `.factory/`) is on the hard-trigger floor. Still open: an operator
+  hand-merge (`gh pr merge`) is not checked.
 - **#412** — fail-closed findings from
   `scripts/gate_blast_radius.py::_adapter_snapshot` carry no diagnostic beyond
   "adapter.yaml unparseable at `<ref>`", and the base ref is validated against HEAD's

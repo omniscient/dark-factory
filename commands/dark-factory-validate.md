@@ -57,66 +57,30 @@ shell-level pre-check that reads `.claude/skills/refinement/config.yaml` and ski
 invocation; that would silently re-open the bypass this ticket closes.
 
 ```bash
-# 1. Get changed files and real line count
-CHANGED=$(git diff main...HEAD --name-only 2>/dev/null || echo "")
-ADDED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
-DELETED=$(git diff main...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
-LINES=$((ADDED + DELETED))
+# Run the one deterministic checker (#551) -- the same script the blast-gate DAG node,
+# the push-and-pr re-check and the close-time check run. It fetches origin main into
+# refs/blast-gate/trusted-main, computes the three-dot changed-file list and line count,
+# runs the baked gate_blast_radius.py (clone copy only when the image has none) with
+# --issue so a signed operator approval is honoured, and writes blast.md.
+_BGC=/opt/dark-factory/scripts/blast_gate_check.sh
+[ -f "$_BGC" ] || _BGC="dark-factory/scripts/blast_gate_check.sh"  # TARGET-PATH
+BLAST_RC=0
+bash "$_BGC" --issue "$ISSUE_NUM" --mode run --out "$ARTIFACTS_DIR/blast.md" || BLAST_RC=$?
 
-# 2. Run the blast-radius checker — pass real line count via --lines-changed.
-# Prefer the baked copy (operator review F9): a target that tracks its own
-# dark-factory/scripts/gate_blast_radius.py (the F2 floor's shadowing-path entry
-# detects that at PR time) must not be the copy that decides its own gate. Falls back
-# to the clone-relative copy when the baked path is absent (local/non-container runs)
-# -- spec's explicitly-sanctioned fallback (F9), not a silent skip. --clone-dir points
-# at the actual clone either way, so adapter.yaml/git-history lookups resolve there.
-REPO_ROOT=$(git rev-parse --show-toplevel)
-BASE_SHA=$(git merge-base main HEAD 2>/dev/null || echo main)
-GATE_SCRIPT="/opt/dark-factory/scripts/gate_blast_radius.py"
-[ -f "$GATE_SCRIPT" ] || GATE_SCRIPT="dark-factory/scripts/gate_blast_radius.py"  # TARGET-PATH
-echo "$CHANGED" | python3 "$GATE_SCRIPT" \
-  --changed-files-stdin \
-  --lines-changed "$LINES" \
-  --hotspots docs/codeindex-hotspots.md \
-  --config .claude/skills/refinement/config.yaml \
-  --clone-dir "$REPO_ROOT" \
-  --base-ref "$BASE_SHA" \
-  > "$ARTIFACTS_DIR/blast.md"
-
-# 3. Read verdict — guard with || true so grep's exit-1-on-no-match doesn't abort under set -e
-BLAST_STATUS=$(grep '^STATUS:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2 || true)
-BLAST_TRIGGER=$(grep '^TRIGGER:' "$ARTIFACTS_DIR/blast.md" | cut -d' ' -f2- || true)
-BLAST_FILES=$(grep '^\s*-' "$ARTIFACTS_DIR/blast.md" | head -10 || true)
-
-# 4. Block on HUMAN_REQUIRED
-if [ "$BLAST_STATUS" = "HUMAN_REQUIRED" ]; then
-  FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
-  gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
-## Blast-Radius Gate — BLOCKED
-
-The blast-radius gate has flagged this change as requiring human review before it can auto-merge.
-
-**Trigger:** $BLAST_TRIGGER
-
-**Triggered files:**
-$BLAST_FILES
-
-Remove the \`needs-discussion\` label after reviewing and approving the risk, then re-run validate:
-\`\`\`
-docker compose --profile factory run --rm dark-factory "Validate issue #$ISSUE_NUM"
-\`\`\`
----
-$FOOTER
-EOF
-)"
-  python3 dark-factory/scripts/factory_core/providers/cli.py \
-    tracker label --id "$ISSUE_NUM" --add needs-discussion  # TARGET-PATH
-  # Move to Blocked on the project board
-  python3 dark-factory/scripts/factory_core/providers/cli.py \
-    tracker set-status --id "$ISSUE_NUM" --status blocked  # TARGET-PATH
+# Exit 1 = HUMAN_REQUIRED (no matching signed approval), exit 2 = checker failure.
+# Either way stop validating. Do not comment, label or move the board: the blast-gate
+# node right after this phase does all of that deterministically, whatever this phase does.
+if [ "$BLAST_RC" -ne 0 ]; then
+  echo "Blast-radius gate: held (exit $BLAST_RC) — see $ARTIFACTS_DIR/blast.md; blast-gate takes the hold steps."
   exit 1
 fi
 ```
+
+If the checker exits non-zero, end this phase there. Do not post a comment, add a label,
+change the board, push, or try to judge whether an earlier human review "resolved" the
+block — an operator approval is honoured only through the signed record the checker
+already looked up. On exit 0 (`PASS`, `SKIPPED`, or `PASS` on a matched approval)
+continue with Phase 1.
 
 ## Phase 1: LOAD
 

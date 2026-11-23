@@ -90,7 +90,8 @@ class GitLabCodeHost(CodeHost):
         )
 
     def merge_change(self, id: str, strategy: str = "merge", delete_branch: bool = True,
-                      repo: str | None = None) -> bool:
+                      repo: str | None = None, match_head: str | None = None) -> bool:
+        # match_head maps to the MR merge API's `sha` parameter once this is live (#551).
         _validate_change_id(id)
         raise NotImplementedError(
             "live GitLab MR merge API — deferred; see "

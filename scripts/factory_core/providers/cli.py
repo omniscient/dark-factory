@@ -195,8 +195,11 @@ def _codehost_mark_ready(args):
 
 
 def _codehost_merge(args):
+    # match_head only when given, so providers/fakes predating #551 keep working.
+    extra = {"match_head": args.match_head} if args.match_head else {}
     _print(get_codehost().merge_change(
-        args.id, strategy=args.strategy, delete_branch=args.delete_branch, repo=args.repo))
+        args.id, strategy=args.strategy, delete_branch=args.delete_branch, repo=args.repo,
+        **extra))
 
 
 def _codehost_checks(args):
@@ -355,6 +358,8 @@ def main():
     cm.add_argument("--strategy", default="merge")
     cm.add_argument("--delete-branch", action=argparse.BooleanOptionalAction, default=True)
     cm.add_argument("--repo")
+    cm.add_argument("--match-head", default=None,
+                    help="Refuse the merge unless the change head is exactly this sha (#551)")
     cm.set_defaults(func=_codehost_merge)
 
     cc = csub.add_parser("checks")

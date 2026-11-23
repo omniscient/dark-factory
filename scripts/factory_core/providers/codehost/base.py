@@ -39,8 +39,10 @@ class CodeHost(ABC):
 
     @abstractmethod
     def merge_change(self, id: str, strategy: str = "merge",
-                      delete_branch: bool = True, repo: str | None = None) -> bool:
-        ...
+                      delete_branch: bool = True, repo: str | None = None,
+                      match_head: str | None = None) -> bool:
+        """Merge; with match_head, refuse unless the change's head is exactly that sha
+        (#551: the close-time blast-radius check pins the head it verified)."""
 
     @abstractmethod
     def get_change_checks(self, id: str, fields: str = "name,bucket,link",

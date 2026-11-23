@@ -160,6 +160,15 @@ def test_merge_change_matches_run_dag_close_preview(monkeypatch):
     assert ok is True
 
 
+def test_merge_change_pins_match_head_commit(monkeypatch):
+    """#551: close-preview merges only the head its blast-radius check verified."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(returncode=0))[1])
+    GitHubCodeHost().merge_change("9", match_head="a" * 40)
+    assert calls[0] == ["gh", "pr", "merge", "9", "--merge", "--delete-branch",
+                        "--match-head-commit", "a" * 40]
+
+
 def test_merge_change_matches_main_red_fixer(monkeypatch):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(returncode=0))[1])
