@@ -778,14 +778,17 @@ Phase 4 and Phase 5 (#373).
    is the reviewer's real one, produced by the existing Phase 4/5 code — this section adds
    no new way to reach a pass.
 5. Otherwise — no usable reviewer response exists and the reconcile budget cannot produce
-   one — leave the file absent and fail loudly:
+   one — leave the file absent and emit a stderr marker:
    ```bash
    echo "dark-factory-conformance: artifact guard — $ARTIFACTS_DIR/conformance.md was never written and no reviewer response is available to write it from; leaving it absent so conformance-gate blocks and posts its failure comment." >&2
    exit 1
    ```
-   Do not create the file. `conformance-gate` (`scripts/verdict_gate_check.sh`) then takes
-   its missing-verdict path unchanged: it posts the `<!-- df-push-gate-failure -->` comment
-   and logs the line `scripts/factory_core/error_signature.py` signs
-   `substantive:verdict_missing`. A file written here would instead send the gate down its
-   quiet "upstream already communicated" branch, suppressing that comment and that log
-   line — the silent, misclassified failure #373 fixes.
+   That `exit 1` runs inside this Bash tool call and only exits its own shell — it does not
+   make this phase or the conformance node fail; the marker line is for the transcript/log
+   only. Do not create the file. The actual block is enforced downstream: `conformance-gate`
+   (`scripts/verdict_gate_check.sh`) takes its missing-verdict path unchanged, posting the
+   `<!-- df-push-gate-failure -->` comment and logging the line
+   `scripts/factory_core/error_signature.py` signs `substantive:verdict_missing`. A file
+   written here would instead send the gate down its quiet "upstream already communicated"
+   branch, suppressing that comment and that log line — the silent, misclassified failure
+   #373 fixes.
