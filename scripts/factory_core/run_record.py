@@ -327,6 +327,228 @@ def _parse_archon_cost_with_capture(
     return nodes, {"ok": True, "exit_code": exit_code, "stderr_excerpt": stderr_excerpt}
 
 
+# --- Per-node cost capture (#453) -------------------------------------------------
+# The workflow YAML Archon actually executes: the clone's own copy, else the baked one
+# (entrypoint.sh copies the baked workflows into a target clone that has none).
+WORKFLOW_YAML_REL = pathlib.Path(".archon") / "workflows" / "archon-dark-factory.yaml"
+BAKED_WORKFLOW_PATH = pathlib.Path("/opt/dark-factory/workflows/archon-dark-factory.yaml")
+_NODE_TYPE_KEYS = ("command", "prompt", "bash")
+_AI_NODE_TYPES = ("command", "prompt")
+# Archon's `archon workflow run` progress line: `[<command ?? id>] Started|Completed (..)|
+# Failed: ..|Skipped (..)`. Anchored at line start; the token must be a known name. Each
+# event word is also anchored to its exact trailing shape (bare end-of-line for Started,
+# "(" for Completed/Skipped, ":" for Failed) so a streamed agent/tool line that merely
+# starts with e.g. "[implement] Started <more text>" is not mistaken for Archon's own
+# progress line (df#453 advisory).
+_NODE_LOG_RE = re.compile(
+    r"^\[([A-Za-z0-9_-]+)\]\s+"
+    r"(Started(?=\s*$)|Completed(?=\s*\()|Failed(?=:)|Skipped(?=\s*\())"
+)
+
+
+def _load_workflow_node_maps(clone_dir) -> "tuple[dict, dict] | None":
+    """(node_id -> "command"|"prompt"|"bash", log token -> node_id), or None.
+
+    Archon names a command: node by its command: value in its log lines
+    (`[dark-factory-implement] Started` for id `implement`) and every other node by its
+    id:, so both are log tokens. A token two nodes claim is dropped as ambiguous. None
+    when neither the clone's nor the baked workflow YAML loads — node types are then
+    unknown and nothing may be classified (an unknown type is never treated as bash).
+    """
+    try:
+        import yaml
+    except ImportError:
+        return None
+    for path in (pathlib.Path(clone_dir or ".") / WORKFLOW_YAML_REL, BAKED_WORKFLOW_PATH):
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        wf_nodes = doc.get("nodes") if isinstance(doc, dict) else None
+        if not isinstance(wf_nodes, list):
+            continue
+        node_types: dict = {}
+        log_tokens: dict = {}
+        ambiguous: set = set()
+        for n in wf_nodes:
+            if not isinstance(n, dict) or not isinstance(n.get("id"), str):
+                continue
+            node_id = n["id"]
+            kind = next((k for k in _NODE_TYPE_KEYS if k in n), None)
+            if kind:
+                node_types[node_id] = kind
+            names = [node_id]
+            if isinstance(n.get("command"), str):
+                names.append(n["command"])
+            for name in names:
+                if log_tokens.get(name, node_id) != node_id:
+                    ambiguous.add(name)
+                log_tokens[name] = node_id
+        for name in ambiguous:
+            log_tokens.pop(name, None)
+        if node_types:
+            return node_types, log_tokens
+    return None
+
+
+def _parse_node_log(log_file, log_tokens: dict) -> "dict | None":
+    """node_id -> last Started/Completed/Failed event from the tee'd
+    `archon workflow run` output ($TMP_OUT), in first-seen order; Skipped only when it is
+    the node's sole event. None when the file is absent/unreadable or no line names a
+    known node.
+
+    The log also carries every agent's streamed output, so a line start is a real "\n"
+    only (a trailing "\r" is dropped): a bare "\r" or a Unicode separator such as U+2028
+    inside agent prose does not begin a line. A node that ran never reads as Skipped: a
+    Skipped line seen alongside a Started/Completed/Failed one for the same node is
+    ignored, so a prose `[<name>] Skipped (..)` line cannot turn a node whose usage Archon
+    lost back into a genuine zero (the #388 shape).
+    """
+    if not log_file:
+        return None
+    try:
+        text = pathlib.Path(log_file).read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    events: dict = {}
+    for line in text.split("\n"):
+        m = _NODE_LOG_RE.match(line[:-1] if line.endswith("\r") else line)
+        if not m or m.group(1) not in log_tokens:
+            continue
+        node_id, event = log_tokens[m.group(1)], m.group(2)
+        if event == "Skipped" and events.get(node_id, "Skipped") != "Skipped":
+            continue
+        events[node_id] = event
+    return events or None
+
+
+def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | None") -> "tuple[list, list]":
+    """Mark each node cost_capture completed/missing (#453). Returns (nodes, missing).
+
+    A reported command:/prompt: node with all-zero usage lost its usage in Archon: it is
+    missing/no_usage_reported with null cost/tokens (duration kept). A bash: zero is real.
+    With a parsed log, a command:/prompt: node that started but is absent from the cost
+    report is appended as missing/not_in_cost_report; a Skipped node never ran and is not
+    emitted, and an absent bash: node spent nothing and is not emitted either. A node that
+    IS reported (present in the cost report, e.g. a `when:`-gated node Archon still lists
+    with zero usage) but whose only log event is Skipped never ran either, so its zero is
+    genuine, not a missing-capture — it is left as completed rather than flagged missing
+    (_parse_node_log reports Skipped only for a node with no other event).
+    """
+    out: list = []
+    missing: list = []
+    for node in nodes:
+        node = dict(node)
+        zero = not any(
+            node.get(k)
+            for k in ("cost_usd", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
+        )
+        skipped = (log_events or {}).get(node.get("node_id")) == "Skipped"
+        if node_types.get(node.get("node_id")) in _AI_NODE_TYPES and zero and not skipped:
+            node.update({
+                "gen_ai.usage.input_tokens": None,
+                "gen_ai.usage.output_tokens": None,
+                "cost_usd": None,
+                "cost_capture": "missing",
+                "reason": "no_usage_reported",
+            })
+            missing.append({"node_id": node.get("node_id", ""), "reason": "no_usage_reported"})
+        else:
+            node["cost_capture"] = "completed"
+        out.append(node)
+    reported = {n.get("node_id") for n in nodes}
+    for node_id, event in (log_events or {}).items():
+        if node_id in reported or event == "Skipped" or node_types.get(node_id) not in _AI_NODE_TYPES:
+            continue
+        out.append({
+            "node_id": node_id,
+            "model": "",
+            "gen_ai.usage.input_tokens": None,
+            "gen_ai.usage.output_tokens": None,
+            "cost_usd": None,
+            "duration_ms": None,
+            "cost_capture": "missing",
+            "reason": "not_in_cost_report",
+        })
+        missing.append({"node_id": node_id, "reason": "not_in_cost_report"})
+    return out, missing
+
+
+def _sum_usage(nodes: list) -> "tuple":
+    return (
+        sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes),
+        sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes),
+        sum(n.get("cost_usd", 0) for n in nodes),
+    )
+
+
+def _capture_totals(nodes: list, *, capture_ok: bool, clone_dir, archon_log_file,
+                    issue: int, run_id: str) -> "tuple[list, dict]":
+    """Classify per-node cost capture and build run-record totals (#453).
+
+    totals.cost_usd/token totals keep their fully-measured meaning: null when capture
+    failed (df#300) or is partial. known_* sum only completed nodes. Emits one
+    non-blocking health event per missing node, plus one when the workflow YAML or the
+    node log is unavailable.
+    """
+    totals = {
+        "gen_ai.usage.input_tokens": None,
+        "gen_ai.usage.output_tokens": None,
+        "cost_usd": None,
+        "cost_capture": "unavailable",
+        "node_log": "unavailable",
+        "known_cost_usd": None,
+        "known_input_tokens": None,
+        "known_output_tokens": None,
+        "missing_nodes": [],
+    }
+    if not capture_ok:
+        return nodes, totals
+
+    maps = _load_workflow_node_maps(clone_dir)
+    if maps is None:
+        emit_health_event(
+            "factory.cost_report.node_types_unavailable", issue, run_id,
+            {"clone_dir": str(clone_dir)},
+        )
+        tin, tout, cost = _sum_usage(nodes)
+        totals.update({
+            "gen_ai.usage.input_tokens": tin,
+            "gen_ai.usage.output_tokens": tout,
+            "cost_usd": cost,
+            "cost_capture": "unknown",
+        })
+        return nodes, totals
+
+    node_types, log_tokens = maps
+    log_events = _parse_node_log(archon_log_file, log_tokens)
+    if log_events is None:
+        emit_health_event(
+            "factory.cost_report.node_log_unavailable", issue, run_id,
+            {"archon_log_file": str(archon_log_file or "")},
+        )
+    nodes, missing = _classify_node_capture(nodes, node_types, log_events)
+    for entry in missing:
+        emit_health_event("factory.cost_report.node_missing", issue, run_id, dict(entry))
+
+    known_in, known_out, known_cost = _sum_usage(
+        [n for n in nodes if n.get("cost_capture") == "completed"]
+    )
+    complete = not missing
+    totals.update({
+        "gen_ai.usage.input_tokens": known_in if complete else None,
+        "gen_ai.usage.output_tokens": known_out if complete else None,
+        "cost_usd": known_cost if complete else None,
+        "cost_capture": "complete" if complete else "partial",
+        "node_log": "unavailable" if log_events is None else "parsed",
+        "known_cost_usd": known_cost,
+        "known_input_tokens": known_in,
+        "known_output_tokens": known_out,
+        "missing_nodes": missing,
+    })
+    return nodes, totals
+
+
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
     """Extract stage verdict and metadata from a verdict artifact .md file.
 
@@ -649,19 +871,20 @@ def _check_needs_discussion(issue) -> tuple:
     return NEEDS_DISCUSSION_LABEL in names, True
 
 
-def _push_result_is_fresh(push_path: pathlib.Path, started_at: str) -> bool:
-    """True if push_path's mtime is not older than this run's --started-at (#447 advisory).
+def _artifact_is_fresh(path: pathlib.Path, started_at: str) -> bool:
+    """True if path's mtime is not older than this run's --started-at (#447 advisory, #573).
 
     `archon workflow cost --last` can hand back an earlier workflow run's id when the
     current run was never recorded there (see _archon_workflow_run_id) — without this
-    check, that earlier run's push-result.json in the sibling directory would be
-    mistaken for this run's artifact. Unparseable started_at or an unreadable mtime
-    fails closed (not fresh): a spurious produced_ungated/1.0 is the failure mode #447
-    exists to remove, so an unverifiable timestamp must not be treated as evidence.
+    check, that earlier run's push-result.json or gate-stage .md file in the sibling
+    directory would be mistaken for this run's artifact. Unparseable started_at or an
+    unreadable mtime fails closed (not fresh): an unverifiable timestamp must not be
+    treated as evidence (a stale review.md could score this run blocked, a stale
+    push-result.json a spurious produced_ungated/1.0).
     """
     try:
         started = datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        mtime = datetime.fromtimestamp(push_path.stat().st_mtime, tz=timezone.utc)
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     except (ValueError, TypeError, OSError):
         return False
     return mtime >= started
@@ -673,7 +896,8 @@ def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | N
     Archon gives every DAG node its own $ARTIFACTS_DIR, runs/<workflow run id> (see
     FACTORY_RUN_CONFIG_JSON in entrypoint.sh), a sibling of the entrypoint's runs/<RUN_ID>
     that cmd_assemble receives as --artifacts-dir — so refine-push/plan-push-and-advance's
-    push-result.json lives under this id, not under args.artifacts_dir (#447).
+    push-result.json (#447) and the validate/conformance/code-review nodes' gate-stage
+    .md files (#573) live under this id, not under args.artifacts_dir.
     """
     if archon_cost_path is None or not archon_cost_path.exists():
         return None
@@ -691,20 +915,67 @@ def cmd_assemble(args) -> None:
     artifacts_dir = pathlib.Path(args.artifacts_dir)
     out_file = pathlib.Path(args.out_file)
 
+    # Resolved once, shared by the gate-stage loop and the push-result.json block (#573).
+    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
+    workflow_run_id = _archon_workflow_run_id(archon_path)
+    workflow_dir = artifacts_dir.parent / workflow_run_id if workflow_run_id is not None else None
+    # #573 advisory: when the resolved workflow run is this entrypoint's own run,
+    # workflow_dir and artifacts_dir are the same directory — the "sibling" probe below
+    # would compare a gate file's mtime against itself and could log it as both own_dir
+    # and stale. Skip the probe in that case; the plain own_dir lookup already covers it.
+    workflow_dir_is_own_dir = (
+        workflow_dir is not None and workflow_dir.resolve() == artifacts_dir.resolve()
+    )
+
     stages = []
     artifacts: dict = {}
     artifact_names = ["validation", "conformance", "review", "conflict_resolution"]
 
+    # #573: the validate, conformance and code-review DAG nodes write validation.md,
+    # conformance.md and review.md into archon's per-workflow-run $ARTIFACTS_DIR, a
+    # sibling of args.artifacts_dir (see _archon_workflow_run_id), never into the
+    # entrypoint's own directory. Same resolution as #447's push-result.json below: the
+    # own-dir path is the default and a fresh sibling copy wins. A stale sibling (an
+    # earlier workflow run's leftover) is never read: its review.md could score this run
+    # blocked. conflict_resolution.md is not a gate stage and keeps its own-dir lookup.
+    gate_artifact_lookup = {
+        "workflow_run_id": workflow_run_id,
+        "workflow_dir_exists": workflow_dir is not None and workflow_dir.is_dir(),
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
+        source = "own_dir"
+        if name in GATE_STAGE_NAMES and workflow_dir is not None and not workflow_dir_is_own_dir:
+            sibling = workflow_dir / f"{name}.md"
+            if sibling.exists():
+                if _artifact_is_fresh(sibling, args.started_at):
+                    md_path, source = sibling, "found"
+                else:
+                    gate_artifact_lookup["stale"].append(name)
         if md_path.exists():
+            if name in GATE_STAGE_NAMES:
+                gate_artifact_lookup[source].append(name)
             content = md_path.read_text(encoding="utf-8")
             artifacts[name] = content
             stage = _parse_artifact_stage(name, content)
             if stage:
                 stages.append(stage)
 
-    archon_path = pathlib.Path(args.archon_cost_json) if args.archon_cost_json else None
+    if (
+        args.status == "completed"
+        and args.intent in ("fix", "continue")
+        and not any(s["stage"] in GATE_STAGE_NAMES for s in stages)
+    ):
+        print(
+            "WARNING: run-record: no gate-stage artifacts found "
+            f"(workflow_run_id={workflow_run_id}, "
+            f"workflow_dir_exists={gate_artifact_lookup['workflow_dir_exists']})",
+            file=sys.stderr,
+        )
+
     stderr_text = ""
     stderr_file = getattr(args, "archon_cost_stderr_file", None)
     if stderr_file:
@@ -717,18 +988,16 @@ def cmd_assemble(args) -> None:
         archon_path, exit_code=exit_code, stderr_text=stderr_text
     )
 
-    if archon_cost_capture.get("ok"):
-        # Capture succeeded — nodes may legitimately be empty (a run with no AI
-        # nodes), in which case these totals are a genuine, measured zero.
-        totals_in = sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes)
-        totals_out = sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes)
-        totals_cost = sum(n.get("cost_usd", 0) for n in nodes)
-    else:
-        # Capture failed — totals are unmeasured, not zero. Keep them null so
-        # `.totals.cost_usd` doesn't read as a genuine zero (df#300).
-        totals_in = None
-        totals_out = None
-        totals_cost = None
+    # Capture failed -> totals null, not zero (df#300); otherwise classify every node's
+    # cost capture (#453) — a measured zero (no AI nodes) still totals 0.
+    nodes, totals = _capture_totals(
+        nodes,
+        capture_ok=bool(archon_cost_capture.get("ok")),
+        clone_dir=getattr(args, "clone_dir", None) or ".",
+        archon_log_file=getattr(args, "archon_log_file", None),
+        issue=args.issue,
+        run_id=args.run_id,
+    )
 
     from . import adapter
     try:
@@ -744,12 +1013,11 @@ def cmd_assemble(args) -> None:
     # abort from a silent death. Never looked up on the failure-trap path (--status
     # failed scores failed anyway).
     artifact_check = None
+    artifact_push_path = artifacts_dir / "push-result.json"
     if args.intent in ("refine", "plan"):
-        artifact_push_path = artifacts_dir / "push-result.json"
-        workflow_run_id = _archon_workflow_run_id(archon_path)
-        if workflow_run_id is not None:
-            workflow_push_path = artifacts_dir.parent / workflow_run_id / "push-result.json"
-            if workflow_push_path.exists() and _push_result_is_fresh(
+        if workflow_dir is not None:
+            workflow_push_path = workflow_dir / "push-result.json"
+            if workflow_push_path.exists() and _artifact_is_fresh(
                 workflow_push_path, args.started_at
             ):
                 artifact_push_path = workflow_push_path
@@ -776,14 +1044,13 @@ def cmd_assemble(args) -> None:
         "artifacts": artifacts,
         "loops": loops,
         "archon_cost_capture": archon_cost_capture,
-        "totals": {
-            "gen_ai.usage.input_tokens": totals_in,
-            "gen_ai.usage.output_tokens": totals_out,
-            "cost_usd": totals_cost,
-        },
+        "totals": totals,
     }
     if artifact_check is not None:
         run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
+    # Scoring-neutral lookup evidence (#573): never passed to _compute_outcome. It is what
+    # separates post-fix records from the historical blind-scored ones (no policy bump).
+    run_record["gate_artifact_lookup"] = gate_artifact_lookup
     run_record["harness_economics"] = _compute_harness_economics(
         run_id=args.run_id,
         status=run_record["status"],
@@ -805,10 +1072,12 @@ def cmd_assemble(args) -> None:
     # Written by refine-push/plan-push-and-advance (#473): the verified push outcome
     # (pushed, branch, local/remote sha, captured error). Same optional, schema-free
     # fold as memory-trace.json — these are plain DAG bash steps, not verdict gates.
-    push_path = artifacts_dir / "push-result.json"
-    if push_path.exists():
+    # Folded from artifact_push_path: for refine/plan, the fresh sibling copy in archon's
+    # workflow-run directory when the artifact_check block above found one (#573); every
+    # other intent reads --artifacts-dir only (no implement-path node writes the file).
+    if artifact_push_path.exists():
         try:
-            run_record["push_result"] = json.loads(push_path.read_text(encoding="utf-8"))
+            run_record["push_result"] = json.loads(artifact_push_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
@@ -991,6 +1260,8 @@ def main() -> None:
     a.add_argument("--archon-cost-json")
     a.add_argument("--archon-cost-exit-code", type=int, default=0)
     a.add_argument("--archon-cost-stderr-file")
+    a.add_argument("--archon-log-file", default=None,
+                   help="tee'd `archon workflow run` output, for per-node status (#453)")
     a.add_argument("--out-file", required=True)
     a.add_argument("--status", default="completed")
     a.add_argument("--ledger-path", default=None)

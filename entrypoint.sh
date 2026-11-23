@@ -625,6 +625,8 @@ ${SUMMARY_LINE}"
       --archon-cost-stderr-file "$FAIL_COST_STDERR" \
       --status failed \
       --out-file "$ARTIFACTS_DIR/run-record.json" \
+      --archon-log-file "${TMP_OUT:-}" \
+      --clone-dir "${CLONE_DIR:-.}" \
       --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
       --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
     rm -f "$FAIL_COST_JSON" "$FAIL_COST_STDERR"
@@ -1138,7 +1140,7 @@ while true; do
     rm -f "$TMP_OUT"
     exit "$EXIT_CODE"
   fi
-  rm -f "$TMP_OUT"
+  # $TMP_OUT (Archon's per-node log) is kept for run-record assemble below (#453).
   break
 done
 
@@ -1161,12 +1163,13 @@ python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assembl
   --archon-cost-json "$ARCHON_COST_JSON" \
   --archon-cost-exit-code "$ARCHON_COST_RC" \
   --archon-cost-stderr-file "$ARCHON_COST_STDERR" \
+  --archon-log-file "$TMP_OUT" \
   --out-file "$ARTIFACTS_DIR/run-record.json" \
   --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
   --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" \
   --clone-dir "$CLONE_DIR" || true
 
-rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR"
+rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR" "$TMP_OUT"
 
 # --- Post cost report to GitHub issue (success path) — non-fatal ---
 post_cost_report || true

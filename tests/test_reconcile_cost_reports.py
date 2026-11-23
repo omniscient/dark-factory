@@ -81,3 +81,28 @@ def test_irrecoverable_run_ledger_rows_unavailable_when_no_ledger(tmp_path):
     report = rcr.build_reconciliation_report(state_dir=state_dir, ledger_path=tmp_path / "no-ledger.jsonl")
 
     assert report["irrecoverable"][0]["ledger_rows_available"] is False
+
+
+def test_partial_capture_run_reads_null_cost_like_failed_capture(tmp_path):
+    # #453: a partial run's totals.cost_usd is null exactly like an
+    # archon_cost_capture.ok == false run's — no reconcile change needed.
+    state_dir = tmp_path / "state"
+    (state_dir / "run-records").mkdir(parents=True)
+    (state_dir / "run-records" / "run-p.json").write_text(json.dumps({
+        "run_id": "run-p", "issue_number": 388, "status": "failed",
+        "nodes": [{"node_id": "implement", "cost_usd": None, "cost_capture": "missing",
+                   "reason": "no_usage_reported"}],
+        "totals": {"cost_usd": None, "cost_capture": "partial", "known_cost_usd": 1.89,
+                   "missing_nodes": [{"node_id": "implement", "reason": "no_usage_reported"}]},
+    }))
+    (state_dir / "run-records" / "run-u.json").write_text(json.dumps({
+        "run_id": "run-u", "issue_number": 388, "status": "failed",
+        "nodes": [], "archon_cost_capture": {"ok": False},
+        "totals": {"cost_usd": None},
+    }))
+
+    report = rcr.build_reconciliation_report(state_dir=state_dir)
+
+    by_id = {r["run_id"]: r for r in report["recoverable"]}
+    assert by_id["run-p"]["cost_usd"] is None
+    assert by_id["run-p"]["cost_usd"] == by_id["run-u"]["cost_usd"]

@@ -43,6 +43,10 @@ def _hermetic_scheduler_state_dir(tmp_path, monkeypatch):
     assert on the durable-write path itself.
     """
     monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "scheduler-state")
+    # #453: cmd_assemble now emits health events and falls back to the baked workflow
+    # YAML — keep both off the real Seq endpoint and the image's /opt copy.
+    monkeypatch.setattr(rr, "SEQ_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(rr, "BAKED_WORKFLOW_PATH", tmp_path / "no-baked-workflow.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -1707,9 +1711,8 @@ def test_assemble_refine_finds_push_result_in_workflow_run_dir(tmp_path, monkeyp
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
     assert rec["artifact_check"] == {"artifact_present": True}
-    # The #473 push_result fold is deliberately unchanged (Design decision 8): it still
-    # reads only --artifacts-dir.
-    assert "push_result" not in rec
+    # #573 R2b: the push_result fold reads the same resolved path as artifact_check.
+    assert rec["push_result"] == {"node": "refine-push", "pushed": True}
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
     assert rec["harness_economics"]["outcome"]["score"] == 1.0
 
@@ -1729,16 +1732,34 @@ def test_assemble_plan_split_dirs_no_push_result_is_failed(tmp_path, monkeypatch
     assert "push_result" not in rec
 
 
-# _AssembleArgs.started_at, as an epoch — the freshness check compares the sibling
-# push-result.json's mtime against it (_push_result_is_fresh, review fixup of #447).
+# _AssembleArgs.started_at, as an epoch — the freshness check compares a sibling
+# artifact's mtime against it (_artifact_is_fresh; review fixup of #447, generalized by #573).
 _ASSEMBLE_STARTED_EPOCH = 1781236800  # 2026-06-12T04:00:00Z
 
 
-def _write_workflow_push_result(workflow_dir, *, mtime):
-    push = workflow_dir / "push-result.json"
-    push.write_text(json.dumps({"node": "refine-push", "pushed": True}))
-    os.utime(push, (mtime, mtime))
-    return push
+def _write_workflow_artifact(directory, filename, content, *, mtime=None):
+    path = directory / filename
+    path.write_text(content)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, False), (0, True), (1, True)])
+def test_artifact_is_fresh_compares_mtime_to_started_at(tmp_path, offset, expected):
+    path = _write_workflow_artifact(
+        tmp_path, "review.md", "STATUS: PASS\n", mtime=_ASSEMBLE_STARTED_EPOCH + offset
+    )
+    assert rr._artifact_is_fresh(path, "2026-06-12T04:00:00Z") is expected
+
+
+def test_artifact_is_fresh_fails_closed(tmp_path):
+    path = _write_workflow_artifact(tmp_path, "review.md", "STATUS: PASS\n")
+    assert rr._artifact_is_fresh(path, "not-a-timestamp") is False
+    assert rr._artifact_is_fresh(path, "") is False
+    assert rr._artifact_is_fresh(tmp_path / "absent.md", "2026-06-12T04:00:00Z") is False
+    # #573 R3: renamed, not aliased — the helper is no longer push-result-specific.
+    assert not hasattr(rr, "_push_result_is_fresh")
 
 
 def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypatch):
@@ -1747,7 +1768,10 @@ def test_assemble_refine_stale_workflow_push_result_is_failed(tmp_path, monkeypa
     calls = _stub_lookup(monkeypatch, (False, True))
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH - 1)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH - 1,
+    )
     rr.cmd_assemble(args)
 
     assert calls == [333]
@@ -1768,7 +1792,10 @@ def test_assemble_refine_fresh_workflow_push_result_is_produced_ungated(
     _forbid_lookup(monkeypatch)
     args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
     assert args.started_at == "2026-06-12T04:00:00Z"
-    _write_workflow_push_result(workflow_dir, mtime=_ASSEMBLE_STARTED_EPOCH + offset)
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_ASSEMBLE_STARTED_EPOCH + offset,
+    )
     rr.cmd_assemble(args)
 
     rec = json.loads((entry_dir / "run-record.json").read_text())
@@ -1929,6 +1956,383 @@ def test_assemble_non_refine_plan_ignores_workflow_run_dir(tmp_path, monkeypatch
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
 
 
+# ── gate-stage artifacts in archon's workflow-run directory (issue #573) ───
+
+_FRESH_EPOCH = _ASSEMBLE_STARTED_EPOCH + 1
+_STALE_EPOCH = _ASSEMBLE_STARTED_EPOCH - 1
+_CLEAN_GATES = {
+    "validation.md": "STATUS: PASS\n",
+    "conformance.md": "STATUS: PASS\nCYCLES: 0\n",
+    "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n",
+}
+_BLOCKED_REVIEW = "STATUS: BLOCKED\nBLOCKERS: 1\nADVISORY: 0\n"
+
+
+def _write_gates(directory, files, *, mtime=_FRESH_EPOCH):
+    for filename, content in files.items():
+        _write_workflow_artifact(directory, filename, content, mtime=mtime)
+
+
+def _assembled(args, entry_dir):
+    rr.cmd_assemble(args)
+    return json.loads((entry_dir / "run-record.json").read_text())
+
+
+@pytest.mark.parametrize("intent", ["fix", "continue"])
+def test_assemble_reads_gate_stages_from_workflow_run_dir(tmp_path, monkeypatch, intent):
+    # Direct #573 regression: in production the three gate files exist ONLY in archon's
+    # workflow-run directory. Before the fix, stages stayed [] and every completed
+    # implement run scored produced_ungated/1.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent=intent)
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    assert rec["artifacts"]["review"] == _CLEAN_GATES["review.md"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+    assert outcome["evidence"]["ungated"] is False
+    assert "artifact_check" not in rec
+
+
+def test_assemble_workflow_run_dir_gate_findings_are_penalized(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {
+        "validation.md": "STATUS: PASS\n",
+        "conformance.md": "STATUS: PASS\nCYCLES: 2\n",
+        "review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 1\n",
+    })
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_with_findings"
+    assert outcome["score"] == 0.75
+
+
+@pytest.mark.parametrize("filename,content", [
+    ("review.md", _BLOCKED_REVIEW),
+    ("conformance.md", "STATUS: BLOCKED\n"),
+    ("validation.md", "STATUS: FAIL\n"),
+], ids=["review", "conformance", "validation"])
+def test_assemble_blocking_verdict_in_workflow_run_dir_is_blocked(
+    tmp_path, monkeypatch, filename, content
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, filename: content})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "blocked"
+    assert outcome["score"] == 0.0
+
+
+def test_assemble_review_blocker_count_without_blocked_verdict_is_not_blocked(
+    tmp_path, monkeypatch
+):
+    # The verdict blocks, not the count (_BLOCKING_VERDICTS).
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": "STATUS: PASS\nBLOCKERS: 1\n"})
+    outcome = _assembled(args, entry_dir)["harness_economics"]["outcome"]
+    assert outcome["state"] == "delivered_clean"
+    assert outcome["score"] == 1.0
+
+
+def test_assemble_stale_workflow_run_dir_gate_stages_are_ignored(tmp_path, monkeypatch):
+    # `archon workflow cost --last` handed back an EARLIER workflow run's id: its
+    # BLOCKED review.md predates this run's --started-at and must not score it blocked.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW}, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["artifacts"] == {}
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "produced_ungated"
+    assert outcome["score"] == 1.0
+
+
+@pytest.mark.parametrize("started_at", ["", "not-a-timestamp", "2026-06-12 04:00:00"])
+def test_assemble_unparseable_started_at_ignores_workflow_run_dir_gate_stages(
+    tmp_path, monkeypatch, started_at
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    args.started_at = started_at
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == []
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+
+
+def test_assemble_fresh_workflow_run_dir_copy_wins_over_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "review", "verdict": "PASS", "blockers": 0, "advisory": 0}]
+    assert rec["artifacts"]["review"] == "STATUS: PASS\nBLOCKERS: 0\nADVISORY: 0\n"
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_own_dir_gate_stage_used_when_workflow_run_dir_lacks_it(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "validation.md").write_text("STATUS: FAIL\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "FAIL"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "blocked"
+
+
+def test_assemble_failure_trap_reads_workflow_run_dir_gate_stages(tmp_path, monkeypatch):
+    # entrypoint.sh's on_failure call site (--status failed): stages are now populated,
+    # the state stays failed/0.0.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    args.status = "failed"
+    _write_gates(workflow_dir, {**_CLEAN_GATES, "review.md": _BLOCKED_REVIEW})
+    rec = _assembled(args, entry_dir)
+
+    assert [s["stage"] for s in rec["stages"]] == ["validation", "conformance", "review"]
+    outcome = rec["harness_economics"]["outcome"]
+    assert outcome["state"] == "failed"
+    assert outcome["score"] == 0.0
+
+
+# Shape of commands/dark-factory-validate.md's free-form report: no STATUS: line.
+_FREEFORM_VALIDATION = (
+    "# Validation Results\n\n"
+    "- Unit tests: PASS\n"
+    "- Endpoint tests: FAIL (2 failures)\n\n"
+    "Final status: FAIL\n"
+)
+
+
+def test_assemble_freeform_validation_md_pins_substring_heuristic(tmp_path, monkeypatch):
+    # Known parser gap (#573 spec, Assumptions): with no STATUS: line, the substring
+    # heuristic in _parse_artifact_stage sees "PASS" first and reads this FAIL report as
+    # PASS. Pinned as-is so the follow-up that fixes the heuristic changes it deliberately.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, {"validation.md": _FREEFORM_VALIDATION})
+    rec = _assembled(args, entry_dir)
+
+    assert rec["stages"] == [{"stage": "validation", "verdict": "PASS"}]
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+def test_assemble_conflict_resolution_in_workflow_run_dir_not_read(tmp_path, monkeypatch):
+    # Known gap, left for a follow-up ticket: conflict_resolution.md keeps its own-dir
+    # lookup. Pinned so widening it is a deliberate change.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    _write_gates(workflow_dir, {"conflict_resolution.md": "CONFLICT_VERDICT=RESOLVED\n"})
+    rec = _assembled(args, entry_dir)
+
+    assert "conflict_resolution" not in rec["artifacts"]
+    assert rec["stages"] == []
+
+
+def test_assemble_conflict_resolution_in_own_dir_still_read(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, _ = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    (entry_dir / "conflict_resolution.md").write_text("CONFLICT_VERDICT=RESOLVED\n")
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifacts"]["conflict_resolution"] == "CONFLICT_VERDICT=RESOLVED\n"
+    assert rec["stages"] == [{"stage": "conflict_resolution", "verdict": "RESOLVED"}]
+
+
+_NO_GATE_WARNING = "WARNING: run-record: no gate-stage artifacts found"
+
+
+def test_assemble_gate_artifact_lookup_records_workflow_run_dir_hits(
+    tmp_path, monkeypatch, capsys
+):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": ["validation", "conformance", "review"],
+        "stale": [],
+        "own_dir": [],
+    }
+    # Scoring-neutral: never part of the outcome evidence.
+    assert "gate_artifact_lookup" not in rec["harness_economics"]["outcome"]["evidence"]
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_gate_artifact_lookup_sibling_wins_is_not_own_dir(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    (entry_dir / "review.md").write_text(_BLOCKED_REVIEW)
+    (entry_dir / "validation.md").write_text("STATUS: PASS\n")
+    _write_gates(workflow_dir, {"review.md": "STATUS: PASS\n"})
+    lookup = _assembled(args, entry_dir)["gate_artifact_lookup"]
+
+    assert lookup["found"] == ["review"]
+    assert lookup["own_dir"] == ["validation"]
+
+
+def test_assemble_stale_gate_stages_are_listed_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="fix")
+    _write_gates(workflow_dir, _CLEAN_GATES, mtime=_STALE_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": ["validation", "conformance", "review"],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=True)" in err
+
+
+def test_assemble_absent_workflow_run_dir_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    # The id resolves but runs/<id>/ does not exist: the silent path R4 exists to surface.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="continue")
+    workflow_dir.rmdir()
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "wf-run",
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=False)" in err
+
+
+def test_assemble_no_cost_json_is_recorded_and_warned(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": None,
+        "workflow_dir_exists": False,
+        "found": [],
+        "stale": [],
+        "own_dir": [],
+    }
+    err = capsys.readouterr().err
+    assert f"{_NO_GATE_WARNING} (workflow_run_id=None, workflow_dir_exists=False)" in err
+
+
+def test_assemble_gate_artifact_lookup_records_own_dir_reads(tmp_path, monkeypatch, capsys):
+    _forbid_lookup(monkeypatch)
+    for filename, content in _CLEAN_GATES.items():
+        (tmp_path / filename).write_text(content)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent="fix")
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["gate_artifact_lookup"]["own_dir"] == ["validation", "conformance", "review"]
+    assert rec["gate_artifact_lookup"]["found"] == []
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mtime", [_FRESH_EPOCH, _STALE_EPOCH])
+def test_assemble_workflow_run_dir_equal_to_own_dir_is_own_dir_only(tmp_path, monkeypatch, mtime):
+    # The cost JSON's run_id names the entrypoint's own directory: the sibling probe is
+    # skipped, so a gate file is listed once, as own_dir — never as found (fresh) nor as
+    # both stale and own_dir (stale). The own-dir read has no freshness guard.
+    _forbid_lookup(monkeypatch)
+    entry_dir = tmp_path / "runs" / "entry-run"
+    entry_dir.mkdir(parents=True)
+    cost = tmp_path / "cost.json"
+    cost.write_text(json.dumps({"run_id": "entry-run", "nodes": []}))
+    args = _artifact_assemble_args(entry_dir, monkeypatch, intent="fix")
+    args.archon_cost_json = str(cost)
+    _write_gates(entry_dir, _CLEAN_GATES, mtime=mtime)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["gate_artifact_lookup"] == {
+        "workflow_run_id": "entry-run",
+        "workflow_dir_exists": True,
+        "found": [],
+        "stale": [],
+        "own_dir": ["validation", "conformance", "review"],
+    }
+    assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
+
+
+@pytest.mark.parametrize("intent,status", [
+    ("close", "completed"),
+    ("new", "completed"),
+    ("deconflict", "completed"),
+    ("fix", "failed"),
+    ("continue", "failed"),
+])
+def test_assemble_no_gate_warning_only_for_completed_fix_continue(
+    tmp_path, monkeypatch, capsys, intent, status
+):
+    _forbid_lookup(monkeypatch)
+    args = _artifact_assemble_args(tmp_path, monkeypatch, intent=intent, status=status)
+    rr.cmd_assemble(args)
+
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert "gate_artifact_lookup" in rec
+    assert _NO_GATE_WARNING not in capsys.readouterr().err
+
+
+def test_assemble_plan_folds_fresh_failed_push_result_from_workflow_run_dir(
+    tmp_path, monkeypatch
+):
+    # #573 R2b: a fresh sibling {"pushed": false} is folded, so cost_report.py's
+    # **Push:** FAILED line can fire for a real run.
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="plan")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"pushed": False, "error": "x"}),
+        mtime=_FRESH_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert rec["push_result"] == {"pushed": False, "error": "x"}
+
+
+def test_assemble_refine_stale_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _stub_lookup(monkeypatch, (False, True))
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(
+        workflow_dir, "push-result.json", json.dumps({"node": "refine-push", "pushed": True}),
+        mtime=_STALE_EPOCH,
+    )
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"]["artifact_present"] is False
+    assert "push_result" not in rec
+
+
+def test_assemble_refine_malformed_workflow_push_result_is_not_folded(tmp_path, monkeypatch):
+    _forbid_lookup(monkeypatch)
+    args, entry_dir, workflow_dir = _split_artifact_dirs(tmp_path, monkeypatch, intent="refine")
+    _write_workflow_artifact(workflow_dir, "push-result.json", "not valid json {{{", mtime=_FRESH_EPOCH)
+    rec = _assembled(args, entry_dir)
+
+    assert rec["artifact_check"] == {"artifact_present": True}
+    assert "push_result" not in rec
+
+
 def _stored_refine_record(tmp_path, run_id, **extra):
     run_dir = tmp_path / "runs" / run_id
     run_dir.mkdir(parents=True)
@@ -1979,3 +2383,529 @@ def test_backfill_legacy_record_without_artifact_check_unchanged(tmp_path, monke
     assert outcome["state"] == "produced_ungated"
     assert outcome["score"] == 1.0
     assert "artifact_check" not in outcome["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# per-node cost capture (#453)
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_WORKFLOW_FIXTURE = """\
+name: archon-dark-factory
+nodes:
+  - id: parse-intent
+    prompt: classify the request
+  - id: fetch-issue
+    bash: echo fetch
+  - id: digest-comments
+    bash: echo digest
+  - id: implement
+    command: dark-factory-implement
+  - id: classify-preview
+    prompt: classify the preview
+  - id: validate
+    command: dark-factory-validate
+  - id: conformance
+    command: dark-factory-conformance
+  - id: push-and-pr
+    bash: echo push
+"""
+
+
+def _clone_with_workflow(root, text=_WORKFLOW_FIXTURE):
+    wf_dir = root / "clone" / ".archon" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "archon-dark-factory.yaml").write_text(text)
+    return root / "clone"
+
+
+def _cost_node(node_id, tin=0, tout=0, cost=0, ms=1000):
+    return {"nodeId": node_id, "inputTokens": tin, "outputTokens": tout,
+            "costUsd": cost, "durationMs": ms, "modelUsage": {}}
+
+
+# MarketHawk #388 (2026-09-26 17:28Z, fix, failed): `implement` completed in 25m 55s
+# with zero reported usage; the four other AI nodes account for the whole $1.89.
+_COST_388 = {
+    "runId": "wf388",
+    "nodes": [
+        _cost_node("parse-intent", 20, 297, 0.0097, 5200),
+        _cost_node("fetch-issue", ms=1800),
+        _cost_node("implement", ms=1_555_000),
+        _cost_node("classify-preview", 40, 600, 0.0203, 6000),
+        _cost_node("validate", 30, 9000, 0.62, 240_000),
+        _cost_node("conformance", 22, 17800, 1.24, 300_000),
+    ],
+}
+
+# Archon names command: nodes by command name, everything else by id (#453).
+_LOG_388 = """\
+Starting dark factory: Fix issue #388
+[parse-intent] Started
+[parse-intent] Completed (5.2s)
+[fetch-issue] Started
+[fetch-issue] Completed (1.8s)
+[digest-comments] Skipped (when_condition)
+[dark-factory-implement] Started
+  agent output quoting [dark-factory-plan] Started mid-line
+[not-a-node] Started
+[dark-factory-implement] Completed (25m 55s)
+[classify-preview] Started
+[classify-preview] Completed (6.0s)
+[dark-factory-validate] Started
+[dark-factory-validate] Completed (4m 0s)
+[dark-factory-conformance] Started
+[dark-factory-conformance] Completed (5m 0s)
+"""
+
+_COST_HEALTHY = {
+    "runId": "wfok",
+    "nodes": [
+        _cost_node("parse-intent", 20, 270, 0.0207, 7800),
+        _cost_node("fetch-issue", ms=1800),
+        _cost_node("implement", 300, 52000, 4.1, 1_200_000),
+    ],
+}
+
+_LOG_HEALTHY = """\
+[parse-intent] Started
+[parse-intent] Completed (7.8s)
+[fetch-issue] Started
+[fetch-issue] Completed (1.8s)
+[digest-comments] Skipped (when_condition)
+[dark-factory-implement] Started
+[dark-factory-implement] Completed (20m 0s)
+"""
+
+
+@pytest.fixture
+def health_events(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        rr, "emit_health_event",
+        lambda event, issue, run_id, detail: events.append((event, detail)),
+    )
+    return events
+
+
+def _assemble_with_capture(root, monkeypatch, cost_obj, *, log_text=None, clone=None,
+                           status="completed", exit_code=0):
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(rr, "JSONL_PATH", root / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", root / "no-ledger.jsonl")
+    cost_json = root / "cost.json"
+    cost_json.write_text(json.dumps(cost_obj))
+    out = root / "run-record.json"
+    args = _AssembleArgs(root, out)
+    args.intent = "fix"
+    args.status = status
+    args.archon_cost_json = str(cost_json)
+    args.archon_cost_exit_code = exit_code
+    args.clone_dir = str(clone if clone is not None else _clone_with_workflow(root))
+    if log_text is not None:
+        log = root / "archon-run.log"
+        log.write_text(log_text)
+        args.archon_log_file = str(log)
+    rr.cmd_assemble(args)
+    return json.loads(out.read_text())
+
+
+def _by_id(rec):
+    return {n["node_id"]: n for n in rec["nodes"]}
+
+
+def test_node_maps_from_clone_workflow(tmp_path):
+    clone = _clone_with_workflow(tmp_path)
+    node_types, log_tokens = rr._load_workflow_node_maps(clone)
+    assert node_types["implement"] == "command"
+    assert node_types["parse-intent"] == "prompt"
+    assert node_types["fetch-issue"] == "bash"
+    assert log_tokens["dark-factory-implement"] == "implement"
+    assert log_tokens["parse-intent"] == "parse-intent"
+
+
+def test_node_maps_real_workflow_keys_command_nodes_by_command_name(tmp_path):
+    # Guards the rejected draft's bug: Archon logs `[dark-factory-implement]`, the cost
+    # report says `implement` — the map must join the two for the shipped DAG.
+    real = (_REPO_ROOT / "workflows" / "archon-dark-factory.yaml").read_text()
+    node_types, log_tokens = rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, real))
+    assert log_tokens["dark-factory-implement"] == "implement"
+    assert log_tokens["dark-factory-conformance"] == "conformance"
+    assert node_types["implement"] == "command"
+    assert node_types["classify-preview"] == "prompt"
+    assert node_types["fetch-issue"] == "bash"
+
+
+def test_node_maps_fall_back_to_baked_workflow(tmp_path, monkeypatch):
+    baked = tmp_path / "baked.yaml"
+    baked.write_text(_WORKFLOW_FIXTURE)
+    monkeypatch.setattr(rr, "BAKED_WORKFLOW_PATH", baked)
+    (tmp_path / "bare-clone").mkdir()
+    node_types, _ = rr._load_workflow_node_maps(tmp_path / "bare-clone")
+    assert node_types["implement"] == "command"
+
+
+def test_node_maps_none_when_no_workflow_loads(tmp_path):
+    assert rr._load_workflow_node_maps(tmp_path / "nowhere") is None
+    assert rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, "nodes: [broken")) is None
+
+
+def test_node_maps_drop_ambiguous_log_token(tmp_path):
+    text = (
+        "nodes:\n"
+        "  - id: a\n    command: shared-cmd\n"
+        "  - id: b\n    command: shared-cmd\n"
+    )
+    _, log_tokens = rr._load_workflow_node_maps(_clone_with_workflow(tmp_path, text))
+    assert "shared-cmd" not in log_tokens
+    assert log_tokens["a"] == "a"
+
+
+# --- _parse_node_log ---
+
+_TOKENS = {"parse-intent": "parse-intent", "dark-factory-implement": "implement",
+           "implement": "implement", "digest-comments": "digest-comments",
+           "dark-factory-validate": "validate", "validate": "validate"}
+
+
+def test_parse_node_log_maps_command_names_and_ignores_noise(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text(_LOG_388)
+    events = rr._parse_node_log(str(log), _TOKENS)
+    assert events == {
+        "parse-intent": "Completed",
+        "digest-comments": "Skipped",
+        "implement": "Completed",
+        "validate": "Completed",
+    }
+    assert list(events) == ["parse-intent", "digest-comments", "implement", "validate"]
+
+
+def test_parse_node_log_reads_failed_with_colon(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("[dark-factory-implement] Started\n"
+                   "[dark-factory-implement] Failed: blast radius HUMAN_REQUIRED\n")
+    assert rr._parse_node_log(str(log), _TOKENS) == {"implement": "Failed"}
+
+
+def test_parse_node_log_none_when_unusable(tmp_path):
+    assert rr._parse_node_log(None, _TOKENS) is None
+    assert rr._parse_node_log("", _TOKENS) is None
+    assert rr._parse_node_log(str(tmp_path / "absent.log"), _TOKENS) is None
+    noise = tmp_path / "noise.log"
+    noise.write_text("hello\n  [dark-factory-implement] Started\n[unknown] Started\n")
+    assert rr._parse_node_log(str(noise), _TOKENS) is None
+
+
+def _log(tmp_path, text):
+    log = tmp_path / "run.log"
+    log.write_bytes(text.encode("utf-8"))
+    return str(log)
+
+
+def test_parse_node_log_started_with_trailing_text_is_not_a_started_event(tmp_path):
+    # Archon prints a bare "[<name>] Started"; an agent line that goes on is prose.
+    assert rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Started more text\n"), _TOKENS) is None
+    assert rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Completed soon\n"
+                       "[dark-factory-implement] Failed badly\n"
+                       "[dark-factory-implement] Skipped it\n"), _TOKENS) is None
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x0b", "\x0c", "\x85", "\r"])
+def test_parse_node_log_only_a_newline_starts_a_line(tmp_path, sep):
+    text = f"agent prose{sep}[dark-factory-implement] Started\n"
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) is None
+
+
+def test_parse_node_log_reads_crlf_lines(tmp_path):
+    text = "[dark-factory-implement] Started\r\n[dark-factory-implement] Completed (1s)\r\n"
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) == {"implement": "Completed"}
+
+
+def test_parse_node_log_skipped_never_overrides_a_real_event(tmp_path):
+    text = ("[dark-factory-implement] Started\n"
+            "[dark-factory-implement] Completed (25m 55s)\n"
+            "[dark-factory-implement] Skipped (x)\n"
+            "[dark-factory-validate] Skipped (x)\n"
+            "[dark-factory-validate] Started\n"
+            "[digest-comments] Skipped (when_condition)\n")
+    assert rr._parse_node_log(_log(tmp_path, text), _TOKENS) == {
+        "implement": "Completed", "validate": "Started", "digest-comments": "Skipped"}
+
+
+# --- _classify_node_capture ---
+
+_TYPES = {"parse-intent": "prompt", "fetch-issue": "bash", "digest-comments": "bash",
+          "implement": "command", "validate": "command", "push-and-pr": "bash"}
+
+
+def _rec_node(node_id, tin=0, tout=0, cost=0, ms=1000):
+    return {"node_id": node_id, "model": "", "gen_ai.usage.input_tokens": tin,
+            "gen_ai.usage.output_tokens": tout, "cost_usd": cost, "duration_ms": ms}
+
+
+def test_classify_bash_zero_stays_completed():
+    nodes, missing = rr._classify_node_capture([_rec_node("fetch-issue")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert nodes[0]["cost_usd"] == 0
+    assert missing == []
+
+
+def test_classify_ai_node_with_usage_is_completed():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", 10, 20, 0.5)], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert "reason" not in nodes[0]
+    assert missing == []
+
+
+def test_classify_zero_command_node_is_missing_no_usage_reported():
+    # The #388 shape: present in the cost report, real duration, all-zero usage.
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", ms=1_555_000)], _TYPES, None)
+    node = nodes[0]
+    assert node["cost_capture"] == "missing"
+    assert node["reason"] == "no_usage_reported"
+    assert node["cost_usd"] is None
+    assert node["gen_ai.usage.input_tokens"] is None
+    assert node["gen_ai.usage.output_tokens"] is None
+    assert node["duration_ms"] == 1_555_000
+    assert missing == [{"node_id": "implement", "reason": "no_usage_reported"}]
+
+
+def test_classify_zero_prompt_node_is_missing():
+    nodes, _ = rr._classify_node_capture([_rec_node("parse-intent")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "missing"
+
+
+def test_classify_node_not_in_workflow_is_not_flagged():
+    nodes, missing = rr._classify_node_capture([_rec_node("target-loop-x")], _TYPES, None)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert missing == []
+
+
+@pytest.mark.parametrize("event", ["Started", "Completed", "Failed"])
+def test_classify_ran_but_absent_node_is_missing_not_in_cost_report(event):
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES,
+        {"parse-intent": "Completed", "validate": event})
+    assert [n["node_id"] for n in nodes] == ["parse-intent", "validate"]
+    added = nodes[1]
+    assert added["cost_capture"] == "missing"
+    assert added["reason"] == "not_in_cost_report"
+    assert added["cost_usd"] is None
+    assert added["duration_ms"] is None
+    assert missing == [{"node_id": "validate", "reason": "not_in_cost_report"}]
+
+
+def test_reported_zero_usage_ai_node_only_skipped_in_log_is_not_missing(tmp_path):
+    # A when:-gated node Archon still lists with zero usage never ran: its zero is real.
+    events = rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Skipped (when_condition)\n"), _TOKENS)
+    nodes, missing = rr._classify_node_capture([_rec_node("implement")], _TYPES, events)
+    assert nodes[0]["cost_capture"] == "completed"
+    assert nodes[0]["cost_usd"] == 0
+    assert missing == []
+
+
+def test_prose_skipped_line_does_not_hide_a_388_shaped_node(tmp_path):
+    # #388: implement ran to completion and Archon reported zero usage. A later agent
+    # line shaped like a Skipped progress line must not turn that back into a real $0.
+    events = rr._parse_node_log(
+        _log(tmp_path, "[dark-factory-implement] Started\n"
+                       "[dark-factory-implement] Completed (25m 55s)\n"
+                       "[dark-factory-implement] Skipped (x)\n"), _TOKENS)
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("implement", ms=1_555_000)], _TYPES, events)
+    assert nodes[0]["cost_capture"] == "missing"
+    assert nodes[0]["cost_usd"] is None
+    assert missing == [{"node_id": "implement", "reason": "no_usage_reported"}]
+
+
+def test_classify_skipped_node_is_omitted():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES, {"digest-comments": "Skipped"})
+    assert [n["node_id"] for n in nodes] == ["parse-intent"]
+    assert missing == []
+
+
+def test_classify_failed_bash_node_absent_from_report_is_not_missing():
+    nodes, missing = rr._classify_node_capture(
+        [_rec_node("parse-intent", 1, 1, 0.01)], _TYPES, {"push-and-pr": "Failed"})
+    assert [n["node_id"] for n in nodes] == ["parse-intent"]
+    assert missing == []
+
+
+def test_classify_does_not_mutate_input_nodes():
+    original = [_rec_node("implement")]
+    rr._classify_node_capture(original, _TYPES, None)
+    assert original == [_rec_node("implement")]
+
+
+# --- cmd_assemble integration ---
+
+def test_assemble_388_shape_marks_implement_missing(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 status="failed")
+    nodes = _by_id(rec)
+    assert list(nodes) == ["parse-intent", "fetch-issue", "implement",
+                           "classify-preview", "validate", "conformance"]
+    assert nodes["implement"]["cost_capture"] == "missing"
+    assert nodes["implement"]["reason"] == "no_usage_reported"
+    assert nodes["implement"]["cost_usd"] is None
+    assert nodes["implement"]["duration_ms"] == 1_555_000
+    assert nodes["fetch-issue"]["cost_capture"] == "completed"
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "partial"
+    assert totals["node_log"] == "parsed"
+    assert totals["cost_usd"] is None
+    assert totals["gen_ai.usage.input_tokens"] is None
+    assert totals["gen_ai.usage.output_tokens"] is None
+    assert totals["known_cost_usd"] == pytest.approx(1.89)
+    assert totals["known_input_tokens"] == 112
+    assert totals["known_output_tokens"] == 27697
+    assert totals["missing_nodes"] == [{"node_id": "implement", "reason": "no_usage_reported"}]
+    assert health_events == [
+        ("factory.cost_report.node_missing", {"node_id": "implement", "reason": "no_usage_reported"}),
+    ]
+
+
+def test_assemble_healthy_run_stays_complete(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=_LOG_HEALTHY)
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "complete"
+    assert totals["node_log"] == "parsed"
+    assert totals["missing_nodes"] == []
+    assert totals["cost_usd"] == 0.0207 + 0 + 4.1  # same sum, same order as before #453
+    assert totals["gen_ai.usage.input_tokens"] == 320
+    assert totals["gen_ai.usage.output_tokens"] == 52270
+    assert totals["known_cost_usd"] == totals["cost_usd"]
+    assert [n["cost_capture"] for n in rec["nodes"]] == ["completed"] * 3
+    assert health_events == []
+
+
+def test_assemble_started_but_unreported_node_is_missing(tmp_path, monkeypatch, health_events):
+    log = _LOG_HEALTHY + "[dark-factory-validate] Started\n"
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=log,
+                                 status="failed")
+    validate = _by_id(rec)["validate"]
+    assert validate["cost_capture"] == "missing"
+    assert validate["reason"] == "not_in_cost_report"
+    assert rec["totals"]["cost_capture"] == "partial"
+    assert rec["totals"]["known_cost_usd"] == pytest.approx(4.1207)
+    assert ("factory.cost_report.node_missing",
+            {"node_id": "validate", "reason": "not_in_cost_report"}) in health_events
+
+
+def test_assemble_failed_node_absent_from_report_is_missing(tmp_path, monkeypatch, health_events):
+    cost = {"runId": "wff", "nodes": [_cost_node("parse-intent", 20, 297, 0.0097, 5200)]}
+    log = ("[parse-intent] Started\n[parse-intent] Completed (5.2s)\n"
+           "[dark-factory-implement] Started\n"
+           "[dark-factory-implement] Failed: blast radius HUMAN_REQUIRED\n")
+    rec = _assemble_with_capture(tmp_path, monkeypatch, cost, log_text=log, status="failed")
+    assert _by_id(rec)["implement"]["reason"] == "not_in_cost_report"
+    assert rec["totals"]["missing_nodes"] == [{"node_id": "implement", "reason": "not_in_cost_report"}]
+
+
+@pytest.mark.parametrize("log_text", [None, "", "no node lines here\n"])
+def test_assemble_without_usable_log_synthesizes_nothing(tmp_path, monkeypatch, health_events, log_text):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=log_text,
+                                 status="failed")
+    assert "validate" in _by_id(rec)  # reported nodes only — nothing appended
+    assert len(rec["nodes"]) == len(_COST_388["nodes"])
+    assert rec["totals"]["node_log"] == "unavailable"
+    # Requirement 1 still applies without a log.
+    assert _by_id(rec)["implement"]["reason"] == "no_usage_reported"
+    assert [e for e, _ in health_events] == [
+        "factory.cost_report.node_log_unavailable",
+        "factory.cost_report.node_missing",
+    ]
+
+
+def test_assemble_empty_log_path_from_on_failure_is_tolerated(tmp_path, monkeypatch, health_events):
+    # on_failure passes "${TMP_OUT:-}" — empty when it fires before the workflow loop.
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps(_COST_HEALTHY))
+    args = _AssembleArgs(tmp_path, tmp_path / "run-record.json")
+    args.archon_cost_json = str(cost_json)
+    args.clone_dir = str(_clone_with_workflow(tmp_path))
+    args.archon_log_file = ""
+    rr.cmd_assemble(args)
+    rec = json.loads((tmp_path / "run-record.json").read_text())
+    assert rec["totals"]["node_log"] == "unavailable"
+    assert rec["totals"]["cost_capture"] == "complete"
+
+
+def test_assemble_capture_failure_skips_classification(tmp_path, monkeypatch, health_events):
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 status="failed", exit_code=1)
+    assert rec["nodes"] == []
+    assert rec["totals"]["cost_capture"] == "unavailable"
+    assert rec["totals"]["cost_usd"] is None
+    assert rec["totals"]["known_cost_usd"] is None
+    assert health_events == []
+
+
+def test_assemble_unloadable_workflow_classifies_nothing(tmp_path, monkeypatch, health_events):
+    (tmp_path / "bare-clone").mkdir()
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_388, log_text=_LOG_388,
+                                 clone=tmp_path / "bare-clone", status="failed")
+    assert all("cost_capture" not in n for n in rec["nodes"])
+    assert _by_id(rec)["implement"]["cost_usd"] == 0  # never guessed to be bash or missing
+    totals = rec["totals"]
+    assert totals["cost_capture"] == "unknown"
+    assert totals["cost_usd"] == pytest.approx(1.89)  # today's value, unchanged
+    assert totals["gen_ai.usage.input_tokens"] == 112
+    assert totals["known_cost_usd"] is None
+    assert [e for e, _ in health_events] == ["factory.cost_report.node_types_unavailable"]
+
+
+def test_assemble_cli_accepts_archon_log_file(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rr, "cmd_assemble", lambda a: seen.update(vars(a)))
+    monkeypatch.setattr(sys, "argv", [
+        "run_record", "assemble", "--run-id", "r1", "--issue", "1", "--intent", "fix",
+        "--artifacts-dir", "/tmp/a", "--out-file", "/tmp/a/run-record.json",
+        "--archon-log-file", "/tmp/a/archon-run.log",
+    ])
+    rr.main()
+    assert seen["archon_log_file"] == "/tmp/a/archon-run.log"
+
+
+def test_partial_capture_leaves_outcome_scoring_untouched(tmp_path, monkeypatch, health_events):
+    # #447/#453: outcome.state/score read stages + status only; a partial token sum must
+    # never feed factory_cpm or tokens_per_task.
+    partial = _assemble_with_capture(tmp_path / "partial", monkeypatch, _COST_388,
+                                     log_text=_LOG_388)
+    healthy = _assemble_with_capture(tmp_path / "healthy", monkeypatch, _COST_HEALTHY,
+                                     log_text=_LOG_HEALTHY)
+    he = partial["harness_economics"]
+    assert he["outcome"] == healthy["harness_economics"]["outcome"]
+    assert he["outcome"]["state"] == "produced_ungated"
+    assert he["factory_cpm"] is None
+    assert he["tokens_per_task"] is None
+    assert he["cost_per_task"] is None
+    assert healthy["harness_economics"]["factory_cpm"] is not None
+
+
+def test_healthy_run_comment_is_byte_identical_to_pre_453_shape(tmp_path, monkeypatch, health_events):
+    from factory_core import cost_report as cr
+
+    rec = _assemble_with_capture(tmp_path, monkeypatch, _COST_HEALTHY, log_text=_LOG_HEALTHY)
+    legacy = json.loads(json.dumps(rec))  # the record as cmd_assemble wrote it before #453
+    for key in ("cost_capture", "node_log", "known_cost_usd", "known_input_tokens",
+                "known_output_tokens", "missing_nodes"):
+        del legacy["totals"][key]
+    for node in legacy["nodes"]:
+        del node["cost_capture"]
+    render = lambda r: cr.render(r, prior_comment_body="", timestamp="2026-11-22 12:00 UTC",
+                                 intent="fix")
+    assert render(rec) == render(legacy)
+    assert "| **Subtotal** | | **320** | **52.2K** |" in render(rec)
