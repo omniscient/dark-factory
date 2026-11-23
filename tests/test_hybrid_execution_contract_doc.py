@@ -165,7 +165,8 @@ def _tracked_files() -> list:
 
 def test_cited_repo_files_resolve():
     text = _doc_text()
-    collapsed = re.sub(r"`([^`]*)`", lambda m: "`" + re.sub(r"\s+", "", m.group(1)) + "`", text)
+    unfenced = re.sub(r"^```.*?^```", "", text, flags=re.M | re.S)
+    collapsed = re.sub(r"`([^`]*)`", lambda m: "`" + re.sub(r"\s+", "", m.group(1)) + "`", unfenced)
     files = _tracked_files()
     missing = []
     for tok in sorted(set(CITATION_RE.findall(collapsed))):
