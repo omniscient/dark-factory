@@ -63,14 +63,20 @@ section governs.
    that proof. A cloud-routed actor's same-run checker (today's `conformance`/
    `docs-conformance`/`code-review` nodes, and `refine`/`plan`'s in-process subagent checkers)
    is unchanged by this contract (§4.2, §4.4).
-4. A dispatch is allowed only if the payload class is a member of the target entry's
-   `accepts_payload_classes`; unknown or missing on either side blocks and escalates (§4.3).
+4. A dispatch is allowed only if its *effective* payload class is a member of the target
+   entry's `accepts_payload_classes`; an out-of-enum declared value, an invalid registry
+   entry, or an effective class absent from `accepts_payload_classes` blocks and escalates. An
+   absent declared class on a cloud dispatch defaults to `cloud_ok` and never blocks (§4.3).
 5. Payload class is stricter-only: no label, comment or model output can loosen it; only
-   operator-controlled config can grant `cloud_ok` (§4.3).
-6. A local-routed dispatch never retries on, or falls back to, cloud. Every local failure,
-   timeout or cancellation resolves to a #238 failure class and abstains or escalates (§4.3,
-   §4.6).
-7. `local_only` work never auto-merges; the merge is always a human action (§4.3; provisional operator default, §4.11 decision 5).
+   operator-controlled config (gitignored instance config or a human-reviewed adapter key) can
+   set or change the declared class (§4.3).
+6. Every dispatch with `hosting_location: local` is `local-pinned` and never retries on, or
+   falls back to, cloud — a later cloud run is always a new dispatch decision, never a
+   fallback of the failed one. Every local failure, timeout or cancellation resolves to a #238
+   failure class and abstains or escalates (§4.3, §4.6).
+7. Neither a `local-pinned` dispatch's output nor any `local_only`-classed payload ever
+   auto-merges; the merge is always a human action (§4.3; accepted operator default, §4.11
+   decision 5).
 8. Secrets are referenced by `secret_reference` and never appear in the correlation envelope,
    a ledger row, a run record, a log line or an issue comment (§4.3).
 9. Capability evidence is authored only by #562's certification run against #561's pinned
@@ -328,32 +334,59 @@ Building on Q1:
 
 Per Q2 and Q3(c):
 
-- **Payload class** (`cloud_ok` / `local_only`) is set per issue/run, stricter-only, grantable
-  only by operator-controlled config — never by a label, comment, or model output (all of which
-  are `self_report` under #288's taxonomy).
+- **Declared payload class** (`payload_class`: `cloud_ok` / `local_only`, optional) is set per
+  issue/run only by operator-controlled config (gitignored instance config or a human-reviewed
+  adapter key) — never by a label, comment, or model output (all of which are `self_report`
+  under #288's taxonomy). It is stricter-only: no label, comment or model output can loosen it.
 - **Destination class** is declared per endpoint-registry entry (#557): hosting location
   (`hosting_location`: `local`/`cloud`) and which payload classes it may receive
   (`accepts_payload_classes`, a non-empty subset of `cloud_ok`/`local_only`). A `cloud` entry
-  may never list `local_only`.
-- **Dispatch-time check:** a dispatch is allowed if and only if the payload class is a member of
-  the target entry's `accepts_payload_classes`. `local_only` is therefore eligible for local
-  entries only; `cloud_ok` is eligible for either. Evaluated once, deterministically, before
-  dispatch. Unknown or missing on either side → block + escalate.
-- **Default classes (§4.11 decision 4):** a ticket with no explicit class is `cloud_ok` when
-  dispatched to cloud, exactly as today. Any dispatch to a local entry is treated as `local_only`
-  from dispatch onward, whatever the ticket's class — it never retries on, or falls back to,
-  cloud.
-- **No auto-merge for `local_only` (§4.11 decision 5):** work whose payload class is
-  `local_only` never auto-merges (no `direct-to-pr` end-gate auto-merge, no grace-timer advance
-  to merge); the merge is always a human action. This check's
-  decision (payload class, endpoint id, secret reference, allow/deny, reason) is recorded in the
-  existing run-record ledger extension (§4.7), never a new store.
-- **Non-exporting outage behavior:** a `local_only` dispatch that fails (outage, OOM, protocol
-  incompatibility, timeout, stale/missing capability evidence) never retries against a cloud
-  endpoint. It records the failure under one of #238's new failure classes and abstains/
-  escalates. Two local failures, a model's stated confidence, or text in the task itself cannot
-  grant export permission — only operator-controlled config can (same rule as the payload-class
-  grant above).
+  may never list `local_only`; a `local` entry must list `local_only`. The payload-class field
+  and the dispatch-time predicate below are #557's to implement (not #558, whose scope excludes
+  eligibility decisions).
+- **Effective class**, computed once, deterministically, at dispatch time: a
+  `local`-destination dispatch is `local_only` unconditionally, whatever the declared class; a
+  `cloud`-destination dispatch is the declared class if one is set, else `cloud_ok` — exactly
+  as today's unmarked ticket (§4.11 decision 4). An absent declared class on a cloud dispatch
+  never blocks.
+- **`local-pinned`** is a derived, never-operator-set property of a dispatch record
+  (`hosting_location: local`), distinct from `payload_class`. It carries two rules that hold
+  for *every* local dispatch regardless of declared class: no cloud retry or fallback, ever
+  (Invariant 6), and no auto-merge, ever (§4.11 decision 5). `payload_class` carries only
+  confidentiality/export eligibility — this separates "never retries on cloud" (a
+  `local-pinned` property) from "this payload is confidential" (a `payload_class` property),
+  the two meanings `local_only` previously conflated.
+- **Dispatch-time check:** a dispatch is allowed if and only if the *effective* class is a
+  member of the target entry's `accepts_payload_classes`. Blocks + escalates on: a declared
+  value outside `{cloud_ok, local_only}`; a registry entry with invalid/missing
+  `hosting_location` or `accepts_payload_classes`; or an effective class absent from the
+  target's `accepts_payload_classes` (e.g. a declared-`local_only` ticket aimed at a cloud
+  entry). Any of these three cases always blocks and escalates — it is never silently
+  rerouted to a default; only an absent *declared* class on a cloud dispatch has a default
+  (`cloud_ok`), and that is not a missing/unknown case. This check's decision (payload class,
+  endpoint id, secret reference, allow/deny, reason) is recorded in the existing run-record
+  ledger extension (§4.7), never a new store.
+- **May a cloud checker read the output of a `cloud_ok` ticket that ran locally?** Yes — a
+  `local`-routed dispatch whose **declared** class is `cloud_ok` or absent is `local-pinned` (no
+  retry, no auto-merge) but not confidential; a separate cloud-routed checker dispatch may read
+  its output, since the output inherits the confidentiality of inputs that were already
+  cloud-eligible. A declared-`local_only` dispatch's output may be checked only by a human or a
+  separate local dispatch — never a cloud checker. **Consequence:** v1 helper dispatches (§4.11
+  decision 3) are limited to work whose declared class is `cloud_ok` or absent, since that is
+  the only case with a valid independent-checker path.
+- **No auto-merge (§4.11 decision 5, restated — strictly stronger, weakens nothing):** neither
+  a `local-pinned` dispatch's output nor any `local_only`-classed payload ever auto-merges (no
+  `direct-to-pr` end-gate auto-merge, no grace-timer advance to merge); the merge is always a
+  human action. The scheduler end-gate check that enforces this is not owned by #557–#564; it
+  needs its own human-reviewed gate ticket (#585).
+- **Non-exporting outage behavior:** a `local-pinned` dispatch that fails (outage, OOM,
+  protocol incompatibility, timeout, stale/missing capability evidence) never retries against
+  a cloud endpoint — this is a property of being local-pinned, not of `payload_class`. It
+  records the failure under one of #238's new failure classes and abstains/escalates. Two
+  local failures, a model's stated confidence, or text in the task itself cannot grant export
+  permission for a future dispatch — only operator-controlled config can, and such a later
+  cloud run is always a *new* dispatch decision, never a runtime fallback of the failed
+  local-pinned dispatch itself.
 - **Credential stripping:** secrets never travel in the request-correlation envelope (§4.4's
   header), in any ledger row, run record, log line or issue comment — they are referenced by `secret_reference` (a lookup key into
   gitignored instance/gateway config, per #202's existing invariant), never inlined. This mirrors

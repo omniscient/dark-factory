@@ -37,7 +37,7 @@ REQUIRED_SECTIONS = [
 SLICE_OWNERS = ["#557", "#558", "#559", "#560", "#561", "#562", "#239", "#238", "#563", "#564"]
 
 FAIL_CLOSED_INVARIANTS = [
-    "Unknown or missing on either side → block + escalate.",
+    "blocks and escalates — it is never silently rerouted",
     "A verdict produced inside a local-routed container is void",
     "never retries against a cloud",
     "`local_only` work never auto-merges",
