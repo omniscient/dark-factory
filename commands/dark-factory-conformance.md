@@ -750,3 +750,42 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    `STATUS:` line directly and blocks `push-and-pr` (and everything chained after it, including
    `status-in-review`) on anything other than `PASS`/`SKIPPED`/`ERROR` — a `command:` node's
    internal `exit 1` does not reliably surface as node failure to the DAG executor (#212, #271).
+
+## Phase 6: ARTIFACT GUARD
+
+Run this section last, on every path, before your turn ends: after Phase 4's "Exit `0`",
+after Phase 5 step 5, and after Phase 1 step 2's SKIPPED exit. Those "exit" lines mean that
+phase's own work is done; they do not skip this check. This guard never writes a verdict of
+its own — the only steps that write `$ARTIFACTS_DIR/conformance.md` are Phase 1 step 2,
+Phase 4 and Phase 5 (#373).
+
+1. Check the artifact:
+   ```bash
+   if test -f "$ARTIFACTS_DIR/conformance.md" && grep -q '^STATUS:' "$ARTIFACTS_DIR/conformance.md"; then
+     echo "artifact-guard: conformance.md carries a STATUS line — nothing to do"
+   else
+     echo "artifact-guard: conformance.md is missing or has no STATUS line"
+   fi
+   ```
+2. If it carries a `STATUS:` line, stop here. Never overwrite or edit an existing verdict.
+3. If it is missing and a reviewer dispatch (Step 3.1 step 4 or 5a, Phase 3.5 step 6 or 7a)
+   has not returned yet, wait for it per that step's foreground-dispatch rule — poll inside
+   your turn, never end the turn to wait — then continue with 4.
+4. If it is missing and you hold the step-4 (Opus) reviewer response for the current cycle,
+   go back and act on it **now** under Step 3.1 step 7's existing rules: a conforming
+   verdict runs Phase 4; a material or inconclusive one re-enters the Phase 3.5 reconcile
+   loop, which itself ends in Phase 4 or Phase 5. Then repeat step 1. The verdict written
+   is the reviewer's real one, produced by the existing Phase 4/5 code — this section adds
+   no new way to reach a pass.
+5. Otherwise — no usable reviewer response exists and the reconcile budget cannot produce
+   one — leave the file absent and fail loudly:
+   ```bash
+   echo "dark-factory-conformance: artifact guard — $ARTIFACTS_DIR/conformance.md was never written and no reviewer response is available to write it from; leaving it absent so conformance-gate blocks and posts its failure comment." >&2
+   exit 1
+   ```
+   Do not create the file. `conformance-gate` (`scripts/verdict_gate_check.sh`) then takes
+   its missing-verdict path unchanged: it posts the `<!-- df-push-gate-failure -->` comment
+   and logs the line `scripts/factory_core/error_signature.py` signs
+   `substantive:verdict_missing`. A file written here would instead send the gate down its
+   quiet "upstream already communicated" branch, suppressing that comment and that log
+   line — the silent, misclassified failure #373 fixes.

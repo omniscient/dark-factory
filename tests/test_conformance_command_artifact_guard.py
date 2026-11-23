@@ -82,3 +82,29 @@ def test_reconcile_step_4_no_response_cycle_precedes_code_fix():
     branch = section[cond:fix]
     assert "go straight to step 6" in branch
     assert "MAX_CYCLES" in branch
+
+
+# --- Requirement 9: Phase 6 is last and never synthesizes a verdict ---
+
+def _phase_6():
+    text = _text()
+    return text[text.index("## Phase 6: ARTIFACT GUARD"):]
+
+
+def test_phase_6_follows_phase_5_and_is_last():
+    text = _text()
+    p5 = text.find("## Phase 5: BLOCKED")
+    p6 = text.find("## Phase 6: ARTIFACT GUARD")
+    assert p5 != -1 and p6 > p5
+    assert not re.search(r"^## ", text[p6 + len("## Phase 6"):], re.M), \
+        "Phase 6 must be the file's last top-level section"
+
+
+def test_phase_6_never_synthesizes_a_verdict():
+    section = _flat(_phase_6())
+    assert "emit_verdict" not in section
+    for literal in ("STATUS: BLOCKED", "STATUS: PASS", "STATUS: ERROR"):
+        assert literal not in section, literal
+    assert "leave the file absent" in section
+    assert "grep -q '^STATUS:'" in section
+    assert "exit 1" in section
