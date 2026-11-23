@@ -808,8 +808,8 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
    this reason ("Priority 3 would then retry it as 'Fix'").
 
 4. **Container matching is by substring and host-wide.**
-   - `is_issue_running` uses `grep -q "#${issue_num}"` (`:119`), so issue 12 is
-     considered running while a container for issue 123 exists.
+   - `is_issue_running` uses the anchored `grep -qE "#${issue_num}([^0-9]|$)"` (`:119`), so issue
+     12 is not considered running while only a container for issue 123 exists (resolved since #414, `d8d074f`).
    - `docker ps` lists all containers the daemon has, so a second instance's container
      for its own issue #12 also counts. The same applies to `count_refine_running`
      (`:245`), which is compared with this instance's `REFINE_WIP_LIMIT`, and to

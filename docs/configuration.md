@@ -101,7 +101,7 @@ keys, which are read by the run container (see Discrepancies D1).
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `scheduler.poll_interval` | `60` | seconds between board polls | `scheduler.sh:1546,1575,1657` | `POLL_INTERVAL` (scheduler) | no |
-| `scheduler.max_retries` | `3` | per-issue retry ceiling for implement and conflict-resolve before the breaker trips to Blocked (refine and plan use the env-only `REFINE_MAX_RETRIES`, see Layer 4) | `scheduler.sh:1079,1091,1098,1235,1246` | `MAX_RETRIES` (scheduler) | no |
+| `scheduler.max_retries` | `3` | per-issue retry ceiling for implement, conflict-resolve and Close/merge dispatches (the `N:close` counter, via `dispatch_close`) before the breaker trips to Blocked (refine and plan use the env-only `REFINE_MAX_RETRIES`, see Layer 4) | `scheduler.sh:372,1079,1091,1098,1235,1246` | `MAX_RETRIES` (scheduler) | no |
 | `scheduler.rate_limit_floor` | `200` | pause polling while the GraphQL remaining budget is at or below this | `scheduler.sh:70-76` (`check_rate_limit`) | `RATE_LIMIT_FLOOR` (scheduler) | no |
 | `scheduler.factory_wip_limit` | `1` | max concurrent run containers (scheduler dispatch guard) | `scheduler.sh:128-129,1569-1574` | `FACTORY_WIP_LIMIT` (scheduler). The run container has its own guard at `entrypoint.sh:169-175` that reads `FACTORY_WIP_LIMIT` from env only, default 1; set it in `.archon/.env` too or a second concurrent run exits with an error | no |
 | `scheduler.main_red_recheck_enabled` | `true` | periodically dispatch "Recheck main" so a red-main latch can clear | `scheduler.sh:156` | `MAIN_RED_RECHECK_ENABLED` (scheduler) | no |
