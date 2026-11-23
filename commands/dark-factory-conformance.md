@@ -294,6 +294,12 @@ ARTIFACT_EOF
    - `description`: "Conformance review: code vs spec"
    - `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.282 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
    - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call. The reviewer's response text is required before any later step executes. If
+     the tool returns only a launch acknowledgement instead of the review, poll inside your
+     turn (keep issuing tool calls) until the response arrives — never end the turn to
+     wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this step's
+     (Opus) response text in hand for the current cycle.
 
 5. Append the subagent's output to `CONFORMANCE_DIALOGUE`
 
@@ -304,6 +310,12 @@ ARTIFACT_EOF
      `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
    - `prompt`: the identical verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md` the Opus call just read in step 4
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call too, and do not end your turn until it has returned — a result or an error,
+     either is fine. If the tool returns only a launch acknowledgement, poll inside your
+     turn until it returns. The non-gating contract below is unchanged: a shadow error,
+     timeout or refusal still degrades to `SHADOW_STATUS: UNCERTAIN` and never blocks or
+     retries the Opus verdict handling.
    - Any tool error, timeout, or refusal is caught here — it never blocks, delays, or
      retries the Opus verdict handling in step 7, and never feeds Phase 3.6's `[OOS]` scan.
    - Derive `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY` from
@@ -533,7 +545,14 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
     item 3a `render-prompt` invocation unchanged — a failure here is a hard stop for the phase,
     identically to Step 3.1.
 6. Re-spawn the conformance reviewer subagent with the verbatim contents of
-   `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a
+   `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a (on a no-response cycle per
+   step 4, the unchanged prompt from the previous cycle)
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call. The reviewer's response text is required before any later step executes. If
+     the tool returns only a launch acknowledgement instead of the review, poll inside your
+     turn (keep issuing tool calls) until the response arrives — never end the turn to
+     wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this
+     re-spawn's (Opus) response text in hand for the current cycle.
 7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator
 7a. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (mirroring Step
     3.1's 5a for this cycle — prompt is the verbatim contents of
@@ -542,6 +561,12 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
     separator, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one. Update
     `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY`/
     `SHADOW_VERDICT_LINE` from this cycle's response (best-effort `UNCERTAIN` on any error).
+    - **Foreground dispatch (#373):** pass `run_in_background: false` on this shadow
+      re-spawn too, and do not end your turn until it has returned — a result or an error.
+      If the tool returns only a launch acknowledgement, poll inside your turn until it
+      returns. The non-gating contract is unchanged: a shadow error, timeout or refusal
+      still degrades to `SHADOW_STATUS: UNCERTAIN` and never blocks or retries the Opus
+      verdict handling.
 8. Parse verdict again → loop back to step 1
 
 ## Phase 4: PASS — Write attestation
