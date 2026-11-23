@@ -68,3 +68,17 @@ def test_headless_contract_block_unchanged():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert _text().count(mod.HEADLESS_CONTRACT_BLOCK) == 1
+
+
+# --- Requirement 7: no-response cycle skips the code fix, re-spawns, shares the budget ---
+
+def test_reconcile_step_4_no_response_cycle_precedes_code_fix():
+    section = _flat(_phase_3_5())
+    step4 = section.find("4. Decide whether this cycle has a finding to fix")
+    cond = section.find("**No-response cycle (#373):**")
+    fix = section.find("Fix the code to align with the spec")
+    assert -1 not in (step4, cond, fix)
+    assert step4 < cond < fix
+    branch = section[cond:fix]
+    assert "go straight to step 6" in branch
+    assert "MAX_CYCLES" in branch

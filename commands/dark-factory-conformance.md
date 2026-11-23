@@ -529,12 +529,20 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
 1. Increment `CONFORMANCE_CYCLE`
 2. If `CONFORMANCE_CYCLE > MAX_CYCLES` → go to Phase 5 (BLOCKED)
 3. Read the MATERIAL deviation descriptions from the conformance reviewer output
-4. Fix the code to align with the spec:
-   - Write a failing test that targets the missing/wrong behavior
-   - Run the test to confirm it fails: `cd backend && python -m pytest <test_path> -x -v`
-   - Implement the fix
-   - Run the test to confirm it passes
-   - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
+4. Decide whether this cycle has a finding to fix:
+   - **No-response cycle (#373):** if this cycle was entered because the reviewer
+     subagent's Agent tool call errored, timed out, or returned an empty/no-response result
+     — not a parseable finding to act on — skip the code-fix and re-diff steps (the rest
+     of this step, step 5 and step 5a) and go straight to step 6: re-spawn the reviewer
+     with the identical `$ARTIFACTS_DIR/conformance_prompt.md`. This retry still consumes
+     the cycle step 1 just counted against `MAX_CYCLES` — there is no separate retry
+     budget, and step 2's `MAX_CYCLES` exit to Phase 5 still applies.
+   - Otherwise: Fix the code to align with the spec:
+     - Write a failing test that targets the missing/wrong behavior
+     - Run the test to confirm it fails: `cd backend && python -m pytest <test_path> -x -v`
+     - Implement the fix
+     - Run the test to confirm it passes
+     - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
 5. Re-get the diff:
    ```bash
    git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000 > "$ARTIFACTS_DIR/conformance_reconcile_diff.txt"
