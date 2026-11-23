@@ -2,6 +2,8 @@
 
 **Issue:** #373
 
+Revised: 2026-11-23 (operator amendment after plan gate)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans (or
 > superpowers:subagent-driven-development) to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
@@ -13,7 +15,9 @@
 - **Part A (classifier):** `scripts/factory_core/error_signature.py::classify()` gets a new
   `_VERDICT_MISSING_RE` that returns `substantive:verdict_missing`. The check order becomes
   delivery_failure → rate_limit → **verdict_missing** → preview_infra → the substantive
-  regexes → unknown. A pytest ties the regex to `scripts/verdict_gate_check.sh`'s wording.
+  regexes → unknown. The regex matches both of the gate's missing-verdict stderr lines: the
+  silent-death line and the quiet-branch `STATUS=missing` line (never `STATUS=BLOCKED`).
+  Pytests tie the regex to both `echo`s in `scripts/verdict_gate_check.sh`.
   Only a comment is added to the gate script; its behavior does not change.
 - **Part B (conformance command):** `commands/dark-factory-conformance.md` gets three
   additions. All four reviewer dispatch sites run in the foreground
@@ -51,6 +55,9 @@ the gate's log line as one contiguous string**:
   concatenate when the shell runs, but not in the source.
 - The gate script's own source is safe: it has `#${ISSUE_NUM}`, not digits, and the regex
   needs `#\d+`.
+- The same applies to the quiet-branch line (the gate source has `STATUS=${STATUS:-missing}`
+  and `#${ISSUE_NUM}`), and to the #580 evidence quote in Tasks 1 and 9, which is
+  deliberately written as two separate fragments. Keep it split when you copy it.
 
 Keep it that way in any comment or prose you write.
 
@@ -62,7 +69,7 @@ Keep it that way in any comment or prose you write.
 |---|---|---|
 | `scripts/factory_core/error_signature.py` | Add `_VERDICT_MISSING_RE` with a cross-reference comment. Reorder `classify()`: rate_limit moves above preview_infra and verdict_missing goes in between. Add a precedence note near `SESSION_WINDOW_PAUSE_SIGNATURE` | 1, 2, 5 |
 | `scripts/verdict_gate_check.sh` | Comment-only: a cross-reference above the "true silent death" `echo` | 2 |
-| `tests/test_factory_core_error_signature.py` | New tests: the #197 transcript shape, a prefix-anchoring negative, rate-limit precedence (both orders), rate-limit over preview, wording coupling to the gate script | 2, 3, 4 |
+| `tests/test_factory_core_error_signature.py` | New tests: the #197 transcript shape, a prefix-anchoring negative, rate-limit precedence (both orders), rate-limit over preview, quiet-branch `STATUS=missing` match and `STATUS=BLOCKED` negative, wording coupling to both gate-script `echo`s | 2, 3, 4 |
 | `tests/test_entrypoint_error_signature.sh` | New section `C2`: preview-infra token + gate line → `.sig` carries `substantive:verdict_missing` | 6 (part 1) |
 | `commands/dark-factory-conformance.md` | Foreground-dispatch text at 4 sites; Phase 3.5 step 4 no-response conditional; new final `## Phase 6: ARTIFACT GUARD` | 7, 8, 9 |
 | `tests/test_conformance_command_artifact_guard.py` | **New.** Static-text assertions for the command edits | 10 |
@@ -117,11 +124,17 @@ first so that a contradiction stops the run before any code is written.
     Record the path and proceed.
   - **NOT AVAILABLE FROM THE RUN CONTAINER:** there are no hits, and no captured
     container log of a failed run is reachable. Record "not directly verified from inside
-    the run container". Cite Step 1's indirect evidence (the gate's quiet-branch stderr
-    text `STATUS=missing` is quoted from container logs in #373's body and in the
-    2026-09-16 #439 comment). Proceed, but carry it into the PR description as an
-    **Unverified assumption** for the human merger. The operator's 2026-11-23 spec-gate
-    amendment explicitly keeps this as a flagged assumption.
+    the run container". Cite the indirect evidence, which is evidence and not proof:
+    - Step 1: the gate's quiet-branch stderr text `STATUS=missing` is quoted from container
+      logs in #373's body and in the 2026-09-16 #439 comment.
+    - The #580 post-mortem comment of 2026-11-23T15:49:46Z quotes the node error. The quote
+      is given here as two fragments so this file never contains the line contiguously:
+      it begins `verdict_gate_check.sh:` and continues `Conformance (Gate 2) verdict
+      missing/unparseable for issue #580 and no needs-discussion label.` The post-mortem
+      is generated from the run's captured output.
+
+    Proceed, but carry it into the PR description as **merge-blocking until a human
+    confirms a `verdict_gate_check.sh:` line in a real run's container log** (Task 9).
   - **CONTRADICTED:** a captured log of a run whose `conformance-gate` failed has **no**
     `verdict_gate_check.sh:` line. **Stop.** Do not do Tasks 2–10. Post an issue comment
     that quotes the evidence and says the classifier cannot fire until the gate node
@@ -160,6 +173,12 @@ first so that a contradiction stops the run before any code is written.
   _BENIGN_PREVIEW = "preview: docker compose up failed — continuing in degraded mode\n"
   # Same string test_rate_limit() above already proves classifies as rate_limit.
   _RATE_LIMIT_TEXT = "Error: you have hit your usage limit for this session"
+  # The gate's quiet branch (needs-discussion present). It reports a missing verdict as
+  # STATUS=missing — the shape #197 most likely took — and a real one as STATUS=BLOCKED.
+  _QUIET_HEAD = _GATE_PREFIX + "Conformance (Gate 2) blocks issue #197 (STATUS="
+  _QUIET_TAIL = "); upstream already communicated, no comment needed."
+  _QUIET_MISSING_LINE = _QUIET_HEAD + "missing" + _QUIET_TAIL
+  _QUIET_BLOCKED_LINE = _QUIET_HEAD + "BLOCKED" + _QUIET_TAIL
 
 
   def test_verdict_missing_fixture_preview_text_alone_is_preview_infra():
@@ -193,6 +212,20 @@ first so that a contradiction stops the run before any code is written.
   def test_rate_limit_outranks_preview_infra():
       # Pins the one intentional reordering of the two pre-existing environmental checks.
       assert _classify(text=_BENIGN_PREVIEW + _RATE_LIMIT_TEXT) == "environmental:rate_limit"
+
+
+  def test_verdict_missing_matches_quiet_branch_status_missing():
+      # Second operator amendment (#373): the quiet-branch line also signs verdict_missing.
+      sig = _classify(text=_BENIGN_PREVIEW + _QUIET_MISSING_LINE + "\n")
+      assert sig == "substantive:verdict_missing"
+
+
+  def test_verdict_missing_ignores_quiet_branch_status_blocked():
+      # A real BLOCKED verdict is not a missing one: today's classification is unchanged.
+      alone = _classify(text=_QUIET_BLOCKED_LINE + "\n")
+      assert alone != "substantive:verdict_missing"
+      with_preview = _classify(text=_BENIGN_PREVIEW + _QUIET_BLOCKED_LINE + "\n")
+      assert with_preview == "environmental:preview_infra"
   ```
 
 - [ ] **Step 2: Insert the failing entrypoint case.** In
@@ -229,27 +262,33 @@ first so that a contradiction stops the run before any code is written.
   bash tests/test_entrypoint_error_signature.sh
   ```
 
-  Expected pytest result: `test_verdict_missing_outranks_earlier_preview_infra_noise` FAILS
-  (`'environmental:preview_infra' == 'substantive:verdict_missing'`) and
+  Expected pytest result (`3 failed, 4 passed`):
+  `test_verdict_missing_outranks_earlier_preview_infra_noise` FAILS
+  (`'environmental:preview_infra' == 'substantive:verdict_missing'`),
+  `test_verdict_missing_matches_quiet_branch_status_missing` FAILS (same message) and
   `test_rate_limit_outranks_preview_infra` FAILS (`environmental:preview_infra`). The other
-  three pass: the fixture sanity check, the negative check and the rate-limit-vs-gate check,
-  which already holds today. Expected bash result: `FAIL: classified
-  substantive:verdict_missing`, then `Results: N passed, 1 failed`, with a non-zero exit.
+  four pass: the fixture sanity check, the prefix negative, the `STATUS=BLOCKED` negative
+  and the rate-limit-vs-gate check, which already hold today. Expected bash result: `FAIL:
+  classified substantive:verdict_missing`, then `Results: 11 passed, 1 failed`, with a
+  non-zero exit.
 
 - [ ] **Step 4: Implement the regex.** In `scripts/factory_core/error_signature.py`, insert
   this right after the `_PREVIEW_INFRA_RE = re.compile(...)` block (after its closing `)`)
   and before `_OOS_FILES_RE`:
 
   ```python
-  # Matches the stderr line scripts/verdict_gate_check.sh prints on its "true silent death"
-  # path (verdict file missing/unparseable, no needs-discussion label) — the run-ending
-  # cause when a gate phase never wrote its verdict (#373). Anchored on that script's own
-  # "verdict_gate_check.sh: " log prefix and a literal issue number, so a transcript that
-  # merely quotes the phrase (e.g. `cat` of the script, whose source has "#${ISSUE_NUM}")
-  # is not mis-signed. Wording is coupled to that echo; tests/test_factory_core_error_signature.py
-  # fails CI if either side drifts. Deliberately no re.IGNORECASE: it is our own literal.
+  # Matches the two stderr lines scripts/verdict_gate_check.sh prints when a gate phase
+  # never wrote its verdict (#373): the "true silent death" line (verdict missing/unparseable,
+  # no needs-discussion label) and the quiet-branch line when it reports STATUS=missing
+  # (needs-discussion present). A quiet-branch STATUS=BLOCKED line is a real verdict and
+  # must not match. Anchored on that script's own "verdict_gate_check.sh: " log prefix and a
+  # literal issue number, so a transcript that merely quotes the phrase (e.g. `cat` of the
+  # script, whose source has "#${ISSUE_NUM}") is not mis-signed. Wording is coupled to both
+  # echoes; tests/test_factory_core_error_signature.py fails CI if either side drifts.
+  # Deliberately no re.IGNORECASE: it is our own literal.
   _VERDICT_MISSING_RE = re.compile(
-      r"verdict_gate_check\.sh: .{0,80}verdict missing/unparseable for issue #\d+"
+      r"verdict_gate_check\.sh: .{0,80}"
+      r"(?:verdict missing/unparseable for issue #\d+|blocks issue #\d+ \(STATUS=missing\))"
   )
   ```
 
@@ -354,6 +393,32 @@ first so that a contradiction stops the run before any code is written.
   def test_gate_script_silent_death_echo_carries_classifier_cross_reference():
       lines, i = _silent_death_echo()
       assert "error_signature.py" in "\n".join(lines[max(0, i - 4):i])
+
+
+  def test_verdict_missing_regex_matches_gate_script_quiet_branch_wording():
+      # Couples the regex to the quiet-branch echo too: STATUS=missing must match,
+      # STATUS=BLOCKED (a real verdict) must not.
+      import re
+      from factory_core.error_signature import _VERDICT_MISSING_RE
+      hits = [line.strip() for line in _GATE_SCRIPT.read_text(encoding="utf-8").splitlines()
+              if line.strip().startswith("echo ") and "upstream already communicated" in line]
+      assert len(hits) == 1, f"expected one quiet-branch echo in {_GATE_SCRIPT}, got {len(hits)}"
+      m = re.match(r'echo "(.*)" >&2$', hits[0])
+      assert m, hits[0]
+      assert "${STATUS:-missing}" in m.group(1), "quiet-branch echo no longer prints STATUS"
+
+      def render(status):
+          return (m.group(1)
+                  .replace("${GATE_LABEL}", "Conformance (Gate 2)")
+                  .replace("${ISSUE_NUM}", "197")
+                  .replace("${STATUS:-missing}", status))
+
+      missing_matches = bool(_VERDICT_MISSING_RE.search(render("missing")))
+      assert missing_matches, "quiet-branch STATUS=missing wording drifted from the regex"
+      sig = _classify(text=render("missing"))
+      assert sig == "substantive:verdict_missing"
+      blocked_matches = bool(_VERDICT_MISSING_RE.search(render("BLOCKED")))
+      assert not blocked_matches, "a STATUS=BLOCKED quiet-branch line must not match"
   ```
 
 - [ ] **Step 2: Run and verify.**
@@ -362,8 +427,11 @@ first so that a contradiction stops the run before any code is written.
   PYTHONPATH=scripts python -m pytest tests/test_factory_core_error_signature.py -v -k "gate_script"
   ```
 
-  Expected: `test_verdict_missing_regex_matches_gate_script_wording` PASSES, because Task 2
-  already added the regex. `test_gate_script_silent_death_echo_carries_classifier_cross_reference`
+  Expected (`1 failed, 3 passed`): `test_verdict_missing_regex_matches_gate_script_wording`
+  and `test_verdict_missing_regex_matches_gate_script_quiet_branch_wording` PASS, because
+  Task 2 already added the regex (the `-k` filter also selects the already-passing
+  `test_verdict_missing_requires_gate_script_prefix`).
+  `test_gate_script_silent_death_echo_carries_classifier_cross_reference`
   FAILS (`assert 'error_signature.py' in ...`).
 
 - [ ] **Step 3: Add the comment** in `scripts/verdict_gate_check.sh`, immediately above the
@@ -373,7 +441,8 @@ first so that a contradiction stops the run before any code is written.
   ```bash
   # Wording coupled to scripts/factory_core/error_signature.py's _VERDICT_MISSING_RE (#373):
   # entrypoint.sh's failure classifier signs the run substantive:verdict_missing from this
-  # exact stderr line. Rewording it fails tests/test_factory_core_error_signature.py.
+  # exact stderr line, and from the quiet-branch echo above when it prints STATUS=missing.
+  # Rewording either one fails tests/test_factory_core_error_signature.py.
   ```
 
   Add nothing else: no other line in the file changes.
@@ -795,6 +864,8 @@ first so that a contradiction stops the run before any code is written.
 point into `commands/dark-factory-conformance.md` past old line 296, or into
 `scripts/verdict_gate_check.sh`. Tasks 2–6 shift all of them. Refs at or before
 conformance line 296 do not move: `:60`–`:77`, `:151-220`, `:181`, `:208`, `:210`, `:277`, `:284`.
+`docs/features.md:105`'s four Phase 3.6 refs (`:339`-`:509`, `:429`, `:470`) are past line
+296 and do move.
 `scripts/docs_refs_check.py` only range-checks line numbers, so CI stays green either way;
 the refs still have to be true.
 
@@ -822,6 +893,10 @@ the refs still have to be true.
   echo "SPILL=$(_at 'SPILLOVER_TICKETS=""' $C)   # old 444"
   echo "EXCISED=$(_at 'EXCISED_COUNT=<number of successfully excised changes>' $C)   # old 502"
   D=$(_at '5. Re-get the diff:' $C); echo "REDIFF=$D-$((D+4))   # old 526-530"
+  echo "P36_START=$(_at '## Phase 3.6: SCOPE REMEDIATION' $C)   # old 339"
+  echo "P36_END=$(_at '### 3.6.4' $C)   # old 509"
+  echo "DEDUPE=$(_at 'DEDUPE_OUT=$(python3 dark-factory/scripts/dedupe_oos.py' $C)   # old 429"
+  echo "BOARD=$(_at 'python3 dark-factory/scripts/factory_core/cli.py board-add' $C)   # old 470"
   echo "GATE_END=$(wc -l < scripts/verdict_gate_check.sh)   # old 86"
   ```
 
@@ -843,9 +918,9 @@ the refs still have to be true.
   ```markdown
      dir for the scheduler. Classes, in check order: `environmental:delivery_failure` (run
      shorter than `DELIVERY_FAILURE_MAX_SECONDS`, no commits, clean tree, no phase artifact),
-     `environmental:rate_limit`, `substantive:verdict_missing` (a gate's missing/unparseable
-     verdict line from `scripts/verdict_gate_check.sh`, ranked above the non-fatal preview
-     noise every self-target run leaves, #373), `environmental:preview_infra`, and
+     `environmental:rate_limit`, `substantive:verdict_missing` (either of the two
+     missing-verdict stderr lines of `scripts/verdict_gate_check.sh`, ranked above the
+     preview noise every self-target run leaves, #373), `environmental:preview_infra`, and
      `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
      (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:S-E`).
   ```
@@ -855,6 +930,7 @@ the refs still have to be true.
 
   | Doc line (today) | Old ref text | New ref text |
   |---|---|---|
+  | `docs/features.md:105` | `` (`:339`-`:509`): `dedupe_oos.py` (`:429`), `cli.py board-add` (`:470`) `` | `` (`:P36_START`-`:P36_END`): `dedupe_oos.py` (`:DEDUPE`), `cli.py board-add` (`:BOARD`) `` |
   | `docs/features.md:107` | `` `commands/dark-factory-conformance.md:300`-`:316` and `:560`-`:574` `` | `` `commands/dark-factory-conformance.md:SH5A_START`-`:SH5A_END` and `:P4SH_START`-`:P4SH_END` `` |
   | `docs/features.md:111` | `` `dark-factory-conformance.md:553` and `:701` `` | `` `dark-factory-conformance.md:P` and `:B` `` |
   | `docs/features.md:134` | `` `dark-factory-conformance.md:623` `` | `` `dark-factory-conformance.md:MEM` `` |
@@ -875,7 +951,7 @@ the refs still have to be true.
   ```
 
   ```bash
-  grep -nE 'dark-factory-conformance\.md:(553|623|715-719|554-556)|md:300`-`:316|:560`-`:574|verdict_gate_check\.sh:36-86|error_signature\.py:37-64|\(`:444`, `:502`\)|\(`:526-530`\)' docs/run-lifecycle.md docs/features.md || echo "no stale refs"
+  grep -nE 'dark-factory-conformance\.md:(553|623|715-719|554-556)|md:300`-`:316|:560`-`:574|verdict_gate_check\.sh:36-86|error_signature\.py:37-64|\(`:444`, `:502`\)|\(`:526-530`\)|\(`:339`-`:509`\)|dedupe_oos\.py` \(`:429`\)|board-add` \(`:470`\)' docs/run-lifecycle.md docs/features.md || echo "no stale refs"
   ```
 
   Expected: `docs_refs_check.py` exits 0 with no errors, the `sed` prints `def classify(`,
@@ -962,27 +1038,35 @@ writes.
   ## Requirement 6 verification (stderr → transcript)
   <FOUND / NOT AVAILABLE FROM THE RUN CONTAINER — copied verbatim from Task 1 Step 3 in implementation.md>
 
+  ## Merge-blocking until a human confirms (stderr → transcript)
+  - **Do not merge until a human confirms a `verdict_gate_check.sh:` line in a real run's
+    container log.** The classifier can only fire if the Archon executor forwards the
+    `conformance-gate` `bash:` node's stderr into the stream `entrypoint.sh` tees to
+    `TMP_OUT`. Indirect evidence (evidence, not proof):
+    - `STATUS=missing` is quoted from container logs in #373 and #439, and that text is
+      emitted only by the two `bash:` verdict-gate scripts' stderr (`verdict_gate_check.sh`,
+      `docs_verdict_gate_check.sh`).
+    - The #580 post-mortem comment of 2026-11-23T15:49:46Z, generated from the run's
+      captured output, quotes the node error. It begins `verdict_gate_check.sh:` and
+      continues `Conformance (Gate 2) verdict missing/unparseable for issue #580 and no
+      needs-discussion label.` (written as two fragments on purpose; keep it split).
+
   ## Unverified assumptions (for the human merger)
-  - The Archon executor forwards the `conformance-gate` `bash:` node's stderr into the stream
-    `entrypoint.sh` tees to `TMP_OUT`. Indirect evidence: `STATUS=missing` is quoted from
-    container logs in #373 and #439, and that text is emitted only by the two `bash:`
-    verdict-gate scripts' stderr (`verdict_gate_check.sh`, `docs_verdict_gate_check.sh`).
   - Requirements 8/9 are agent instructions, not enforced mechanisms; the tests are static
     text checks only.
 
-  ## Reservation (not in scope; candidate follow-up)
-  - `_VERDICT_MISSING_RE` matches only the gate's *silent-death* line (needs-discussion
-    absent), as the spec requires. The #197 run itself was Blast-Radius-parked, so
-    needs-discussion was likely present and the gate took its *quiet* branch
-    (`... blocks issue #N (STATUS=missing); upstream already communicated ...`), which this
-    regex does not match. Since #551 the DAG only reaches conformance after `blast-gate`
-    passes, so that combination should now be rare. Whether the quiet-branch
-    `STATUS=missing` line should also classify is a separate decision.
+  ## Notes on what the classifier matches
+  - `_VERDICT_MISSING_RE` matches both of the gate's missing-verdict lines: the
+    *silent-death* line (needs-discussion absent) and the *quiet-branch* line when it
+    prints `STATUS=missing` (needs-discussion present — the shape the Blast-Radius-parked
+    #197 run most likely took). A quiet-branch `STATUS=BLOCKED` line never matches. A
+    quiet-branch line for an unparseable non-empty status (`STATUS=<other token>`) is not
+    matched either; that combination is a candidate follow-up.
   - `verdict_gate_check.sh` also backs `review-gate` (Gate 3,
     `workflows/archon-dark-factory.yaml`), so a missing code-review verdict is also signed
     `substantive:verdict_missing`. That is intended by the spec's `<gate label>` wording.
-    `docs_verdict_gate_check.sh` lines never contain `verdict missing/unparseable`, so they
-    do not match.
+    `docs_verdict_gate_check.sh` lines never carry the `verdict_gate_check.sh: ` prefix
+    followed by either matched phrase, so they do not match.
   ```
 
 ---
@@ -1000,8 +1084,15 @@ writes.
 - [x] Dry run (planner, 2026-11-23, scratch worktree off `2d9c7cf`): every edit block in
   Tasks 2–7 applied cleanly as written. Each "verify fail" step failed exactly as stated and
   each "verify pass" step passed. The full suite gave 3271 passed. Also green:
-  `test_entrypoint_error_signature.sh` (14/0), `test_verdict_gate_check.sh`,
+  `test_entrypoint_error_signature.sh` (12/0), `test_verdict_gate_check.sh`,
   `docs_refs_check.py` and `check_workflow_dag.py`. The Task 8 Step 5 self-classification
   scan found no hits. After architect cycle 1, the revised Task 1 grep and Task 7's
   anchor script were dry-run again. All 17 anchors resolved to the expected shifted lines,
   and the Step 4 stale-ref grep printed `no stale refs`.
+- [x] Re-run after the plan-gate amendment (reviewer, 2026-11-23, `python:3.12` container
+  with `jq`, repo mounted as `<dir>/dark-factory`): Tasks 2–6 applied verbatim from the
+  amended blocks. Task 2 Step 3 gave `3 failed, 4 passed` and bash `11 passed, 1 failed`;
+  Task 2 Step 7 gave 29 passed and bash `12 passed, 0 failed`; Task 3 Step 2 gave
+  `1 failed, 3 passed`; Task 3 Step 4 gave 32 passed. All 21 Task 7 anchors resolved
+  (the four new ones to 351, 521, 441, 482). Full suite: 3272 passed, 2 skipped. The Task 8
+  Step 5 scan, extended to this plan and the spec, printed `hits: []`.

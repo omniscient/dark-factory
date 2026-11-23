@@ -4,6 +4,9 @@
 
 Revised: 2026-11-23 (operator amendment after spec gate)
 
+2026-11-23 second operator amendment after plan gate: classifier also matches the gate's
+quiet-branch STATUS=missing line
+
 ---
 
 ## Overview / Problem Statement
@@ -88,6 +91,13 @@ gate itself is not the bug. The bug is two-fold:
    mis-signed. The issue-comment sentence "No verdict was recorded for this run" is
    written to a temp file and posted to the tracker, not printed, so it is deliberately
    **not** an alternative of the regex.
+   Under the same `verdict_gate_check.sh: ` prefix the regex **also** matches the gate's
+   quiet-branch line when, and only when, it reports a missing verdict
+   (`verdict_gate_check.sh: <gate label> blocks issue #<n> (STATUS=missing); ...`, printed
+   when the verdict is absent and `needs-discussion` is present — the shape run #197 most
+   likely took, and the `STATUS=missing` trigger the issue body names). A quiet-branch
+   line reporting `STATUS=BLOCKED` (a real reviewer verdict) must **not** match. This is
+   classifier-only: `verdict_gate_check.sh`'s behavior is unchanged.
 2. Add a short cross-reference comment in both `error_signature.py` (above
    `_VERDICT_MISSING_RE`) and `verdict_gate_check.sh` (above the "true silent death"
    `echo`) noting that the classifier's regex depends on this exact wording. The comment
@@ -96,6 +106,8 @@ gate itself is not the bug. The bug is two-fold:
    extracts that `echo` line, substitutes `${GATE_LABEL}` → `Conformance (Gate 2)` and
    `${ISSUE_NUM}` → a number, and asserts `_VERDICT_MISSING_RE` matches the result — so a
    rewording of either side fails CI instead of silently breaking the classification.
+   A second coupling test does the same for the quiet-branch `echo`: rendered with
+   `${STATUS:-missing}` → `missing` it must match, rendered with `BLOCKED` it must not.
    This is a comment-only edit to `verdict_gate_check.sh`; its behavior is unchanged.
 3. A new regression test in `tests/test_factory_core_error_signature.py` reproducing the
    #197 transcript shape. The fixture's early "benign preview" text must contain a token
@@ -106,6 +118,11 @@ gate itself is not the bug. The bug is two-fold:
    bare phrase without the `verdict_gate_check.sh:` prefix (e.g. a quoted `${GATE_LABEL}
    verdict missing/unparseable for issue #${ISSUE_NUM}` source line) does **not** classify
    as `verdict_missing`.
+   One further fixture covers the quiet branch: preview text followed by the
+   quiet-branch `STATUS=missing` line classifies as `"substantive:verdict_missing"`, and
+   the same preview text followed by a quiet-branch `STATUS=BLOCKED` line stays
+   `"environmental:preview_infra"` (negative test — today's behavior for a real BLOCKED
+   verdict is unchanged).
 4. A new test in the same file: a transcript containing both a token `_RATE_LIMIT_RE`
    matches (reuse the string an existing rate-limit test in this file already uses) and
    the gate line classifies as `"environmental:rate_limit"`, in either textual order. A
@@ -234,7 +251,8 @@ Add one new compiled regex and one new `if` branch in `classify()`:
 
 ```python
 _VERDICT_MISSING_RE = re.compile(
-    r"verdict_gate_check\.sh: .{0,80}verdict missing/unparseable for issue #\d+"
+    r"verdict_gate_check\.sh: .{0,80}"
+    r"(?:verdict missing/unparseable for issue #\d+|blocks issue #\d+ \(STATUS=missing\))"
 )
 ```
 
