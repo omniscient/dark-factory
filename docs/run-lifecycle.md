@@ -766,7 +766,7 @@ conformance command does not adjudicate this gate.
    because the reviewer call errored, timed out or returned nothing skips the fix and just
    re-spawns the reviewer; it still counts as a cycle. More than
    `conformance.max_reconcile_cycles` cycles is BLOCKED.
-8. **Artifact guard** (Phase 6, `:754-791`), last on every path: if `conformance.md` has no
+8. **Artifact guard** (Phase 6, `:754-794`), last on every path: if `conformance.md` has no
    `STATUS:` line it acts on a reviewer response it holds (Phase 4 or 5), else leaves the
    file absent and exits 1 so `conformance-gate` takes its missing-verdict path. It never
    writes a verdict itself (#373).
