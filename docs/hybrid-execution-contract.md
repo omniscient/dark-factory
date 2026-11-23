@@ -467,15 +467,18 @@ starting `"1.0"`), plus one document-level `hybrid_contract: "1.0"` version for 
 |---|---|---|
 | Configuration | #557 | Endpoint registry entry fields (§4.1, §4.6) |
 | Request | #558 | Correlation envelope (§4.4) + payload class |
-| Result | #558 | Outcome, failure class (if any), destination actually used |
+| Result | #558 | Outcome, failure class (if any), destination actually used, and the dispatch-record fields §4.2's independence check relies on (`hosting_location`, `endpoint_id`, `correlation`) |
 | Capability evidence | #561/#562 | §4.5's schema |
 
 Compatibility rule: minor bumps are additive and forward-compatible (unknown fields ignored);
 major bumps are a hard reject, handled with the same fail-closed posture as missing capability
-evidence or an unknown payload/destination class. All four are specified here only; #557/#558/
-#561 implement them as new additive top-level fields on `run_record.py`'s existing per-run
-record, following the `harness_economics`/`memory_trace` extension idiom — no new datastore
-(consistent with the #207 architecture-memory entry below).
+evidence or an unknown payload/destination class. All four are specified here only. #558
+implements the Request and Result contracts as new additive top-level fields on
+`run_record.py`'s existing per-run record, following the `harness_economics`/`memory_trace`
+extension idiom — no new datastore (consistent with the #207 architecture-memory entry below).
+The Configuration contract (#557) and the capability-evidence record (#561/#562) are
+per-endpoint: they live on the operator-controlled instance-config surface (§4.5), and the
+per-run record cites them by `endpoint_id` and `schema_version`.
 
 ### 4.8 Compatibility matrix — helper boundary vs. full Claude-harness compatibility
 
