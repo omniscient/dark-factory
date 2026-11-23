@@ -88,13 +88,15 @@ class GitHubCodeHost(CodeHost):
         subprocess.run(cmd, capture_output=True)
 
     def merge_change(self, id: str, strategy: str = "merge", delete_branch: bool = True,
-                      repo: str | None = None) -> bool:
+                      repo: str | None = None, match_head: str | None = None) -> bool:
         cmd = ["gh", "pr", "merge", id]
         if repo:
             cmd += ["--repo", repo]
         cmd.append(f"--{strategy}")
         if delete_branch:
             cmd.append("--delete-branch")
+        if match_head:
+            cmd += ["--match-head-commit", match_head]
         r = subprocess.run(cmd, capture_output=True)
         return r.returncode == 0
 

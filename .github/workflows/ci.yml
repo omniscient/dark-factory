@@ -27,6 +27,7 @@ jobs:
       - run: bash tests/test_entrypoint_clone_url.sh
       - run: bash tests/test_entrypoint_staged_excludes.sh
       - run: bash tests/test_entrypoint_session_window.sh
+      - run: bash tests/test_entrypoint_blast_hold.sh
       - run: bash tests/test_entrypoint_error_signature.sh
       - run: bash tests/test_entrypoint_adapter_validate.sh
       - run: bash tests/test_entrypoint_conflict_escalate.sh
@@ -46,6 +47,7 @@ jobs:
       - run: bash tests/test_config_deletion.sh
       - run: bash tests/test_epic_autopilot_config.sh
       - run: bash tests/test_verdict_gate_check.sh
+      - run: bash tests/test_blast_gate_check.sh
       - run: bash tests/test_budget_context.sh
       - run: bash tests/test_scheduler_lib.sh
       - run: bash tests/test_gate_diff_md_visibility.sh

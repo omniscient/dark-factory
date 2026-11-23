@@ -49,6 +49,13 @@ source "${REPO_ROOT}/dark-factory/scripts/gate_lib.sh"  # TARGET-PATH
 ISSUE_NUM=$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")
 ```
 
+**Conformance does not adjudicate the blast-radius gate.** Once dispatched it runs its
+review; it does not consult `blast.md`, a blast-radius comment, or a blast-radius
+`needs-discussion`/`Blocked` state to decide whether to run. Enforcement is the
+`blast-gate` node, the `push-and-pr` re-check and the close-time check (#551) — the DAG
+only reaches this phase after `blast-gate` passed. Your own Phase 5 writes of
+`needs-discussion` and `Blocked` are unchanged.
+
 1. Read `.claude/skills/refinement/config.yaml` and extract the `conformance` block.
 2. If `conformance.enabled` is `false`:
    - Write `$ARTIFACTS_DIR/conformance.md` with content: `STATUS: SKIPPED\nREASON: conformance.enabled=false`

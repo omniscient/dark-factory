@@ -140,7 +140,7 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 
 The workflow therefore runs for `refine`, `plan`, `fix`, `continue` and `close` only.
 `refine`, `plan` and `close` skip the smoke gate; `close` and `recheck` skip the adapter
-gate (`entrypoint.sh:657-662`).
+gate (`entrypoint.sh:715-720`).
 
 ---
 
@@ -150,14 +150,14 @@ gate (`entrypoint.sh:657-662`).
 
 Runs steps 1-23 above with no issue number. The smoke gate's green path clears the
 main-red sentinel and closes the regression ticket; the run then exits 0
-(`entrypoint.sh:913-916`). If main is still red, the gate itself exits 0
+(`entrypoint.sh:974-977`). If main is still red, the gate itself exits 0
 (`smoke_gate.sh:66-135`).
 
 ### `Fix main`
 
 After the clone and setup, if `MAIN_RED_AUTOFIX_ENABLED` is not `true` the run logs that
 and exits 0. Otherwise it calls `factory_core/cli.py main-red-fix --once` and exits 0
-regardless of the result (`entrypoint.sh:874-882`). The fixer itself
+regardless of the result (`entrypoint.sh:935-943`). The fixer itself
 (`scripts/factory_core/main_red_fixer.py`) is outside this document; its knobs are the
 `main_red_autofix.*` keys ([configuration.md](configuration.md)).
 
@@ -178,9 +178,9 @@ No Archon workflow is involved. The side-effect config says the same:
 
 1. Smoke gate (step 23).
 2. Find the remote branch `origin/feat/issue-<N>-*`; take the first match
-   (`entrypoint.sh:923-924`). None found: escalate.
+   (`entrypoint.sh:984-985`). None found: escalate.
 3. `git reset --hard` and `git clean -fd dark-factory/ .claude/` to undo the setup
-   copies, then check the branch out; verify `HEAD` is on it (`:939-955`). Either
+   copies, then check the branch out; verify `HEAD` is on it (`:1000-1016`). Either
    failing: escalate.
 4. Resolve (`factory_core/cli.py deconflict`, implemented in
    `scripts/factory_core/deconflict.py:325-421`):
@@ -207,21 +207,21 @@ No Archon workflow is involved. The side-effect config says the same:
    - Writes `conflict_resolution.md` with `CONFLICT_VERDICT`
      (`none|tier1|tier2|clean_merge|escalate`), `FILES_CONFLICTED`, `TIER1_RESOLVED`,
      `TIER2_RESOLVED`, `ESCALATED` (`:211-220`).
-5. Validate (`entrypoint.sh:963-984`): if `.factory/hooks/validate` is a non-empty file,
+5. Validate (`entrypoint.sh:1024-1045`): if `.factory/hooks/validate` is a non-empty file,
    run it through `run_hook --gate validate`; otherwise run `npx tsc --noEmit` in
    `frontend/`. Failure: escalate.
 6. `git push origin <branch>`, move the board to **In Review**, overwrite
    `conflict_resolution.md` with a short prose summary, post
-   "Dark Factory — Merge Conflicts Resolved", exit 0 (`:984-1016`).
+   "Dark Factory — Merge Conflicts Resolved", exit 0 (`:1022-1054`).
 
 **Escalation** means: move the board to **Blocked**, post one
 "Dark Factory — Conflict Resolution Escalated" comment with the reason and manual steps,
-and exit 0 (`entrypoint.sh:727-750` for the entrypoint's own guards;
+and exit 0 (`entrypoint.sh:785-808` for the entrypoint's own guards;
 `scripts/factory_core/deconflict.py:223-243` for resolver failures). Exit 0 is deliberate so `on_failure` does
-not add a second comment (`entrypoint.sh:724-726`).
+not add a second comment (`entrypoint.sh:782-784`).
 
 Success in this path does not assemble a run record or post a cost report: every branch
-exits before `entrypoint.sh:1082`.
+exits before `entrypoint.sh:1147`.
 
 ---
 
@@ -234,7 +234,7 @@ and no worktree (`:13-17`). Nodes are of three kinds:
 - **command**: runs a file from `commands/` as an agent session (`command: <name>`).
 - **bash**: a shell script. Its working directory is the clone root. `CLONE_DIR` and
   `RUN_ID` are not exported into bash nodes, which is why scripts use
-  `${CLONE_DIR:-.}` and derive the run id from the artifacts path (`:382-386`, `:769-772`).
+  `${CLONE_DIR:-.}` and derive the run id from the artifacts path (`:402-406`, `:789-792`).
 
 A node runs when its `when:` expression is true and its dependencies allow it. The
 default rule is that all dependencies succeeded; a skipped dependency skips the node.
@@ -267,8 +267,9 @@ flowchart TD
     IM --> RC[regen-codeindex]
     RC -->|continue| DC[de-conflict]
     RC --> PC[preview-changeset] --> CP[classify-preview] --> PU[preview-up]
-    PU --> VA["validate<br/>incl. blast-radius gate"]
-    VA --> CF["budget + conformance"] --> CG{conformance-gate}
+    PU --> VA["validate<br/>incl. blast-radius check"] --> BG{blast-gate}
+    BG -->|"PASS / SKIPPED"| CF["budget + conformance"] --> CG{conformance-gate}
+    BG -->|otherwise| HOLD(["hold: branch pushed, no PR"])
     CG -->|"PASS / SKIPPED / ERROR"| DF["budget + docs-conformance"] --> DG{docs-conformance-gate}
     CG -->|otherwise| STOP1(["stop: no push"])
     DG -->|"observe: any verdict<br/>enforce: PASS / SKIPPED<br/>never if HEAD or index moved"| PR[push-and-pr]
@@ -278,7 +279,7 @@ flowchart TD
     RG -->|otherwise| STOP2(["stop: board not moved"])
 
     FI -->|close| CA[close-announce]
-    FI -->|close| CL["close-preview<br/>merge PR, board to Done"] --> PM[post-merge-update-codeindex]
+    FI -->|close| CL["close-preview<br/>blast-radius check, merge PR<br/>pinned to that head, board to Done"] --> PM[post-merge-update-codeindex]
 ```
 
 The diagram leaves out the `resolve` branch and `bench-mode-probe`; both are in the
@@ -290,7 +291,7 @@ tables.
 |---|---|---|---|---|---|
 | `parse-intent` | prompt (haiku, no tools) | always | none | Extracts `issue_number` and `intent` from the command string (`:21-41`) | command string → node output |
 | `fetch-issue` | bash, 60 s | always | `parse-intent` | Fetches the issue through the tracker CLI. If it carries the `epic` label, resolves to one open sub-issue from the body's `- [ ] #N` checklist: for `continue`/`close` the first with an open PR (falling back to the first open one), otherwise the first with no PR; fails if none qualifies. If a PR exists for branch prefix `feat/issue-<N>-`, attaches its reviews, comments and inline comments. Adds `intent`, `resolved_number`, `epic_number` (`:43-133`) | tracker, code host → `issue.json` and node output |
-| `bench-mode-probe` | bash, 5 s | always | `fetch-issue` | Prints `stub` if `BENCH_MODE=stub`, else `live` (`:801-809`) | env → node output |
+| `bench-mode-probe` | bash, 5 s | always | `fetch-issue` | Prints `stub` if `BENCH_MODE=stub`, else `live` (`:849-857`) | env → node output |
 | `digest-comments` | bash, 15 s | `continue` | `fetch-issue` | Runs `scripts/comment_digest.py`; skipped with exit 0 when `TOKEN_OPTIMIZATION_COMMENTS_ENABLED` is `false` or `0` (`:138-154`) | `issue.json` → `comment-digest.md` |
 | `summarize-feedback` | prompt (haiku, no tools) | `continue` | `digest-comments` | Summarizes the digest in 2-3 sentences (`:156-177`) | digest output → `summary` |
 | `acknowledge-continue` | bash, 15 s | `continue` | `summarize-feedback` | Posts "Resuming work — Feedback understood: …" on the issue through `providers/cli.py tracker add-comment` (`:179-189`). Nothing depends on it | summary → issue comment |
@@ -301,39 +302,39 @@ keeps **all** inline review comments, and always includes the most recent
 "Code Review — Blocked" or "Spec Conformance — Blocked" comment in its own section
 (`scripts/comment_digest.py:41-50,100-147,164-264`). A token cap applies only when
 `TOKEN_OPTIMIZATION_COMMENTS_MAX_TOKENS` is set in the environment, and never truncates
-the gate-verdict section (`:21-38,284-307`).
+the gate-verdict section (`:21-38,304-327`).
 
 ### 4.2 Refine
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `setup-refine-branch` | bash, 15 s | `refine` or `plan` | `parse-intent`, `fetch-issue` | Branch `refine/issue-<N>-<slug>` (slug: lower-cased title, non-alphanumerics to `-`, first 40 chars). Checks it out from origin if it exists, else creates it (`:343-358`) | `issue.json` → git branch |
-| `budget-refine` | bash, 30 s | `refine` | `setup-refine-branch`, `fetch-issue` | `scripts/context_budget.py --scenario refine`; failure ignored (`:379-398`) | `issue.json`, `memory-context.md` → `context-budget.refine.json` |
-| `enforce-budget-refine` | bash, 30 s | `refine` | `budget-refine` | `scripts/budget_gate.sh refine`; failure ignored (`:400-405`) | `context-budget.refine.json`, config → `token-opt-caps.env` |
+| `setup-refine-branch` | bash, 15 s | `refine` or `plan` | `parse-intent`, `fetch-issue` | Branch `refine/issue-<N>-<slug>` (slug: lower-cased title, non-alphanumerics to `-`, first 40 chars). Checks it out from origin if it exists, else creates it (`:363-378`) | `issue.json` → git branch |
+| `budget-refine` | bash, 30 s | `refine` | `setup-refine-branch`, `fetch-issue` | `scripts/context_budget.py --scenario refine`; failure ignored (`:399-418`) | `issue.json`, `memory-context.md` → `context-budget.refine.json` |
+| `enforce-budget-refine` | bash, 30 s | `refine` | `budget-refine` | `scripts/budget_gate.sh refine`; failure ignored (`:420-425`) | `context-budget.refine.json`, config → `token-opt-caps.env` |
 | `refine` | command `dark-factory-refine` (sonnet), idle 10 min | `refine` | `enforce-budget-refine`, `setup-refine-branch`, `fetch-issue` | Writes and commits a design spec ([section 5](#5-the-phase-commands)) | `issue.json` → spec under `docs/superpowers/specs/`, optional `.archon/memory/` commit, issue comment, `refinement-status.md` |
-| `refine-push` | bash, 60 s | `refine` | `refine` | Push gate: pushes the branch and applies `spec-pending-review` only if a committed spec exists and the push is verified ([gate C1](#c-refine-and-plan)) (`:463-573`) | git, `issue.json` → remote branch, label, `push-result.json`, possibly a marker comment |
+| `refine-push` | bash, 60 s | `refine` | `refine` | Push gate: pushes the branch and applies `spec-pending-review` only if a committed spec exists and the push is verified ([gate C1](#c-refine-and-plan)) (`:483-607`) | git, `issue.json` → remote branch, label, `push-result.json`, possibly a marker comment |
 
 ### 4.3 Plan
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
 | `setup-refine-branch` | (same node as above) | | | The plan is written on the same `refine/issue-<N>-<slug>` branch as the spec | |
-| `budget-plan` | bash, 30 s | `plan` | `setup-refine-branch`, `fetch-issue` | Locates the spec with `push_gate_check.sh`, then `context_budget.py --scenario plan`; failure ignored (`:416-438`) | `issue.json`, spec → `context-budget.plan.json` |
-| `enforce-budget-plan` | bash, 30 s | `plan` | `budget-plan` | `budget_gate.sh plan`; failure ignored (`:440-445`) | → `token-opt-caps.env` |
-| `plan` | command `dark-factory-plan` (opus, effort high), idle 10 min | `plan` | `enforce-budget-plan`, `setup-refine-branch`, `fetch-issue` | Writes and commits an implementation plan after architect and plan-vs-spec review (`:448-457`) | `issue.json`, spec → plan under `docs/superpowers/plans/`, issue comment, `refinement-status.md` |
-| `plan-push-and-advance` | bash, 60 s | `plan` | `plan` | Same push gate as `refine-push`, for the plan and the `plan-pending-review` label. Despite the name it does not move the board (`:575-687`) | git → remote branch, label, `push-result.json`, possibly a marker comment |
+| `budget-plan` | bash, 30 s | `plan` | `setup-refine-branch`, `fetch-issue` | Locates the spec with `push_gate_check.sh`, then `context_budget.py --scenario plan`; failure ignored (`:436-458`) | `issue.json`, spec → `context-budget.plan.json` |
+| `enforce-budget-plan` | bash, 30 s | `plan` | `budget-plan` | `budget_gate.sh plan`; failure ignored (`:460-465`) | → `token-opt-caps.env` |
+| `plan` | command `dark-factory-plan` (opus, effort high), idle 10 min | `plan` | `enforce-budget-plan`, `setup-refine-branch`, `fetch-issue` | Writes and commits an implementation plan after architect and plan-vs-spec review (`:468-477`) | `issue.json`, spec → plan under `docs/superpowers/plans/`, issue comment, `refinement-status.md` |
+| `plan-push-and-advance` | bash, 60 s | `plan` | `plan` | Same push gate as `refine-push`, for the plan and the `plan-pending-review` label. Despite the name it does not move the board (`:614-735`) | git → remote branch, label, `push-result.json`, possibly a marker comment |
 
 ### 4.4 Implement
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `setup-branch` | bash, 60 s | `new` or `continue` | `parse-intent`, `fetch-issue` | Branch `feat/issue-<N>-<slug>`. `continue`: fetch and check out the existing branch, else create it. `new`: create it. On a newly created branch, runs `scripts/transfer_refine_artifacts.sh` (`:304-340`) | `issue.json` → git branch, possibly one commit |
-| `update-codeindex` | bash, 120 s | `new` or `continue` | `setup-branch` | `codeindex analyze` and `codeindex symbols --inline`; skipped with a warning if the binary is absent (`:690-702`) | repo → local index |
-| `budget-implement` | bash, 30 s, OR-join | `new` or `continue` | `update-codeindex`, `fetch-issue`, `digest-comments` | `scripts/budget_context.sh`: maps `new`→scenario `implement`, `continue`→`continue`, then `context_budget.py`. Exits 1 on an unexpected intent. Both intents write the one `context-budget.implement.json`; the `scenario` field inside records which (`:704-712`; `scripts/budget_context.sh:41-51`) | `issue.json`, `comment-digest.md` → `context-budget.implement.json` |
-| `enforce-budget-implement` | bash, 30 s | `new` or `continue` | `budget-implement` | `budget_gate.sh implement`; failure ignored (`:714-719`) | → `token-opt-caps.env` |
-| `implement` | command `dark-factory-implement` (opus), idle 10 min, OR-join | `new` or `continue` | `enforce-budget-implement`, `update-codeindex`, `fetch-issue`, `digest-comments` | Implements the change with TDD, updates docs and memory, commits (`:722-731`) | `issue.json`, `comment-digest.md` → commits, `plan.md`, `implementation.md`, optionally `out-of-scope.md`, `failure-diagnosis.md` |
-| `regen-codeindex` | bash, 120 s | `new` or `continue` | `implement` | Re-indexes and regenerates `docs/codeindex-hotspots.md` locally, filtered by `scripts/filter_hotspots.py`. Not committed (`:739-760`) | repo → local index and hotspots file |
-| `de-conflict` | bash, 300 s, OR-join | `continue` or `resolve` | `regen-codeindex`, `setup-branch-resolve` | `factory_core/cli.py deconflict --issue N`: the same tiered merge of `origin/main` as [section 3](#deconflict-issue-n) (`:764-780`) | git → merge commit, `conflict_resolution.md` |
+| `setup-branch` | bash, 60 s | `new` or `continue` | `parse-intent`, `fetch-issue` | Branch `feat/issue-<N>-<slug>`. `continue`: fetch and check out the existing branch, else create it. `new`: create it. On a newly created branch, runs `scripts/transfer_refine_artifacts.sh` (`:324-360`) | `issue.json` → git branch, possibly one commit |
+| `update-codeindex` | bash, 120 s | `new` or `continue` | `setup-branch` | `codeindex analyze` and `codeindex symbols --inline`; skipped with a warning if the binary is absent (`:738-750`) | repo → local index |
+| `budget-implement` | bash, 30 s, OR-join | `new` or `continue` | `update-codeindex`, `fetch-issue`, `digest-comments` | `scripts/budget_context.sh`: maps `new`→scenario `implement`, `continue`→`continue`, then `context_budget.py`. Exits 1 on an unexpected intent. Both intents write the one `context-budget.implement.json`; the `scenario` field inside records which (`:724-732`; `scripts/budget_context.sh:41-51`) | `issue.json`, `comment-digest.md` → `context-budget.implement.json` |
+| `enforce-budget-implement` | bash, 30 s | `new` or `continue` | `budget-implement` | `budget_gate.sh implement`; failure ignored (`:762-767`) | → `token-opt-caps.env` |
+| `implement` | command `dark-factory-implement` (opus), idle 10 min, OR-join | `new` or `continue` | `enforce-budget-implement`, `update-codeindex`, `fetch-issue`, `digest-comments` | Implements the change with TDD, updates docs and memory, commits (`:770-779`) | `issue.json`, `comment-digest.md` → commits, `plan.md`, `implementation.md`, optionally `out-of-scope.md`, `failure-diagnosis.md` |
+| `regen-codeindex` | bash, 120 s | `new` or `continue` | `implement` | Re-indexes and regenerates `docs/codeindex-hotspots.md` locally, filtered by `scripts/filter_hotspots.py`. Not committed (`:787-808`) | repo → local index and hotspots file |
+| `de-conflict` | bash, 300 s, OR-join | `continue` or `resolve` | `regen-codeindex`, `setup-branch-resolve` | `factory_core/cli.py deconflict --issue N`: the same tiered merge of `origin/main` as [section 3](#deconflict-issue-n) (`:812-828`) | git → merge commit, `conflict_resolution.md` |
 
 `transfer_refine_artifacts.sh` copies the ticket's spec and plan from the most recently
 committed `origin/refine/issue-<N>-*` branch onto the new feature branch and commits them
@@ -345,27 +346,27 @@ always exits 0 (`scripts/transfer_refine_artifacts.sh:26-93`).
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `preview-changeset` | bash, 15 s | `new` or `continue` | `regen-codeindex`, `fetch-issue` | Prints `git diff main...HEAD` file names and stat (`:784-791`) | git → node output |
-| `classify-preview` | prompt (haiku, tool `Read`) | `bench-mode-probe` output is `live` | `preview-changeset`, `fetch-issue`, `bench-mode-probe` | Decides `needs_preview`. False only if every changed file is docs, agent/workflow config, tests, or CI/meta; any doubt means true. If `preview.enabled` is false in config it must answer true (`:811-863`) | changeset, issue title/labels, config → `needs_preview`, `category`, `reason` |
-| `preview-up` | bash, 600 s | `new` or `continue` | `classify-preview` | Builds and starts the preview stack, or records why not (below) (`:866-1048`) | classifier output → `preview_env.sh`, `preview_build.log`, possibly an issue comment |
-| `preview-up-resolve` | bash, 15 s | `resolve` | `de-conflict` | Writes a `preview_env.sh` marking the preview skipped (`:1051-1069`) | → `preview_env.sh` |
+| `preview-changeset` | bash, 15 s | `new` or `continue` | `regen-codeindex`, `fetch-issue` | Prints `git diff main...HEAD` file names and stat (`:831-839`) | git → node output |
+| `classify-preview` | prompt (haiku, tool `Read`) | `bench-mode-probe` output is `live` | `preview-changeset`, `fetch-issue`, `bench-mode-probe` | Decides `needs_preview`. False only if every changed file is docs, agent/workflow config, tests, or CI/meta; any doubt means true. If `preview.enabled` is false in config it must answer true (`:859-911`) | changeset, issue title/labels, config → `needs_preview`, `category`, `reason` |
+| `preview-up` | bash, 600 s | `new` or `continue` | `classify-preview` | Builds and starts the preview stack, or records why not (below) (`:914-1096`) | classifier output → `preview_env.sh`, `preview_build.log`, possibly an issue comment |
+| `preview-up-resolve` | bash, 15 s | `resolve` | `de-conflict` | Writes a `preview_env.sh` marking the preview skipped (`:1099-1117`) | → `preview_env.sh` |
 
 `preview-up` in detail:
 
 - Every exit path writes `preview_env.sh` with `PREVIEW_SKIPPED`, `PREVIEW_FAILED`,
   `PREVIEW_SKIP_REASON`, `PREVIEW_SLOT`, `PREVIEW_FRONTEND`, `PREVIEW_BACKEND`,
-  `PREVIEW_NET` (`:878-888`). `validate`, `push-and-pr` and `report` source this file
+  `PREVIEW_NET` (`:898-908`). `validate`, `push-and-pr` and `report` source this file
   instead of referencing the node's output.
-- `BENCH_MODE=stub`: write a skipped file and exit 0 (`:917-923`).
+- `BENCH_MODE=stub`: write a skipped file and exit 0 (`:937-943`).
 - `needs_preview` is exactly `false`: write a skipped file with the classifier's reason
-  and exit 0. Any other value builds the preview (`:925-934`).
+  and exit 0. Any other value builds the preview (`:945-954`).
 - Otherwise: reuse the slot of an already-running `mh-preview-<N>` stack or allocate the
   lowest free two-digit slot (ports `1<slot>33` frontend, `1<slot>80` backend); build the
   backend and frontend images through the remote BuildKit builder; `docker compose -p
   mh-preview-<N> -f dark-factory/docker-compose.preview.yml up -d`; connect the run
   container to the preview network; poll the backend container's health for up to
-  60 × 3 s (`:936-1037`).
-- **Any failure degrades, it does not fail the run** (`preview_fail`, `:893-912`): write
+  60 × 3 s (`:956-1057`).
+- **Any failure degrades, it does not fail the run** (`preview_fail`, `:913-932`): write
   `PREVIEW_SKIPPED=true PREVIEW_FAILED=true`, post
   "⚠️ Preview environment failed to start" with the last 30 lines of the build log on the
   issue, exit 0. The stack is left in place for debugging.
@@ -374,75 +375,80 @@ always exits 0 (`scripts/transfer_refine_artifacts.sh:26-93`).
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `validate` | command `dark-factory-validate` (sonnet), idle 5 min, OR-join | `new`, `continue` or `resolve` | `preview-up`, `preview-up-resolve` | Blast-radius gate, then tests, type-check and endpoint checks; fixes failures and re-runs (`:1071-1079`) | `implementation.md`, `preview_env.sh`, hotspots file → `blast.md`, `memory-context.md`, `memory-trace.json`, `validation.md`, possibly fix commits |
+| `validate` | command `dark-factory-validate` (sonnet), idle 5 min, OR-join | `new`, `continue` or `resolve` | `preview-up`, `preview-up-resolve` | Blast-radius check (`scripts/blast_gate_check.sh`; stops on a non-zero exit and leaves the hold to `blast-gate`), then tests, type-check and endpoint checks; fixes failures and re-runs (`:1119-1127`) | `implementation.md`, `preview_env.sh`, hotspots file → `blast.md`, `memory-context.md`, `memory-trace.json`, `validation.md`, possibly fix commits |
 
 ### 4.7 Conformance
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `budget-conformance` | bash, 30 s | `new` or `continue` | `validate` | Locates the spec, takes `git diff main...HEAD`, runs `context_budget.py --scenario conformance`; failure ignored (`:1082-1111`) | spec, `implementation.md`, diff → `context-budget.conformance.json` |
-| `enforce-budget-conformance` | bash, 30 s | `new` or `continue` | `budget-conformance` | `budget_gate.sh conformance`; failure ignored (`:1113-1118`) | → `token-opt-caps.env` |
-| `conformance` | command `dark-factory-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-conformance`, `validate` | Gate 2: reviews the diff against the spec, removes out-of-scope changes, reconciles material divergences (`:1121-1126`) | spec, `implementation.md`, `out-of-scope.md`, diff → `conformance.md`, `diff-ranking.json`, working files, possibly commits, tickets, comments, labels |
-| `conformance-gate` | bash, 30 s | `new` or `continue` | `conformance` | `scripts/verdict_gate_check.sh conformance.md <N> "Conformance (Gate 2)"`. Non-zero exit blocks everything downstream (`:1131-1140`) | `conformance.md` → exit code, possibly a marker comment |
-| `budget-docs-conformance` | bash, 30 s | `new` or `continue` | `conformance-gate` | Takes `git diff main...HEAD` after Gate 2, runs `context_budget.py --scenario docs-conformance`; failure ignored. Then records HEAD, the index tree and `git status --porcelain` as the read-only baseline for `docs-conformance-gate` (`:1173-1201`) | `doc-impact.md`, diff → `context-budget.docs-conformance.json`, `docs-conformance-pre-head.txt`, `docs-conformance-pre-index.txt`, `docs-conformance-pre-status.txt` |
-| `enforce-budget-docs-conformance` | bash, 30 s | `new` or `continue` | `budget-docs-conformance` | `budget_gate.sh docs-conformance`; failure ignored (`:1203-1208`) | → `token-opt-caps.env` |
-| `docs-conformance` | command `dark-factory-docs-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-docs-conformance`, `conformance-gate` | Gate 2.5: one reviewer checks the docs against the final diff (`:1212-1217`) | `doc-impact.md`, diff, doc files → `docs-conformance.md`, `docs-conformance-baseline/`, `docs_conformance_*` working files, `diff-ranking.json`, possibly a comment; in `enforce` mode also a label and board move |
-| `docs-conformance-gate` | bash, 30 s | `new` or `continue` | `docs-conformance` | Compares HEAD, the index tree and `git status` with the baseline `budget-docs-conformance` recorded, reads `docs_conformance.mode`, then `scripts/docs_verdict_gate_check.sh docs-conformance.md <N> "Docs Conformance (Gate 2.5)" <mode> <changed-note> <changed-kind>`. In `observe` no docs verdict blocks; in `enforce` a non-zero exit blocks everything downstream. A commit or a staged change made during the `docs-conformance` node exits 1 in every mode (`:1224-1271`) | `docs-conformance.md`, `docs-conformance-pre-head.txt`, `docs-conformance-pre-index.txt`, `docs-conformance-pre-status.txt`, config → exit code, possibly a marker comment |
+| `blast-gate` | bash, 120 s | `new`, `continue` or `resolve` | `validate` | Re-runs the gate itself on HEAD with `scripts/blast_gate_check.sh --mode run --hold` (never reads the agent's `blast.md`). Non-zero exit: pushes the branch without a PR, writes the review request, adds `needs-discussion`, moves the board to **Blocked**, posts the `df-blast-hold` comment, writes `blast-hold.json` and blocks everything downstream ([gate D1](#d-implementation-gates)) (`:1134-1145`) | git, signed approval record → `blast.md`, `blast-hold.json`, `<issue>.request.json`, remote branch, comment, label |
+| `budget-conformance` | bash, 30 s | `new` or `continue` | `blast-gate` | Locates the spec, takes `git diff main...HEAD`, runs `context_budget.py --scenario conformance`; failure ignored (`:1148-1177`) | spec, `implementation.md`, diff → `context-budget.conformance.json` |
+| `enforce-budget-conformance` | bash, 30 s | `new` or `continue` | `budget-conformance` | `budget_gate.sh conformance`; failure ignored (`:1179-1184`) | → `token-opt-caps.env` |
+| `conformance` | command `dark-factory-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-conformance`, `blast-gate` | Gate 2: reviews the diff against the spec, removes out-of-scope changes, reconciles material divergences (`:1187-1192`) | spec, `implementation.md`, `out-of-scope.md`, diff → `conformance.md`, `diff-ranking.json`, working files, possibly commits, tickets, comments, labels |
+| `conformance-gate` | bash, 30 s | `new` or `continue` | `conformance` | `scripts/verdict_gate_check.sh conformance.md <N> "Conformance (Gate 2)"`. Non-zero exit blocks everything downstream (`:1197-1206`) | `conformance.md` → exit code, possibly a marker comment |
+| `budget-docs-conformance` | bash, 30 s | `new` or `continue` | `conformance-gate` | Takes `git diff main...HEAD` after Gate 2, runs `context_budget.py --scenario docs-conformance`; failure ignored. Then records HEAD, the index tree and `git status --porcelain` as the read-only baseline for `docs-conformance-gate` (`:1211-1239`) | `doc-impact.md`, diff → `context-budget.docs-conformance.json`, `docs-conformance-pre-head.txt`, `docs-conformance-pre-index.txt`, `docs-conformance-pre-status.txt` |
+| `enforce-budget-docs-conformance` | bash, 30 s | `new` or `continue` | `budget-docs-conformance` | `budget_gate.sh docs-conformance`; failure ignored (`:1241-1246`) | → `token-opt-caps.env` |
+| `docs-conformance` | command `dark-factory-docs-conformance` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-docs-conformance`, `conformance-gate` | Gate 2.5: one reviewer checks the docs against the final diff (`:1250-1255`) | `doc-impact.md`, diff, doc files → `docs-conformance.md`, `docs-conformance-baseline/`, `docs_conformance_*` working files, `diff-ranking.json`, possibly a comment; in `enforce` mode also a label and board move |
+| `docs-conformance-gate` | bash, 30 s | `new` or `continue` | `docs-conformance` | Compares HEAD, the index tree and `git status` with the baseline `budget-docs-conformance` recorded, reads `docs_conformance.mode`, then `scripts/docs_verdict_gate_check.sh docs-conformance.md <N> "Docs Conformance (Gate 2.5)" <mode> <changed-note> <changed-kind>`. In `observe` no docs verdict blocks; in `enforce` a non-zero exit blocks everything downstream. A commit or a staged change made during the `docs-conformance` node exits 1 in every mode (`:1262-1309`) | `docs-conformance.md`, `docs-conformance-pre-head.txt`, `docs-conformance-pre-index.txt`, `docs-conformance-pre-status.txt`, config → exit code, possibly a marker comment |
 
 ### 4.8 Push and PR
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `push-and-pr` | bash, 30 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` | Archives the spec and plan, pushes, creates or updates the draft PR (below) (`:1296-1453`) | `issue.json`, `preview_env.sh`, git → remote branch, PR |
-| `push-resolve` | bash, 30 s | `resolve` | `validate` | Pushes the current branch, verifies it is on origin, looks up the PR number (`:1274-1293`) | git → remote branch |
+| `push-and-pr` | bash, 180 s | `new` or `continue` | `conformance-gate`, `docs-conformance-gate` | Archives the spec and plan, pushes, creates or updates the draft PR (below) (`:1334-1505`) | `issue.json`, `preview_env.sh`, git → remote branch, PR |
+| `push-resolve` | bash, 30 s | `resolve` | `blast-gate` | Pushes the current branch, verifies it is on origin, looks up the PR number (`:1312-1331`) | git → remote branch |
 
 `push-and-pr` in detail:
 
-1. `BENCH_MODE=stub`: print a marker and exit 0 without pushing (`:1313-1317`).
+1. `BENCH_MODE=stub`: print a marker and exit 0 without pushing (`:1351-1355`).
 2. Locate this branch's spec and plan with `push_gate_check.sh`; `git mv` each to
-   `docs/archive/` and commit `docs: archive spec/plan for issue #N` (`:1324-1343`).
-3. `git push -u origin <branch>`; exit 1 if the push fails or the branch is not on
-   origin afterwards (`:1347-1356`).
-4. If `codeindex` is available, run `codeindex impact` on up to 50 changed files for a
-   "Blast radius" section in the PR body (`:1359-1368`). This is advisory text, not the
+   `docs/archive/` and commit `docs: archive spec/plan for issue #N` (`:1362-1381`).
+3. Re-check the exact HEAD about to be pushed with `scripts/blast_gate_check.sh --mode run
+   --hold` (#551): validate's fixes, conformance's reconcile commits and the archive commit
+   all land after `blast-gate`. A hold takes the same steps as `blast-gate` and exits 1
+   before any push to a PR or PR creation.
+4. `git push -u origin <branch>`; exit 1 if the push fails or the branch is not on
+   origin afterwards (`:1396-1405`).
+5. If `codeindex` is available, run `codeindex impact` on up to 50 changed files for a
+   "Blast radius" section in the PR body (`:1408-1417`). This is advisory text, not the
    blast-radius gate.
-5. If a PR already exists for the branch: make sure its body carries the closing keyword
-   for the issue (`:1388-1408`). Otherwise open a **draft** PR titled with the issue
+6. If a PR already exists for the branch: make sure its body carries the closing keyword
+   for the issue (`:1437-1457`). Otherwise open a **draft** PR titled with the issue
    title, with the closing keyword, a summary line, the preview section, the
    `Continue`/`Close` commands and the blast-radius section; exit 1 if no PR id comes
-   back (`:1409-1450`).
+   back (`:1458-1499`).
 
 ### 4.9 Code review
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `budget-code-review` | bash, 30 s | `new` or `continue` | `push-and-pr` | `context_budget.py --scenario code-review` over `git diff main...HEAD`; failure ignored (`:1456-1478`) | `issue.json`, diff → `context-budget.code-review.json` |
-| `enforce-budget-code-review` | bash, 30 s | `new` or `continue` | `budget-code-review` | `budget_gate.sh code-review`; failure ignored (`:1480-1485`) | → `token-opt-caps.env` |
-| `code-review` | command `dark-factory-code-review` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-code-review`, `push-and-pr` | Gate 3: an AI reviewer's findings become one GitHub PR review; findings at or above the threshold block (`:1488-1493`) | diff, spec → `review_diff.txt`, `diff-ranking.json`, `review_findings.md`, `review_result.json`, `review_payload.json`, `review.md`, PR review, possibly comment, label, board move, memory commit |
-| `revise-advisory` | command `dark-factory-revise-advisory` (sonnet), idle 10 min | `new` or `continue` | `code-review` | If the review passed with advisory findings, a subagent fixes them; the command commits and pushes (`:1496-1501`) | `review_result.json`, `review_diff.txt` → commit, push, PR review comment, `revise_summary.txt`, `revise_advisory.md` |
-| `review-gate` | bash, 30 s | `new` or `continue` | `code-review`, `revise-advisory` | `verdict_gate_check.sh review.md <N> "Code Review (Gate 3)"`. Non-zero exit blocks `status-in-review` (`:1505-1514`) | `review.md` → exit code, possibly a marker comment |
+| `budget-code-review` | bash, 30 s | `new` or `continue` | `push-and-pr` | `context_budget.py --scenario code-review` over `git diff main...HEAD`; failure ignored (`:1508-1530`) | `issue.json`, diff → `context-budget.code-review.json` |
+| `enforce-budget-code-review` | bash, 30 s | `new` or `continue` | `budget-code-review` | `budget_gate.sh code-review`; failure ignored (`:1532-1537`) | → `token-opt-caps.env` |
+| `code-review` | command `dark-factory-code-review` (sonnet), idle 10 min | `new` or `continue` | `enforce-budget-code-review`, `push-and-pr` | Gate 3: an AI reviewer's findings become one GitHub PR review; findings at or above the threshold block (`:1540-1545`) | diff, spec → `review_diff.txt`, `diff-ranking.json`, `review_findings.md`, `review_result.json`, `review_payload.json`, `review.md`, PR review, possibly comment, label, board move, memory commit |
+| `revise-advisory` | command `dark-factory-revise-advisory` (sonnet), idle 10 min | `new` or `continue` | `code-review` | If the review passed with advisory findings, a subagent fixes them; the command commits and pushes (`:1548-1553`) | `review_result.json`, `review_diff.txt` → commit, push, PR review comment, `revise_summary.txt`, `revise_advisory.md` |
+| `review-gate` | bash, 30 s | `new` or `continue` | `code-review`, `revise-advisory` | `verdict_gate_check.sh review.md <N> "Code Review (Gate 3)"`. Non-zero exit blocks `status-in-review` (`:1557-1566`) | `review.md` → exit code, possibly a marker comment |
 
 ### 4.10 Finish
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
-| `status-in-review` | bash, 15 s, OR-join | `new`, `continue` or `resolve` | `push-and-pr`, `push-resolve`, `code-review`, `revise-advisory`, `review-gate` | Moves the issue to **In Review**; a failed board move is a warning only. No-op for `resolve` (`:1517-1538`) | `issue.json` → board |
-| `report` | bash, 15 s, OR-join | `new`, `continue` or `resolve` | `status-in-review`, `code-review` | Posts the run summary comment (`:1540-1715`) | `implementation.md`, `conformance.md`, `blast.md`, `review.md`, `conflict_resolution.md`, `preview_env.sh` → issue comment |
+| `status-in-review` | bash, 15 s, OR-join | `new`, `continue` or `resolve` | `push-and-pr`, `push-resolve`, `code-review`, `revise-advisory`, `review-gate` | Moves the issue to **In Review**; a failed board move is a warning only. No-op for `resolve` (`:1569-1590`) | `issue.json` → board |
+| `report` | bash, 15 s, OR-join | `new`, `continue` or `resolve` | `status-in-review`, `code-review` | Posts the run summary comment (`:1592-1767`) | `implementation.md`, `conformance.md`, `blast.md`, `review.md`, `conflict_resolution.md`, `preview_env.sh` → issue comment |
 
 The summary comment is titled "Dark Factory Run — New implementation",
 "— Continued iteration" or "— Conflict resolution". It contains the PR and epic links,
 the branch, the full text of `implementation.md`, a blast-radius line, the conformance
 attestation (with out-of-scope excision counts and ticket numbers), a code-review line,
 a conflict-resolution block when a merge happened, the preview URLs or the reason there
-are none, and the `Continue`/`Close` commands (`:1562-1707`).
+are none, and the `Continue`/`Close` commands (`:1614-1759`).
 
 ### 4.11 Close (post-merge)
 
 | Node | Kind | Runs when | Depends on | What it does | Reads → writes |
 |---|---|---|---|---|---|
 | `close-announce` | bash, 15 s | `close` | `fetch-issue` | Posts "Merging PR and tearing down preview environment." through `tracker add-comment` (`:192-201`) | → issue comment |
-| `close-preview` | bash, 30 s | `close` | `parse-intent`, `fetch-issue` | Tears down the preview, merges the PR, moves the issue to Done (below) (`:203-268`) | `issue.json` → merged PR, board, issue comment |
-| `post-merge-update-codeindex` | bash, 120 s | `close` | `close-preview` | Checks out `main` at `origin/main`, regenerates `docs/codeindex-hotspots.md`, and if it changed commits `chore: refresh codeindex hotspots (post-merge #N)` and pushes to `main`; a failed push is a warning (`:270-302`) | repo → commit on `main` |
+| `close-preview` | bash, 180 s | `close` | `parse-intent`, `fetch-issue` | Tears down the preview, merges the PR, moves the issue to Done (below) (`:203-288`) | `issue.json` → merged PR, board, issue comment |
+| `post-merge-update-codeindex` | bash, 120 s | `close` | `close-preview` | Checks out `main` at `origin/main`, regenerates `docs/codeindex-hotspots.md`, and if it changed commits `chore: refresh codeindex hotspots (post-merge #N)` and pushes to `main`; a failed push is a warning (`:290-322`) | repo → commit on `main` |
 
 `close-preview` in detail:
 
@@ -450,10 +456,10 @@ are none, and the `Continue`/`Close` commands (`:1562-1707`).
    final comment but do not fail the node (`:209-227`).
 2. Find the PR for branch prefix `feat/issue-<N>-`; exit 1 if there is none (`:230-234`).
 3. **Refuse to merge if the issue carries `needs-discussion`**: exit 1 (`:236-245`).
-4. Mark the PR ready and merge it; exit 1 if the merge did not happen (`:250-255`).
+4. Mark the PR ready and merge it; exit 1 if the merge did not happen (`:264-269`).
 5. Move the issue to **Done** (a failed board move is a warning) and post
    "preview torn down, PR #M merged. Issue complete." For an epic the sub-issue is moved,
-   not the epic (`:258-265`).
+   not the epic (`:275-282`).
 
 ### 4.12 The `resolve` branch
 
@@ -461,7 +467,7 @@ Three nodes exist only for workflow intent `resolve`:
 
 | Node | Kind | Depends on | What it does |
 |---|---|---|---|
-| `setup-branch-resolve` | bash, 15 s | `parse-intent`, `fetch-issue` | Fetches and checks out `feat/issue-<N>-<slug>`; exits 1 if it is not on origin (`:361-376`) |
+| `setup-branch-resolve` | bash, 15 s | `parse-intent`, `fetch-issue` | Fetches and checks out `feat/issue-<N>-<slug>`; exits 1 if it is not on origin (`:381-396`) |
 | `preview-up-resolve` | bash, 15 s | `de-conflict` | See 4.5 |
 | `push-resolve` | bash, 30 s | `validate` | See 4.8 |
 
@@ -556,9 +562,9 @@ The command does not push. `refine-push` does.
 
 ### `dark-factory-validate`
 
-- **Phase 0, blast-radius gate** (`commands/dark-factory-validate.md:44-119`):
+- **Phase 0, blast-radius gate** (`commands/dark-factory-validate.md:44-83`):
   [gate D1](#d-implementation-gates).
-- **Load** (`:121-149`): `implementation.md`, `CLAUDE.md`, and memory for phase
+- **Load** (`:85-113`): `implementation.md`, `CLAUDE.md`, and memory for phase
   `validate`.
 - **Validate** (`:175-218`): `cd backend && python -m pytest --no-cov -v`;
   `cd frontend && npx tsc -p tsconfig.app.json`; and, unless `PREVIEW_SKIPPED=true`,
@@ -592,7 +598,7 @@ and defaults are in [configuration.md](configuration.md).
 | Gate | Checks | Pass | Fail | Tuned by |
 |---|---|---|---|---|
 | **A1. Concurrency guard** (`entrypoint.sh:169-179`) | Number of other running run containers | Continue | Exit 1 before the trap is installed and before any board move: nothing appears on the ticket | `scheduler.factory_wip_limit` / `FACTORY_WIP_LIMIT` |
-| **A2. Adapter validity** (`entrypoint.sh:664-705`, called at `:771`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
+| **A2. Adapter validity** (`entrypoint.sh:722-763`, called at `:829`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
 | **A3. Smoke gate** (`scripts/hooks.sh:24-76`, `smoke_gate.sh`) | Runs the target's `.factory/hooks/smoke-gate` for `fix`, `continue`, `deconflict`, `recheck`. Exit 0 means `main` is green | Green (`smoke_gate.sh:140-163`): remove the `main-is-red` sentinel, close every open `regression` ticket carrying the `df-main-red` marker, continue | Red (`:66-135`): write `main-is-red` and `main-red-last-recheck` to the state dir; comment on the existing regression ticket or create "main is red: tsc/python import failure"; **exit 0**. The ticket being worked on gets no comment and no board change from the gate | `scheduler.main_red_recheck_*` (scheduler side) |
 | **A3b. Smoke hook missing** (`smoke_gate.sh:179-223`) | The hook is absent, a directory, or empty | n/a | Refuses the run: stderr, a `smoke-gate-hook-missing` line in `hook-warnings.log`, a "Dark Factory — Smoke-gate hook missing" comment (marker `df-smoke-hook-missing`), a health event; returns 1, which fires `on_failure`. Does not write or clear the main-red sentinel | none |
 
@@ -626,10 +632,10 @@ Each agent phase is preceded by a `budget-*` node and an `enforce-budget-*` node
   `observe` mode it is empty (`scripts/budget_enforce.py:7-11,316-333`).
 
 **These gates never stop a run.** Every `enforce-budget-*` node wraps the script in
-`|| true` (for example `workflows/archon-dark-factory.yaml:402`). Their effect is the
+`|| true` (for example `workflows/archon-dark-factory.yaml:425`). Their effect is the
 caps file, which later steps source: `scripts/load_memory_context.sh:25`, and the diff-ranking
 steps of the conformance and code-review commands
-(`commands/dark-factory-conformance.md:201`, `commands/dark-factory-code-review.md:110`).
+(`commands/dark-factory-conformance.md:208`, `commands/dark-factory-code-review.md:110`).
 Details: [dark-factory-token-optimization.md](dark-factory-token-optimization.md).
 
 ### C. Refine and plan
@@ -643,7 +649,7 @@ issue number appears in the file name, or `#<N>` appears in the committed conten
 (second pass) a commit on the branch whose subject mentions `#<N>` touched that file. It
 prints nothing if there is none, and always exits 0 (`scripts/push_gate_check.sh:56-115`).
 
-| Situation | Outcome (`workflows/archon-dark-factory.yaml:472-565`, plan mirror `:589-682`) |
+| Situation | Outcome (`workflows/archon-dark-factory.yaml:495-588`, plan mirror `:612-705`) |
 |---|---|
 | Artifact found, push succeeds within 30 s, and `git ls-remote` shows the remote branch at local `HEAD` | Apply `spec-pending-review` (or `plan-pending-review`). `push-result.json` records `pushed: true` |
 | …but applying the label fails | Warning plus a "Refinement Pipeline — Gate Label Missing" comment (marker `df-gate-label-failure`) with the manual `gh issue edit` command |
@@ -680,15 +686,19 @@ the push gate takes its "clean abort" branch:
 
 ### D. Implementation gates
 
-**D1. Blast-radius gate** (validate command Phase 0; `scripts/gate_blast_radius.py`).
+**D1. Blast-radius gate** (`scripts/blast_gate_check.sh` running `scripts/gate_blast_radius.py`;
+called by validate Phase 0, the `blast-gate` node, the `push-and-pr` re-check and
+`close-preview`).
 
-Input: the files changed in `git diff main...HEAD`, the added-plus-deleted line count,
-and `docs/codeindex-hotspots.md`. Config is read from the image's baked config layered
+Input: the files changed between the merge base with `refs/blast-gate/trusted-main` (origin
+`main`, fetched by the checker every time) and the head, the added-plus-deleted line
+count, and the hotspot report: `main`'s committed `docs/codeindex-hotspots.md`, plus the
+working-tree copy in a run. A changed file name git has to quote fails the check. Config is read from the image's baked config layered
 under the config at the merge base, never from the working tree, so a change cannot
-disable its own gate (`scripts/gate_blast_radius.py:63-103`). The baked script copy is
-preferred over the clone's (`commands/dark-factory-validate.md:66-76`).
+disable its own gate (`scripts/gate_blast_radius.py:85-125`). The baked script copies are
+preferred over the clone's.
 
-`STATUS: HUMAN_REQUIRED` when any of these holds (`scripts/gate_blast_radius.py:340-360`):
+`STATUS: HUMAN_REQUIRED` when any of these holds (`scripts/gate_blast_radius.py:537-557`):
 
 - a changed file has a hotspot score at or above `blast_radius.hotspot_score_floor`
   (suppressed when `blast_radius.enabled` is false);
@@ -697,37 +707,47 @@ preferred over the clone's (`commands/dark-factory-validate.md:66-76`).
 - `.factory/adapter.yaml` changed in a way that escalates: the `safety:` block changed, a
   loop's `side_effect_level` rose or a new loop declares a factory-owned level, a loop's
   verifier or stop condition changed, a factory-owned loop changed or was removed, or the
-  file does not parse at either ref (`:248-315`);
+  file does not parse at either ref (`:270-337`);
 - the line count exceeds `blast_radius.size_budget_lines` **and**
   `blast_radius.size_budget_blocks` is true.
 
-Otherwise `SKIPPED` when disabled, else `PASS`. The script always exits 0 and writes its
-verdict to stdout, which the command saves as `blast.md`.
+Otherwise `SKIPPED` when disabled, else `PASS`. A `HUMAN_REQUIRED` verdict is then looked
+up against the operator's signed approval record,
+`/var/lib/dark-factory/blast-approvals/<issue>.json` plus `.json.sig` (#551). The record
+is valid only with a detached gpg signature from a key in
+`main:.factory/blast-approvers.asc`, and it binds the `<mode> <blob>` of every triggered
+file at the merge base and at the head (both trees when the size trigger is active). A
+match turns the verdict into `PASS` with `APPROVAL: matched (...)`. Anything else keeps
+`HUMAN_REQUIRED` with `APPROVAL: none`, `error (signature)`, `error (record)` or
+`stale (...)`. The approval is written only by the operator's host-side
+`approve-blast.sh`, never by a comment or a label. The gate always exits 0; the checker
+exits 0 for `PASS`/`SKIPPED`, 1 for `HUMAN_REQUIRED` and 2 when it could not decide.
 
-| Verdict | Outcome (`commands/dark-factory-validate.md:86-118`) |
+| Where | Non-zero outcome |
 |---|---|
-| `PASS`, `SKIPPED` | Validation continues. `report` later prints a one-line blast-radius section |
-| `HUMAN_REQUIRED` | Post "Blast-Radius Gate — BLOCKED" with the trigger and up to 10 triggered files; add `needs-discussion`; move the board to **Blocked**; `exit 1` |
+| validate Phase 0 | Stops validating; posts nothing |
+| `blast-gate` node | Pushes the branch without a PR, writes `<issue>.request.json`, adds `needs-discussion`, moves the board to **Blocked**, posts the `df-blast-hold` comment (branch, head, trigger, files, `APPROVAL:` line, the `approve-blast.sh <N> --sha <head>` instruction), writes `blast-hold.json`, exits 1 |
+| `push-and-pr` re-check | The same, before any push to a PR or PR creation |
+| `close-preview` | No merge; request (mode `close`), `needs-discussion`, comment; exits 1 (gate E1) |
 
-No workflow node reads `blast.md` to enforce this; see
-[oddity 3](#open-questions-and-oddities). The `needs-discussion` label does make
-`close-preview` refuse to merge (gate E1).
+The entrypoint treats `blast-hold.json` as a hold, not a failure (section F). The
+conformance command does not adjudicate this gate.
 
 **D2. Conformance, Gate 2** (`commands/dark-factory-conformance.md`, then the
 `conformance-gate` node).
 
-1. `conformance.enabled` false: write `STATUS: SKIPPED` to `conformance.md` and stop (`:52-55`).
+1. `conformance.enabled` false: write `STATUS: SKIPPED` to `conformance.md` and stop (`:59-62`).
 2. Locate the spec: the "Plan Generated" comment, then `refinement-status.md`, then a
    title-keyword scan of `docs/superpowers/specs/`. None found: `NO_SPEC=true` and the
-   review runs against the issue body, advisory only (`:73-133`).
+   review runs against the issue body, advisory only (`:80-140`).
 3. Build the diff: `git diff main...HEAD` excluding lock files, `docs/*.md`,
    `evals/*.md`, `bench/*.md`, memory and the index files; strip formatter-only Python
-   hunks (`scripts/fmt_hunk_filter.py`); rank with `scripts/diff_rank.py` (`:137-213`).
+   hunks (`scripts/fmt_hunk_filter.py`); rank with `scripts/diff_rank.py` (`:144-220`).
 4. An `opus` reviewer subagent applies the conformance rubric
    (`.claude/skills/conformance/RUBRIC.md` in the clone, else
    `/opt/refinement-skills/conformance-reviewer-prompt.md`). A non-gating shadow reviewer
-   runs on `conformance.shadow_model` unless that is empty (`:286-313`).
-5. **Scope remediation** (`:332-506`), when the reviewer lists `[OOS]` entries and
+   runs on `conformance.shadow_model` unless that is empty (`:293-320`).
+5. **Scope remediation** (`:339-513`), when the reviewer lists `[OOS]` entries and
    `conformance.scope_enforcement` is true: drop entries that are documentation files;
    if `conformance.excise_out_of_scope`, revert each remaining change with a
    `revert: excise out-of-scope change…` commit; de-duplicate with
@@ -735,11 +755,11 @@ No workflow node reads `blast.md` to enforce this; see
    and `conformance.backlog_label` and add it to the board, or comment on the existing
    ticket; post a "Scope enforcement: excised N…" comment on the origin issue; re-run the
    review.
-6. Verdict (`:320-330`): "Conforms" or "Minor deviations" passes. "Material divergence"
+6. Verdict (`:327-337`): "Conforms" or "Minor deviations" passes. "Material divergence"
    passes as advisory when there is no spec or `conformance.block_on_material` is false;
    otherwise it starts the reconcile loop. An unparseable verdict, error or refusal
    always starts the reconcile loop.
-7. **Reconcile loop** (`:508-538`): write a failing test, fix the code, commit
+7. **Reconcile loop** (`:515-545`): write a failing test, fix the code, commit
    `fix: align implementation with spec (conformance cycle N)`, re-review. More than
    `conformance.max_reconcile_cycles` cycles is BLOCKED.
 
@@ -758,12 +778,12 @@ notices. It writes `diff-ranking.json` (`scripts/diff_rank.py:234-285,340-603`).
 
 | Result | Outcome |
 |---|---|
-| PASS (`:540-634`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
-| BLOCKED (`:636-712`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
+| PASS (`:547-641`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
+| BLOCKED (`:643-719`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
 
 **The `conformance-gate` node enforces the result** by reading `conformance.md`, because
 a command node's own `exit 1` is not relied on to stop the DAG
-(`commands/dark-factory-conformance.md:708-712`). `scripts/verdict_gate_check.sh:36-86`:
+(`commands/dark-factory-conformance.md:715-719`). `scripts/verdict_gate_check.sh:36-86`:
 
 | First `STATUS:` line | Gate |
 |---|---|
@@ -807,7 +827,7 @@ pass and read-only by instruction: one reviewer, no reconcile loop, no commits.
 | BLOCKED (`:248-308`) | "Docs Conformance (Gate 2.5) — Mismatch observed (informational)" comment (marker `df-docs-conformance-observed`); no label, no board move | "Docs Conformance (Gate 2.5) — Blocked" comment (marker `df-docs-conformance-blocked`) with the evidence and next steps; board to **Blocked**; `needs-discussion` label |
 
 **The `docs-conformance-gate` node enforces the result** with
-`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1224-1271`), not
+`scripts/docs_verdict_gate_check.sh` (`workflows/archon-dark-factory.yaml:1265-1312`), not
 `verdict_gate_check.sh`, because `ERROR` must not pass:
 
 | First `STATUS:` line | `observe` | `enforce` |
@@ -898,32 +918,45 @@ conformance and code review have run; nothing re-runs those on the revised code.
 
 ### E. Close
 
-**E1. Merge refusal** (`close-preview`, `workflows/archon-dark-factory.yaml:236-255`).
+**E1. Merge refusal** (`close-preview`, `workflows/archon-dark-factory.yaml:236-272`).
 `Close issue #N` exits 1 without merging if the issue has `needs-discussion`, if no PR
-exists, or if the merge call does not report success. This is the one place where a gate
+exists, if the blast-radius check on the PR head does not pass (gate D1; a
+`HUMAN_REQUIRED` diff needs a valid signed approval, and a checker failure also refuses),
+or if the merge call does not report success. The merge is pinned to the head that was
+checked (`codehost merge --match-head`), and a successful merge deletes the issue's
+approval record. This is the one place where a gate
 label set earlier (blast radius, conformance, code review, breaker) stops a merge.
 The failure surfaces as a failed workflow ([section 9](#9-how-a-run-ends)).
 
 ### F. Rate-limit and session-window handling (entrypoint)
 
 When the workflow exits non-zero, the entrypoint first checks the captured output for a
-Claude session-window exhaustion (`entrypoint.sh:278-349`, `1040-1044`). On a match it
+Claude session-window exhaustion (`entrypoint.sh:278-349`, `1105-1109`). On a match it
 writes the resume time to `session-window-paused` in the state dir, drops an
 `environmental:session_window_pause` signature for the scheduler, appends a `paused`
 entry to `runs.jsonl`, and exits 0. Tuned by `scheduler.session_window_backoff_enabled`,
 `scheduler.session_window_buffer_minutes`, `scheduler.session_window_fallback_minutes`.
 
+Next it checks for the hold marker (#551, `_handle_blast_hold`): `blast-hold.json` in the
+entrypoint's own artifacts directory, exported as `FACTORY_BLAST_HOLD_FILE` before the
+workflow starts because Archon gives bash nodes a different `ARTIFACTS_DIR`. A
+blast-radius hold writes it before any of its other steps. A marker that names a
+different issue than the run's is ignored. On a match it appends a `blast_hold` / `human_required` entry to
+`runs.jsonl`, posts the cost report and exits 0: no post-mortem, no error signature, and
+no change to any retry counter. While `needs-discussion` is on the issue the scheduler
+skips it; after approval the next dispatch counts as one ordinary attempt.
+
 With the backoff disabled, a rate-limit match makes the entrypoint sleep until the
 parsed reset time plus 60 s (300 s when the time cannot be parsed or the result is
 negative or above 90000 s) and re-run the whole workflow
-(`:1035-1070`).
+(`:1102-1137`).
 
 ---
 
 ## 7. After the workflow
 
-When `archon workflow run` exits 0 (`entrypoint.sh:1082-1110`), the steps below run in
-order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:552-573`), with
+When `archon workflow run` exits 0 (`entrypoint.sh:1147-1175`), the steps below run in
+order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:610-631`), with
 `--status failed`, which scores the run `failed`:
 
 1. `archon workflow cost --last --json --quiet` is captured.
@@ -949,7 +982,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:552-573
    (`push-result.json` presence, resolved the same two-directory way, else a
    `needs-discussion` label lookup), folds `push_result` from that resolved path, and
    scores an artifact-less run `failed` or `clean_abort`. Failure is ignored.
-3. `post_cost_report` (`entrypoint.sh:434-501`): if `run-record.json` exists and has
+3. `post_cost_report` (`entrypoint.sh:479-546`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
    `delivered-savings.jsonl`; the legacy single `context-budget.json` is read only when no
@@ -997,7 +1030,8 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `out-of-scope.md` | implement command; `oos_excise.sh` | conformance command |
 | `failure-diagnosis.md` | implement command (blocked exit) | Posted as an issue comment; failure classification |
 | `preview_env.sh`, `preview_build.log` | `preview-up`, `preview-up-resolve` | validate, `push-and-pr`, `report` |
-| `blast.md` | validate command (from `gate_blast_radius.py`) | validate command; `report` |
+| `blast.md` | `blast_gate_check.sh` (validate Phase 0, then overwritten by `blast-gate`, `push-and-pr`, `close-preview`) | `report` |
+| `blast-hold.json` (entrypoint's directory, via `FACTORY_BLAST_HOLD_FILE`) | `blast_gate_check.sh --hold` (`blast-gate`, `push-and-pr`) | `entrypoint.sh` `_handle_blast_hold` |
 | `validation.md` | validate command | `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)) |
 | `conformance_artifact_content.md`, `conformance_prompt.md`, `no_spec_issue_body.md`, `conformance_reconcile_diff.txt` | conformance command | Reviewer subagent prompt |
 | `diff-ranking.json` | `diff_rank.py` (conformance, then docs conformance, then code review) | `context_budget.py`; humans debugging a zero-content block |
@@ -1010,13 +1044,15 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `review.md` | code-review command | `review-gate`, `report`, `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)), post-mortem |
 | `revise_advisory_*.md`, `revise_summary.txt`, `revise_advisory.md` | revise-advisory command | Fix subagent; PR comment |
 | `conflict_resolution.md` | `deconflict.py`; overwritten by the entrypoint deconflict success path | `report`; `run-record assemble`; failure classification |
-| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:400-403`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
+| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:445-448`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
 | `run-record.json` | `run-record assemble` | `post_cost_report` |
 
 State written outside the artifacts directory, under `/var/lib/dark-factory`:
 `runs.jsonl`, `current-run.json`, `main-is-red`, `main-red-last-recheck`,
 `main-is-red-issue`, `session-window-paused`, `error-signatures/<issue>.<phase>.sig`,
-`hook-warnings.log`.
+`hook-warnings.log`, `blast-approvals/<issue>.request.json` (written on a blast-radius
+hold; the signed `<issue>.json` and `.json.sig` beside it are written only by the
+operator's `approve-blast.sh` and deleted by `close-preview` after the merge).
 
 ---
 
@@ -1059,7 +1095,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
 
 ### Workflow failure (non-zero exit from `archon workflow run`)
 
-`entrypoint.sh:1032-1077`, in order:
+`entrypoint.sh:1093-1142`, in order:
 
 1. Session-window match: exit 0 (gate F).
 2. Rate-limit match with backoff disabled: sleep and retry.
@@ -1073,7 +1109,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    `DELIVERY_FAILURE_MAX_SECONDS`, no commits, clean tree, no phase artifact),
    `environmental:preview_infra`, `environmental:rate_limit`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:373-432`, `scripts/factory_core/error_signature.py:37-64`).
+   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:37-64`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see
@@ -1081,18 +1117,18 @@ This path does not go through `on_failure`; see
 
 ### Entrypoint failure (`on_failure`, the `ERR` trap)
 
-Any unguarded failing command after `entrypoint.sh:637`: clone failure, dependency
+Any unguarded failing command after `entrypoint.sh:695`: clone failure, dependency
 install failure, the adapter gate, the missing smoke hook, a failed push in the
-deconflict path. `on_failure` (`:504-636`):
+deconflict path. `on_failure` (`:549-694`):
 
 1. Appends a `failed` entry to `runs.jsonl` and assembles a `run-record.json` with
    `status: failed`.
 2. For `refine`, `plan`, `deconflict`: writes the error signature and posts
    "Refinement Pipeline — Failed" (marker `df-refine-failure`) with the exit code and the
-   retry command. **No board change**; the scheduler's breaker owns that (`:582-603`).
+   retry command. **No board change**; the scheduler's breaker owns that (`:642-663`).
 3. For `fix`, `continue`: writes the error signature, posts the post-mortem, moves the
    board to **Blocked**, and posts "Dark Factory Run — Failed" (marker
-   `df-factory-failure`) saying so (`:604-628`).
+   `df-factory-failure`) saying so (`:664-688`).
 4. For `close` or runs without an issue number: no comment.
 5. Posts the cost report.
 
@@ -1149,7 +1185,7 @@ The scheduler-side oddities are tracked in
 1. **The workflow's `resolve` path appears unreachable.** The scheduler's
    conflict command is `Deconflict issue #N` (`scheduler.sh:1118`). The entrypoint
    handles `deconflict` inline and every branch of that block ends in `exit 0` before the
-   workflow is started (`entrypoint.sh:922-1018`). No dispatched command contains the
+   workflow is started (`entrypoint.sh:983-1079`). No dispatched command contains the
    word "resolve". The nodes `setup-branch-resolve`, `preview-up-resolve`,
    `push-resolve`, and the `resolve` branches of `de-conflict`, `validate`,
    `status-in-review` and `report` would run only if `parse-intent` (a model call)
@@ -1158,8 +1194,8 @@ The scheduler-side oddities are tracked in
    archon".
 
 2. **On `continue`, `de-conflict` is not upstream of validation or the push.**
-   `de-conflict` depends on `regen-codeindex` (`workflows/archon-dark-factory.yaml:775`).
-   `preview-changeset` also depends on `regen-codeindex` (`:789`), and the chain to
+   `de-conflict` depends on `regen-codeindex` (`workflows/archon-dark-factory.yaml:798`).
+   `preview-changeset` also depends on `regen-codeindex` (`:812`), and the chain to
    `validate`, `conformance` and `push-and-pr` runs through it, not through
    `de-conflict`. Nothing orders the merge of `main` before validation, and nothing
    downstream on the `continue` path waits for it or checks its result. Whether Archon
@@ -1168,19 +1204,22 @@ The scheduler-side oddities are tracked in
    (`scripts/factory_core/deconflict.py:394-404`), but the only node depending on
    `de-conflict` is `preview-up-resolve`.
 
-3. **The blast-radius block has no enforcing DAG node.** The validate command writes
+3. **Resolved by #551.** The `blast-gate` node, the `push-and-pr` re-check and the
+   `close-preview` check now enforce the gate deterministically (gate D1). The original
+   finding: **the blast-radius block has no enforcing DAG node.** The validate command writes
    `blast.md` and does `exit 1` on `HUMAN_REQUIRED`
-   (`commands/dark-factory-validate.md:91-118`). The conformance and code-review commands
+   (`commands/dark-factory-validate.md:91-118`, pre-#551 line numbers). The conformance and code-review commands
    both state that a command node's internal `exit 1` "does not reliably surface as node
    failure to the DAG executor", which is why `conformance-gate` and `review-gate` exist
-   (`commands/dark-factory-conformance.md:708-712`). There is no equivalent node for
-   `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1602-1620`).
+   (`commands/dark-factory-conformance.md:715-719`). There is no equivalent node for
+   `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1657-1675`).
    If the exit does not surface, conformance, push, PR creation and `status-in-review`
    would proceed and move a Blocked issue to In Review. The `needs-discussion` label
    would still stop `close-preview` from merging.
 
-4. **The blast-radius comment names a command that does not exist.** It tells the human
-   to re-run `"Validate issue #N"` (`commands/dark-factory-validate.md:104-107`). The
+4. **Resolved by #551**: the `df-blast-hold` comment names `approve-blast.sh` instead. The
+   original finding: **the blast-radius comment names a command that does not exist.** It tells the human
+   to re-run `"Validate issue #N"` (`commands/dark-factory-validate.md:104-107`, pre-#551). The
    entrypoint's intent pattern has no `validate` (`entrypoint.sh:103`), so that string
    falls through to `fix`, and what the workflow's `parse-intent` would make of it is a
    model decision.
@@ -1194,50 +1233,50 @@ The scheduler-side oddities are tracked in
    (cost report) and the failure path (post-mortem, error signature).
    `scripts/comment_digest.py:124-135` records the same open question about `report`.
    The `report` node has a "⛔ Blocked … Issue moved to Blocked" branch for code review
-   (`workflows/archon-dark-factory.yaml:1631-1633`), which suggests it is expected to run
+   (`workflows/archon-dark-factory.yaml:1686-1688`), which suggests it is expected to run
    after a review block.
 
 6. **A failed workflow does not run `on_failure`.** The failure branch ends in
-   `exit "$EXIT_CODE"` (`entrypoint.sh:1073-1076`), and an `ERR` trap does not fire on
-   `exit` (the script says so itself at `:651-653`; confirmed with a small bash probe).
+   `exit "$EXIT_CODE"` (`entrypoint.sh:1138-1141`), and an `ERR` trap does not fire on
+   `exit` (the script says so itself at `:709-711`; confirmed with a small bash probe).
    So on this path there is no "Dark Factory Run — Failed" comment, no move to Blocked,
    no `failed` run-record entry, no assembled `run-record.json`, and no cost report. The
-   comment above `_write_error_signature` (`:365-372`) calls this the load-bearing call
+   comment above `_write_error_signature` (`:410-417`) calls this the load-bearing call
    site, so it may be intended that the scheduler owns the board here, but the failure
-   bookkeeping in `on_failure` (`:537-573`) is then only reached by setup-time failures.
+   bookkeeping in `on_failure` (`:595-633`) is then only reached by setup-time failures.
 
 7. **The "Paused (session window)" issue comment looks unreachable.** It is posted only
    inside `on_failure`, when `TMP_OUT` exists and the pause check matches
-   (`entrypoint.sh:507-535`). `TMP_OUT` is created inside the workflow loop and, on success, kept until
-   `run-record assemble` has read it; inside the loop a pause match exits 0 directly (`:1033-1036`) without posting anything. In normal
+   (`entrypoint.sh:552-580`). `TMP_OUT` is created inside the workflow loop and, on success, kept until
+   `run-record assemble` has read it; inside the loop a pause match exits 0 directly (`:1094-1097`) without posting anything. In normal
    operation a paused run therefore leaves no comment on the issue and posts no cost
    report.
 
 8. **The adapter gate runs before the self-contained fallback copy.**
-   `_adapter_invalid_refuse` is called at `entrypoint.sh:771`; the baked scripts are
-   copied into `dark-factory/scripts` at `:782-787`. `on_failure` then calls
+   `_adapter_invalid_refuse` is called at `entrypoint.sh:829`; the baked scripts are
+   copied into `dark-factory/scripts` at `:840-845`. `on_failure` then calls
    `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py` for the comment footer with no
-   guard (`:589`, `:612`). For a target that does not carry `dark-factory/scripts` in its
+   guard (`:649`, `:672`). For a target that does not carry `dark-factory/scripts` in its
    repository (the self target has `scripts/` at the root), that call fails; a bash probe
    confirms a failing assignment inside the trap handler aborts the handler. The
-   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:609`) happen
+   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:669`) happen
    first, but the generic failure comment and the cost report would not be posted.
    `run_post_mortem` (`:233`) uses the same missing path. Not verified against a live run.
 
 9. **Kill-switch retry path has unguarded pipelines.** With the session-window backoff
    disabled, `RESET_TIME=$(grep … | head -1)` and the `RESET_TZ` line
-   (`entrypoint.sh:1042-1043`) run under `set -euo pipefail` with no `|| true`. When the
+   (`entrypoint.sh:1107-1108`) run under `set -euo pipefail` with no `|| true`. When the
    output has no "resets <time>" text the pipeline status is non-zero, which would fire
    the `ERR` trap instead of using the 300 s default on the next line. The script's own
    comment at `:100-102` describes this exact hazard for another `grep`.
 
 10. **`BENCH_MODE` handling is inconsistent.** In stub mode `classify-preview` is skipped
-    by its `when:` (`workflows/archon-dark-factory.yaml:852`). `preview-up` depends only
-    on `classify-preview` with the default trigger rule, and the comment at `:793-800`
+    by its `when:` (`workflows/archon-dark-factory.yaml:875`). `preview-up` depends only
+    on `classify-preview` with the default trigger rule, and the comment at `:816-823`
     describes exactly this cascade (a skipped `classify-preview` skipping `validate`,
     `push-and-pr` and `report`). If that holds, `preview-up`'s own stub branch
-    (`:917-923`) cannot run. Separately, comments describe a `BENCH_MODE=full` mode
-    (`:916`, `:1312`) but no code tests for the value `full`.
+    (`:940-946`) cannot run. Separately, comments describe a `BENCH_MODE=full` mode
+    (`:939`, `:1353`) but no code tests for the value `full`.
 
 11. **Variable-name mismatches inside command files.** These are instructions to an
     agent, so the effect depends on how the agent bridges them.
@@ -1245,23 +1284,23 @@ The scheduler-side oddities are tracked in
       `${ADVISORY_COUNT}` (`commands/dark-factory-code-review.md:278-280`), but Phase 4
       names the values `BLOCKERS` and `ADVISORY` (`:213-214`). Taken literally the file
       would say `BLOCKERS: 0` on a blocked run; `report` prints that number
-      (`workflows/archon-dark-factory.yaml:1632`).
+      (`workflows/archon-dark-factory.yaml:1687`).
     - Conformance, PASS branch: `conformance.md` is written from `${OOS_EXCISED}` and
-      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:547-549`), but scope
-      remediation names them `EXCISED_COUNT` and `SPILLOVER_TICKETS` (`:437`, `:495`).
+      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:554-556`), but scope
+      remediation names them `EXCISED_COUNT` and `SPILLOVER_TICKETS` (`:444`, `:502`).
       `report` reads `OOS_EXCISED:`/`OOS_TICKETS:` from the file.
 
 12. **Reconcile cycles review a different diff from the first pass.** The first
     conformance review uses the formatter-filtered, risk-ranked diff
-    (`commands/dark-factory-conformance.md:144-213`). Reconcile cycles use
+    (`commands/dark-factory-conformance.md:151-220`). Reconcile cycles use
     `git diff … | head -1000` with no filtering or ranking and a slightly shorter
-    exclusion list (`:519-523`).
+    exclusion list (`:526-530`).
 
 13. **Target-specific commands are hardcoded in generic steps.** The validate command
     runs `cd backend && python -m pytest` and `cd frontend && npx tsc`
-    (`commands/dark-factory-validate.md:177-185`); `preview-up` builds `backend/Dockerfile`
+    (`commands/dark-factory-validate.md:141-149`); `preview-up` builds `backend/Dockerfile`
     and `frontend/Dockerfile` and names stacks `mh-preview-<N>`
-    (`workflows/archon-dark-factory.yaml:976-1000`). `run_hook` is called only from
+    (`workflows/archon-dark-factory.yaml:999-1023`). `run_hook` is called only from
     `entrypoint.sh` (smoke gate, and `validate` in the deconflict path); no workflow node
     or command calls a target hook, and nothing calls the `preview-up`/`preview-down`
     hook names that `scripts/hooks.sh:14-15` lists. On a target without those directories
@@ -1272,24 +1311,24 @@ The scheduler-side oddities are tracked in
     reads `conflict_resolution.ai_tier` into `CONFLICT_RESOLUTION_AI_TIER`
     (`entrypoint.sh:35`, then the `CONFLICT_RESOLUTION_AI_TIER` row of `run-config.env`), and `config/config.yaml:64` documents `false` as "only
     Tier 1". But both callers run `cli.py deconflict --issue N` with no further flag
-    (`entrypoint.sh:716-717`, `workflows/archon-dark-factory.yaml:773-774`); the CLI
+    (`entrypoint.sh:774-775`, `workflows/archon-dark-factory.yaml:796-797`); the CLI
     computes `ai_tier=not args.no_ai_tier` from a `--no-ai-tier` flag that nothing
     passes (`scripts/factory_core/cli.py:40,364`); and `deconflict.py` does not read the
     environment variable. As far as this trace goes, Tier 2 always runs.
 
 15. **Smaller inconsistencies.**
     - `on_failure` logs "Moving issue #N back to Ready..." and then sets **Blocked**
-      (`entrypoint.sh:608-611`).
+      (`entrypoint.sh:666-669`).
     - The entrypoint's deconflict success path overwrites the resolver's key=value
       `conflict_resolution.md` with prose, labelled "TypeScript validation" even when the
-      validate hook ran instead (`entrypoint.sh:994-1002`). `run-record` is not assembled
+      validate hook ran instead (`entrypoint.sh:1055-1063`). `run-record` is not assembled
       on that path, so only failure classification sees the file.
     - `close-preview` tests for `needs-discussion` with a substring `grep -c`
       (`workflows/archon-dark-factory.yaml:237-239`); the push gates and
-      `verdict_gate_check.sh` use an exact-line match (`:542`).
+      `verdict_gate_check.sh` use an exact-line match (`:565`).
     - `plan-push-and-advance` does not advance anything; a plan-phase silent death is
       reported under the heading "Refinement Pipeline — Failed" with marker
-      `df-refine-failure` (`:665-666`).
+      `df-refine-failure` (`:688-689`).
     - Refine's pre-flight threshold is written as the literal 20 in the command text
       (`commands/dark-factory-refine.md:102`); `refine.min_issue_body_length` exists in
       config with the same value, and the command is told to read the config but not
