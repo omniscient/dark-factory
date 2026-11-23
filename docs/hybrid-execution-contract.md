@@ -420,28 +420,60 @@ role. Any other value is recorded as `correlation: "unknown"`. This supersedes t
 
 ### 4.5 Capability evidence
 
-Per Q3(a). A capability-evidence record (schema below) may only be authored by #562's operator
-certification run executing #561's pinned fixtures. See the full field list and fail-closed rule
-in the Q3(a) answer above; reproduced here as the normative schema shape:
+Per Q3(a), tightened by #580's post-merge review. A capability-evidence record is
+**per-endpoint and long-lived, not a per-run record**: one record per `endpoint_id`, stored as
+a sibling record next to (not a field of) its #557 registry entry, on the same
+operator-controlled, human-only instance-config surface as the registry entries and
+payload-class grants (exact path left to #557's own refinement) — never in the per-run record
+or ledger, which may only cite it by `endpoint_id` + `schema_version`.
+
+**Who may write it:** only an operator, acting on the output of #562's human-gated
+certification run (`ready-for-human`, never scheduler-dispatched) executing #561's pinned
+fixtures. No factory phase agent may create or edit a record, however privileged; no
+scheduler-dispatched container may be able to write it (the mechanism is #557's and #560's to
+specify). A record-shaped artifact appearing in a branch, PR diff, issue comment or run
+artifact is `self_report` and is ignored. Preflight rejects a record missing `certified_by` or
+whose `fixture_suite_version` does not match the currently pinned suite.
 
 ```text
 capability_evidence:
   schema_version: "1.0"
   endpoint_id: <#557 registry key>
-  model_identity: {served_name, digest_or_revision}
-  runtime_stack: {name, version}
+  model_identity: {served_name, digest_or_revision, quantisation}
+  runtime_stack: {name, version, chat_template, context_settings}
+  harness_version: <pinned Claude CLI/SDK version>
   fixture_suite_version: <pinned commit/digest>
-  results: {<capability_dimension>: pass | fail | not_tested, ...}
-  qualified_roles: [worker]          # never "checker" — see §4.2
+  results: {<capability_dimension>: pass | fail | unsupported | not_tested, ...}
+  qualified_roles: [actor]          # §4.4's enum; never "checker" or "monitor" — see §4.2
   certified_by: <operator identity>
   certified_at: <ISO8601>
   expires_at: <ISO8601>
-  invalidated_by: [model_digest, runtime_version, fixture_suite_version, registry_config]
+  invalidated_by: [model_digest, quantisation, runtime_version, chat_template, context_settings,
+                   harness_version, fixture_suite_version, registry_config]
 ```
 
-Capability dimensions (minimum set #561's fixtures must cover): protocol compatibility, tool-call
-fidelity, streaming behavior, context-length handling, role-isolation (confirms the endpoint
-cannot be mistaken for an independent checker), and timeout/cancellation behavior (§4.6).
+`qualified_roles` uses §4.4's normative `role` enum: v1 evidence may only ever list `actor`
+(§4.2 already treats `worker`/`orchestrator` as kinds of `actor`), never `checker` or
+`monitor`. `actor` qualification under §4.11 decision 3 certifies a checker-free helper
+dispatch only — it never advertises full-agent or checker capability (#561).
+
+Per-dimension `results` values are `pass | fail | unsupported | not_tested` (`unsupported`
+means the endpoint's protocol/runtime cannot do this at all, proven by a fixture). A separate,
+derived evidence state — `tested | declared | stale | unknown` — is computed at preflight read
+time from `expires_at`/`invalidated_by` fingerprint comparison and is never stored or
+operator-set: `declared` (the registry entry declares a capability but no valid record exists
+yet), `stale` (`expires_at` has passed, or any `invalidated_by` fingerprint differs from what
+is observed), `unknown` (no record exists, or a fingerprint cannot be resolved), `tested`
+(none of the above). A role is eligible only if the derived state is `tested` and every
+dimension that role requires is `pass`; every other combination (per-dimension
+`fail`/`unsupported`/`not_tested`, or derived `declared`/`stale`/`unknown`) fails closed —
+missing, expired, failed, or mismatched evidence blocks and escalates exactly like a failed
+certification, no grace period.
+
+Capability dimensions (minimum set #561's fixtures must cover): protocol compatibility,
+tool-call fidelity, streaming behavior, context-length handling, role-isolation (confirms the
+endpoint cannot be mistaken for an independent checker), and timeout/cancellation behavior
+(§4.6).
 
 ### 4.6 Timeouts and cancellation (policy)
 

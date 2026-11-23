@@ -114,10 +114,12 @@ def test_four_contracts_are_independently_versioned():
 def test_capability_evidence_schema_never_qualifies_a_checker():
     section = _section(_doc_text(), "### 4.5 Capability evidence")
     assert 'schema_version: "1.0"' in section
-    assert "qualified_roles: [worker]" in section
+    roles = re.search(r"^\s*qualified_roles: \[([^\]]*)\]", section, re.MULTILINE)
+    assert roles and [r.strip() for r in roles.group(1).split(",")] == ["actor"]
     for field in ("endpoint_id:", "model_identity:", "fixture_suite_version:", "expires_at:",
-                  "invalidated_by:"):
+                  "invalidated_by:", "harness_version:"):
         assert field in section, f"capability-evidence field {field} missing"
+    assert "unsupported" in section
 
 
 def test_spec_delta_for_239_lists_items_12_to_15():
