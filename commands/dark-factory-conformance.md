@@ -294,6 +294,12 @@ ARTIFACT_EOF
    - `description`: "Conformance review: code vs spec"
    - `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.282 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn in Phase 3.5 too)
    - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call. The reviewer's response text is required before any later step executes. If
+     the tool returns only a launch acknowledgement instead of the review, poll inside your
+     turn (keep issuing tool calls) until the response arrives — never end the turn to
+     wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this step's
+     (Opus) response text in hand for the current cycle.
 
 5. Append the subagent's output to `CONFORMANCE_DIALOGUE`
 
@@ -304,6 +310,12 @@ ARTIFACT_EOF
      `claude-fable-5-1` (alias-only enum); `SHADOW_MODEL:` still records the literal pin
    - `prompt`: the identical verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md` the Opus call just read in step 4
    - Read access: `Glob`/`Grep`/`Read`, per the checker-invocation contract
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call too, and do not end your turn until it has returned — a result or an error,
+     either is fine. If the tool returns only a launch acknowledgement, poll inside your
+     turn until it returns. The non-gating contract below is unchanged: a shadow error,
+     timeout or refusal still degrades to `SHADOW_STATUS: UNCERTAIN` and never blocks or
+     retries the Opus verdict handling.
    - Any tool error, timeout, or refusal is caught here — it never blocks, delays, or
      retries the Opus verdict handling in step 7, and never feeds Phase 3.6's `[OOS]` scan.
    - Derive `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY` from
@@ -517,12 +529,20 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
 1. Increment `CONFORMANCE_CYCLE`
 2. If `CONFORMANCE_CYCLE > MAX_CYCLES` → go to Phase 5 (BLOCKED)
 3. Read the MATERIAL deviation descriptions from the conformance reviewer output
-4. Fix the code to align with the spec:
-   - Write a failing test that targets the missing/wrong behavior
-   - Run the test to confirm it fails: `cd backend && python -m pytest <test_path> -x -v`
-   - Implement the fix
-   - Run the test to confirm it passes
-   - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
+4. Decide whether this cycle has a finding to fix:
+   - **No-response cycle (#373):** if this cycle was entered because the reviewer
+     subagent's Agent tool call errored, timed out, or returned an empty/no-response result
+     — not a parseable finding to act on — skip the code-fix and re-diff steps (the rest
+     of this step, step 5 and step 5a) and go straight to step 6: re-spawn the reviewer
+     with the identical `$ARTIFACTS_DIR/conformance_prompt.md`. This retry still consumes
+     the cycle step 1 just counted against `MAX_CYCLES` — there is no separate retry
+     budget, and step 2's `MAX_CYCLES` exit to Phase 5 still applies.
+   - Otherwise: Fix the code to align with the spec:
+     - Write a failing test that targets the missing/wrong behavior
+     - Run the test to confirm it fails: `cd backend && python -m pytest <test_path> -x -v`
+     - Implement the fix
+     - Run the test to confirm it passes
+     - Commit: `git add -A && git commit -m "fix: align implementation with spec (conformance cycle $CONFORMANCE_CYCLE)"`
 5. Re-get the diff:
    ```bash
    git diff main...HEAD -- ':!*.lock' ':!docs/*.md' ':!evals/*.md' ':!bench/*.md' ':!.archon/memory/**' 2>/dev/null | head -1000 > "$ARTIFACTS_DIR/conformance_reconcile_diff.txt"
@@ -533,7 +553,14 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
     item 3a `render-prompt` invocation unchanged — a failure here is a hard stop for the phase,
     identically to Step 3.1.
 6. Re-spawn the conformance reviewer subagent with the verbatim contents of
-   `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a
+   `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a (on a no-response cycle per
+   step 4, the unchanged prompt from the previous cycle)
+   - **Foreground dispatch (#373):** pass `run_in_background: false` on this Agent tool
+     call. The reviewer's response text is required before any later step executes. If
+     the tool returns only a launch acknowledgement instead of the review, poll inside your
+     turn (keep issuing tool calls) until the response arrives — never end the turn to
+     wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this
+     re-spawn's (Opus) response text in hand for the current cycle.
 7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator
 7a. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (mirroring Step
     3.1's 5a for this cycle — prompt is the verbatim contents of
@@ -542,6 +569,12 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
     separator, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one. Update
     `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY`/
     `SHADOW_VERDICT_LINE` from this cycle's response (best-effort `UNCERTAIN` on any error).
+    - **Foreground dispatch (#373):** pass `run_in_background: false` on this shadow
+      re-spawn too, and do not end your turn until it has returned — a result or an error.
+      If the tool returns only a launch acknowledgement, poll inside your turn until it
+      returns. The non-gating contract is unchanged: a shadow error, timeout or refusal
+      still degrades to `SHADOW_STATUS: UNCERTAIN` and never blocks or retries the Opus
+      verdict handling.
 8. Parse verdict again → loop back to step 1
 
 ## Phase 4: PASS — Write attestation
@@ -717,3 +750,45 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    `STATUS:` line directly and blocks `push-and-pr` (and everything chained after it, including
    `status-in-review`) on anything other than `PASS`/`SKIPPED`/`ERROR` — a `command:` node's
    internal `exit 1` does not reliably surface as node failure to the DAG executor (#212, #271).
+
+## Phase 6: ARTIFACT GUARD
+
+Run this section last, on every path, before your turn ends: after Phase 4's "Exit `0`",
+after Phase 5 step 5, and after Phase 1 step 2's SKIPPED exit. Those "exit" lines mean that
+phase's own work is done; they do not skip this check. This guard never writes a verdict of
+its own — the only steps that write `$ARTIFACTS_DIR/conformance.md` are Phase 1 step 2,
+Phase 4 and Phase 5 (#373).
+
+1. Check the artifact:
+   ```bash
+   if test -f "$ARTIFACTS_DIR/conformance.md" && grep -q '^STATUS:' "$ARTIFACTS_DIR/conformance.md"; then
+     echo "artifact-guard: conformance.md carries a STATUS line — nothing to do"
+   else
+     echo "artifact-guard: conformance.md is missing or has no STATUS line"
+   fi
+   ```
+2. If it carries a `STATUS:` line, stop here. Never overwrite or edit an existing verdict.
+3. If it is missing and a reviewer dispatch (Step 3.1 step 4 or 5a, Phase 3.5 step 6 or 7a)
+   has not returned yet, wait for it per that step's foreground-dispatch rule — poll inside
+   your turn, never end the turn to wait — then continue with 4.
+4. If it is missing and you hold the step-4 (Opus) reviewer response for the current cycle,
+   go back and act on it **now** under Step 3.1 step 7's existing rules: a conforming
+   verdict runs Phase 4; a material or inconclusive one re-enters the Phase 3.5 reconcile
+   loop, which itself ends in Phase 4 or Phase 5. Then repeat step 1. The verdict written
+   is the reviewer's real one, produced by the existing Phase 4/5 code — this section adds
+   no new way to reach a pass.
+5. Otherwise — no usable reviewer response exists and the reconcile budget cannot produce
+   one — leave the file absent and emit a stderr marker:
+   ```bash
+   echo "dark-factory-conformance: artifact guard — $ARTIFACTS_DIR/conformance.md was never written and no reviewer response is available to write it from; leaving it absent so conformance-gate blocks and posts its failure comment." >&2
+   exit 1
+   ```
+   That `exit 1` runs inside this Bash tool call and only exits its own shell — it does not
+   make this phase or the conformance node fail; the marker line is for the transcript/log
+   only. Do not create the file. The actual block is enforced downstream: `conformance-gate`
+   (`scripts/verdict_gate_check.sh`) takes its missing-verdict path unchanged, posting the
+   `<!-- df-push-gate-failure -->` comment and logging the line
+   `scripts/factory_core/error_signature.py` signs `substantive:verdict_missing`. A file
+   written here would instead send the gate down its quiet "upstream already communicated"
+   branch, suppressing that comment and that log line — the silent, misclassified failure
+   #373 fixes.

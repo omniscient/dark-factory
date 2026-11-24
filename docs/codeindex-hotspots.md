@@ -1,6 +1,6 @@
 Files with blast score ≥ 5.0  (10 found)
 
-    12.5  scripts/factory_core/adapter_defaults.py  (8d / 9t)  148 loc
+    12.5  scripts/factory_core/adapter_defaults.py  (8d / 9t)  152 loc
     12.0  scripts/factory_core/adapter.py  (8d / 8t)  331 loc
     11.0  scripts/factory_core/verdict.py  (4d / 14t)  67 loc
     10.0  scripts/factory_core/identity.py  (7d / 6t)  40 loc
