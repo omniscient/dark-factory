@@ -480,3 +480,87 @@ def role_problems(record, role="actor"):
     return [f"capability evidence for '{record['endpoint_id']}': {dim} is "
             f"{record['results'].get(dim, 'not_tested')}, not pass"
             for dim in ACTOR_REQUIRED_DIMENSIONS if record["results"].get(dim) != "pass"]
+
+
+def _select(registry_path, endpoint_id):
+    path = Path(registry_path) / REGISTRY_FILE
+    try:
+        endpoints = load_registry(path)
+    except RegistryError as e:
+        return None, e.problems
+    for entry in endpoints:
+        if entry["id"] == endpoint_id:
+            return entry, []
+    return None, [f"Unknown FACTORY_MODEL_ENDPOINT '{endpoint_id}' — no such id in {path}; "
+                  "no other endpoint is chosen instead"]
+
+
+def hosting_location_of(registry_path, endpoint_id):
+    entry, _ = _select(registry_path, endpoint_id)
+    return entry["hosting_location"] if entry else None
+
+
+def _local_problems(entry, evidence_dir):
+    eid = entry["id"]
+    problems = []
+    present = sorted(n for n in CLOUD_CREDENTIALS
+                     if os.environ.get(n) and n != entry["secret_reference"])
+    if present:
+        problems.append(f"endpoint '{eid}' is local but cloud model credential(s) are set in this "
+                        f"container: {', '.join(present)} — a local-routed container holds none "
+                        "(contract §4.3)")
+    if os.environ.get("ANTHROPIC_BASE_URL") != entry["base_url"]:
+        problems.append(f"endpoint '{eid}': ANTHROPIC_BASE_URL must equal the entry's base_url "
+                        "(contract §4.11 decision 1)")
+    served = entry["model_identity"]["served_name"]
+    for alias in TIER_ALIASES:
+        if os.environ.get(alias) != served:
+            problems.append(f"endpoint '{eid}': {alias} must equal model_identity.served_name "
+                            f"'{served}' (contract §4.11 decision 2)")
+    try:
+        record = load_evidence(evidence_dir, eid)
+    except RegistryError as e:
+        problems += e.problems
+    else:
+        state, reasons = evidence_state(record, entry)
+        if state != "tested":
+            problems.append(f"endpoint '{eid}': capability evidence is '{state}', not 'tested' "
+                            "(contract §4.5)")
+            problems += reasons
+        else:
+            problems += role_problems(record, "actor")
+    problems.append(_NO_LOCAL_DISPATCH.format(eid=eid))
+    return problems
+
+
+def preflight(registry_path, evidence_dir, endpoint_id) -> list[str]:
+    """Run-container check of the staged registry for one selected endpoint; [] == OK."""
+    problems = verify_staged_digest(registry_path)
+    if problems:
+        return problems
+    entry, problems = _select(registry_path, endpoint_id)
+    if entry is None:
+        return problems
+    ref = entry["secret_reference"]
+    if entry["hosting_location"] == "cloud":
+        problems += _missing([ref])  # a cloud entry's secret arrives via .archon/.env
+    elif not os.environ.get(ref):
+        # Not _missing(): a local secret must not be delivered through .archon/.env (spec §C).
+        problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is not set")
+    if entry["hosting_location"] == "local":
+        problems += _local_problems(entry, evidence_dir)
+    # Checked again after every read: a swap between the first check and the reads fails here.
+    problems += verify_staged_digest(registry_path)
+    return problems
+
+
+def scheduler_preflight(registry_path, endpoint_id) -> list[str]:
+    """Scheduler boot check on its read-only source mount: schema, selected id, §4.11 decision 3.
+
+    The digest, secret presence and credential/alias guards are the run container's: it holds
+    the environment they check.
+    """
+    entry, problems = _select(registry_path, endpoint_id)
+    if entry is not None and entry["hosting_location"] == "local":
+        problems.append(_NO_LOCAL_DISPATCH.format(eid=entry["id"]))
+    return problems

@@ -433,3 +433,162 @@ def test_observed_harness_version_is_none_without_cli(monkeypatch):
         raise FileNotFoundError("claude")
     monkeypatch.setattr(me.subprocess, "run", _no_cli)
     assert me.observed_harness_version() is None
+
+
+# --- Task 4: endpoint preflight -------------------------------------------------------------
+
+def _stage(tmp_path, monkeypatch, endpoints, evidence=None):
+    """Write a registry (+ evidence) as the staged copy and pass its digest like the scheduler."""
+    reg = _write_registry(tmp_path / "staged", endpoints)
+    for eid, record in (evidence or {}).items():
+        (reg / me.EVIDENCE_DIR).mkdir(exist_ok=True)
+        (reg / me.EVIDENCE_DIR / f"{eid}.yaml").write_text(
+            yaml.safe_dump({"capability_evidence": record}), encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    return reg
+
+
+def _local_env(monkeypatch, entry=LOCAL):
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", entry["base_url"])
+    for alias in me.TIER_ALIASES:
+        monkeypatch.setenv(alias, entry["model_identity"]["served_name"])
+
+
+def _run_preflight(reg, endpoint_id):
+    return me.preflight(reg, reg / me.EVIDENCE_DIR, endpoint_id)
+
+
+def test_cloud_selection_passes_with_secret_and_digest(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    assert _run_preflight(reg, "cloud-test") == []
+
+
+def test_cloud_selection_needs_no_evidence_but_names_missing_secret(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    assert _run_preflight(reg, "cloud-test") == ["ANTHROPIC_API_KEY is not set. Add it to .archon/.env"]
+
+
+def test_unknown_endpoint_fails_without_choosing_another(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    problems = _run_preflight(reg, "cloud-nope")
+    assert len(problems) == 1 and "Unknown FACTORY_MODEL_ENDPOINT 'cloud-nope'" in problems[0]
+    assert "no other endpoint is chosen instead" in problems[0]
+
+
+def test_preflight_without_digest_fails_before_reading_registry(tmp_path, monkeypatch):
+    reg = _write_registry(tmp_path / "staged", [CLOUD])
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in _run_preflight(reg, "cloud-test")[0]
+
+
+def test_preflight_fails_on_tampered_staged_copy(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    _write_registry(reg, [CLOUD, _entry(CLOUD, id="cloud-extra")])
+    problems = _run_preflight(reg, "cloud-test")
+    assert len(problems) == 1 and "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0]
+
+
+def test_preflight_rechecks_digest_after_reading(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    real_select = me._select
+
+    def _select_then_tamper(path, endpoint_id):
+        result = real_select(path, endpoint_id)
+        (Path(path) / "planted.yaml").write_text("x: 1\n", encoding="utf-8")
+        return result
+    monkeypatch.setattr(me, "_select", _select_then_tamper)
+    problems = _run_preflight(reg, "cloud-test")
+    assert len(problems) == 1 and "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0]
+
+
+def test_preflight_reports_schema_violations(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [_entry(CLOUD, protocol="openai-chat")])
+    assert any("unsupported protocol" in p for p in _run_preflight(reg, "cloud-test"))
+
+
+def test_local_selection_missing_secret_names_it_without_archon_env_hint(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    problems = _run_preflight(reg, "local-test")
+    assert "LOCAL_GATEWAY_TOKEN (secret_reference of endpoint 'local-test') is not set" in problems
+    assert not any(".archon/.env" in p for p in problems)
+
+
+@pytest.mark.parametrize("name", me.CLOUD_CREDENTIALS)
+def test_local_selection_fails_when_a_cloud_credential_is_present(tmp_path, monkeypatch, name):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    _local_env(monkeypatch)
+    monkeypatch.setenv(name, SENTINEL + "-cloud")
+    problems = _run_preflight(reg, "local-test")
+    assert any(f"cloud model credential(s) are set in this container: {name}" in p for p in problems)
+    assert SENTINEL not in " ".join(problems)
+
+
+def test_local_selection_requires_matching_base_url(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    _local_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    assert any("ANTHROPIC_BASE_URL must equal the entry's base_url" in p
+               for p in _run_preflight(reg, "local-test"))
+
+
+@pytest.mark.parametrize("alias", me.TIER_ALIASES)
+def test_local_selection_requires_every_tier_alias_to_be_the_served_model(tmp_path, monkeypatch, alias):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    _local_env(monkeypatch)
+    monkeypatch.setenv(alias, "claude-opus-5-5")
+    assert any(f"{alias} must equal model_identity.served_name" in p
+               for p in _run_preflight(reg, "local-test"))
+
+
+def test_local_selection_requires_evidence(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    _local_env(monkeypatch)
+    problems = _run_preflight(reg, "local-test")
+    assert "endpoint 'local-test': capability evidence is 'unknown', not 'tested' (contract §4.5)" in problems
+
+
+def test_local_selection_always_fails_as_an_existing_phase(tmp_path, monkeypatch, pinned_suite):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    assert _run_preflight(reg, "local-test") == [
+        "endpoint 'local-test' is local, but no local-eligible dispatch exists yet — every "
+        "current dispatch runs a gated phase (contract §4.11 decision 3; the first helper "
+        "dispatch is #587)"]
+
+
+def test_local_selection_with_failed_dimension_reports_it(tmp_path, monkeypatch, pinned_suite):
+    record = _record(LOCAL, results=dict(_record(LOCAL)["results"], tool_call_fidelity="fail"))
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": record})
+    _local_env(monkeypatch)
+    assert "capability evidence for 'local-test': tool_call_fidelity is fail, not pass" in \
+        _run_preflight(reg, "local-test")
+
+
+def test_preflight_output_never_contains_secret_values(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL, CLOUD])
+    _local_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    for eid in ("local-test", "cloud-test"):
+        assert SENTINEL not in " ".join(_run_preflight(reg, eid))
+
+
+def test_scheduler_preflight_checks_schema_and_id_only(tmp_path):
+    src = _write_registry(tmp_path / "src", [CLOUD, LOCAL])
+    assert me.scheduler_preflight(src, "cloud-test") == []
+    assert "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in me.scheduler_preflight(src, "nope")[0]
+
+
+def test_scheduler_preflight_blocks_a_local_selection(tmp_path):
+    src = _write_registry(tmp_path / "src", [LOCAL])
+    assert me.scheduler_preflight(src, "local-test") == [me._NO_LOCAL_DISPATCH.format(eid="local-test")]
+
+
+def test_hosting_location_of(tmp_path):
+    src = _write_registry(tmp_path / "src", [CLOUD, LOCAL])
+    assert me.hosting_location_of(src, "local-test") == "local"
+    assert me.hosting_location_of(src, "cloud-test") == "cloud"
+    assert me.hosting_location_of(src, "nope") is None
+    assert me.hosting_location_of(tmp_path / "absent", "local-test") is None
