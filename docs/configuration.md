@@ -523,7 +523,7 @@ containers (`run-compose.yml:31-47`).
 
 Optional. With `FACTORY_MODEL_ENDPOINT` unset (the default) nothing below is read, staged or
 checked, and dispatch argv and env are unchanged. Design:
-`docs/superpowers/specs/2026-11-23-endpoint-registry-secrets-preflight-design.md`.
+`docs/archive/2026-11-23-endpoint-registry-secrets-preflight-design.md`.
 
 | Variable | Set where | Read by | Notes |
 |---|---|---|---|
