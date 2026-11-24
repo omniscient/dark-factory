@@ -725,6 +725,21 @@ def test_run_side_local_selection_skips_cloud_credential_check(base_env, tmp_pat
     assert problems[-1] == me._NO_LOCAL_DISPATCH.format(eid="local-test")
 
 
+def test_undetermined_hosting_never_skips_the_cloud_credential_check(base_env, tmp_path, monkeypatch):
+    # The first registry read fails (hosting None) but the endpoint check then passes on a
+    # valid cloud entry: the missing cloud credential must still be reported.
+    from factory_core import providers
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD]))
+    monkeypatch.setattr(me, "hosting_location_of", lambda registry_dir, endpoint_id: None)
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert providers.preflight(side="scheduler") == [
+        "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env"]
+    # An unknown id still fails on the endpoint check alone, with no credential noise.
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "nope")
+    problems = providers.preflight(side="scheduler")
+    assert len(problems) == 1 and "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in problems[0]
+
+
 def test_scheduler_side_reads_the_source_mount_without_a_digest(base_env, tmp_path, monkeypatch):
     from factory_core import providers
     monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD, LOCAL]))
