@@ -537,9 +537,12 @@ The registry lives on the human-only instance surface,
 `deploy/instances/<instance>/model-registry/model-endpoints.yaml`, with one
 `capability-evidence/<endpoint_id>.yaml` per local entry beside it. The scheduler mounts that
 directory read-only at `/etc/dark-factory/model-registry`. Before each dispatch it copies it to
-`/var/lib/dark-factory/model-registry` on the shared state volume and passes the copy's SHA-256
-to that run. The run container's preflight fails if the digest is missing or does not match,
-and also if a digest arrives with no endpoint selected. A local selection also fails if any
+`/var/lib/dark-factory/model-registry` on the shared state volume and passes the read-only
+source's SHA-256 to that run; staging (and so the dispatch) fails if the copy's digest differs
+from the source's (#593). The run container's preflight fails if the digest is missing or does
+not match, if any file in the staged tree is larger than 1 MiB, and also if a digest arrives
+with no endpoint selected. Every check is made on the bytes the digest was computed over: each
+staged file is read once (#593). A local selection also fails if any
 cloud model credential is set in the container, if `ANTHROPIC_BASE_URL` or any of the four
 `ANTHROPIC_DEFAULT_*_MODEL` aliases does not match the entry, if its capability evidence is
 not `tested`, and in every case until #587 ships a local-eligible dispatch.
