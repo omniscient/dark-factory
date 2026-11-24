@@ -592,3 +592,69 @@ def test_hosting_location_of(tmp_path):
     assert me.hosting_location_of(src, "cloud-test") == "cloud"
     assert me.hosting_location_of(src, "nope") is None
     assert me.hosting_location_of(tmp_path / "absent", "local-test") is None
+
+
+# --- Task 5: payload class predicate and redacted view --------------------------------------
+
+@pytest.mark.parametrize("declared,hosting,expected", [
+    (None, "local", "local_only"), ("cloud_ok", "local", "local_only"),
+    ("local_only", "local", "local_only"), (None, "cloud", "cloud_ok"),
+    ("cloud_ok", "cloud", "cloud_ok"), ("local_only", "cloud", "local_only"),
+])
+def test_effective_payload_class(declared, hosting, expected):
+    assert me.effective_payload_class(declared, hosting) == expected
+
+
+@pytest.mark.parametrize("declared,hosting", [("public", "cloud"), ("public", "local"), (None, "edge")])
+def test_effective_payload_class_rejects_unknown_values(declared, hosting):
+    with pytest.raises(ValueError):
+        me.effective_payload_class(declared, hosting)
+
+
+def test_dispatch_allowed():
+    assert me.dispatch_allowed("cloud_ok", ["cloud_ok"])
+    assert not me.dispatch_allowed("local_only", ["cloud_ok"])
+
+
+def test_payload_decision_allows_unmarked_cloud_dispatch():
+    assert me.payload_decision(None, CLOUD) == {
+        "payload_class": "cloud_ok", "endpoint_id": "cloud-test",
+        "secret_reference": "ANTHROPIC_API_KEY", "allow": True,
+        "reason": "effective class accepted by endpoint"}
+
+
+def test_payload_decision_blocks_local_only_payload_on_cloud():
+    decision = me.payload_decision("local_only", CLOUD)
+    assert decision["allow"] is False and decision["payload_class"] == "local_only"
+
+
+@pytest.mark.parametrize("declared,entry", [
+    ("public", CLOUD),
+    (None, _entry(CLOUD, hosting_location=None)),
+    (None, _entry(CLOUD, accepts_payload_classes=None)),
+    (None, _entry(CLOUD, accepts_payload_classes=["secret"])),
+])
+def test_payload_decision_blocks_invalid_inputs(declared, entry):
+    decision = me.payload_decision(declared, entry)
+    assert decision["allow"] is False and decision["reason"]
+
+
+@pytest.mark.parametrize("url,scope", [
+    ("http://localhost:8080", "same-host"), ("http://127.0.0.1:8080", "same-host"),
+    ("http://host.docker.internal:8080", "same-host"), ("http://192.168.1.50:8080", "lan"),
+    ("http://10.0.0.5", "lan"), ("http://gpu-box.local:8080", "lan"), ("http://ollama:11434", "lan"),
+    ("https://gpu.example.com", "remote"), ("http://8.8.8.8", "remote"),
+])
+def test_base_url_scope(url, scope):
+    assert me.base_url_scope(url) == scope
+
+
+def test_redacted_view_reduces_secret_reference_to_name_and_presence(monkeypatch):
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    view = me.redacted_view(FIXTURES)
+    by_id = {e["id"]: e for e in view["endpoints"]}
+    assert by_id["local-same-host"]["secret_reference"] == {"name": "LOCAL_GATEWAY_TOKEN", "present": True}
+    assert by_id["local-remote"]["secret_reference"] == {"name": "REMOTE_GATEWAY_TOKEN", "present": False}
+    assert [by_id[i].get("base_url_scope") for i in ("local-same-host", "local-lan", "local-remote", "cloud-anthropic")] == [
+        "same-host", "lan", "remote", None]
+    assert SENTINEL not in repr(view)

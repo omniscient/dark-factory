@@ -564,3 +564,69 @@ def scheduler_preflight(registry_path, endpoint_id) -> list[str]:
     if entry is not None and entry["hosting_location"] == "local":
         problems.append(_NO_LOCAL_DISPATCH.format(eid=entry["id"]))
     return problems
+
+
+def effective_payload_class(declared, hosting_location) -> str:
+    """Contract §4.3: local is always local_only; cloud is the declared class, else cloud_ok."""
+    if declared is not None and declared not in PAYLOAD_CLASSES:
+        raise ValueError(f"declared payload_class {declared!r} is not one of cloud_ok, local_only")
+    if hosting_location == "local":
+        return "local_only"
+    if hosting_location == "cloud":
+        return declared or "cloud_ok"
+    raise ValueError(f"hosting_location {hosting_location!r} is not one of local, cloud")
+
+
+def dispatch_allowed(effective_class, accepts_payload_classes) -> bool:
+    return effective_class in accepts_payload_classes
+
+
+def payload_decision(declared, entry) -> dict:
+    """The §4.3 dispatch-time decision, shaped for the run-record ledger (#558 records it)."""
+    decision = {"payload_class": None, "endpoint_id": entry.get("id"),
+                "secret_reference": entry.get("secret_reference"), "allow": False, "reason": ""}
+    accepts = entry.get("accepts_payload_classes")
+    if not isinstance(accepts, list) or not accepts or any(c not in PAYLOAD_CLASSES for c in accepts):
+        decision["reason"] = "registry entry has missing or invalid accepts_payload_classes"
+        return decision
+    try:
+        effective = effective_payload_class(declared, entry.get("hosting_location"))
+    except ValueError as e:
+        decision["reason"] = str(e)
+        return decision
+    decision["payload_class"] = effective
+    decision["allow"] = dispatch_allowed(effective, accepts)
+    decision["reason"] = ("effective class accepted by endpoint" if decision["allow"] else
+                          f"effective class {effective} is not in the endpoint's "
+                          "accepts_payload_classes")
+    return decision
+
+
+def base_url_scope(url) -> str:
+    """same-host | lan | remote — informational only, never changes validation."""
+    host = urlsplit(url).hostname or ""
+    if host in ("localhost", "host.docker.internal"):
+        return "same-host"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "lan" if host.endswith(".local") or "." not in host else "remote"
+    if ip.is_loopback:
+        return "same-host"
+    if ip.is_private or ip.is_link_local:
+        return "lan"
+    return "remote"
+
+
+def redacted_view(registry_path) -> dict:
+    """Effective configuration with each secret_reference reduced to its name and presence."""
+    path = Path(registry_path) / REGISTRY_FILE
+    endpoints = []
+    for entry in load_registry(path):
+        view = {k: v for k, v in entry.items() if k != "secret_reference"}
+        ref = entry["secret_reference"]
+        view["secret_reference"] = {"name": ref, "present": bool(os.environ.get(ref))}
+        if "base_url" in entry:
+            view["base_url_scope"] = base_url_scope(entry["base_url"])
+        endpoints.append(view)
+    return {"registry": str(path), "endpoints": endpoints}
