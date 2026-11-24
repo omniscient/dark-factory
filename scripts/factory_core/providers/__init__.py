@@ -92,7 +92,10 @@ def _endpoint_preflight(side: str, endpoint_id: str, model_name: str) -> list[st
         problems = model_endpoint.preflight(
             registry_dir, registry_dir / model_endpoint.EVIDENCE_DIR, endpoint_id)
     # A local selection holds no cloud model credential, so the cloud credential check is
-    # skipped for it; a cloud selection runs it in addition to the endpoint checks.
-    if hosting != "local":
+    # skipped for it; a cloud selection runs it in addition to the endpoint checks. An
+    # unknown id or invalid/unverified registry (hosting is None) already fails visibly via
+    # the endpoint checks above — running the cloud check too would add unrelated
+    # credential errors to that failure.
+    if hosting == "cloud":
         problems += model.preflight(model_name)
     return problems

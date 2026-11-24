@@ -104,7 +104,13 @@ def _construct_unique_mapping(loader, node):
     seen = set()
     for key_node, _ in node.value:
         key = loader.construct_object(key_node)
-        if key in seen:
+        try:
+            duplicate = key in seen
+        except TypeError:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark,
+                "found unhashable key", key_node.start_mark) from None
+        if duplicate:
             raise yaml.constructor.ConstructorError(
                 None, None, f"duplicate key {key!r}", key_node.start_mark)
         seen.add(key)
@@ -311,7 +317,16 @@ def stage_registry(source=None, dest=None) -> str:
     source = Path(source) if source else SOURCE_REGISTRY_DIR
     dest = Path(dest) if dest else staged_registry_dir()
     load_registry(source / REGISTRY_FILE)  # never stage an invalid registry
-    tree_sha256(source)  # rejects symlinks before anything is copied
+    source_digest = tree_sha256(source)  # rejects symlinks before anything is copied
+    if dest.exists():
+        try:
+            if tree_sha256(dest) == source_digest:
+                # Nothing changed: skip the swap so a concurrent dispatch's
+                # verify_staged_digest()/load_registry() never sees a missing path or a
+                # mid-walk FileNotFoundError while this call replaces an identical tree.
+                return source_digest
+        except (RegistryError, OSError):
+            pass  # dest is unreadable/invalid; fall through and re-stage over it
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dest.name}.tmp-", dir=dest.parent))
     old = dest.with_name(f".{dest.name}.old-{uuid.uuid4().hex}")
