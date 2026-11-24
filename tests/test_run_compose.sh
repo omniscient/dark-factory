@@ -46,6 +46,20 @@ grep -qF 'name: ${FACTORY_BUILD_NETWORK:-${FACTORY_INSTANCE:-dark-factory}_dark-
 IDS="$REPO_ROOT/scripts/identity.sh"
 grep -q 'FACTORY_RUN_PREFIX:-${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-' "$IDS"   || { echo "FAIL: identity.sh RUN_PREFIX default does not match compose run-container naming"; exit 1; }
 
+# 3e) Model endpoint registry (#557): the scheduler alone gets one read-only mount of the
+# instance's model-registry/ (default: the empty tracked placeholder). Run containers get
+# the staged copy through the existing state volume, so run-compose.yml gains no mount.
+grep -qF -- '- ${FACTORY_MODEL_REGISTRY_DIR:-./model-registry.empty}:/etc/dark-factory/model-registry:ro' "$DC" \
+  || { echo "FAIL: deploy compose missing the read-only model registry mount"; exit 1; }
+[ "$(grep -c ':/etc/dark-factory/model-registry' "$DC")" -eq 1 ] \
+  || { echo "FAIL: deploy compose mounts the model registry more than once"; exit 1; }
+[ -f "$REPO_ROOT/deploy/model-registry.empty/.gitkeep" ] \
+  || { echo "FAIL: deploy/model-registry.empty/.gitkeep placeholder missing"; exit 1; }
+[ "$(ls -A "$REPO_ROOT/deploy/model-registry.empty")" = ".gitkeep" ] \
+  || { echo "FAIL: deploy/model-registry.empty/ must hold only .gitkeep"; exit 1; }
+if grep -q 'model-registry' "$RC"; then
+  echo "FAIL: run-compose.yml must not mount the model registry (staged via scheduler_state)"; exit 1
+fi
 # 4) Parse check via docker compose config (skipped if docker not available)
 if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
   # Provision a scratch .archon/.env so the required env_file check passes
