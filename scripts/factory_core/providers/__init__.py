@@ -41,8 +41,12 @@ def get_codehost():
 _missing_env = model._missing
 
 
-def preflight() -> list[str]:
-    """Return a list of human-readable problems; empty list == OK."""
+def preflight(side: str = "run") -> list[str]:
+    """Return a list of human-readable problems; empty list == OK.
+
+    side="scheduler" is scheduler.sh's boot check; the default is the run container's
+    (entrypoint.sh). The two differ only when FACTORY_MODEL_ENDPOINT is set (#557).
+    """
     problems = []
 
     tracker_name = os.environ.get("FACTORY_TRACKER", "github")
@@ -60,6 +64,39 @@ def preflight() -> list[str]:
         problems += _missing_env(codehost_cls.required_env())
 
     model_name = os.environ.get("FACTORY_MODEL_PROVIDER", "anthropic")
+    endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT", "")
+    if endpoint_id:
+        problems += _endpoint_preflight(side, endpoint_id, model_name)
+        return problems
+    if os.environ.get("FACTORY_MODEL_REGISTRY_SHA256"):
+        problems.append("FACTORY_MODEL_REGISTRY_SHA256 is set but FACTORY_MODEL_ENDPOINT is not "
+                        "— a registry digest without an endpoint selection is refused")
     problems += model.preflight(model_name)
 
+    return problems
+
+
+def _endpoint_preflight(side: str, endpoint_id: str, model_name: str) -> list[str]:
+    # Imported here so the default path (FACTORY_MODEL_ENDPOINT unset) never loads it.
+    from factory_core.providers import model_endpoint
+
+    if side == "scheduler":
+        registry_dir = model_endpoint.SOURCE_REGISTRY_DIR
+    else:
+        registry_dir = model_endpoint.staged_registry_dir()
+    # Read before preflight(), so its closing digest check also covers this read.
+    hosting = model_endpoint.hosting_location_of(registry_dir, endpoint_id)
+    if side == "scheduler":
+        problems = model_endpoint.scheduler_preflight(registry_dir, endpoint_id)
+    else:
+        problems = model_endpoint.preflight(
+            registry_dir, registry_dir / model_endpoint.EVIDENCE_DIR, endpoint_id)
+    # A local selection holds no cloud model credential, so the cloud credential check is
+    # skipped for it; a cloud selection runs it in addition to the endpoint checks. When
+    # hosting could not be determined (None), an unknown id or invalid/unverified registry
+    # already fails via the endpoint checks above, so the cloud check would only add
+    # unrelated credential errors — but if those checks found nothing, the first read was
+    # the one that failed, and the cloud check is never skipped on that.
+    if hosting == "cloud" or (hosting is None and not problems):
+        problems += model.preflight(model_name)
     return problems

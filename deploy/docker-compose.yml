@@ -89,6 +89,11 @@ services:
       # Set PROJECT_DIR on the host to the absolute path of your project checkout.
       # Default (..) resolves to the parent of the deploy/ directory.
       - ${PROJECT_DIR:-..}:/workspace/project:ro
+      # Model endpoint registry (#557): this instance's own model-registry/ directory, read
+      # only. FACTORY_MODEL_REGISTRY_DIR is interpolated at `up` time like PROJECT_DIR. Unset,
+      # the empty tracked placeholder is mounted, and nothing reads the mount unless
+      # FACTORY_MODEL_ENDPOINT is set. See docs/configuration.md "Model endpoint registry".
+      - ${FACTORY_MODEL_REGISTRY_DIR:-./model-registry.empty}:/etc/dark-factory/model-registry:ro
     networks:
       - dark-factory-net
     # Optional: structured logging to Seq/Gelf. Comment out if you don't run Seq.

@@ -1,0 +1,54 @@
+# Test fixture only (#557): the same-host, LAN and remote base_url shapes plus one cloud
+# entry, all under the one registry schema. Never copy into deploy/instances/**.
+schema_version: "1.0"
+endpoints:
+  - id: local-same-host
+    hosting_location: local
+    protocol: anthropic-messages
+    accepts_payload_classes: [local_only]
+    model_identity:
+      served_name: qwen2.5-coder-32b
+      digest_or_revision: sha256:0b1f5c3c1f0e4f7a9d2b6e8a4c3d5f7e9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d
+    base_url: http://host.docker.internal:8080
+    secret_reference: LOCAL_GATEWAY_TOKEN
+    timeouts:
+      connect_seconds: 10
+      time_to_first_token_seconds: 120
+      idle_seconds: 60
+      total_seconds: 1800
+  - id: local-lan
+    hosting_location: local
+    protocol: anthropic-messages
+    accepts_payload_classes: [local_only]
+    model_identity:
+      served_name: qwen2.5-coder-32b
+      digest_or_revision: sha256:0b1f5c3c1f0e4f7a9d2b6e8a4c3d5f7e9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d
+    base_url: http://192.168.1.50:8080
+    secret_reference: LOCAL_GATEWAY_TOKEN
+    timeouts:
+      connect_seconds: 10
+      time_to_first_token_seconds: 120
+      idle_seconds: 60
+      total_seconds: 1800
+  - id: local-remote
+    hosting_location: local
+    protocol: anthropic-messages
+    accepts_payload_classes: [local_only, cloud_ok]
+    model_identity:
+      served_name: qwen2.5-coder-32b
+      digest_or_revision: sha256:0b1f5c3c1f0e4f7a9d2b6e8a4c3d5f7e9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d
+    base_url: https://gpu.example.com
+    secret_reference: REMOTE_GATEWAY_TOKEN
+    timeouts:
+      connect_seconds: 10
+      time_to_first_token_seconds: 120
+      idle_seconds: 60
+      total_seconds: 1800
+  - id: cloud-anthropic
+    hosting_location: cloud
+    protocol: anthropic-messages
+    accepts_payload_classes: [cloud_ok]
+    model_identity:
+      served_name: claude-opus-5-5
+      digest_or_revision: claude-opus-5-5
+    secret_reference: ANTHROPIC_API_KEY

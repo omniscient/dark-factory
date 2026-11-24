@@ -224,12 +224,54 @@ def _codehost_update_body(args):
 
 
 def _preflight(args):
-    problems = preflight()
+    problems = preflight(side=args.side)
     if problems:
         for p in problems:
             print(f"ERROR: {p}", file=sys.stderr)
         sys.exit(1)
     print("providers preflight: OK")
+
+
+def _fail(problems):
+    for p in problems:
+        print(f"ERROR: {p}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _model_endpoints_show(args):
+    # Redacted effective-configuration view (#557): secret_reference prints as its name and
+    # presence only. The staged copy is trusted only with this dispatch's digest; --from-source
+    # reads the scheduler's read-only mount instead.
+    from factory_core.providers import model_endpoint
+    if args.from_source:
+        registry_dir, problems = model_endpoint.SOURCE_REGISTRY_DIR, []
+    else:
+        registry_dir = model_endpoint.staged_registry_dir()
+        problems = model_endpoint.verify_staged_digest(registry_dir)
+    if problems:
+        _fail(problems)
+    try:
+        view = model_endpoint.redacted_view(registry_dir)
+    except model_endpoint.RegistryError as e:
+        _fail(e.problems)
+    if not args.from_source:
+        problems = model_endpoint.verify_staged_digest(registry_dir)  # unchanged while read?
+        if problems:
+            _fail(problems)
+    print(json.dumps(view, indent=2, default=str))
+
+
+def _model_endpoints_stage(args):
+    # scheduler.sh dispatch() calls this before each dispatch when FACTORY_MODEL_ENDPOINT is
+    # set; stdout is the staged tree's digest, forwarded as FACTORY_MODEL_REGISTRY_SHA256.
+    from factory_core.providers import model_endpoint
+    try:
+        digest = model_endpoint.stage_registry(args.source_dir, args.dest_dir)
+    except model_endpoint.RegistryError as e:
+        _fail(e.problems)
+    except OSError as e:
+        _fail([f"model registry staging failed: {e}"])
+    print(digest)
 
 
 def main():
@@ -389,7 +431,22 @@ def main():
     cub.set_defaults(func=_codehost_update_body)
 
     pf = top.add_parser("preflight")
+    pf.add_argument("--side", choices=("run", "scheduler"), default="run",
+                    help="scheduler: scheduler.sh's boot check; run (default): a run container's")
     pf.set_defaults(func=_preflight)
+
+    model_endpoints = top.add_parser("model-endpoints")
+    msub = model_endpoints.add_subparsers(dest="verb", required=True)
+
+    mshow = msub.add_parser("show")
+    mshow.add_argument("--from-source", action="store_true",
+                       help="read the scheduler's read-only registry mount, not the staged copy")
+    mshow.set_defaults(func=_model_endpoints_show)
+
+    mstage = msub.add_parser("stage")
+    mstage.add_argument("--source-dir", default=None)
+    mstage.add_argument("--dest-dir", default=None)
+    mstage.set_defaults(func=_model_endpoints_stage)
 
     parsed = parser.parse_args()
     parsed.func(parsed)

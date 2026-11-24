@@ -92,3 +92,26 @@ def test_dispatch_uses_provider_env_flags():
     assert "scripts/provider_env.sh" in sched
     dispatch = re.search(r"^dispatch\(\) \{.*?^\}", sched, re.S | re.M).group(0)
     assert "provider_env_flags" in dispatch and '"${env_flags[@]}"' in dispatch
+
+
+def test_model_endpoint_selection_forwarded_but_digest_and_path_are_not():
+    # #557: the registry id is instance config; the digest is per dispatch (dispatch() adds it
+    # with its own -e) and FACTORY_MODEL_REGISTRY_PATH is a test-only override.
+    f = _forwarded()
+    assert "FACTORY_MODEL_ENDPOINT" in f
+    assert not {"FACTORY_MODEL_REGISTRY_SHA256", "FACTORY_MODEL_REGISTRY_PATH"} & f
+
+
+def test_dispatch_stages_model_registry_before_compose_run():
+    # #557: the digest is a dispatch-local export, set only by model_registry_env_flags.
+    sched = (REPO / "scheduler.sh").read_text(encoding="utf-8")
+    dispatch = re.search(r"^dispatch\(\) \{.*?^\}", sched, re.S | re.M).group(0)
+    assert "local -x FACTORY_MODEL_REGISTRY_SHA256" in dispatch
+    call = dispatch.index("model_registry_env_flags env_flags")
+    assert dispatch.index("provider_env_flags)") < call < dispatch.index("docker compose")
+    assert "return 1" in dispatch[call:dispatch.index("docker compose")]
+
+
+def test_scheduler_boot_preflight_runs_scheduler_side():
+    sched = (REPO / "scheduler.sh").read_text(encoding="utf-8")
+    assert re.search(r'^python3 "\$FACTORY_PROVIDERS_CLI" preflight --side scheduler$', sched, re.M)

@@ -197,6 +197,10 @@ docker run --rm --env-file deploy/instance.env --entrypoint python3 \
   /opt/dark-factory/scripts/factory_core/providers/cli.py preflight
 ```
 
+With `FACTORY_MODEL_ENDPOINT` set, this run-side check fails on the missing per-dispatch
+registry digest by design; see `docs/configuration.md` "Model endpoint registry" for the
+offline alternative.
+
 ### Windows notes
 
 - Put `PROJECT_DIR` in `deploy/instance.env` with forward slashes (`C:/git/my-repo`)

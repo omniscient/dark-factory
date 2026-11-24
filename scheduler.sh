@@ -42,7 +42,7 @@ read_config() {
 }
 
 # --- Validate required environment (provider-aware; parent spec §4) ---
-python3 "$FACTORY_PROVIDERS_CLI" preflight
+python3 "$FACTORY_PROVIDERS_CLI" preflight --side scheduler
 
 # --- Provision the dispatch env file ---
 # The dispatch runs `docker compose -f /opt/dark-factory/docker-compose.yml run dark-factory`,
@@ -396,6 +396,18 @@ dispatch() {
   # Forward provider selection/env set in the scheduler's env (#489); see scripts/provider_env.sh.
   local -a env_flags=()
   mapfile -t env_flags < <(provider_env_flags)
+  local -x FACTORY_MODEL_REGISTRY_SHA256  # #557: set only by model_registry_env_flags, for this run
+  model_registry_env_flags env_flags \
+    || {
+      echo "[$(date -u +%FT%TZ)] dispatch_error command=\"${command}\" reason=model_registry_stage_failed" >&2
+      # Instance-level, not per-ticket: the registry is invalid (or unreadable) for every
+      # dispatch this tick, not just this caller's. Every stage_* loop checks DISPATCHED
+      # before considering another item, so setting it here halts the rest of this tick
+      # instead of letting each remaining ticket's caller count its own attempt as a
+      # per-ticket dispatch failure against its retry budget.
+      DISPATCHED="model_registry_stage_failed"
+      return 1
+    }
   docker compose -f /opt/dark-factory/docker-compose.yml "${profile_flags[@]}" run \
     "${env_flags[@]}" -d --rm dark-factory "$command" || exit_code=$?
   if [ "$exit_code" -ne 0 ]; then

@@ -1,0 +1,30 @@
+# Test fixture only (#557): shaped like contract §4.5's record. Lists every invalidated_by
+# fingerprint, so #557 (which dials no endpoint) derives `unknown` from it.
+capability_evidence:
+  schema_version: "1.0"
+  endpoint_id: local-same-host
+  model_identity:
+    served_name: qwen2.5-coder-32b
+    digest_or_revision: sha256:0b1f5c3c1f0e4f7a9d2b6e8a4c3d5f7e9a1b3c5d7e9f0a2b4c6d8e0f1a3b5c7d
+    quantisation: q4_k_m
+  runtime_stack:
+    name: example-runtime
+    version: "1.0.0"
+    chat_template: example-template
+    context_settings: {max_tokens: 32768}
+  harness_version: "2.1.282"
+  fixture_suite_version: "fixture-suite-example"
+  results:
+    protocol_compatibility: pass
+    tool_call_fidelity: pass
+    streaming: pass
+    context_length: pass
+    role_isolation: pass
+    timeout_cancellation: pass
+  qualified_roles: [actor]
+  certified_by: example-operator
+  certified_at: "2026-11-01T00:00:00+00:00"
+  expires_at: "2099-01-01T00:00:00+00:00"
+  invalidated_by: [model_digest, quantisation, runtime_version, chat_template, context_settings,
+                   harness_version, fixture_suite_version, registry_config]
+  registry_config: d4323ada731dca764311176191937e89fbdddd8c7e076b7896b38402607fdec3
