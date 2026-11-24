@@ -92,3 +92,11 @@ def test_dispatch_uses_provider_env_flags():
     assert "scripts/provider_env.sh" in sched
     dispatch = re.search(r"^dispatch\(\) \{.*?^\}", sched, re.S | re.M).group(0)
     assert "provider_env_flags" in dispatch and '"${env_flags[@]}"' in dispatch
+
+
+def test_model_endpoint_selection_forwarded_but_digest_and_path_are_not():
+    # #557: the registry id is instance config; the digest is per dispatch (dispatch() adds it
+    # with its own -e) and FACTORY_MODEL_REGISTRY_PATH is a test-only override.
+    f = _forwarded()
+    assert "FACTORY_MODEL_ENDPOINT" in f
+    assert not {"FACTORY_MODEL_REGISTRY_SHA256", "FACTORY_MODEL_REGISTRY_PATH"} & f
