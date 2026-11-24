@@ -72,6 +72,7 @@ prompts, which is the approval step.
   the amendment workflow.
 - [BRIEF.md](BRIEF.md) — the operator brief convention (dated artifact, linked issues).
 - `scripts/` — `status.sh`, `watch.sh`, `usage.sh`, `runs.sh`, `deploy-check.sh` (read-only);
-  `board.sh`, `approve.sh`, `optin.sh` (write, each verifies by read-back). All take `DF_*` env
+  `board.sh`, `approve.sh`, `optin.sh` (write, each verifies by read-back);
+  `approve-blast.sh` (Frank only: signs a blast-radius approval). All take `DF_*` env
   overrides for the MarketHawk instance (`DF_REPO=omniscient/markethawk DF_PROJECT_NUM=1
   DF_SCHEDULER=dark-factory-scheduler DF_RUN_PREFIX=dark-factory-dark-factory-run-`).
