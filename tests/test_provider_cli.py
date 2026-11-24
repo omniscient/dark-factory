@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -249,7 +250,7 @@ def test_codehost_verbs_pass_repo_through(monkeypatch):
 
 def test_preflight_ok_prints_ok_and_exits_0(monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "preflight", lambda: [])
+    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": [])
     monkeypatch.setattr(sys, "argv", ["cli.py", "preflight"])
     cli_mod.main()
     assert capsys.readouterr().out.strip() == "providers preflight: OK"
@@ -257,7 +258,7 @@ def test_preflight_ok_prints_ok_and_exits_0(monkeypatch, capsys):
 
 def test_preflight_failure_prints_every_problem_and_exits_1(monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "preflight", lambda: [
+    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": [
         "GH_TOKEN is not set. Add it to .archon/.env",
         "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env",
     ])
@@ -421,3 +422,99 @@ def test_codehost_merge_match_head_passed_through_and_omitted_when_absent(monkey
     assert calls[0] == ("7", {"strategy": "merge", "delete_branch": True, "repo": None,
                               "match_head": "b" * 40})
     assert calls[1] == ("7", {"strategy": "merge", "delete_branch": True, "repo": None})
+
+
+# --- #557: preflight --side, model-endpoints show/stage -------------------------------------
+
+MODEL_REGISTRY_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_registry"
+
+
+def test_preflight_side_defaults_to_run_and_passes_scheduler_through(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    seen = []
+    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": seen.append(side) or [])
+    for argv in (["cli.py", "preflight"], ["cli.py", "preflight", "--side", "scheduler"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        cli_mod.main()
+    assert seen == ["run", "scheduler"]
+
+
+def _staged_fixture(tmp_path, monkeypatch):
+    from factory_core.providers import model_endpoint
+    staged = tmp_path / "model-registry"
+    shutil.copytree(MODEL_REGISTRY_FIXTURES, staged)
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(staged))
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", model_endpoint.tree_sha256(staged))
+    return staged
+
+
+def test_model_endpoints_show_redacts_secrets(tmp_path, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    _staged_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", "sk-sentinel-show")
+    monkeypatch.delenv("REMOTE_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show"])
+    cli_mod.main()
+    out = capsys.readouterr().out
+    assert "sk-sentinel-show" not in out
+    view = {e["id"]: e for e in json.loads(out)["endpoints"]}
+    assert view["local-same-host"]["secret_reference"] == {"name": "LOCAL_GATEWAY_TOKEN", "present": True}
+    assert view["local-remote"]["secret_reference"] == {"name": "REMOTE_GATEWAY_TOKEN", "present": False}
+    assert view["local-lan"]["base_url_scope"] == "lan"
+
+
+def test_model_endpoints_show_refuses_staged_copy_without_digest(tmp_path, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    _staged_fixture(tmp_path, monkeypatch)
+    monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256")
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show"])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in capsys.readouterr().err
+
+
+def test_model_endpoints_show_from_source_needs_no_digest(monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    from factory_core.providers import model_endpoint
+    monkeypatch.setattr(model_endpoint, "SOURCE_REGISTRY_DIR", MODEL_REGISTRY_FIXTURES)
+    monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256", raising=False)
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show", "--from-source"])
+    cli_mod.main()
+    assert len(json.loads(capsys.readouterr().out)["endpoints"]) == 4
+
+
+def test_model_endpoints_show_invalid_registry_exits_1_with_field_errors(tmp_path, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    staged = _staged_fixture(tmp_path, monkeypatch)
+    registry = staged / "model-endpoints.yaml"
+    registry.write_text(registry.read_text(encoding="utf-8").replace(
+        "protocol: anthropic-messages", "protocol: openai-chat", 1), encoding="utf-8")
+    from factory_core.providers import model_endpoint
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", model_endpoint.tree_sha256(staged))
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show"])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    assert "ERROR: endpoint 'local-same-host': unsupported protocol 'openai-chat'" in capsys.readouterr().err
+
+
+def test_model_endpoints_stage_prints_staged_digest(tmp_path, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    from factory_core.providers import model_endpoint
+    dest = tmp_path / "state" / "model-registry"
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "stage",
+                                      "--source-dir", str(MODEL_REGISTRY_FIXTURES), "--dest-dir", str(dest)])
+    cli_mod.main()
+    assert capsys.readouterr().out.strip() == model_endpoint.tree_sha256(dest)
+
+
+def test_model_endpoints_stage_failure_exits_1(tmp_path, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+    monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "stage",
+                                      "--source-dir", str(tmp_path / "empty"), "--dest-dir", str(tmp_path / "d")])
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main()
+    assert exc.value.code == 1
+    assert "model endpoint registry not found" in capsys.readouterr().err
+    assert not (tmp_path / "d").exists()
