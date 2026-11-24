@@ -355,3 +355,128 @@ def verify_staged_digest(registry_path) -> list[str]:
         return [f"staged model registry at {registry_path} does not match "
                 "FACTORY_MODEL_REGISTRY_SHA256 — it changed after the scheduler staged it"]
     return []
+
+
+def registry_config_sha256(entry) -> str:
+    """The `registry_config` fingerprint: SHA-256 of the entry's canonical JSON."""
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def observed_harness_version():
+    """The installed Claude CLI version (`claude --version`), or None if it cannot be read."""
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True,
+                             timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\d+\.\d+\.\d+", out)
+    return m.group(0) if m else None
+
+
+def load_evidence(evidence_dir, endpoint_id):
+    """The capability-evidence record for endpoint_id, or None if there is none."""
+    path = Path(evidence_dir) / f"{endpoint_id}.yaml"
+    if not path.is_file():
+        return None
+    doc = _read_yaml(path)
+    if (not isinstance(doc, dict) or set(doc) != {"capability_evidence"}
+            or not isinstance(doc["capability_evidence"], dict)):
+        raise RegistryError([f"{path}: must contain exactly one capability_evidence mapping"])
+    return doc["capability_evidence"]
+
+
+def _timestamp(value):
+    if isinstance(value, datetime):
+        ts = value
+    elif isinstance(value, str):
+        try:
+            ts = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return ts if ts.tzinfo else None
+
+
+def _evidence_problems(record, entry):
+    eid = entry["id"]
+    where = f"capability evidence for '{eid}'"
+    version, problems = _parse_version(record.get("schema_version"), where)
+    if problems:
+        return problems
+    problems = _unknown_keys(record, _EVIDENCE_KEYS, where, version[1] <= SUPPORTED_MINOR)
+    problems += [f"{where}: missing {k}" for k in sorted(_EVIDENCE_REQUIRED - set(record))]
+    if problems:
+        return problems
+    if record["endpoint_id"] != eid:
+        problems.append(f"{where}: endpoint_id does not match the registry entry")
+    if not isinstance(record["certified_by"], str) or not record["certified_by"].strip():
+        problems.append(f"{where}: certified_by must name the certifying operator")
+    for field in ("certified_at", "expires_at"):
+        if _timestamp(record[field]) is None:
+            problems.append(f"{where}: {field} must be an ISO 8601 timestamp with a timezone")
+    if not isinstance(record["model_identity"], dict):
+        problems.append(f"{where}: model_identity must be a mapping")
+    results = record["results"]
+    if not isinstance(results, dict) or any(v not in RESULT_VALUES for v in results.values()):
+        problems.append(f"{where}: results values must be one of {', '.join(RESULT_VALUES)}")
+    roles = record["qualified_roles"]
+    if not isinstance(roles, list) or not roles or any(r != "actor" for r in roles):
+        problems.append(f"{where}: qualified_roles may only list actor (contract §4.4/§4.5)")
+    names = record["invalidated_by"]
+    if not isinstance(names, list) or any(n not in FINGERPRINTS for n in names):
+        problems.append(f"{where}: invalidated_by may only list {', '.join(FINGERPRINTS)}")
+    return problems
+
+
+def evidence_state(record, entry, now=None):
+    """Derived evidence state (contract §4.5) and the reasons behind it. Never stored.
+
+    unknown: no record, or a fingerprint #557 cannot resolve without dialing the endpoint.
+    declared: a local entry exists but its record is not valid. stale: expired, or a resolved
+    fingerprint differs. tested: none of these.
+    """
+    eid = entry["id"]
+    if record is None:
+        return "unknown", [f"endpoint '{eid}': no capability-evidence record"]
+    problems = _evidence_problems(record, entry)
+    if problems:
+        return "declared", problems
+    stale = []
+    if _timestamp(record["expires_at"]) <= (now or datetime.now(timezone.utc)):
+        stale.append("expires_at has passed")
+    observed = {
+        "model_digest": entry["model_identity"]["digest_or_revision"],
+        "harness_version": observed_harness_version(),
+        "fixture_suite_version": PINNED_FIXTURE_SUITE_VERSION,
+        "registry_config": registry_config_sha256(entry),
+    }
+    recorded = {
+        "model_digest": record["model_identity"].get("digest_or_revision"),
+        "harness_version": record["harness_version"],
+        "fixture_suite_version": record["fixture_suite_version"],
+        "registry_config": record.get("registry_config"),
+    }
+    # fixture_suite_version is always compared (§4.5), listed in invalidated_by or not.
+    unresolved = []
+    for name in dict.fromkeys([*record["invalidated_by"], "fixture_suite_version"]):
+        if observed.get(name) is None or recorded.get(name) is None:
+            unresolved.append(name)
+        elif str(recorded[name]) != str(observed[name]):
+            stale.append(f"{name} differs from what is observed")
+    if unresolved:
+        return "unknown", [f"endpoint '{eid}': cannot resolve fingerprint(s) "
+                           f"{', '.join(unresolved)} — an unobserved fingerprint never matches"]
+    if stale:
+        return "stale", [f"endpoint '{eid}': capability evidence is stale ({'; '.join(stale)})"]
+    return "tested", []
+
+
+def role_problems(record, role="actor"):
+    """A role is eligible only if every dimension it requires is `pass` (contract §4.5)."""
+    if role not in record["qualified_roles"]:
+        return [f"capability evidence for '{record['endpoint_id']}' does not qualify role {role}"]
+    return [f"capability evidence for '{record['endpoint_id']}': {dim} is "
+            f"{record['results'].get(dim, 'not_tested')}, not pass"
+            for dim in ACTOR_REQUIRED_DIMENSIONS if record["results"].get(dim) != "pass"]

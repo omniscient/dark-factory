@@ -306,3 +306,130 @@ def test_verify_staged_digest_detects_tampering(tmp_path, monkeypatch):
     assert me.verify_staged_digest(reg) == []
     _write_registry(reg, [_entry(CLOUD, accepts_payload_classes=["cloud_ok"], id="cloud-evil")])
     assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in me.verify_staged_digest(reg)[0]
+
+
+# --- Task 3: capability evidence ------------------------------------------------------------
+
+def _record(entry, **overrides):
+    record = {
+        "schema_version": "1.0",
+        "endpoint_id": entry["id"],
+        "model_identity": dict(entry["model_identity"], quantisation="q4_k_m"),
+        "runtime_stack": {"name": "rt", "version": "1.0.0", "chat_template": "t",
+                          "context_settings": {}},
+        "harness_version": "2.1.282",
+        "fixture_suite_version": "suite-1",
+        "results": {dim: "pass" for dim in me.ACTOR_REQUIRED_DIMENSIONS},
+        "qualified_roles": ["actor"],
+        "certified_by": "operator",
+        "certified_at": "2026-11-01T00:00:00+00:00",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "invalidated_by": ["model_digest", "harness_version", "fixture_suite_version",
+                           "registry_config"],
+        "registry_config": me.registry_config_sha256(entry),
+    }
+    record.update(overrides)
+    return record
+
+
+@pytest.fixture
+def pinned_suite(monkeypatch):
+    monkeypatch.setattr(me, "PINNED_FIXTURE_SUITE_VERSION", "suite-1")
+
+
+def test_no_record_is_unknown():
+    assert me.evidence_state(None, LOCAL)[0] == "unknown"
+
+
+def test_fixture_evidence_matches_fixture_entry_but_stays_unknown():
+    entry = me.load_registry(FIXTURES / me.REGISTRY_FILE)[0]
+    record = me.load_evidence(FIXTURES / me.EVIDENCE_DIR, "local-same-host")
+    assert record["registry_config"] == me.registry_config_sha256(entry)
+    state, reasons = me.evidence_state(record, entry)
+    assert state == "unknown"
+    assert "quantisation" in reasons[0] and "fixture_suite_version" in reasons[0]
+
+
+def test_missing_evidence_file_loads_as_none(tmp_path):
+    assert me.load_evidence(tmp_path, "local-test") is None
+
+
+def test_evidence_without_wrapper_is_rejected(tmp_path):
+    (tmp_path / "local-test.yaml").write_text("endpoint_id: local-test\n", encoding="utf-8")
+    with pytest.raises(me.RegistryError, match="exactly one capability_evidence mapping"):
+        me.load_evidence(tmp_path, "local-test")
+
+
+def test_record_missing_certified_by_is_declared(pinned_suite):
+    record = _record(LOCAL)
+    del record["certified_by"]
+    state, reasons = me.evidence_state(record, LOCAL)
+    assert state == "declared" and any("missing certified_by" in r for r in reasons)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"endpoint_id": "other"}, {"qualified_roles": ["checker"]}, {"results": {"streaming": "ok"}},
+    {"invalidated_by": ["weather"]}, {"expires_at": "2099-01-01"}, {"schema_version": "2.0"},
+    {"surprise": 1},
+])
+def test_invalid_record_is_declared(pinned_suite, overrides):
+    assert me.evidence_state(_record(LOCAL, **overrides), LOCAL)[0] == "declared"
+
+
+def test_matching_record_is_tested(pinned_suite):
+    assert me.evidence_state(_record(LOCAL), LOCAL) == ("tested", [])
+
+
+def test_yaml_datetime_timestamps_are_accepted(pinned_suite):
+    record = _record(LOCAL, expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc))
+    assert me.evidence_state(record, LOCAL)[0] == "tested"
+
+
+def test_expired_record_is_stale(pinned_suite):
+    state, reasons = me.evidence_state(_record(LOCAL, expires_at="2020-01-01T00:00:00+00:00"), LOCAL)
+    assert state == "stale" and "expires_at has passed" in reasons[0]
+
+
+@pytest.mark.parametrize("change", ["model_digest", "registry_config", "harness_version"])
+def test_fingerprint_mismatch_is_stale(pinned_suite, monkeypatch, change):
+    record = _record(LOCAL)
+    if change == "model_digest":
+        record["model_identity"]["digest_or_revision"] = "sha256:" + "cd" * 32
+    elif change == "registry_config":
+        record["registry_config"] = "0" * 64
+    else:
+        monkeypatch.setattr(me, "observed_harness_version", lambda: "2.1.300")
+    state, reasons = me.evidence_state(record, LOCAL)
+    assert state == "stale" and f"{change} differs" in reasons[0]
+
+
+@pytest.mark.parametrize("name", ["quantisation", "runtime_version", "chat_template", "context_settings"])
+def test_unresolvable_fingerprint_is_unknown(pinned_suite, name):
+    record = _record(LOCAL, invalidated_by=["model_digest", name])
+    state, reasons = me.evidence_state(record, LOCAL)
+    assert state == "unknown" and name in reasons[0]
+
+
+def test_unpinned_fixture_suite_is_unknown():
+    state, reasons = me.evidence_state(_record(LOCAL, invalidated_by=["model_digest"]), LOCAL)
+    assert state == "unknown" and "fixture_suite_version" in reasons[0]
+
+
+def test_unreadable_harness_version_is_unknown(pinned_suite, monkeypatch):
+    monkeypatch.setattr(me, "observed_harness_version", lambda: None)
+    assert me.evidence_state(_record(LOCAL), LOCAL)[0] == "unknown"
+
+
+def test_role_requires_every_dimension_to_pass():
+    record = _record(LOCAL, results=dict(_record(LOCAL)["results"], streaming="not_tested"))
+    assert me.role_problems(record, "actor") == [
+        "capability evidence for 'local-test': streaming is not_tested, not pass"]
+    assert me.role_problems(_record(LOCAL), "actor") == []
+
+
+def test_observed_harness_version_is_none_without_cli(monkeypatch):
+    monkeypatch.undo()
+    def _no_cli(*a, **k):
+        raise FileNotFoundError("claude")
+    monkeypatch.setattr(me.subprocess, "run", _no_cli)
+    assert me.observed_harness_version() is None
