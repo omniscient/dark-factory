@@ -50,7 +50,7 @@ Related documents (not repeated here):
 
 The scheduler starts a run with
 `docker compose -f /opt/dark-factory/docker-compose.yml --profile factory run -d --rm dark-factory "<command>"`
-(`scheduler.sh:388-405`; the compose file is `run-compose.yml`, baked to that path by
+(`scheduler.sh:388-408`; the compose file is `run-compose.yml`, baked to that path by
 `Dockerfile:150`). The command string is the only argument. A human can start the same
 run by hand; with no argument the entrypoint prints usage and exits 1
 (`entrypoint.sh:88-97`).
@@ -70,12 +70,12 @@ The command is interpreted twice, by two different mechanisms:
 
 | Command the scheduler passes | Entrypoint intent | Workflow intent | Where the work happens |
 |---|---|---|---|
-| `Refine issue #N` (`scheduler.sh:264,1395`) | `refine` | `refine` | Workflow: refine phase |
-| `Plan issue #N` (`scheduler.sh:300,1328`) | `plan` | `plan` | Workflow: plan phase |
-| `Fix issue #N` (`scheduler.sh:1208,1264`) | `fix` | `new` | Workflow: implement through report |
-| `Continue issue #N` (`scheduler.sh:346,1154,1260`) | `continue` | `continue` | Workflow: same path as `new`, on the existing branch, with feedback digest and a merge of `main` |
+| `Refine issue #N` (`scheduler.sh:264,1398`) | `refine` | `refine` | Workflow: refine phase |
+| `Plan issue #N` (`scheduler.sh:300,1331`) | `plan` | `plan` | Workflow: plan phase |
+| `Fix issue #N` (`scheduler.sh:1211,1267`) | `fix` | `new` | Workflow: implement through report |
+| `Continue issue #N` (`scheduler.sh:346,1157,1263`) | `continue` | `continue` | Workflow: same path as `new`, on the existing branch, with feedback digest and a merge of `main` |
 | `Close issue #N` (`scheduler.sh:379`, via `dispatch_close` from `:338`, `:1148`) | `close` | `close` | Workflow: merge PR, tear down preview, refresh hotspots |
-| `Deconflict issue #N` (`scheduler.sh:1118`) | `deconflict` | never reached | Entrypoint only ([section 3](#3-paths-handled-entirely-by-the-entrypoint)) |
+| `Deconflict issue #N` (`scheduler.sh:1121`) | `deconflict` | never reached | Entrypoint only ([section 3](#3-paths-handled-entirely-by-the-entrypoint)) |
 | `Recheck main` (`scheduler.sh:159`) | `recheck` | never reached | Entrypoint only: smoke gate, then exit |
 | `Fix main` (`scheduler.sh:185`) | `fix-main` | never reached | Entrypoint only: main-red auto-fix |
 | `Audit deps` (`deps_audit_check` in `scheduler.sh`) | `audit-deps` | never reached | Entrypoint only: dependency-health loop |
@@ -111,7 +111,7 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 | # | Step | Lines | Notes |
 |---|---|---|---|
 | 1 | Source instance identity (`scripts/identity.sh`) | 5-6 | Provides repo slug, clone dir, board constants |
-| 2 | Provider preflight (`providers/cli.py preflight`) | 9-10 | Validates required environment. A failure here ends the run before any ticket signal exists |
+| 2 | Provider preflight (`providers/cli.py preflight`) | 9-10 | Validates required environment. When `FACTORY_MODEL_ENDPOINT` is set it also checks the staged model endpoint registry against `FACTORY_MODEL_REGISTRY_SHA256` and the selected entry (#557; [configuration.md](configuration.md) "Model endpoint registry"). A failure here ends the run before any ticket signal exists |
 | 3 | Git identity (`<Product> Factory`, `factory@<repo>`) | 20-25 | |
 | 4 | Parse arguments into `ISSUE_NUM` and `INTENT` | 88-108 | See [section 1](#1-intents) |
 | 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 112-116 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
@@ -1193,7 +1193,7 @@ The scheduler-side oddities are tracked in
 [#530](https://github.com/omniscient/dark-factory/issues/530); see [scheduler.md](scheduler.md).
 
 1. **The workflow's `resolve` path appears unreachable.** The scheduler's
-   conflict command is `Deconflict issue #N` (`scheduler.sh:1118`). The entrypoint
+   conflict command is `Deconflict issue #N` (`scheduler.sh:1121`). The entrypoint
    handles `deconflict` inline and every branch of that block ends in `exit 0` before the
    workflow is started (`entrypoint.sh:983-1079`). No dispatched command contains the
    word "resolve". The nodes `setup-branch-resolve`, `preview-up-resolve`,
