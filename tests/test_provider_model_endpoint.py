@@ -658,3 +658,78 @@ def test_redacted_view_reduces_secret_reference_to_name_and_presence(monkeypatch
     assert [by_id[i].get("base_url_scope") for i in ("local-same-host", "local-lan", "local-remote", "cloud-anthropic")] == [
         "same-host", "lan", "remote", None]
     assert SENTINEL not in repr(view)
+
+
+# --- Task 6: providers.preflight() wiring ---------------------------------------------------
+
+@pytest.fixture
+def base_env(monkeypatch):
+    """Tracker/code-host/cloud credentials present, so only endpoint problems remain."""
+    monkeypatch.setenv("GH_TOKEN", "x")
+    for name in ("FACTORY_TRACKER", "FACTORY_CODEHOST", "FACTORY_MODEL_PROVIDER"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_default_path_never_loads_the_registry_module(base_env, monkeypatch):
+    from factory_core import providers
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    monkeypatch.delitem(sys.modules, "factory_core.providers.model_endpoint")
+    assert providers.preflight() == [] and providers.preflight(side="scheduler") == []
+    assert "factory_core.providers.model_endpoint" not in sys.modules
+
+
+def test_default_path_reports_the_same_cloud_problems_as_before(base_env):
+    from factory_core import providers
+    from factory_core.providers import model
+    assert providers.preflight() == model.preflight("anthropic")
+
+
+def test_digest_without_endpoint_selection_fails(base_env, monkeypatch):
+    from factory_core import providers
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64)
+    assert providers.preflight() == [
+        "FACTORY_MODEL_REGISTRY_SHA256 is set but FACTORY_MODEL_ENDPOINT is not — a registry "
+        "digest without an endpoint selection is refused"]
+
+
+def test_run_side_cloud_selection_adds_endpoint_checks_to_cloud_check(base_env, tmp_path, monkeypatch):
+    from factory_core import providers
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert providers.preflight() == [
+        "ANTHROPIC_API_KEY is not set. Add it to .archon/.env",
+        "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    assert providers.preflight() == []
+
+
+def test_run_side_endpoint_without_digest_fails(base_env, tmp_path, monkeypatch):
+    from factory_core import providers
+    reg = _write_registry(tmp_path / "staged", [CLOUD])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    assert any("FACTORY_MODEL_REGISTRY_SHA256 is not set" in p for p in providers.preflight())
+
+
+def test_run_side_local_selection_skips_cloud_credential_check(base_env, tmp_path, monkeypatch):
+    from factory_core import providers
+    reg = _stage(tmp_path, monkeypatch, [LOCAL])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    _local_env(monkeypatch)
+    problems = providers.preflight()
+    assert not any("CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY" in p for p in problems)
+    assert problems[-1] == me._NO_LOCAL_DISPATCH.format(eid="local-test")
+
+
+def test_scheduler_side_reads_the_source_mount_without_a_digest(base_env, tmp_path, monkeypatch):
+    from factory_core import providers
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD, LOCAL]))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert providers.preflight(side="scheduler") == []
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    assert providers.preflight(side="scheduler") == [me._NO_LOCAL_DISPATCH.format(eid="local-test")]
