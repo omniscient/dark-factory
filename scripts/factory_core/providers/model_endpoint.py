@@ -1,7 +1,7 @@
 """Model endpoint registry, capability evidence and endpoint preflight (#557).
 
 Configuration-contract owner in docs/hybrid-execution-contract.md (§4.1, §4.3, §4.5, §4.11);
-design in docs/superpowers/specs/2026-11-23-endpoint-registry-secrets-preflight-design.md.
+design in docs/archive/2026-11-23-endpoint-registry-secrets-preflight-design.md.
 
 Read-only: nothing here writes the operator's registry or evidence; stage_registry() only
 copies the scheduler's read-only mount onto the shared state volume. providers.preflight()
