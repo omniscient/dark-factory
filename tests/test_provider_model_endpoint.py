@@ -218,3 +218,91 @@ def test_loader_does_not_require_referenced_secrets_to_exist(tmp_path):
     assert "LOCAL_GATEWAY_TOKEN" not in os.environ and "ANTHROPIC_API_KEY" not in os.environ
     path = _write_registry(tmp_path / "reg", [LOCAL, CLOUD]) / me.REGISTRY_FILE
     assert len(me.load_registry(path)) == 2
+
+
+# --- Task 2: staged-tree digest and staging -----------------------------------------------
+
+def test_tree_sha256_is_stable_and_content_sensitive(tmp_path):
+    reg = _write_registry(tmp_path / "reg", [LOCAL])
+    first = me.tree_sha256(reg)
+    assert first == me.tree_sha256(reg) and len(first) == 64
+    (reg / "capability-evidence").mkdir()
+    (reg / "capability-evidence" / "local-test.yaml").write_text("x: 1\n", encoding="utf-8")
+    assert me.tree_sha256(reg) != first
+
+
+def test_tree_sha256_rejects_symlinks(tmp_path):
+    reg = _write_registry(tmp_path / "reg", [LOCAL])
+    (reg / "link.yaml").symlink_to(reg / me.REGISTRY_FILE)
+    with pytest.raises(me.RegistryError, match="not a regular file"):
+        me.tree_sha256(reg)
+
+
+def test_stage_copies_tree_and_returns_its_digest(tmp_path):
+    src = _write_registry(tmp_path / "src", [LOCAL, CLOUD])
+    dest = tmp_path / "state" / "model-registry"
+    digest = me.stage_registry(src, dest)
+    assert digest == me.tree_sha256(src) == me.tree_sha256(dest)
+    assert (dest / me.REGISTRY_FILE).read_bytes() == (src / me.REGISTRY_FILE).read_bytes()
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["model-registry"]
+
+
+def test_stage_replaces_previous_copy(tmp_path):
+    dest = tmp_path / "state" / "model-registry"
+    dest.mkdir(parents=True)
+    (dest / "planted.yaml").write_text("tampered: true\n", encoding="utf-8")
+    me.stage_registry(_write_registry(tmp_path / "src", [CLOUD]), dest)
+    assert not (dest / "planted.yaml").exists()
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["model-registry"]
+
+
+def test_stage_refuses_invalid_registry_and_keeps_previous_copy(tmp_path):
+    dest = tmp_path / "state" / "model-registry"
+    good = me.stage_registry(_write_registry(tmp_path / "good", [CLOUD]), dest)
+    with pytest.raises(me.RegistryError):
+        me.stage_registry(_write_registry(tmp_path / "bad", [_entry(CLOUD, protocol="openai")]), dest)
+    assert me.tree_sha256(dest) == good
+
+
+def test_stage_copy_failure_leaves_no_partial_tree(tmp_path, monkeypatch):
+    dest = tmp_path / "state" / "model-registry"
+    good = me.stage_registry(_write_registry(tmp_path / "good", [CLOUD]), dest)
+
+    def _half_copy(src, dst, **kw):
+        (Path(dst) / "half.yaml").write_text("partial\n", encoding="utf-8")
+        raise OSError("disk full")
+    monkeypatch.setattr(me.shutil, "copytree", _half_copy)
+    with pytest.raises(OSError):
+        me.stage_registry(_write_registry(tmp_path / "next", [LOCAL]), dest)
+    assert me.tree_sha256(dest) == good
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["model-registry"]
+
+
+def test_staged_registry_dir_default_and_test_override(monkeypatch, tmp_path):
+    assert me.staged_registry_dir() == Path("/var/lib/dark-factory/model-registry")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(tmp_path))
+    assert me.staged_registry_dir() == tmp_path
+
+
+def test_verify_staged_digest_requires_the_digest(tmp_path):
+    reg = _write_registry(tmp_path / "reg", [CLOUD])
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in me.verify_staged_digest(reg)[0]
+
+
+def test_verify_staged_digest_rejects_malformed_digest(tmp_path, monkeypatch):
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "not-hex")
+    reg = _write_registry(tmp_path / "reg", [CLOUD])
+    assert me.verify_staged_digest(reg) == ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"]
+
+
+def test_verify_staged_digest_missing_dir_never_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64)
+    assert "no fallback to cloud" in me.verify_staged_digest(tmp_path / "absent")[0]
+
+
+def test_verify_staged_digest_detects_tampering(tmp_path, monkeypatch):
+    reg = _write_registry(tmp_path / "reg", [CLOUD])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    assert me.verify_staged_digest(reg) == []
+    _write_registry(reg, [_entry(CLOUD, accepts_payload_classes=["cloud_ok"], id="cloud-evil")])
+    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in me.verify_staged_digest(reg)[0]

@@ -278,3 +278,80 @@ def load_registry(path) -> list[dict]:
     if problems:
         raise RegistryError(problems)
     return endpoints
+
+
+def tree_sha256(root) -> str:
+    """SHA-256 over a directory tree: sorted relative paths and file bytes."""
+    root = Path(root)
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(root):  # never descends into a symlink
+        entries += [Path(dirpath) / name for name in dirnames + filenames]
+    digest = hashlib.sha256()
+    for path in sorted(entries):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise RegistryError([f"{root}: {rel} is not a regular file or directory"])
+        if path.is_file():
+            digest.update(rel.encode("utf-8") + b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii") + b"\n")
+    return digest.hexdigest()
+
+
+def staged_registry_dir() -> Path:
+    # FACTORY_MODEL_REGISTRY_PATH is a test-only override, never forwarded to run containers.
+    return Path(os.environ.get("FACTORY_MODEL_REGISTRY_PATH") or _DEFAULT_STAGED_DIR)
+
+
+def stage_registry(source=None, dest=None) -> str:
+    """Copy the read-only source registry onto the shared volume; return the staged digest.
+
+    The copy goes to a temp directory beside dest and is swapped in by rename, so a failed
+    copy never leaves a half-written registry where a run container reads it.
+    """
+    source = Path(source) if source else SOURCE_REGISTRY_DIR
+    dest = Path(dest) if dest else staged_registry_dir()
+    load_registry(source / REGISTRY_FILE)  # never stage an invalid registry
+    tree_sha256(source)  # rejects symlinks before anything is copied
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{dest.name}.tmp-", dir=dest.parent))
+    old = dest.with_name(f".{dest.name}.old-{uuid.uuid4().hex}")
+    try:
+        os.chmod(tmp, 0o755)  # mkdtemp is 0700; run containers must be able to read it
+        shutil.copytree(source, tmp, dirs_exist_ok=True)
+        digest = tree_sha256(tmp)
+        if dest.exists():
+            os.replace(dest, old)
+        try:
+            os.replace(tmp, dest)
+        except OSError:
+            if old.exists():
+                os.replace(old, dest)
+            raise
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    return digest
+
+
+def verify_staged_digest(registry_path) -> list[str]:
+    """The staged copy is trusted only if it matches the digest the scheduler passed (Req. 8)."""
+    expected = os.environ.get("FACTORY_MODEL_REGISTRY_SHA256", "")
+    if not expected:
+        return ["FACTORY_MODEL_REGISTRY_SHA256 is not set — the staged model registry is trusted "
+                "only with the digest the scheduler passes to this dispatch"]
+    if not _SHA256_HEX_RE.match(expected):
+        return ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"]
+    registry_path = Path(registry_path)
+    if not registry_path.is_dir():
+        return [f"staged model registry not found at {registry_path} — no fallback to cloud"]
+    try:
+        actual = tree_sha256(registry_path)
+    except RegistryError as e:
+        return e.problems
+    except OSError:
+        return [f"staged model registry at {registry_path} is unreadable"]
+    if not hmac.compare_digest(actual, expected):
+        return [f"staged model registry at {registry_path} does not match "
+                "FACTORY_MODEL_REGISTRY_SHA256 — it changed after the scheduler staged it"]
+    return []
