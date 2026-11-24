@@ -317,6 +317,55 @@ assert_eq "profile flag present when FACTORY_MODEL_PROXY_ENABLED=true" \
 unset FACTORY_MODEL_PROXY_ENABLED
 
 # ==========================================
+# C3: dispatch() stages the model registry only when FACTORY_MODEL_ENDPOINT is set (#557)
+# ==========================================
+echo ""
+echo "--- C3: dispatch() model registry staging ---"
+> "$STUB_LOG"
+
+# The stub prints the env a real child process would see, proving the digest is exported.
+docker() {
+  echo "docker $* sha_env=$(bash -c 'echo "${FACTORY_MODEL_REGISTRY_SHA256:-unset}"')" >> "$STUB_LOG"
+  return 0
+}
+export -f docker
+
+unset FACTORY_MODEL_ENDPOINT FACTORY_MODEL_REGISTRY_SHA256
+dispatch "Fix issue #3"
+assert_eq "no staging call when FACTORY_MODEL_ENDPOINT is unset" \
+  "0" "$(grep -c 'model-endpoints stage' "$STUB_LOG" || true)"
+assert_eq "no digest flag when FACTORY_MODEL_ENDPOINT is unset" \
+  "0" "$(grep -c -- '-e FACTORY_MODEL_REGISTRY_SHA256' "$STUB_LOG" || true)"
+assert_eq "no digest in the compose env when FACTORY_MODEL_ENDPOINT is unset" \
+  "1" "$(grep -c 'sha_env=unset' "$STUB_LOG" || true)"
+
+> "$STUB_LOG"
+export FACTORY_MODEL_ENDPOINT=cloud-anthropic
+PROVIDERS_CLI_OUTPUT="$(printf 'a%.0s' {1..64})"
+dispatch "Fix issue #3"
+assert_eq "staging runs before the dispatch" \
+  "1" "$(grep -c 'providers/cli.py model-endpoints stage' "$STUB_LOG" || true)"
+assert_eq "endpoint selection is forwarded by name" \
+  "1" "$(grep -c -- 'run -e FACTORY_MODEL_ENDPOINT ' "$STUB_LOG" || true)"
+assert_eq "digest is forwarded by name, after the provider flags" \
+  "1" "$(grep -c -- ' -e FACTORY_MODEL_REGISTRY_SHA256 -d --rm dark-factory' "$STUB_LOG" || true)"
+assert_eq "the staged digest is exported to docker compose" \
+  "1" "$(grep -c "sha_env=${PROVIDERS_CLI_OUTPUT}\$" "$STUB_LOG" || true)"
+assert_eq "the digest does not outlive the dispatch call" "unset" "${FACTORY_MODEL_REGISTRY_SHA256:-unset}"
+
+> "$STUB_LOG"
+PROVIDERS_CLI_OUTPUT=""
+EXIT_CODE=0
+dispatch "Fix issue #3" 2>/dev/null || EXIT_CODE=$?
+assert_eq "an empty staging result refuses the dispatch" "1" "$EXIT_CODE"
+assert_eq "no compose run after a staging failure" \
+  "0" "$(grep -c '^docker compose' "$STUB_LOG" || true)"
+unset FACTORY_MODEL_ENDPOINT
+reset_python3_stub
+docker() { echo "docker $*" >> "$STUB_LOG"; return 0; }
+export -f docker
+
+# ==========================================
 # D: Opt-in label gate (fails until Task 8)
 # ==========================================
 echo ""
@@ -1149,6 +1198,8 @@ echo "--- P: Provider preflight gate ---"
 
 assert_eq "sourcing calls providers preflight before the poll loop" \
   "1" "$(echo "$SOURCE_TIME_LOG" | grep -c 'providers/cli.py preflight' || echo 0)"
+assert_eq "scheduler preflight runs the scheduler-side check (#557)" \
+  "1" "$(echo "$SOURCE_TIME_LOG" | grep -c 'providers/cli.py preflight --side scheduler' || echo 0)"
 
 # Isolated subshell (must not run in-process — a preflight failure trips
 # `set -e` inside scheduler.sh, which would kill this test runner if sourced
