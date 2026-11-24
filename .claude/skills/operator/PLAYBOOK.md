@@ -60,8 +60,8 @@ bash $S/optin.sh N [--direct-to-pr]   # board membership, Backlog, deps, stale r
 
 ## PR review and merge
 
-- Factory PRs are **drafts**. A Gate-3 block leaves a draft PR; a validate-stage block leaves
-  none until push-and-pr runs (it always does — see "Blast-radius block").
+- Factory PRs are **drafts**. A Gate-3 block leaves a draft PR; a blast-radius hold leaves a
+  pushed branch and **no** PR (see "Blast-radius hold").
 - Check `gh pr view N --json mergeStateStatus` first: `DIRTY` means GitHub ran **no CI at all**.
   Resolve by merging main into the feat branch in a worktree.
 - Review = independent reviewer standing in for Gates 2+3 (REVIEWERS.md "PR"), plus your own
@@ -85,14 +85,33 @@ drop `ready-for-agent`/`direct-to-pr`/`needs-discussion`, delete the refine bran
 comment with follow-ups. Verify the board **after** the run exits; the run's own board write
 lands after yours.
 
-## Blast-radius block (`needs-discussion` + "Blast-Radius Gate — BLOCKED")
+## Blast-radius hold (`needs-discussion` + "Blast-Radius Gate — Held for human review")
 
-Traced end to end (2026-09-10): validate's `exit 1` does not stop the DAG; the run continues
-through conformance, code review, archive and push-and-pr and creates a draft PR. Enforcement is
-the close/auto-merge node, which refuses while `needs-discussion` is present. So: **do nothing
-but review**. Review the PR, post the sign-off on the issue, remove `needs-discussion`, then
-merge or dispatch `Close issue #N`. Never hand-create a PR, never re-run Validate (the gate is
-stateless; #374).
+Since #551 the `blast-gate` node stops the run: the branch is pushed, **no PR is opened**, the
+board goes to Blocked and a `df-blast-hold` comment names the head and the triggered files. The
+only thing that passes the gate is a **signed approval bound to that exact content**; removing
+`needs-discussion` by hand does nothing (the next run recomputes and holds again).
+
+1. Have the branch independently reviewed (REVIEWERS.md, PR prompt, against the branch).
+   The triggered files are the minimum; review the whole diff.
+2. **Frank** runs, on the host, with the `--sha` from the hold comment:
+   `bash .claude/skills/operator/scripts/approve-blast.sh N --sha <head>` — prints the gate
+   verdict, each covered path's diff and the record, and signs nothing. Then the same command
+   with `--yes`: signs with his key, stores `.sig` then `.json` in the scheduler state volume,
+   has the baked gate verify the stored approval, posts an audit comment and removes
+   `needs-discussion` last. The signature is Frank's sign-off: an operator session never holds
+   the private key and never runs `--yes`.
+3. The scheduler's Blocked loop dispatches `Continue issue #N`; the gate passes and the PR
+   appears. A new commit that changes a covered file makes the approval `stale (...)`: review
+   that delta and approve again. The close-time check re-verifies before any factory merge.
+
+**Key runbook.** One signing-only key per approver, generated on the operator host:
+`gpg --quick-gen-key "Dark Factory blast approver (<name>)" ed25519 sign 2y`, then
+`gpg --armor --export <fingerprint> > .factory/blast-approvers.asc` and a hand-reviewed PR for
+that file (it is on the gate's hard-trigger floor; rotation and revocation are PRs to it, and
+the file may hold several keys). Only the public key is committed. The private key never goes
+into a container, the state volume or the repo. Other targets (MarketHawk) commit their own
+`.factory/blast-approvers.asc`; run the script with that target's `DF_REPO` and `DF_REPO_DIR`.
 
 ## Recovery
 

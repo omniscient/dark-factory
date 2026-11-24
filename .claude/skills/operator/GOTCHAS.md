@@ -55,9 +55,10 @@ learned; verify code citations against `origin/main` before relying on them.
 
 ## Factory behaviour you will misjudge from one file
 
-- **Validate's `exit 1` does not stop the DAG** (workflow yaml says so); the blast-radius block
-  is enforced at close/auto-merge. Read the DAG node and its trigger semantics before
-  describing what a phase does. Three wrong claims in one session came from grepping one file.
+- **A blast-radius hold stops the run with no PR** (#551: `blast-gate` node, then re-checked at
+  push-and-pr and at close). Before #551 validate's `exit 1` did not stop the DAG. Read the DAG
+  node and its trigger semantics before describing what a phase does. Three wrong claims in
+  one session came from grepping one file.
 - **After `push-and-pr`, the spec and plan live under `docs/archive/`.** Conformance (Gate 2)
   runs before the archive commit; code review (Gate 3), revise-advisory and report run after
   it. A lookup that only searches `docs/superpowers/specs/` is inert at Gate 3 (#403, caught by
@@ -192,8 +193,11 @@ learned; verify code citations against `origin/main` before relying on them.
   needed after a pause; the classifier denies that state write anyway.
 - **Blocked + feature branch on origin ⇒ the scheduler dispatches `Continue` by itself** once
   `needs-discussion` is lifted (scheduler.sh Blocked loop, branch probe). After a blast-radius
-  block with no PR yet, review the branch, lift the label, and let Continue produce the PR;
-  the stateless gate will re-apply `needs-discussion` on the way (lift it again after the PR).
+  hold, lifting the label by hand achieves nothing: the gate recomputes and holds again. Only
+  `approve-blast.sh` (Frank's signature) passes it; it removes the label itself, last.
+- **The operator half of #551 was not delivered with the factory half** (2026-11-24): the hold
+  comment told Frank to run `approve-blast.sh` and the script did not exist. When a spec
+  splits delivery into a factory PR and an operator PR, open the operator PR the same day.
 
 ## Learned 2026-10-21 (evening)
 
