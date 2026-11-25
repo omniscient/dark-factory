@@ -1350,3 +1350,102 @@ def test_streamed_model_mismatch_is_aborted_and_fails_the_run(local_env, monkeyp
     rows, _ = rr._read_ledger_rows("run-s", local_env / "ledger.jsonl")
     assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
     assert rr._compute_model_dispatch(rows)["result"]["outcome"] == "failed"
+
+
+CLOUD_SENTINEL = "sk-ant-sentinel-cloud-checker-key"
+
+
+def test_ac1_local_worker_and_cloud_checker_dispatches_are_isolated_and_attributed(
+        local_env, monkeypatch):
+    """#559 acceptance criterion 1. Two real create_app() instances run concurrently in one
+    process: a local worker against a fake local upstream, and a cloud checker that selected a
+    cloud registry entry against a fake cloud upstream. Each has its own current-run.json.
+    Both dispatch records are built from ledger rows by run_record's production aggregation.
+
+    Scope note (spec): one process and one OS environment, so this proves header, ledger and
+    artifact non-leakage plus the worker proxy's startup refusal to hold a cloud credential.
+    Separate-process isolation is structural (one dispatched container, one endpoint config)
+    and no in-process test can simulate it.
+    """
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    artifacts = local_env / "artifacts"
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", artifacts)
+    worker_ptr = _pointer(local_env / "worker-run.json", "run-worker")  # no role: actor
+    checker_ptr = _pointer(local_env / "checker-run.json", "run-checker", role="checker")
+    local_calls, cloud_calls = [], []
+
+    async def scenario():
+        local_up = await _make_upstream(_recording(_ok_json, local_calls))
+        cloud_up = await _make_upstream(_recording(_ok_json, cloud_calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(cloud_up))
+        worker = TestClient(TestServer(mp.create_app(_local_destination(_url(local_up)),
+                                                     current_run_path=worker_ptr)))
+        checker = TestClient(TestServer(mp.create_app(_cloud_destination(),
+                                                      current_run_path=checker_ptr)))
+        await worker.start_server()
+        await checker.start_server()
+        try:
+            results = await asyncio.gather(
+                _post_json(worker),
+                _post_cloud(checker, headers={"x-api-key": CLOUD_SENTINEL}))
+            await _wait_for(lambda: len(_rows(local_env)) >= 2 and artifacts.exists()
+                            and len(list(artifacts.rglob("*.json"))) >= 2)
+        finally:
+            for c in (worker, checker):
+                await c.close()
+            for s in (local_up, cloud_up):
+                await s.close()
+        return results
+
+    (w_status, _), (c_status, _) = _run(scenario())
+    assert w_status == 200 and c_status == 200
+    assert len(local_calls) == 1 and len(cloud_calls) == 1
+
+    ledger = local_env / "ledger.jsonl"
+    worker_rows, _ = rr._read_ledger_rows("run-worker", ledger)
+    checker_rows, _ = rr._read_ledger_rows("run-checker", ledger)
+    assert len(worker_rows) == 1 and len(checker_rows) == 1
+    w, c = worker_rows[0], checker_rows[0]
+
+    # Exact role / request / endpoint attribution, per request.
+    envelope = json.loads(local_calls[0]["headers"]["x-factory-correlation"])
+    assert (w["role"], w["endpoint_id"], w["hosting_location"], w["issue_number"]) == (
+        "actor", "local-test", "local", ISSUE)
+    assert w["request_id"] and w["request_id"] == envelope["request_id"]
+    assert envelope["role"] == "actor" and envelope["run_id"] == "run-worker"
+    assert (c["role"], c["endpoint_id"], c["hosting_location"], c["issue_number"]) == (
+        "checker", "cloud-test", "cloud", ISSUE)
+    assert c["request_id"] is None  # the cloud path signs nothing, so it mints none (#558)
+    assert w["correlation"] == c["correlation"] == "inferred_pointer"
+
+    # The independence proof over the real, ledger-derived dispatch records.
+    worker_result = rr._compute_model_dispatch(worker_rows)["result"]
+    checker_result = rr._compute_model_dispatch(checker_rows)["result"]
+    assert ri.check_verdict_independence(
+        worker_result, checker_result, actor_issue=w["issue_number"],
+        producer_issue=c["issue_number"], verdict_issue=ISSUE) == (True, "independent")
+    # An unrelated (other-issue) successful cloud run is never the proof.
+    assert ri.check_verdict_independence(
+        worker_result, checker_result, actor_issue=ISSUE, producer_issue=ISSUE + 1,
+        verdict_issue=ISSUE) == (False, "unit_of_work_mismatch")
+
+    # No cross-role credential leakage: forwarded headers, ledger rows, raw captures.
+    assert local_calls[0]["headers"]["x-api-key"] == SENTINEL
+    assert cloud_calls[0]["headers"]["x-api-key"] == CLOUD_SENTINEL
+    assert CLOUD_SENTINEL not in json.dumps(local_calls[0]["headers"])
+    assert SENTINEL not in json.dumps(cloud_calls[0]["headers"])
+    ledger_text = ledger.read_text()
+    assert SENTINEL not in ledger_text and CLOUD_SENTINEL not in ledger_text
+    captured = [p.read_text() for p in artifacts.rglob("*.json")]
+    assert {p.parent.name for p in artifacts.rglob("*.json")} == {"run-worker", "run-checker"}
+    for text in captured:
+        assert SENTINEL not in text and CLOUD_SENTINEL not in text
+
+    # Process environment: the worker-side proxy holds no cloud credential, and refuses to
+    # start if handed the checker's (startup check, contract §4.3) without echoing it.
+    assert CLOUD_SENTINEL not in os.environ.values()
+    with pytest.raises(ma.DestinationError) as exc:
+        ma.destination_from_entry(  # LOCAL_ENTRY's base_url is never dialled: startup only
+            copy.deepcopy(LOCAL_ENTRY),
+            environ={"LOCAL_GATEWAY_TOKEN": SENTINEL, "ANTHROPIC_API_KEY": CLOUD_SENTINEL})
+    assert "ANTHROPIC_API_KEY" in str(exc.value) and CLOUD_SENTINEL not in str(exc.value)
