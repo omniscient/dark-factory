@@ -347,8 +347,9 @@ def tree_sha256(root) -> str:
 
 def staged_registry_dir() -> Path:
     # FACTORY_MODEL_REGISTRY_PATH is a test-only override, never forwarded to run containers.
-    # Registry verification must never run from agent-controlled env (#593): today only the
-    # pre-agent entrypoint.sh preflight reads this, and #558 must keep it that way.
+    # Registry verification must never run from agent-controlled env (#593): only the
+    # pre-agent entrypoint.sh preflight and the model proxy's startup (#558 — its own
+    # container, whose env the agent never sets) read this.
     return Path(os.environ.get("FACTORY_MODEL_REGISTRY_PATH") or _DEFAULT_STAGED_DIR)
 
 
@@ -407,9 +408,9 @@ def read_verified_tree(registry_path) -> tuple[list[str], dict[str, bytes] | Non
     files maps each relative path to the bytes that were hashed. Parse those — never re-open a
     staged file, or a swap-and-swap-back between the two reads goes unseen.
     """
-    # Registry verification must never run from agent-controlled env (#593): today only the
-    # pre-agent entrypoint.sh preflight reads FACTORY_MODEL_REGISTRY_SHA256, and #558 must
-    # keep it that way.
+    # Registry verification must never run from agent-controlled env (#593): only the
+    # pre-agent entrypoint.sh preflight and the model proxy's startup (#558 — its own
+    # container, whose env the agent never sets) read FACTORY_MODEL_REGISTRY_SHA256.
     expected = os.environ.get("FACTORY_MODEL_REGISTRY_SHA256", "")
     if not expected:
         return ["FACTORY_MODEL_REGISTRY_SHA256 is not set — the staged model registry is trusted "
@@ -644,6 +645,33 @@ def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
     if hosting == "local":
         problems += _local_problems(entry, files, registry_path)
     return problems, hosting
+
+
+def load_verified_entry(registry_path, endpoint_id) -> tuple[list[str], dict | None]:
+    """The model proxy's Configuration-contract loader (#558): (problems, entry).
+
+    entry is non-None only when problems is empty. Exactly one read_verified_tree() call;
+    registry, entry and evidence are parsed only from the bytes it hashed (#593) — never
+    _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered, so a
+    local entry never comes back until #587 lifts it.
+    """
+    registry_path = Path(registry_path)
+    problems, files = read_verified_tree(registry_path)
+    if problems:
+        return problems, None
+    path = registry_path / REGISTRY_FILE
+    if REGISTRY_FILE not in files:
+        return [f"model endpoint registry not found at {path}"], None
+    try:
+        endpoints = _parse_registry(files[REGISTRY_FILE], path)
+    except RegistryError as e:
+        return e.problems, None
+    entry, problems = _pick(endpoints, endpoint_id, path)
+    if entry is None:
+        return problems, None
+    if entry["hosting_location"] == "local":
+        problems = problems + _local_problems(entry, files, registry_path)
+    return (problems, None) if problems else ([], entry)
 
 
 def scheduler_preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:

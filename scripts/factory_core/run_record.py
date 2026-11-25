@@ -249,6 +249,19 @@ def _find_run_obj(content: str) -> "dict | None":
     return None
 
 
+def _node_cost(n: dict):
+    """A node's reported cost. A key present with a null value is an unknown cost (a
+    local-routed node, #558, contract §4.10) and stays None; an absent key stays 0."""
+    value = n.get("costUsd") or n.get("cost_usd")
+    if value:
+        return value
+    if any(n.get(k) is not None for k in ("costUsd", "cost_usd")):
+        return 0  # a reported zero stays a zero
+    if "costUsd" in n or "cost_usd" in n:
+        return None
+    return 0
+
+
 def _nodes_from_run_obj(run_obj: dict) -> list:
     """Map a run object's nodes to OTel field names."""
     nodes = []
@@ -269,7 +282,7 @@ def _nodes_from_run_obj(run_obj: dict) -> list:
                 "gen_ai.usage.output_tokens": (
                     n.get("outputTokens") or n.get("output_tokens") or 0
                 ),
-                "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
+                "cost_usd": _node_cost(n),
                 "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
             }
         )
@@ -453,6 +466,10 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
                 "reason": "no_usage_reported",
             })
             missing.append({"node_id": node.get("node_id", ""), "reason": "no_usage_reported"})
+        elif node.get("cost_usd") is None:
+            # Reported, but its cost is unknown (#558): tokens kept, and the null cost
+            # nulls every cost total it joins instead of reading as 0.
+            node["cost_capture"] = "cost_unknown"
         else:
             node["cost_capture"] = "completed"
         out.append(node)
@@ -475,10 +492,12 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
 
 
 def _sum_usage(nodes: list) -> "tuple":
+    # An unknown (null) cost is not zero (#558): any one makes the cost sum null.
+    costs = [n.get("cost_usd", 0) for n in nodes]
     return (
         sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes),
         sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes),
-        sum(n.get("cost_usd", 0) for n in nodes),
+        None if any(c is None for c in costs) else sum(costs),
     )
 
 
@@ -531,14 +550,18 @@ def _capture_totals(nodes: list, *, capture_ok: bool, clone_dir, archon_log_file
     for entry in missing:
         emit_health_event("factory.cost_report.node_missing", issue, run_id, dict(entry))
 
-    known_in, known_out, known_cost = _sum_usage(
-        [n for n in nodes if n.get("cost_capture") == "completed"]
-    )
+    counted = [n for n in nodes if n.get("cost_capture") in ("completed", "cost_unknown")]
+    priced = [n for n in counted if n.get("cost_capture") == "completed"]
+    known_in, known_out, _ = _sum_usage(counted)
+    # A cost_unknown node (#558) is excluded from the known cost like a missing node; with no
+    # priced node to bound it, the known cost is unknown (null) — never a fabricated 0.
+    known_cost = _sum_usage(priced)[2] if priced or not counted else None
+    cost_unknown = len(priced) != len(counted)
     complete = not missing
     totals.update({
         "gen_ai.usage.input_tokens": known_in if complete else None,
         "gen_ai.usage.output_tokens": known_out if complete else None,
-        "cost_usd": known_cost if complete else None,
+        "cost_usd": known_cost if complete and not cost_unknown else None,
         "cost_capture": "complete" if complete else "partial",
         "node_log": "unavailable" if log_events is None else "parsed",
         "known_cost_usd": known_cost,
@@ -801,7 +824,7 @@ def _compute_ledger_mechanics(rows: list) -> dict:
 def _compute_harness_economics(
     *, run_id: str, status: str, stages: list, totals: dict,
     started_at: str, completed_at: str, ledger_path: pathlib.Path,
-    artifact_check: "dict | None" = None,
+    artifact_check: "dict | None" = None, ledger: "tuple | None" = None,
 ) -> dict:
     tokens_in = totals.get("gen_ai.usage.input_tokens")
     tokens_out = totals.get("gen_ai.usage.output_tokens")
@@ -813,7 +836,8 @@ def _compute_harness_economics(
         outcome["score"] * 1_000_000 / tokens_per_task if tokens_per_task else None
     )
 
-    rows, ledger_available = _read_ledger_rows(run_id, ledger_path)
+    # cmd_assemble passes the rows it already read (#558); backfill reads them here.
+    rows, ledger_available = ledger if ledger is not None else _read_ledger_rows(run_id, ledger_path)
     if ledger_available:
         retry_spend = _compute_retry_spend(rows)
         ledger_mechanics = _compute_ledger_mechanics(rows)
@@ -839,6 +863,52 @@ def _compute_harness_economics(
         "ledger_rows_correlated": len(rows),
         "ledger_mechanics": ledger_mechanics,
     }
+
+
+# Request and Result contracts (contract §4.7), versioned independently.
+MODEL_DISPATCH_REQUEST_VERSION = "1.0"
+MODEL_DISPATCH_RESULT_VERSION = "1.0"
+_PAYLOAD_DECISION_KEYS = ("payload_class", "endpoint_id", "secret_reference", "allow", "reason")
+
+
+def _compute_model_dispatch(rows: list) -> dict:
+    """run_record["model_dispatch"] (#558) from this run's request-ledger rows.
+
+    request is the proxy's startup payload_decision() (its payload_decision column), copied
+    from the first row — never recomputed here. result aggregates the rows: one endpoint_id or
+    null (more than one is failed, never resolved to one), outcome ok/failed by failure class,
+    unknown when the run has no rows.
+    """
+    decision = rows[0].get("payload_decision") if rows else None
+    if isinstance(decision, dict):
+        request = {"schema_version": MODEL_DISPATCH_REQUEST_VERSION, **decision}
+    else:
+        request = {"schema_version": MODEL_DISPATCH_REQUEST_VERSION,
+                   **{k: None for k in _PAYLOAD_DECISION_KEYS}, "reason": "no endpoint selected"}
+    if not rows:
+        return {"request": request, "result": {
+            "schema_version": MODEL_DISPATCH_RESULT_VERSION, "outcome": "unknown",
+            "endpoint_id": None, "hosting_location": None, "role": None,
+            "correlation": "unknown", "request_count": 0, "failure_classes_seen": []}}
+
+    def _single(key):
+        values = {r.get(key) for r in rows}
+        return next(iter(values)) if len(values) == 1 else None
+
+    endpoints_split = len({r.get("endpoint_id") for r in rows}) > 1
+    failures = sorted({r["failure_class"] for r in rows if r.get("failure_class")})
+    return {"request": request, "result": {
+        "schema_version": MODEL_DISPATCH_RESULT_VERSION,
+        "outcome": "failed" if failures or endpoints_split else "ok",
+        "endpoint_id": _single("endpoint_id"),
+        "hosting_location": _single("hosting_location"),
+        "role": _single("role"),
+        "correlation": ("inferred_pointer"
+                        if all(r.get("correlation") == "inferred_pointer" for r in rows)
+                        else "unknown"),
+        "request_count": len(rows),
+        "failure_classes_seen": failures,
+    }}
 
 
 NEEDS_DISCUSSION_LABEL = "needs-discussion"
@@ -988,6 +1058,12 @@ def cmd_assemble(args) -> None:
         archon_path, exit_code=exit_code, stderr_text=stderr_text
     )
 
+    # The request ledger, read once (#558): it decides the local-run cost override below and
+    # feeds harness_economics and model_dispatch.
+    ledger_path = pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH
+    ledger_rows, ledger_available = _read_ledger_rows(args.run_id, ledger_path)
+    local_run = any(r.get("hosting_location") == "local" for r in ledger_rows)
+
     # Capture failed -> totals null, not zero (df#300); otherwise classify every node's
     # cost capture (#453) — a measured zero (no AI nodes) still totals 0.
     nodes, totals = _capture_totals(
@@ -998,6 +1074,11 @@ def cmd_assemble(args) -> None:
         issue=args.issue,
         run_id=args.run_id,
     )
+    if local_run:
+        # Contract §4.10: a local-routed run's cost is unknown — null, never the harness's
+        # Claude-priced figure and never 0 (sum([]) included). Token counts are kept.
+        nodes = [dict(n, cost_usd=None) for n in nodes]
+        totals = dict(totals, cost_usd=None, known_cost_usd=None)
 
     from . import adapter
     try:
@@ -1058,9 +1139,12 @@ def cmd_assemble(args) -> None:
         totals=run_record["totals"],
         started_at=run_record["started_at"],
         completed_at=run_record["completed_at"],
-        ledger_path=pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH,
+        ledger_path=ledger_path,
         artifact_check=artifact_check,
+        ledger=(ledger_rows, ledger_available),
     )
+    # Request/Result contracts (#558): additive, computed independently like harness_economics.
+    run_record["model_dispatch"] = _compute_model_dispatch(ledger_rows)
 
     trace_path = artifacts_dir / "memory-trace.json"
     if trace_path.exists():

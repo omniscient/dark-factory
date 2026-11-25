@@ -452,7 +452,7 @@ effective.
 | `FACTORY_TRACKER` | `github` (`github`, `jira`) | `providers/__init__.py:24,52` | `instance.env` |
 | `FACTORY_CODEHOST` | `github` | `providers/__init__.py:32,59` | `instance.env` |
 | `FACTORY_MODEL_PROVIDER` | `anthropic` (`anthropic`, `bedrock`, `vertex`) | `providers/__init__.py:66` | `instance.env` |
-| `FACTORY_MODEL_ENDPOINT` | unset (a registry `id`) | `scripts/factory_core/providers/__init__.py`, `scripts/factory_core/providers/model_endpoint.py`; see "Model endpoint registry" below | `instance.env` |
+| `FACTORY_MODEL_ENDPOINT` | unset (a registry `id`) | `scripts/factory_core/providers/__init__.py`, `scripts/factory_core/providers/model_endpoint.py`, `scripts/factory_core/model_proxy.py` `main()` (#558); see "Model endpoint registry" below | `instance.env` |
 | `JIRA_BASE_URL`, `JIRA_PROJECT_KEY`, `JIRA_EPIC_LINK_FIELD` | none | `providers/tracker/jira.py:36-39` | `instance.env` |
 | `JIRA_ISSUE_TYPE` / `JIRA_REQUEST_TIMEOUT_SECONDS` | `Task` / `30` | `jira.py:40-41` | `instance.env` |
 | `GITLAB_BASE_URL` | `gitlab.com` | `codehost/gitlab.py:49` | `instance.env` |
@@ -481,7 +481,7 @@ containers (`run-compose.yml:31-47`).
 | Variable | Default | Reader | File |
 |---|---|---|---|
 | `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:392` (adds the `factory-model-proxy` compose profile) | `instance.env` |
-| `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:39`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
+| `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:51`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
 | `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:826,940,1354` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:56` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
@@ -503,7 +503,7 @@ containers (`run-compose.yml:31-47`).
 | `FACTORY_BLAST_HOLD_FILE` | `$ARTIFACTS_DIR/blast-hold.json` (the entrypoint's own run directory) | `entrypoint.sh` (export, `_handle_blast_hold`), `scripts/blast_gate_check.sh` | hold marker handoff across Archon's per-node `ARTIFACTS_DIR` (#551); never set by hand |
 | `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR`, `BLAST_GATE_BAKED_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:82,91`; `scripts/blast_gate_check.sh` | "never set in the image"; test seams |
 | `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1477`, `entrypoint.sh:89,813` | tests only |
-| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:26-41`; `run_record.py:28,716` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
+| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:37-53`; `run_record.py:28,739` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
 | `FACTORY_EDITS_LABEL`, `FACTORY_REGRESSION_LABEL`, `FACTORY_EMAIL` | `merged-with-edits`, `factory-regression`, `factory@<repo>` | `scripts/fetch_scorecard.py:26-28` | scorecard tooling |
 | `MEM0_SPIKE_STORE_PATH`, `AGENTMEMORY_*` | none | `scripts/mem0_retrieve_adapter.py:46`, `scripts/eval_agentmemory.sh` | memory spike tooling, not part of runs |
 
@@ -527,10 +527,10 @@ checked, and dispatch argv and env are unchanged. Design:
 
 | Variable | Set where | Read by | Notes |
 |---|---|---|---|
-| `FACTORY_MODEL_ENDPOINT` | scheduler's `instance.env` | scheduler boot preflight; forwarded to runs by `dispatch()` | selects one registry `id`; an unknown id fails preflight, no other endpoint is chosen |
+| `FACTORY_MODEL_ENDPOINT` | scheduler's `instance.env` | scheduler boot preflight; forwarded to runs by `dispatch()`; the model proxy's startup (#558) | selects one registry `id`; an unknown id fails preflight, no other endpoint is chosen. When the proxy has it set, `main()` resolves the entry once through `model_endpoint.load_verified_entry()` and exits non-zero before binding on any problem |
 | `FACTORY_MODEL_REGISTRY_DIR` | compose interpolation at `up` time (the `--env-file` file or the shell), like `PROJECT_DIR` | `deploy/docker-compose.yml` | host path of this instance's own `model-registry/` directory; unset mounts the empty `deploy/model-registry.empty/` |
-| `FACTORY_MODEL_REGISTRY_SHA256` | never set by hand | run-container preflight | computed by `dispatch()` per run and passed only with `docker compose run -e`; not in `PROVIDER_PASSTHROUGH_VARS` |
-| the variable a `secret_reference` names | cloud entry: the run container's `.archon/.env` (for example `ANTHROPIC_API_KEY`); local entry: not `.archon/.env`, defined by #558/#587 | run-container preflight (presence only) | the registry stores the name, never the value |
+| `FACTORY_MODEL_REGISTRY_SHA256` | never set by hand | run-container preflight; the model proxy's startup when `FACTORY_MODEL_ENDPOINT` is set (#558) | computed by `dispatch()` per run and passed only with `docker compose run -e`; not in `PROVIDER_PASSTHROUGH_VARS` |
+| the variable a `secret_reference` names | cloud entry: the run container's `.archon/.env` (for example `ANTHROPIC_API_KEY`); local entry: not `.archon/.env`; the model proxy's own environment, delivered by #587 | run-container preflight (presence only); the model proxy, which sends it as the local request's only `x-api-key` (#558) | the registry stores the name, never the value |
 | `FACTORY_MODEL_REGISTRY_PATH` | tests only | `model_endpoint.staged_registry_dir()` | overrides the staged path; never forwarded |
 
 The registry lives on the human-only instance surface,
@@ -602,7 +602,7 @@ back to defaults on any error.
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
 | `deconflict.models_init`, `deconflict.migrations_dir`, `deconflict.alembic_ini` | Tier-1 conflict resolution file paths; the alembic.ini whose directory the post-Tier-1 multi-head check runs in (not a file: check skipped, unless a migration file is conflicted, which escalates) | `scripts/factory_core/deconflict.py:22-55` |
-| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:1004` |
+| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:1085` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
 dispatch ceiling, side-effect levels, main-red autofix) is **not** adapter-overridable. The

@@ -5,6 +5,17 @@ Generic reverse proxy for ANTHROPIC_BASE_URL: forwards every request to the real
 Anthropic API unchanged (streaming responses forwarded byte-for-byte), while writing
 a compact per-request ledger row and optional raw artifacts. See
 docs/archive/2026-07-11-transparent-model-proxy-design.md.
+
+Local destination (#558; docs/archive/2026-11-25-hybrid-runtime-adapter-design.md):
+when FACTORY_MODEL_ENDPOINT is set, main() resolves the endpoint once at startup through
+providers.model_adapter — never providers.preflight(), which needs GH_TOKEN — and exits
+non-zero on any problem before binding. A local entry's upstream is its verified base_url;
+no code path reaches the cloud default. Interfaces this process must hold for a local
+selection: FACTORY_MODEL_ENDPOINT, FACTORY_MODEL_REGISTRY_SHA256, MODEL_PROXY_UPSTREAM
+(optional; must equal the entry's base_url when set), ANTHROPIC_BASE_URL and the four
+ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL aliases (checked by the loader), and the
+variable named by the entry's secret_reference. The proxy service receives none of these
+today; delivering them is #587's.
 """
 import asyncio
 import fcntl
@@ -13,6 +24,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -40,7 +52,12 @@ RAW_ARTIFACT_CAPTURE = os.environ.get("RAW_ARTIFACT_CAPTURE", "false").lower() =
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("RAW_ARTIFACT_RETENTION_DAYS", "7"))
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
-_REDACT_EXACT = {"authorization", "x-api-key", "api-key"}
+# Adapter identity on every ledger row (#558): which code path produced the row.
+ADAPTER_ID = "model_proxy/anthropic-messages-passthrough"
+
+# x-factory-correlation carries no secret, but §4.3 puts every correlation header in the
+# redaction set; its fields are already ledger columns (#558).
+_REDACT_EXACT = {"authorization", "x-api-key", "api-key", "x-factory-correlation"}
 _REDACT_PATTERN = re.compile(r"^x-factory-.*-(token|secret)$", re.IGNORECASE)
 
 
@@ -79,11 +96,17 @@ def read_current_run() -> dict:
         return {"run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown"}
 
 
+def _correlation_state(run: dict) -> str:
+    """§4.4: the current-run.json pointer is today's only correlation source — never upgraded."""
+    return "unknown" if run["run_id"] == "unknown" else "inferred_pointer"
+
+
 def build_ledger_row(
     *, endpoint, method, model, status, duration_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, tool_count, tool_bytes, system_bytes,
     request_bytes, largest_tools, streamed, run_id=None, issue_number=None, intent=None,
-    stage=None,
+    stage=None, endpoint_id=None, hosting_location="cloud", role=None, request_id=None,
+    failure_class=None, correlation="unknown", adapter_id=ADAPTER_ID, payload_decision=None,
 ) -> dict:
     return {
         "timestamp": _timestamp(),
@@ -113,6 +136,16 @@ def build_ledger_row(
         # become their own correlated ledger rows; see the Architecture section's
         # "Retry/fallback metadata" note and the rollout doc.
         "retry_count": 0,
+        # Request/Result contract columns (#558, contract §4.7). None/"cloud" on the default
+        # path; the model column above is the backend model (a local row's served_name).
+        "endpoint_id": endpoint_id,
+        "hosting_location": hosting_location,
+        "role": role,
+        "request_id": request_id,
+        "failure_class": failure_class,
+        "correlation": correlation,
+        "adapter_id": adapter_id,
+        "payload_decision": payload_decision,
     }
 
 
@@ -257,6 +290,38 @@ async def _persist_ledger(row: dict) -> None:
     await loop.run_in_executor(None, post_seq_ledger, row)
 
 
+class _DownstreamGone(Exception):
+    """The client side of a proxied response went away mid-write (classified cancellation)."""
+
+
+# Every failure handle_proxy records as a ledger row; anything else is a bug and propagates.
+_HANDLED_ERRORS = (aiohttp.ClientError, TimeoutError, OSError, _DownstreamGone,
+                   asyncio.CancelledError)
+
+
+def _error_body(error_type, message, failure_class, endpoint_id) -> dict:
+    return {"error": {"type": error_type, "message": message,
+                      "failure_class": failure_class, "endpoint_id": endpoint_id}}
+
+
+def _decode_scan(scan: bytes, encoding: str) -> bytes:
+    """The session runs auto_decompress=False (see _startup), so scans hold raw wire bytes —
+    decompress a local copy for parsing; the client receives the untouched stream."""
+    if encoding in ("gzip", "deflate"):
+        try:
+            return gzip.decompress(scan) if encoding == "gzip" else zlib.decompress(scan)
+        except (OSError, zlib.error):
+            pass  # ledger falls back to zero-usage rather than failing the request
+    return scan
+
+
+async def _write_downstream(response: web.StreamResponse, chunk: bytes) -> None:
+    try:
+        await response.write(chunk)
+    except ConnectionError as exc:  # includes aiohttp.ClientConnectionResetError
+        raise _DownstreamGone(str(exc)) from exc
+
+
 async def handle_proxy(request: web.Request) -> web.StreamResponse:
     start = time.monotonic()
     body_bytes = await request.read()
@@ -268,59 +333,155 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         pass
 
     correlation = read_current_run()
-    upstream_url = f"{UPSTREAM.rstrip('/')}{request.path_qs}"
-    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    dest = request.app["local_destination"]
+    local = dest is not None and dest["hosting_location"] == "local"
+    ma = None
+    if dest is not None:
+        # Lazy, as in main(): the default cloud path never loads the adapter (#558).
+        from factory_core.providers import model_adapter as ma
+    # Request/Result ledger columns (#558). role is the §4.2 contract constant on every local
+    # row — refused rows included (spec Req. 13); request_id exists once a request is signed.
+    columns = {
+        "endpoint_id": dest["endpoint_id"] if dest else None,
+        "hosting_location": dest["hosting_location"] if dest else "cloud",
+        "role": ma.LOCAL_ROLE if local else None,
+        "request_id": None,
+        "correlation": _correlation_state(correlation),
+        "payload_decision": dict(dest["payload_decision"]) if dest else None,
+    }
 
-    session = request.app["client_session"]
-    try:
-        async with session.request(
-            request.method, upstream_url, headers=fwd_headers, data=body_bytes,
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
-        ) as upstream_resp:
-            response = web.StreamResponse(
-                status=upstream_resp.status, headers=upstream_resp.headers
-            )
-            await response.prepare(request)
-            usage_scan = bytearray()
-            async for chunk in upstream_resp.content.iter_any():
-                await response.write(chunk)
-                usage_scan.extend(chunk)
-            await response.write_eof()
-    except (aiohttp.ClientError, TimeoutError, OSError) as exc:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        error_body = {
-            "error": {
-                "type": "factory_model_proxy_upstream_error",
-                "message": f"upstream request failed: {exc}",
-            }
-        }
-        row = build_ledger_row(
-            endpoint=request.path, method=request.method, model=model, status=504,
-            duration_ms=duration_ms, input_tokens=0, output_tokens=0,
-            cache_read_tokens=0, cache_creation_tokens=0, streamed=False,
+    def _row(status, failure_class, *, usage=None, streamed=False):
+        usage = usage or {}
+        return build_ledger_row(
+            endpoint=request.path, method=request.method, model=model, status=status,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_read_tokens=0, cache_creation_tokens=0, streamed=streamed,
             request_bytes=len(body_bytes), **measurements,
             run_id=correlation["run_id"], issue_number=correlation["issue_number"],
             intent=correlation["intent"], stage=correlation["stage"],
+            failure_class=failure_class, **columns,
         )
-        await _persist_ledger(row)
-        return web.json_response(error_body, status=504)
 
-    duration_ms = int((time.monotonic() - start) * 1000)
-    # The session runs auto_decompress=False (see _startup), so usage_scan holds raw
-    # wire bytes — decompress a local copy for usage parsing and raw artifacts; the
-    # client already received the untouched compressed stream.
-    scan_bytes = bytes(usage_scan)
-    encoding = upstream_resp.headers.get("Content-Encoding", "").lower()
-    if encoding in ("gzip", "deflate"):
+    if local:
+        # Every refusal happens here, before any outbound call (spec Req. 9, 10, 4).
         try:
-            scan_bytes = (
-                gzip.decompress(scan_bytes)
-                if encoding == "gzip"
-                else zlib.decompress(scan_bytes)
-            )
-        except (OSError, zlib.error):
-            pass  # ledger falls back to zero-usage rather than failing the request
-    is_streamed = "text/event-stream" in upstream_resp.headers.get("Content-Type", "")
+            ma.check_request(dest, request.method, request.path, body_bytes)
+            fwd_headers = ma.strip_and_sign_headers(dict(request.headers), dest)
+        except ma.AdapterRefusal as refusal:
+            await _persist_ledger(_row(refusal.status, refusal.failure_class))
+            return web.json_response(
+                _error_body(ma.REFUSAL_TYPE, refusal.message, refusal.failure_class,
+                            dest["endpoint_id"]),
+                status=refusal.status)
+        header_value, envelope = ma.build_correlation(dest, correlation)
+        fwd_headers[ma.CORRELATION_HEADER] = header_value
+        columns["role"], columns["request_id"] = envelope["role"], envelope["request_id"]
+        bounds = ma.resolve_timeout(dest)
+        # The verified entry's base_url — never UPSTREAM (spec Req. 3).
+        upstream_url = f"{dest['upstream'].rstrip('/')}{request.path_qs}"
+        # sock_read stays None: aiohttp runs it before the first byte too, which would cap
+        # time_to_first_token at idle. Both ride the rolling deadline below (§4.6).
+        timeout = aiohttp.ClientTimeout(total=bounds["total"], connect=bounds["connect"],
+                                        sock_read=None)
+        first_token_seconds, idle_seconds = bounds["time_to_first_token"], bounds["idle"]
+        handled = _HANDLED_ERRORS + (ma.AdapterRefusal,)
+    else:
+        upstream_url = f"{UPSTREAM.rstrip('/')}{request.path_qs}"
+        fwd_headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=10)
+        first_token_seconds = idle_seconds = None
+        handled = _HANDLED_ERRORS
+
+    session = request.app["client_session"]
+    loop = asyncio.get_running_loop()
+    response = None
+    usage_scan = bytearray()
+    # One rolling upstream-wait deadline (§4.6): time_to_first_token until the first body
+    # byte, then idle_seconds per wait between chunks; disarmed while a chunk is written
+    # downstream. asyncio.timeout(None) is never re-armed on the cloud path, so never fires.
+    deadline = asyncio.timeout(first_token_seconds)
+    first_byte_seen = False
+
+    def _got_chunk():
+        nonlocal first_byte_seen
+        first_byte_seen = True
+        deadline.reschedule(None)
+
+    def _await_next_chunk():
+        if idle_seconds is not None:
+            deadline.reschedule(loop.time() + idle_seconds)
+
+    try:
+        async with deadline:
+            async with session.request(
+                request.method, upstream_url, headers=fwd_headers, data=body_bytes,
+                timeout=timeout, allow_redirects=not local,
+            ) as upstream_resp:
+                encoding = upstream_resp.headers.get("Content-Encoding", "").lower()
+                is_streamed = "text/event-stream" in upstream_resp.headers.get("Content-Type", "")
+                if local:
+                    ma.check_response_status(upstream_resp.status)
+                if local and not is_streamed:
+                    # Buffered, so a malformed body is refused with a real error before prepare().
+                    async for chunk in upstream_resp.content.iter_any():
+                        _got_chunk()
+                        usage_scan.extend(chunk)
+                        _await_next_chunk()
+                    deadline.reschedule(None)
+                    ma.check_json_body(upstream_resp.status,
+                                       _decode_scan(bytes(usage_scan), encoding))
+                response = web.StreamResponse(
+                    status=upstream_resp.status, headers=upstream_resp.headers
+                )
+                await response.prepare(request)
+                if local and not is_streamed:
+                    await _write_downstream(response, bytes(usage_scan))
+                else:
+                    async for chunk in upstream_resp.content.iter_any():
+                        _got_chunk()
+                        await _write_downstream(response, chunk)
+                        usage_scan.extend(chunk)
+                        _await_next_chunk()
+                    deadline.reschedule(None)
+                    if local:
+                        ma.check_sse_complete(upstream_resp.status,
+                                              _decode_scan(bytes(usage_scan), encoding))
+                await response.write_eof()
+    except handled as exc:
+        prepared = response is not None and response.prepared
+        if prepared and request.transport is not None:
+            # No JSON error can follow a prepared response: abort without a clean EOF so the
+            # client sees a truncated stream, never one that looks complete (spec Req. 12).
+            request.transport.abort()
+        failure_class = None
+        if ma is not None:
+            expired = deadline.expired()
+            failure_class = ma.classify_failure(
+                exc, ttft_expired=expired and not first_byte_seen,
+                idle_expired=expired and first_byte_seen,
+                downstream_gone=isinstance(exc, _DownstreamGone))
+        refusal = ma is not None and isinstance(exc, ma.AdapterRefusal)
+        status = exc.status if refusal else 504
+        # Shielded: a cancelled handler still records its row (§4.6: never a silent hang).
+        await asyncio.shield(_persist_ledger(_row(status, failure_class)))
+        if isinstance(exc, asyncio.CancelledError):
+            raise  # never swallowed
+        if prepared:
+            # The aborted response is all the client gets; aiohttp's finish_response() absorbs
+            # the write_eof() ConnectionError quietly (re-raising would log a traceback).
+            return response
+        if refusal:
+            return web.json_response(
+                _error_body(ma.REFUSAL_TYPE, exc.message, failure_class, columns["endpoint_id"]),
+                status=status)
+        return web.json_response(
+            _error_body("factory_model_proxy_upstream_error", f"upstream request failed: {exc}",
+                        failure_class, columns["endpoint_id"]),
+            status=504)
+
+    scan_bytes = _decode_scan(bytes(usage_scan), encoding)
     if is_streamed:
         usage = _extract_usage_from_bytes(scan_bytes)
     else:
@@ -333,41 +494,36 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         except json.JSONDecodeError:
             usage = {"input_tokens": 0, "output_tokens": 0}
 
-    row = build_ledger_row(
-        endpoint=request.path, method=request.method, model=model,
-        status=upstream_resp.status, duration_ms=duration_ms,
-        input_tokens=usage.get("input_tokens", 0),
-        output_tokens=usage.get("output_tokens", 0),
-        cache_read_tokens=0, cache_creation_tokens=0, streamed=is_streamed,
-        request_bytes=len(body_bytes), **measurements,
-        run_id=correlation["run_id"], issue_number=correlation["issue_number"],
-        intent=correlation["intent"], stage=correlation["stage"],
-    )
-    await _persist_ledger(row)
+    failure_class = ma.status_failure_class(upstream_resp.status) if local else None
+    await _persist_ledger(_row(upstream_resp.status, failure_class, usage=usage,
+                               streamed=is_streamed))
 
     if RAW_ARTIFACT_CAPTURE:
         seq = int(time.time() * 1000)
-        write_raw_artifact(
-            correlation["run_id"], seq,
-            {
-                "request_headers": redact_headers(dict(request.headers)),
-                "request_path": request.path,
-                "request_body": body_bytes.decode("utf-8", errors="replace"),
-                "response_status": upstream_resp.status,
-                "response_headers": redact_headers(dict(upstream_resp.headers)),
-                # scan_bytes holds the full forwarded response (decompressed locally when
-                # the upstream was gzip/deflate; the client got the raw wire bytes) —
-                # requirement 6 asks for request/response artifacts, so persist both
-                # sides, not request-only.
-                "response_body": scan_bytes.decode("utf-8", errors="replace"),
-            },
-        )
+        artifact = {
+            "request_headers": redact_headers(dict(request.headers)),
+            "request_path": request.path,
+            "request_body": body_bytes.decode("utf-8", errors="replace"),
+            "response_status": upstream_resp.status,
+            "response_headers": redact_headers(dict(upstream_resp.headers)),
+            # scan_bytes holds the full forwarded response (decompressed locally when
+            # the upstream was gzip/deflate; the client got the raw wire bytes) —
+            # requirement 6 asks for request/response artifacts, so persist both
+            # sides, not request-only.
+            "response_body": scan_bytes.decode("utf-8", errors="replace"),
+        }
+        if local:
+            # What actually left for the local endpoint: signed and correlated, redacted (#558).
+            artifact["forwarded_request_headers"] = redact_headers(fwd_headers)
+        write_raw_artifact(correlation["run_id"], seq, artifact)
     return response
 
 
-def create_app() -> web.Application:
+def create_app(destination=None) -> web.Application:
     app = web.Application()
     app["client_session"] = None
+    # The endpoint resolved once at startup (#558); None on the cloud-default path.
+    app["local_destination"] = destination
     app.router.add_route("*", "/{tail:.*}", handle_proxy)
 
     async def _startup(app):
@@ -390,8 +546,20 @@ def create_app() -> web.Application:
 
 
 def main() -> None:
+    destination = None
+    endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT")
+    if endpoint_id:
+        # Lazy: the default cloud path never loads the adapter or registry code (#558).
+        from factory_core.providers import model_adapter, model_endpoint
+        try:
+            destination = model_adapter.resolve_local_destination(
+                model_endpoint.staged_registry_dir(), endpoint_id)
+        except model_adapter.DestinationError as e:
+            for problem in e.problems:
+                print(f"factory-model-proxy: {problem}", file=sys.stderr)
+            sys.exit(1)
     sweep_raw_artifacts()
-    web.run_app(create_app(), port=PORT)
+    web.run_app(create_app(destination), port=PORT)
 
 
 if __name__ == "__main__":

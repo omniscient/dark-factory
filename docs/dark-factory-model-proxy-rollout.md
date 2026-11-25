@@ -116,6 +116,67 @@ time: leaving it set after the proxy is disabled breaks runs.
   (same `run_id`/`issue_number`, adjacent timestamps) rather than a per-row counter. Aggregate
   by `(run_id, model, close timestamp window)` to reconstruct retry behavior.
 
+## Local destination: supported and uncertified modes (#558)
+
+Spec: `docs/archive/2026-11-25-hybrid-runtime-adapter-design.md`. Nothing here is
+reachable in production yet. #557's `_NO_LOCAL_DISPATCH` still rejects every local selection,
+and the proxy service receives none of the variables a local selection needs. Delivering them
+is #587's. The adapter is built and hermetically tested so #587 can enable it.
+
+When `FACTORY_MODEL_ENDPOINT` is set, the proxy verifies the staged registry once at startup.
+It recomputes the SHA-256 against `FACTORY_MODEL_REGISTRY_SHA256` and never re-reads the
+registry afterwards. Any problem exits non-zero before the server binds. For a
+`hosting_location: local` entry:
+
+- **Destination.** Requests go only to the entry's verified `base_url`, never to the cloud
+  default. A `MODEL_PROXY_UPSTREAM` that differs from `base_url` is a startup failure.
+  Redirects are never followed: a 3xx is refused `502` `protocol_incompatibility`.
+- **Credentials.** Inbound `authorization`, `x-api-key` and `api-key` headers are dropped. The
+  outbound `x-api-key` comes only from the variable named by the entry's `secret_reference`.
+  Any cloud model credential in the proxy's environment is a startup failure.
+- **Accepted endpoint.** Only `POST /v1/messages` is accepted. A query string such as
+  `?beta=true` is allowed. Any other path or method, including `POST /v1/messages/count_tokens`,
+  is refused `400` `protocol_incompatibility` and never forwarded.
+- **Supported.** Single-turn and multi-turn requests, tool-result continuation turns, and
+  streaming (`text/event-stream`) and non-streaming responses.
+- **Refused** with `400` `protocol_incompatibility`, before any outbound call:
+  - forced tool choice: `tool_choice.type` of `any` or `tool`;
+  - deferred tools: any `tools` entry carrying `defer_loading`;
+  - structured output: `output_config` or `output_format` present.
+- **Model identity.** A `model` other than the entry's `model_identity.served_name`, including
+  any cloud model ID, is refused `403` `destination_policy_denial`. It is never remapped.
+- **Responses.** A non-streaming 2xx body that is not a JSON object is refused `502`
+  `protocol_incompatibility`. A streamed response that ends without a complete `message_stop`
+  frame is aborted. Every failure after the response has started streaming aborts the
+  connection without a clean end, so the client sees a truncated stream, never one that looks
+  complete. A local `502`/`503`/`504` (not ready) is forwarded unchanged and recorded as
+  `endpoint_unreachable`. Nothing is retried against this or any other endpoint. Only `gzip`
+  and `deflate` response encodings are decoded for these checks: a local endpoint answering
+  with another `Content-Encoding` (for example `br` or `zstd`) is treated as malformed.
+- **Timeouts.** The entry's `connect_seconds` and `total_seconds` are aiohttp `ClientTimeout`
+  bounds. `time_to_first_token_seconds` bounds the wait for the first body byte, and
+  `idle_seconds` bounds every later wait between chunks. Both share one rolling deadline.
+  aiohttp's `sock_read` is not used on this path: it also runs before the first byte, so it
+  would cap time-to-first-token at the idle bound.
+- **Failure classes** (contract §4.6 interim enumeration; #238's names supersede these):
+  `endpoint_unreachable`, `timeout_connect`, `timeout_time_to_first_token`, `timeout_idle`,
+  `timeout_total`, `cancellation`, `protocol_incompatibility`, `capability_evidence_invalid`
+  (startup only) and `destination_policy_denial`. Refusals use the error envelope
+  `{"error": {"type": "factory_model_adapter_refused", "message", "failure_class",
+  "endpoint_id"}}`.
+- **Telemetry.** Every ledger row carries `endpoint_id`, `hosting_location`, `role`,
+  `request_id`, `failure_class`, `correlation`, `adapter_id` and `payload_decision`, and its
+  `model` column is the backend model. On a refused request that column holds the model the
+  client asked for, because nothing was forwarded. The outbound `X-Factory-Correlation` header is
+  redacted from raw artifacts, which stay opt-in (`RAW_ARTIFACT_CAPTURE`) and bounded by
+  retention. The run record gains `model_dispatch`, and a local-routed run records
+  `cost_usd: null`, never 0.
+
+Everything else about a local runtime is **uncertified** until #561/#562 ship capability
+evidence. That includes Claude agent compatibility, subagents, prompt caching, extended
+thinking, and any field not listed above. Compatibility with `/v1/chat/completions` is not
+evidence of Claude agent compatibility, and this adapter does no protocol translation.
+
 ## Retention
 
 - Ledger: size-rotated at 100 MB, 3 rotations kept, oldest deleted — bounded regardless of

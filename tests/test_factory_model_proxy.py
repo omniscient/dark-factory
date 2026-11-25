@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -7,11 +8,31 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import model_proxy as mp
+from factory_core.providers import model_adapter as ma  # noqa: E402
+from factory_core.providers import model_endpoint as me  # noqa: E402
+
+SENTINEL = "sk-sentinel-local-gateway-token"
+SERVED = "qwen2.5-coder-32b"
+LOCAL_ENTRY = {
+    "id": "local-test", "hosting_location": "local", "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["local_only"],
+    "model_identity": {"served_name": SERVED, "digest_or_revision": "sha256:" + "ab" * 32},
+    "base_url": "http://127.0.0.1:9", "secret_reference": "LOCAL_GATEWAY_TOKEN",
+    "timeouts": {"connect_seconds": 2, "time_to_first_token_seconds": 2, "idle_seconds": 2,
+                 "total_seconds": 10},
+}
+CLOUD_ENTRY = {
+    "id": "cloud-test", "hosting_location": "cloud", "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["cloud_ok"],
+    "model_identity": {"served_name": "claude-opus-5-5", "digest_or_revision": "claude-opus-5-5"},
+    "secret_reference": "ANTHROPIC_API_KEY",
+}
 
 
 def test_redact_headers_strips_known_secrets():
@@ -451,3 +472,649 @@ def test_proxy_passes_gzip_response_through_untouched_and_still_ledgers_usage(
     assert row["status"] == 200
     assert row["gen_ai.usage.input_tokens"] == 42
     assert row["gen_ai.usage.output_tokens"] == 7
+
+
+# --- #558: ledger columns and redaction --------------------------------------------------
+
+def _bare_row(**kw):
+    return mp.build_ledger_row(
+        endpoint="/v1/messages", method="POST", model="m", status=200, duration_ms=1,
+        input_tokens=1, output_tokens=1, cache_read_tokens=0, cache_creation_tokens=0,
+        tool_count=0, tool_bytes=0, system_bytes=0, request_bytes=0, largest_tools=[],
+        streamed=False, **kw,
+    )
+
+
+def test_ledger_row_defaults_are_the_cloud_path_values():
+    row = _bare_row()
+    assert row["hosting_location"] == "cloud"
+    assert row["adapter_id"] == "model_proxy/anthropic-messages-passthrough" == mp.ADAPTER_ID
+    for key in ("endpoint_id", "role", "request_id", "failure_class", "payload_decision"):
+        assert row[key] is None
+    assert row["correlation"] == "unknown"
+
+
+def test_ledger_row_carries_the_local_columns():
+    decision = {"payload_class": "local_only", "endpoint_id": "local-test",
+                "secret_reference": "LOCAL_GATEWAY_TOKEN", "allow": True, "reason": "ok"}
+    row = _bare_row(endpoint_id="local-test", hosting_location="local", role="actor",
+                    request_id="r-1", failure_class="timeout_idle",
+                    correlation="inferred_pointer", payload_decision=decision)
+    assert (row["endpoint_id"], row["hosting_location"], row["role"], row["request_id"]) == (
+        "local-test", "local", "actor", "r-1")
+    assert row["failure_class"] == "timeout_idle" and row["correlation"] == "inferred_pointer"
+    assert row["payload_decision"] == decision
+
+
+def test_correlation_state_follows_the_pointer_file():
+    assert mp._correlation_state({"run_id": "unknown"}) == "unknown"
+    assert mp._correlation_state({"run_id": "run-9"}) == "inferred_pointer"
+
+
+def test_redact_headers_redacts_the_correlation_header():
+    redacted = mp.redact_headers({"X-Factory-Correlation": '{"run_id":"r"}', "X-Factory-Persona": "p"})
+    assert redacted == {"X-Factory-Correlation": "[REDACTED]", "X-Factory-Persona": "p"}
+
+
+# --- #558: proxy startup -----------------------------------------------------------------
+
+@pytest.fixture
+def startup(monkeypatch):
+    """main() with web.run_app() recorded instead of serving, and a clean selection env."""
+    served = []
+    monkeypatch.setattr(mp.web, "run_app", lambda app, **kw: served.append(app))
+    monkeypatch.setattr(mp, "sweep_raw_artifacts", lambda: None)
+    for name in (*me.CLOUD_CREDENTIALS, *me.TIER_ALIASES, "ANTHROPIC_BASE_URL",
+                 "MODEL_PROXY_UPSTREAM", "LOCAL_GATEWAY_TOKEN", "FACTORY_MODEL_ENDPOINT",
+                 "FACTORY_MODEL_REGISTRY_SHA256", "FACTORY_MODEL_REGISTRY_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    return served
+
+
+def _stage_registry(tmp_path, monkeypatch, endpoints):
+    reg = tmp_path / "staged"
+    reg.mkdir()
+    (reg / me.REGISTRY_FILE).write_text(
+        yaml.safe_dump({"schema_version": "1.0", "endpoints": endpoints}, sort_keys=False),
+        encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    return reg
+
+
+def _main_exit(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mp.main()
+    assert exc.value.code == 1
+    return capsys.readouterr().err
+
+
+def test_create_app_defaults_to_no_destination():
+    assert mp.create_app()["local_destination"] is None
+
+
+def test_unset_endpoint_serves_the_cloud_default_without_loading_the_adapter(startup, monkeypatch):
+    monkeypatch.delitem(sys.modules, "factory_core.providers.model_adapter", raising=False)
+    mp.main()
+    assert len(startup) == 1 and startup[0]["local_destination"] is None
+    assert "factory_core.providers.model_adapter" not in sys.modules
+
+
+def test_a_verified_cloud_entry_starts_with_its_destination(startup, tmp_path, monkeypatch):
+    _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY, LOCAL_ENTRY])
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    mp.main()
+    dest = startup[0]["local_destination"]
+    assert dest["endpoint_id"] == "cloud-test" and dest["hosting_location"] == "cloud"
+    assert dest["upstream"] is None
+
+
+def test_digest_mismatch_fails_startup_before_binding(startup, tmp_path, monkeypatch, capsys):
+    reg = _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY])
+    (reg / me.REGISTRY_FILE).write_text(
+        yaml.safe_dump({"schema_version": "1.0", "endpoints": [CLOUD_ENTRY, dict(CLOUD_ENTRY, id="cloud-extra")]}),
+        encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in _main_exit(capsys)
+    assert startup == []
+
+
+def test_unset_digest_fails_startup(startup, tmp_path, monkeypatch, capsys):
+    _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY])
+    monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256")
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in _main_exit(capsys)
+    assert startup == []
+
+
+def test_a_local_entry_still_fails_startup_on_no_local_dispatch(startup, tmp_path, monkeypatch, capsys):
+    _stage_registry(tmp_path, monkeypatch, [LOCAL_ENTRY])
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    assert "no local-eligible dispatch exists yet" in _main_exit(capsys)
+    assert startup == []
+
+
+@pytest.mark.parametrize("setup,needle", [
+    (lambda mpatch: mpatch.setenv("MODEL_PROXY_UPSTREAM", "https://api.anthropic.com"), "MODEL_PROXY_UPSTREAM"),
+    (lambda mpatch: mpatch.setenv("ANTHROPIC_API_KEY", "cloud-sentinel"), "ANTHROPIC_API_KEY"),
+    (lambda mpatch: mpatch.delenv("LOCAL_GATEWAY_TOKEN"), "LOCAL_GATEWAY_TOKEN"),
+])
+def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeypatch, capsys, setup, needle):
+    # A fixture entry stands in for the loader: a real local entry never passes it (#587).
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], copy.deepcopy(LOCAL_ENTRY)))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    setup(monkeypatch)
+    err = _main_exit(capsys)
+    assert needle in err and SENTINEL not in err and "cloud-sentinel" not in err
+    assert startup == []
+
+
+def test_payload_decision_allow_false_fails_startup(startup, monkeypatch, capsys):
+    entry = dict(copy.deepcopy(LOCAL_ENTRY), accepts_payload_classes=["cloud_ok"])
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], entry))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    assert "payload decision does not allow dispatch" in _main_exit(capsys)
+    assert startup == []
+
+
+# --- #558: local request path (hermetic; destination built from a fixture entry) ----------
+
+SSE_OK = (b'event: message_start\ndata: {"type":"message_start","message":{"usage":'
+          b'{"input_tokens":7,"output_tokens":1}}}\n\n'
+          b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":3}}\n\n'
+          b'event: message_stop\ndata: {"type":"message_stop"}\n\n')
+# Whatever the client sees once the proxy aborts a prepared response: never a clean EOF.
+_TRUNCATED = (aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError, aiohttp.ClientOSError)
+
+
+@pytest.fixture
+def local_env(tmp_path, monkeypatch):
+    for name in (*me.CLOUD_CREDENTIALS, "MODEL_PROXY_UPSTREAM"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+    return tmp_path
+
+
+def _url(server):
+    return f"http://{server.host}:{server.port}"
+
+
+def _local_destination(base_url, **timeouts):
+    """Req. 2: a local entry never comes back from load_verified_entry() while
+    _NO_LOCAL_DISPATCH stands, so tests build the destination from a fixture entry."""
+    entry = copy.deepcopy(LOCAL_ENTRY)
+    entry["base_url"] = base_url
+    entry["timeouts"].update(timeouts)
+    return ma.destination_from_entry(entry)
+
+
+async def _local_client(base_url, **timeouts):
+    client = TestClient(TestServer(mp.create_app(_local_destination(base_url, **timeouts))))
+    await client.start_server()
+    return client
+
+
+def _rows(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    return [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+
+
+def _recording(handler, calls):
+    async def wrapped(request):
+        calls.append({"method": request.method, "path_qs": request.path_qs,
+                      "headers": {k.lower(): v for k, v in request.headers.items()}})
+        return await handler(request)
+    return wrapped
+
+
+async def _ok_json(request):
+    return web.json_response({"type": "message", "usage": {"input_tokens": 10, "output_tokens": 5}})
+
+
+async def _ok_sse(request):
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(SSE_OK)
+    await resp.write_eof()
+    return resp
+
+
+def _local_scenario(local_env, monkeypatch, handler, send, *, timeouts=None, rows=1, until=None):
+    """Run send(client) against a local destination whose upstream is handler; return
+    (send's result, upstream calls, cloud-upstream calls). The cloud UPSTREAM is a second fake
+    server that must never be reached from a local-configured adapter (Req. 3). Waits for
+    `until` (default: `rows` ledger rows) before the servers close."""
+    calls, cloud_calls = [], []
+
+    async def scenario():
+        upstream = await _make_upstream(_recording(handler, calls))
+        cloud = await _make_upstream(_recording(_ok_json, cloud_calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(cloud))
+        client = await _local_client(_url(upstream), **(timeouts or {}))
+        try:
+            result = await send(client)
+            await _wait_for(until or (lambda: len(_rows(local_env)) >= rows))
+        finally:
+            await client.close()
+            await upstream.close()
+            await cloud.close()
+        return result
+
+    result = _run(scenario())
+    return result, calls, cloud_calls
+
+
+async def _post_json(client, path="/v1/messages", **body):
+    resp = await client.post(path, json={"model": SERVED, "messages": [], **body})
+    return resp.status, await resp.json()
+
+
+def test_local_request_reaches_only_the_entry_base_url_with_the_scoped_credential(local_env, monkeypatch):
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "messages": []}, headers={
+            "Authorization": "Bearer inbound", "x-api-key": "inbound-key", "api-key": "inbound-2",
+            "X-Factory-Correlation": '{"role":"checker"}'})
+        return resp.status, await resp.json()
+
+    (status, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, _ok_json, send)
+    assert status == 200 and body["usage"]["input_tokens"] == 10
+    assert cloud_calls == [] and len(calls) == 1
+    headers = calls[0]["headers"]
+    assert headers["x-api-key"] == SENTINEL
+    assert "authorization" not in headers and "api-key" not in headers
+    envelope = json.loads(headers["x-factory-correlation"])
+    assert envelope["role"] == "actor" and envelope["endpoint_id"] == "local-test"
+    row = _rows(local_env)[0]
+    assert (row["hosting_location"], row["endpoint_id"], row["role"]) == ("local", "local-test", "actor")
+    assert row["request_id"] == envelope["request_id"]
+    assert row["model"] == SERVED and row["adapter_id"] == mp.ADAPTER_ID
+    assert row["failure_class"] is None and row["correlation"] == "unknown"
+    assert row["payload_decision"] == {
+        "payload_class": "local_only", "endpoint_id": "local-test",
+        "secret_reference": "LOCAL_GATEWAY_TOKEN", "allow": True,
+        "reason": "effective class accepted by endpoint"}
+    assert SENTINEL not in (local_env / "ledger.jsonl").read_text()
+
+
+def test_local_correlation_uses_the_pointer_file(local_env, monkeypatch):
+    (local_env / "current-run.json").write_text(json.dumps(
+        {"run_id": "run-9", "issue_number": 558, "intent": "plan", "stage": "plan"}))
+    _, calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, _post_json)
+    envelope = json.loads(calls[0]["headers"]["x-factory-correlation"])
+    assert (envelope["run_id"], envelope["issue"], envelope["phase"]) == ("run-9", 558, "plan")
+    assert _rows(local_env)[0]["correlation"] == "inferred_pointer"
+
+
+def test_local_streaming_is_forwarded_and_ledgered(local_env, monkeypatch):
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "stream": True, "messages": []})
+        return await resp.read()
+
+    body, _, _ = _local_scenario(local_env, monkeypatch, _ok_sse, send)
+    assert body == SSE_OK
+    row = _rows(local_env)[0]
+    assert row["streamed"] is True and row["failure_class"] is None
+    assert row["gen_ai.usage.output_tokens"] == 3
+
+
+def test_local_raw_artifact_redacts_forwarded_credential_and_correlation(local_env, monkeypatch):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    artifacts = local_env / "artifacts"
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", artifacts)
+    _local_scenario(local_env, monkeypatch, _ok_json, _post_json,
+                    until=lambda: artifacts.exists() and any(artifacts.rglob("*.json")))
+    text = next(artifacts.rglob("*.json")).read_text()
+    persisted = json.loads(text)
+    forwarded = {k.lower(): v for k, v in persisted["forwarded_request_headers"].items()}
+    assert forwarded["x-api-key"] == "[REDACTED]"
+    assert forwarded["x-factory-correlation"] == "[REDACTED]"
+    assert SENTINEL not in text and '"request_id"' not in text
+
+
+def test_local_raw_artifacts_stay_opt_in(local_env, monkeypatch):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", False)
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", local_env / "artifacts")
+    _local_scenario(local_env, monkeypatch, _ok_json, _post_json)
+    assert not (local_env / "artifacts").exists()
+
+
+def test_local_redirect_is_refused_and_never_followed(local_env, monkeypatch):
+    async def redirect(request):
+        if request.path == "/elsewhere":
+            return web.json_response({"usage": {}})
+        raise web.HTTPFound("/elsewhere")
+
+    (status, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, redirect, _post_json)
+    assert status == 502
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+    assert [c["path_qs"] for c in calls] == ["/v1/messages"] and cloud_calls == []
+    assert _rows(local_env)[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "qwen2.5-coder-7b"])
+def test_local_model_identity_mismatch_is_refused_403(local_env, monkeypatch, model):
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": model, "messages": []})
+        return resp.status, await resp.json()
+
+    (status, body), calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, send)
+    assert status == 403 and calls == []
+    assert body["error"]["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    assert body["error"]["endpoint_id"] == "local-test"
+    row = _rows(local_env)[0]
+    assert row["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    # Req. 13: role is "actor" on every local row, refused ones included; nothing was signed.
+    assert row["role"] == "actor" and row["request_id"] is None
+
+
+@pytest.mark.parametrize("extra", [
+    {"tool_choice": {"type": "any"}},
+    {"tool_choice": {"type": "tool", "name": "Bash"}},
+    {"tools": [{"name": "Bash", "input_schema": {}, "defer_loading": True}]},
+    {"output_config": {"format": {"type": "json_schema", "schema": {}}}},
+    {"output_format": {"type": "json_schema", "schema": {}}},
+])
+def test_local_unsupported_modes_are_refused_before_any_outbound_call(local_env, monkeypatch, extra):
+    async def send(client):
+        return await _post_json(client, **extra)
+
+    (status, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, _ok_json, send)
+    assert status == 400 and calls == [] and cloud_calls == []
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+    row = _rows(local_env)[0]
+    assert row["status"] == 400 and row["role"] == "actor" and row["hosting_location"] == "local"
+
+
+@pytest.mark.parametrize("method,path", [("GET", "/v1/messages"), ("POST", "/v1/messages/count_tokens")])
+def test_local_unsupported_endpoints_are_refused(local_env, monkeypatch, method, path):
+    async def send(client):
+        resp = await client.request(method, path, json={"model": SERVED, "messages": []})
+        return resp.status, await resp.json()
+
+    (status, body), calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, send)
+    assert status == 400 and calls == []
+    assert body["error"]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+def test_local_query_string_on_messages_is_forwarded(local_env, monkeypatch):
+    async def send(client):
+        return await _post_json(client, path="/v1/messages?beta=true")
+
+    (status, _), calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, send)
+    assert status == 200 and calls[0]["path_qs"] == "/v1/messages?beta=true"
+
+
+def test_cloud_path_still_passes_every_endpoint_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+    calls = []
+
+    async def scenario():
+        upstream = await _make_upstream(_recording(_ok_json, calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app()))
+        await client.start_server()
+        for method, path in (("GET", "/v1/messages"), ("POST", "/v1/messages/count_tokens")):
+            resp = await client.request(method, path, json={"model": "claude-opus-5-5"},
+                                        headers={"X-Factory-Correlation": "client-value"})
+            assert resp.status == 200
+        await _wait_for(lambda: len(_rows(tmp_path)) >= 2)
+        await client.close()
+        await upstream.close()
+
+    _run(scenario())
+    assert [(c["method"], c["path_qs"]) for c in calls] == [
+        ("GET", "/v1/messages"), ("POST", "/v1/messages/count_tokens")]
+    # Default-path parity: forwarded headers are untouched — nothing added, nothing stripped.
+    assert calls[0]["headers"]["x-factory-correlation"] == "client-value"
+    row = _rows(tmp_path)[0]
+    assert row["hosting_location"] == "cloud" and row["adapter_id"] == mp.ADAPTER_ID
+    assert (row["endpoint_id"], row["role"], row["request_id"], row["failure_class"],
+            row["payload_decision"]) == (None, None, None, None, None)
+
+
+def test_local_endpoint_unreachable_fails_closed_without_retrying_elsewhere(local_env, monkeypatch):
+    cloud_calls = []
+
+    async def scenario():
+        cloud = await _make_upstream(_recording(_ok_json, cloud_calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(cloud))
+        client = await _local_client("http://127.0.0.1:1")  # nothing listens here
+        resp = await client.post("/v1/messages", json={"model": SERVED, "messages": []})
+        result = resp.status, await resp.json()
+        await _wait_for(lambda: len(_rows(local_env)) >= 1)
+        await client.close()
+        await cloud.close()
+        return result
+
+    status, body = _run(scenario())
+    assert status == 504 and cloud_calls == []
+    assert body["error"]["type"] == "factory_model_proxy_upstream_error"
+    assert body["error"]["failure_class"] == ma.ENDPOINT_UNREACHABLE
+    assert body["error"]["endpoint_id"] == "local-test"
+    assert SENTINEL not in json.dumps(body)
+
+
+def test_local_not_ready_upstream_is_forwarded_and_classified(local_env, monkeypatch):
+    async def not_ready(request):
+        return web.json_response({"error": {"type": "loading_model"}}, status=503)
+
+    (status, body), _, cloud_calls = _local_scenario(local_env, monkeypatch, not_ready, _post_json)
+    assert status == 503 and body["error"]["type"] == "loading_model" and cloud_calls == []
+    assert _rows(local_env)[0]["failure_class"] == ma.ENDPOINT_UNREACHABLE
+
+
+async def _expect_truncated(client, **body):
+    with pytest.raises(_TRUNCATED):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "messages": [], **body})
+        await resp.read()
+
+
+def test_local_partial_stream_is_aborted_not_completed(local_env, monkeypatch):
+    async def partial(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: content_block_delta\ndata: {"type":"content_bl')
+        await resp.write_eof()  # a clean upstream EOF after a partial frame
+        return resp
+
+    _local_scenario(local_env, monkeypatch, partial, lambda c: _expect_truncated(c, stream=True))
+    assert _rows(local_env)[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+def test_local_upstream_disconnect_mid_stream_is_aborted(local_env, monkeypatch):
+    async def dropped(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: message_start\ndata: {"type":"message_start"}\n\n')
+        request.transport.abort()
+        return resp
+
+    _local_scenario(local_env, monkeypatch, dropped, lambda c: _expect_truncated(c, stream=True))
+    assert _rows(local_env)[0]["failure_class"] == ma.ENDPOINT_UNREACHABLE
+
+
+def test_local_malformed_json_is_refused_with_a_real_error(local_env, monkeypatch):
+    async def malformed(request):
+        return web.Response(body=b'{"type":"message","usage":{"input_tok',
+                            content_type="application/json")
+
+    (status, body), _, _ = _local_scenario(local_env, monkeypatch, malformed, _post_json)
+    assert status == 502 and body["error"]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+async def _silent(request):
+    await asyncio.sleep(5)
+    return web.json_response({})
+
+
+def test_local_first_byte_after_idle_but_within_ttft_succeeds(local_env, monkeypatch):
+    # Before the first byte only time_to_first_token applies — idle (0.2s) must not cap it.
+    async def slow_first_byte(request):
+        await asyncio.sleep(0.5)
+        return web.json_response({"type": "message", "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    (status, _), _, _ = _local_scenario(
+        local_env, monkeypatch, slow_first_byte, _post_json,
+        timeouts={"idle_seconds": 0.2, "time_to_first_token_seconds": 3})
+    assert status == 200 and _rows(local_env)[0]["failure_class"] is None
+
+
+def test_local_first_chunk_just_inside_ttft_succeeds(local_env, monkeypatch):
+    # Spec Open Question: the boundary case — the first chunk arrives just under the bound.
+    async def near_bound(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await asyncio.sleep(0.8)
+        await resp.write(SSE_OK)
+        await resp.write_eof()
+        return resp
+
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "stream": True, "messages": []})
+        return await resp.read()
+
+    body, _, _ = _local_scenario(local_env, monkeypatch, near_bound, send,
+                                 timeouts={"idle_seconds": 0.2, "time_to_first_token_seconds": 1.5})
+    assert body == SSE_OK and _rows(local_env)[0]["failure_class"] is None
+
+
+def test_local_first_byte_past_ttft_is_its_own_class(local_env, monkeypatch):
+    (status, body), _, _ = _local_scenario(
+        local_env, monkeypatch, _silent, _post_json,
+        timeouts={"idle_seconds": 3, "time_to_first_token_seconds": 0.2})
+    assert status == 504 and body["error"]["failure_class"] == ma.TIMEOUT_TIME_TO_FIRST_TOKEN
+
+
+def test_local_first_event_past_ttft_after_headers_aborts(local_env, monkeypatch):
+    async def headers_then_silence(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await asyncio.sleep(5)
+        return resp
+
+    _local_scenario(local_env, monkeypatch, headers_then_silence,
+                    lambda c: _expect_truncated(c, stream=True),
+                    timeouts={"idle_seconds": 3, "time_to_first_token_seconds": 0.2})
+    assert _rows(local_env)[0]["failure_class"] == ma.TIMEOUT_TIME_TO_FIRST_TOKEN
+
+
+def test_local_stall_after_the_first_chunk_hits_the_idle_bound(local_env, monkeypatch):
+    async def stall(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: message_start\ndata: {"type":"message_start"}\n\n')
+        await asyncio.sleep(5)
+        return resp
+
+    _local_scenario(local_env, monkeypatch, stall, lambda c: _expect_truncated(c, stream=True),
+                    timeouts={"idle_seconds": 0.2, "time_to_first_token_seconds": 3})
+    assert _rows(local_env)[0]["failure_class"] == ma.TIMEOUT_IDLE
+
+
+def test_local_slow_but_complete_stream_finishes_within_total(local_env, monkeypatch):
+    async def slow(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        for frame in SSE_OK.split(b"\n\n")[:-1]:
+            await asyncio.sleep(0.1)
+            await resp.write(frame + b"\n\n")
+        await resp.write_eof()
+        return resp
+
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "stream": True, "messages": []})
+        return await resp.read()
+
+    body, _, _ = _local_scenario(local_env, monkeypatch, slow, send,
+                                 timeouts={"idle_seconds": 0.5, "time_to_first_token_seconds": 0.5,
+                                           "total_seconds": 5})
+    assert body == SSE_OK and _rows(local_env)[0]["failure_class"] is None
+
+
+def _spy_on_handler(monkeypatch):
+    outcomes = []
+    real = mp.handle_proxy
+
+    async def spy(request):
+        try:
+            result = await real(request)
+        except asyncio.CancelledError:
+            outcomes.append("cancelled")
+            raise
+        outcomes.append("returned")
+        return result
+
+    monkeypatch.setattr(mp, "handle_proxy", spy)  # create_app() routes to the module global
+    return outcomes
+
+
+def test_local_cancellation_writes_its_row_and_re_raises(local_env, monkeypatch):
+    outcomes = _spy_on_handler(monkeypatch)
+
+    async def first_then_wait(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b'event: message_start\ndata: {"type":"message_start"}\n\n')
+        await asyncio.sleep(5)
+        return resp
+
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": SERVED, "stream": True, "messages": []})
+        await resp.content.readany()
+        resp.close()  # the client goes away mid-stream; TestServer cancels the handler task
+
+    _local_scenario(local_env, monkeypatch, first_then_wait, send)
+    assert _rows(local_env)[0]["failure_class"] == ma.CANCELLATION
+    assert outcomes == ["cancelled"]
+
+
+def test_cloud_mid_stream_failure_now_aborts_instead_of_completing(tmp_path, monkeypatch):
+    # Shared failure path (Req. 12): the default path no longer returns a JSON body after
+    # prepare(); its row keeps today's 504 and null failure_class (no endpoint selected).
+    monkeypatch.setattr(mp, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", tmp_path / "current-run.json")
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda r: None)
+
+    async def dropped(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b"event: message_start\n")
+        request.transport.abort()
+        return resp
+
+    async def scenario():
+        upstream = await _make_upstream(dropped)
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app()))
+        await client.start_server()
+        with pytest.raises(_TRUNCATED):
+            resp = await client.post("/v1/messages", json={"model": "m"})
+            await resp.read()
+        await _wait_for(lambda: len(_rows(tmp_path)) >= 1)
+        await client.close()
+        await upstream.close()
+
+    _run(scenario())
+    row = _rows(tmp_path)[0]
+    assert row["status"] == 504 and row["failure_class"] is None
+
+
+def test_rollout_doc_lists_exactly_the_supported_and_refused_local_modes():
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "dark-factory-model-proxy-rollout.md"
+           ).read_text(encoding="utf-8")
+    section = doc.split("## Local destination: supported and uncertified modes (#558)", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    for needle in (f"`{ma.SUPPORTED_METHOD} {ma.SUPPORTED_PATH}`", "count_tokens",
+                   *(f"`{c}`" for c in ma.FORCED_TOOL_CHOICES), f"`{ma.DEFERRED_TOOL_FIELD}`",
+                   *(f"`{f}`" for f in ma.STRUCTURED_OUTPUT_FIELDS), "served_name",
+                   "uncertified", "/v1/chat/completions", *ma.FAILURE_CLASSES):
+        assert needle in section, needle
