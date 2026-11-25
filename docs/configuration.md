@@ -547,11 +547,26 @@ cloud model credential is set in the container, if `ANTHROPIC_BASE_URL` or any o
 `ANTHROPIC_DEFAULT_*_MODEL` aliases does not match the entry, if its capability evidence is
 not `tested`, and in every case until #587 ships a local-eligible dispatch.
 
+Known gap, a precondition of #587 (#594): that cloud-credential check covers only the static
+credentials in `CLOUD_CREDENTIALS` (`scripts/factory_core/providers/model_endpoint.py`). It does
+not yet see three ways Claude Code reaches a cloud model without `ANTHROPIC_BASE_URL`:
+`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`; the AWS alternate-auth signals
+`_AWS_ALT_AUTH_SIGNALS` in `scripts/factory_core/providers/model.py` already enumerates for the
+Bedrock preflight (`AWS_PROFILE`, `AWS_SESSION_TOKEN`, role and container credentials); and GCP
+application-default credentials (compare `_GCP_ALT_AUTH_SIGNALS` in the same file). This is
+inert today, because every local selection already fails, but #587 must widen the guard
+before the first local-eligible dispatch, mirroring `_AWS_ALT_AUTH_SIGNALS` rather than
+copying it, with its own tests. #587 must also decide whether a capability-evidence record
+may carry an empty `invalidated_by`: one is accepted today, and then only
+`fixture_suite_version` is compared.
+
 Inspect the effective configuration without printing secret values:
 `python3 /opt/dark-factory/scripts/factory_core/providers/cli.py model-endpoints show --from-source`
 in the scheduler container (the read-only mount), or `model-endpoints show` in a run container
 (the staged copy, checked against its digest). Each `secret_reference` prints as its name and
-whether it is set. With an endpoint selected, the README's offline check
+whether it is set. Only known keys are printed: a newer-minor registry's tolerated unknown keys
+(at the entry level, in `model_identity` or in `timeouts`) are left out, and the entry shows
+only their count as `unknown_keys_omitted` (#594). With an endpoint selected, the README's offline check
 (`providers/cli.py preflight` with `--env-file deploy/instance.env`) fails on the missing
 per-dispatch digest by design. Check offline with `preflight --side scheduler` and the
 registry directory mounted at `/etc/dark-factory/model-registry`
