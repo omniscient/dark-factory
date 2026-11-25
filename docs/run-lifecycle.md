@@ -1116,10 +1116,12 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    dir for the scheduler. Classes, in check order: `environmental:delivery_failure` (run
    shorter than `DELIVERY_FAILURE_MAX_SECONDS`, no commits, clean tree, no phase artifact),
    `environmental:rate_limit`, `substantive:verdict_missing` (either of the two
-   missing-verdict stderr lines of `scripts/verdict_gate_check.sh`, ranked above the
-   preview noise every self-target run leaves, #373), `environmental:preview_infra`, and
+   missing-verdict stderr lines of `scripts/verdict_gate_check.sh`, the quiet-branch one
+   whenever its status is missing or unparseable rather than a real verdict token, #591;
+   ranked above the preview noise every self-target run leaves, #373),
+   `environmental:preview_infra`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:55-89`).
+   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:70-104`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see

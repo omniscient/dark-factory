@@ -67,8 +67,8 @@ fi
 
 # Wording coupled to scripts/factory_core/error_signature.py's _VERDICT_MISSING_RE (#373):
 # entrypoint.sh's failure classifier signs the run substantive:verdict_missing from this
-# exact stderr line, and from the quiet-branch echo above when it prints STATUS=missing.
-# Rewording either one fails tests/test_factory_core_error_signature.py.
+# exact stderr line, and from the quiet-branch echo above when its STATUS is missing or
+# unparseable (#591). Rewording either one fails tests/test_factory_core_error_signature.py.
 echo "verdict_gate_check.sh: ${GATE_LABEL} verdict missing/unparseable for issue #${ISSUE_NUM} and no needs-discussion label — true silent death, posting failure comment." >&2
 _FOOTER=$(python3 "${SCRIPT_DIR}/factory_core/cli.py" marker factory 2>/dev/null || echo "")
 _FAIL_BODY="<!-- df-push-gate-failure -->
