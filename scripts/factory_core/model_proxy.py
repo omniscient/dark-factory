@@ -315,9 +315,16 @@ def _decode_scan(scan: bytes, encoding: str) -> bytes:
     if encoding in ("gzip", "deflate"):
         try:
             return gzip.decompress(scan) if encoding == "gzip" else zlib.decompress(scan)
-        except (OSError, zlib.error):
+        except (OSError, EOFError, zlib.error):  # EOFError: a truncated/partial gzip member
             pass  # ledger falls back to zero-usage rather than failing the request
     return scan
+
+
+# The streamed early model check re-parses the buffer on every chunk until it finds the model
+# field. message_start is the stream's first event, so past this many buffered bytes it stops
+# (a model-less or undecodable stream would otherwise cost O(n^2)); the end-of-stream check
+# still runs.
+_EARLY_MODEL_SCAN_BYTES = 16 * 1024
 
 
 async def _write_downstream(response: web.StreamResponse, chunk: bytes) -> None:
@@ -469,7 +476,8 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     model_confirmed = False
                     async for chunk in upstream_resp.content.iter_any():
                         _got_chunk()
-                        if local and not model_confirmed:
+                        if (local and not model_confirmed
+                                and len(usage_scan) < _EARLY_MODEL_SCAN_BYTES):
                             # #559: check as soon as the message_start frame is buffered —
                             # before this chunk (which carries it) is forwarded — so a
                             # fallback/swapped model is refused right away, not after

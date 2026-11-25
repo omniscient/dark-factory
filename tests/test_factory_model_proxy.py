@@ -1392,7 +1392,83 @@ def test_streamed_model_mismatch_is_refused_before_the_rest_of_the_stream_is_for
     assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
 
 
-CLOUD_SENTINEL = "sk-ant-sentinel-cloud-checker-key"
+def _sse_in_chunks(chunks, **headers):
+    """An upstream that writes each of `chunks` as its own network chunk."""
+    async def handler(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", **headers})
+        await resp.prepare(request)
+        for chunk in chunks:
+            await resp.write(chunk)
+            await asyncio.sleep(0.005)  # let the proxy read it before the next one is written
+        await resp.write_eof()
+        return resp
+    return handler
+
+
+def _gzip_halves(payload):
+    import gzip as _gzip
+    compressed = _gzip.compress(payload)
+    return [compressed[:len(compressed) // 2], compressed[len(compressed) // 2:]]
+
+
+def test_gzip_stream_split_across_chunks_is_forwarded_and_ledgered(local_env, monkeypatch):
+    # Operator review of PR #617: the early model check decodes a partial buffer, and
+    # gzip.decompress raises EOFError on a truncated member — which _decode_scan did not catch,
+    # so a gzip event stream arriving in more than one chunk crashed the handler with no row.
+    halves = _gzip_halves(SSE_OK)
+
+    async def send(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        return resp.status, await resp.read()
+
+    (status, body), _, _ = _local_scenario(
+        local_env, monkeypatch, _sse_in_chunks(halves, **{"Content-Encoding": "gzip"}), send)
+    assert status == 200 and body == SSE_OK  # clean EOF (the test client decodes the gzip)
+    row = _rows(local_env)[0]
+    assert row["failure_class"] is None and row["gen_ai.usage.input_tokens"] == 7
+
+
+def test_gzip_stream_model_mismatch_is_still_refused_at_end_of_stream(local_env, monkeypatch):
+    # A partial gzip buffer cannot be decoded, so the early check cannot see the model; the
+    # full-body check after the last chunk must still refuse it (no clean EOF, ledgered).
+    halves = _gzip_halves(SSE_WRONG_MODEL)
+    _local_scenario(local_env, monkeypatch,
+                    _sse_in_chunks(halves, **{"Content-Encoding": "gzip"}),
+                    lambda c: _expect_truncated(c, stream=True))
+    assert _rows(local_env)[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+def test_early_model_check_stops_rescanning_past_its_byte_bound(local_env, monkeypatch):
+    # Operator review of PR #617: a stream whose message_start carries no model field (SSE_OK
+    # has none) was re-parsed from byte 0 on every chunk — quadratic in stream length. Past
+    # _EARLY_MODEL_SCAN_BYTES the proxy stops and relies on the end-of-stream check.
+    monkeypatch.setattr(mp, "_EARLY_MODEL_SCAN_BYTES", 2048)
+    frames = SSE_OK.split(b"\n\n")
+    delta = b'event: ping\ndata: {"type":"ping","pad":"' + b"x" * 980 + b'"}'
+    chunks = [f + b"\n\n" for f in [frames[0]] + [delta] * 30 + frames[1:3]]
+    sizes = []
+    real = ma.check_response_model
+
+    def counting(dest, data, streamed):
+        sizes.append(len(data))
+        return real(dest, data, streamed)
+
+    monkeypatch.setattr(ma, "check_response_model", counting)
+
+    async def send(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        return resp.status, await resp.read()
+
+    (status, body), _, _ = _local_scenario(local_env, monkeypatch, _sse_in_chunks(chunks), send)
+    assert status == 200 and body == b"".join(chunks)
+    # At most one early check straddles the bound, plus the one end-of-stream check.
+    assert len([s for s in sizes if s > 2048 + 1024]) <= 2, sizes
+    assert sizes[-1] == len(body)  # the end-of-stream check still sees the whole stream
+
+
+CLOUD_SENTINEL ="sk-ant-sentinel-cloud-checker-key"
 
 
 def test_ac1_local_worker_and_cloud_checker_dispatches_are_isolated_and_attributed(
