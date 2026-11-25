@@ -220,3 +220,41 @@ def test_model_identity_mismatch_is_refused_403_never_remapped(monkeypatch, mode
                        _body(model=model))
     assert (refusal.status, refusal.failure_class) == (403, ma.DESTINATION_POLICY_DENIAL)
     assert "never remapped" in refusal.message
+
+
+# --- Task 4: headers, correlation, timeouts --------------------------------------------------
+
+def test_strip_and_sign_drops_every_inbound_credential_and_correlation(monkeypatch):
+    dest = _dest(monkeypatch)
+    out = ma.strip_and_sign_headers({
+        "Host": "proxy", "Authorization": "Bearer inbound", "X-Api-Key": "inbound-key",
+        "api-key": "inbound-2", "X-Factory-Correlation": '{"role":"checker"}',
+        "Content-Type": "application/json", "anthropic-version": "2023-06-01",
+    }, dest)
+    assert out == {"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+                   "x-api-key": SENTINEL}
+
+
+def test_strip_and_sign_refuses_when_the_secret_is_gone(monkeypatch):
+    dest = _dest(monkeypatch)
+    monkeypatch.delenv("LOCAL_GATEWAY_TOKEN")
+    refusal = _refusal(ma.strip_and_sign_headers, {"x-api-key": "inbound"}, dest)
+    assert (refusal.status, refusal.failure_class) == (403, ma.DESTINATION_POLICY_DENIAL)
+    assert "inbound" not in refusal.message
+
+
+def test_build_correlation_envelope(monkeypatch):
+    dest = _dest(monkeypatch)
+    run = {"run_id": "run-9", "issue_number": 558, "intent": "plan", "stage": "plan"}
+    header, envelope = ma.build_correlation(dest, run)
+    assert json.loads(header) == envelope
+    assert set(envelope) == {"run_id", "issue", "phase", "role", "endpoint_id", "request_id"}
+    assert envelope["run_id"] == "run-9" and envelope["issue"] == 558
+    assert envelope["phase"] == "plan" and envelope["role"] == "actor"
+    assert envelope["endpoint_id"] == "local-test"
+    assert ma.build_correlation(dest, run)[1]["request_id"] != envelope["request_id"]
+
+
+def test_resolve_timeout_maps_the_entry_bounds(monkeypatch):
+    assert ma.resolve_timeout(_dest(monkeypatch)) == {
+        "connect": 10, "time_to_first_token": 120, "idle": 60, "total": 1800}

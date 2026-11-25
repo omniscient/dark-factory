@@ -165,3 +165,44 @@ def check_model_identity(dest, model) -> None:
         raise AdapterRefusal(403, DESTINATION_POLICY_DENIAL,
                              f"model {model!r} is not endpoint '{dest['endpoint_id']}' served "
                              f"model {dest['served_name']!r}; models are never remapped")
+
+
+def strip_and_sign_headers(headers, dest, environ=None) -> dict:
+    """Credential scope per request (spec Req. 4, 13): drop host, every inbound auth header and
+    any inbound correlation header, then sign from the entry's secret_reference only."""
+    env = os.environ if environ is None else environ
+    dropped = {"host", CORRELATION_HEADER.lower(), *INBOUND_AUTH_HEADERS}
+    out = {k: v for k, v in headers.items() if k.lower() not in dropped}
+    secret = env.get(dest["secret_reference"])
+    if not secret:
+        raise AdapterRefusal(403, DESTINATION_POLICY_DENIAL,
+                             f"{dest['secret_reference']} (secret_reference of endpoint "
+                             f"'{dest['endpoint_id']}') is not set")
+    out[LOCAL_AUTH_HEADER] = secret
+    return out
+
+
+def build_correlation(dest, run) -> tuple[str, dict]:
+    """§4.4's envelope from read_current_run()'s pointer fields: (header value, envelope)."""
+    envelope = {
+        "run_id": run["run_id"],
+        "issue": run["issue_number"],
+        "phase": run["stage"],
+        "role": LOCAL_ROLE,
+        "endpoint_id": dest["endpoint_id"],
+        "request_id": str(uuid.uuid4()),
+    }
+    return json.dumps(envelope, separators=(",", ":")), envelope
+
+
+def resolve_timeout(dest) -> dict:
+    """§4.6 bounds. connect/total are aiohttp.ClientTimeout fields; time_to_first_token and
+    idle share one rolling deadline in model_proxy — aiohttp's sock_read also runs before the
+    first byte, so it cannot carry idle without capping time_to_first_token at idle."""
+    t = dest["timeouts"]
+    return {
+        "connect": t["connect_seconds"],
+        "time_to_first_token": t["time_to_first_token_seconds"],
+        "idle": t["idle_seconds"],
+        "total": t["total_seconds"],
+    }
