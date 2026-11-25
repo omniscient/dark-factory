@@ -1449,3 +1449,107 @@ def test_ac1_local_worker_and_cloud_checker_dispatches_are_isolated_and_attribut
             copy.deepcopy(LOCAL_ENTRY),
             environ={"LOCAL_GATEWAY_TOKEN": SENTINEL, "ANTHROPIC_API_KEY": CLOUD_SENTINEL})
     assert "ANTHROPIC_API_KEY" in str(exc.value) and CLOUD_SENTINEL not in str(exc.value)
+
+
+async def _malformed_worker_json(request):
+    return web.Response(body=b'{"type":"message","usage":{"input_tok',
+                        content_type="application/json")
+
+
+async def _malformed_worker_stream(request):
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(b'event: content_block_delta\ndata: {"type":"content_bl')
+    await resp.write_eof()  # a clean upstream EOF after a partial frame
+    return resp
+
+
+def _worker_dispatch(local_env, monkeypatch, handler, *, stream=False, base_url=None):
+    """One real local-worker request (run-worker, issue 559); its model_dispatch result."""
+    _pointer(local_env / "current-run.json", "run-worker")
+
+    async def scenario():
+        upstream = await _make_upstream(handler)
+        client = await _local_client(base_url or _url(upstream))
+        try:
+            try:
+                resp = await client.post("/v1/messages",
+                                         json={"model": SERVED, "stream": stream, "messages": []})
+                await resp.read()
+            except _TRUNCATED:
+                pass  # an aborted stream is the client's view of a refused one
+            await _wait_for(lambda: len(_rows(local_env)) >= 1)
+        finally:
+            await client.close()
+            await upstream.close()
+
+    _run(scenario())
+    rows, _ = rr._read_ledger_rows("run-worker", local_env / "ledger.jsonl")
+    return rr._compute_model_dispatch(rows)["result"]
+
+
+def _checker_dispatch(local_env, monkeypatch, destination, *, role="checker", pointer=True):
+    """One real checker request; (its row's issue_number, its model_dispatch result)."""
+    path = local_env / "checker-run.json"
+    if pointer:
+        _pointer(path, "run-checker", role=role)
+    before = len(_rows(local_env))
+
+    async def scenario():
+        upstream = await _make_upstream(_ok_json)
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app(destination, current_run_path=path)))
+        await client.start_server()
+        try:
+            await _post_cloud(client)
+            await _wait_for(lambda: len(_rows(local_env)) > before)
+        finally:
+            await client.close()
+            await upstream.close()
+
+    _run(scenario())
+    rows, _ = rr._read_ledger_rows("run-checker" if pointer else "unknown",
+                                   local_env / "ledger.jsonl")
+    return rows[0]["issue_number"], rr._compute_model_dispatch(rows)["result"]
+
+
+@pytest.mark.parametrize("worker_kwargs,failure_class", [
+    pytest.param({"handler": _ok_json, "base_url": "http://127.0.0.1:1"},
+                 ma.ENDPOINT_UNREACHABLE, id="local-endpoint-failure"),
+    pytest.param({"handler": _malformed_worker_json}, ma.PROTOCOL_INCOMPATIBILITY,
+                 id="malformed-worker-output-json"),
+    pytest.param({"handler": _malformed_worker_stream, "stream": True},
+                 ma.PROTOCOL_INCOMPATIBILITY, id="malformed-worker-output-stream"),
+    pytest.param({"handler": _answering_as("claude-opus-5-5")}, ma.PROTOCOL_INCOMPATIBILITY,
+                 id="worker-answered-as-another-model"),
+])
+def test_ac5_failed_or_malformed_worker_output_never_proves_independence(
+        local_env, monkeypatch, worker_kwargs, failure_class):
+    worker = _worker_dispatch(local_env, monkeypatch, **worker_kwargs)
+    assert worker["outcome"] == "failed" and failure_class in worker["failure_classes_seen"]
+    issue, checker = _checker_dispatch(local_env, monkeypatch, _cloud_destination())
+    assert checker["outcome"] == "ok" and checker["role"] == "checker"
+    assert ri.check_verdict_independence(
+        worker, checker, actor_issue=ISSUE, producer_issue=issue, verdict_issue=ISSUE) == (
+        False, "dispatch_outcome_not_ok")
+
+
+@pytest.mark.parametrize("destination,kwargs,reason", [
+    # A default cloud run (no endpoint selected) records endpoint_id None and role None.
+    pytest.param(None, {}, "producer_endpoint_missing", id="missing-checker-endpoint"),
+    # No pointer: correlation "unknown", issue 0 — never the proof (Invariant 3, §4.4).
+    pytest.param("cloud", {"pointer": False}, "unit_of_work_mismatch", id="no-pointer"),
+    # Endpoint selected but no declared role: selection alone never makes a checker.
+    pytest.param("cloud", {"role": None}, "producer_role_not_checker", id="undeclared-role"),
+])
+def test_ac5_a_checker_dispatch_without_a_provable_identity_is_void(
+        local_env, monkeypatch, destination, kwargs, reason):
+    worker = _worker_dispatch(local_env, monkeypatch, _ok_json)
+    assert worker["outcome"] == "ok" and worker["role"] == "actor"
+    dest = _cloud_destination() if destination == "cloud" else None
+    issue, checker = _checker_dispatch(local_env, monkeypatch, dest, **kwargs)
+    if kwargs.get("pointer") is False:
+        assert checker["correlation"] == "unknown"
+    assert ri.check_verdict_independence(
+        worker, checker, actor_issue=ISSUE, producer_issue=issue, verdict_issue=ISSUE) == (
+        False, reason)
