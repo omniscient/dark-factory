@@ -969,7 +969,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:610-631
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:984-1201`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:984-1223`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
    validate, conformance and code-review nodes write the first three into Archon's
    per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
@@ -978,8 +978,12 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:610-631
    own directory (#573); `conflict_resolution.md` is read from the entrypoint's directory
    only. The scoring-neutral `gate_artifact_lookup` field records the workflow run id,
    whether its directory exists, and which of the three were read from it (`found`),
-   present but too old (`stale`) or read from the entrypoint's directory (`own_dir`). A
-   completed `fix`/`continue` run with no gate stage prints
+   present but too old (`stale`) or read from the entrypoint's directory (`own_dir`).
+   A gate file that exists but cannot be read (not valid UTF-8, a directory with the
+   name, ...) is skipped and named in `unreadable` — never counted as `found`/`own_dir`
+   evidence — with one `factory.run_record.gate_artifact_unreadable` health event; the
+   run record is still written (#583). A completed `fix`/`continue` run with no gate
+   stage prints
    `WARNING: run-record: no gate-stage artifacts found` to stderr. Assemble also adds
    per-node token and cost figures from the Archon cost JSON, classifies each node's
    `cost_capture` (a `command:`/`prompt:` node reported with zero usage is `missing`,
