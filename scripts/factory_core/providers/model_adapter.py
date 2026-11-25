@@ -206,3 +206,69 @@ def resolve_timeout(dest) -> dict:
         "idle": t["idle_seconds"],
         "total": t["total_seconds"],
     }
+
+
+def check_response_status(status) -> None:
+    """Redirects are never followed (allow_redirects=False); a 3xx is refused (spec Req. 3)."""
+    if 300 <= status < 400:
+        raise AdapterRefusal(502, PROTOCOL_INCOMPATIBILITY,
+                             f"local endpoint answered {status} (a redirect); redirects are "
+                             "never followed")
+
+
+def status_failure_class(status):
+    """A not-ready upstream status is endpoint_unreachable; any other status has no class."""
+    return ENDPOINT_UNREACHABLE if status in NOT_READY_STATUSES else None
+
+
+def check_json_body(status, data) -> None:
+    """A 2xx non-streaming local body must be a JSON object (usage parsing requires it)."""
+    if not 200 <= status < 300:
+        return
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise AdapterRefusal(502, PROTOCOL_INCOMPATIBILITY,
+                             "local endpoint returned a non-streaming 2xx body that is not a "
+                             "JSON object")
+
+
+def check_sse_complete(status, data) -> None:
+    """A 2xx local event stream must end on a complete frame and carry message_stop."""
+    if not 200 <= status < 300:
+        return
+    if not data.endswith((b"\n\n", b"\r\n\r\n")) or not _MESSAGE_STOP_RE.search(data):
+        raise AdapterRefusal(502, PROTOCOL_INCOMPATIBILITY,
+                             "local endpoint's event stream ended without a complete "
+                             "message_stop frame")
+
+
+def classify_failure(exc, *, ttft_expired=False, idle_expired=False,
+                     downstream_gone=False) -> str:
+    """One §4.6 interim class per handled failure — never unclassified, never retried.
+
+    ttft_expired/idle_expired: the proxy's rolling deadline fired before/after the first body
+    byte. aiohttp's connect/sock_read timeouts are matched by class name so this module stays
+    aiohttp-free; any other TimeoutError is aiohttp's ClientTimeout.total bound. Edge cases
+    needing unusual bounds: aiohttp reports a total-bound expiry during connect as
+    ConnectionTimeoutError (timeout_connect), and with time_to_first_token below connect a
+    slow connect is timeout_time_to_first_token.
+    """
+    if isinstance(exc, AdapterRefusal):
+        return exc.failure_class
+    if isinstance(exc, asyncio.CancelledError) or downstream_gone:
+        return CANCELLATION
+    if ttft_expired:
+        return TIMEOUT_TIME_TO_FIRST_TOKEN
+    if idle_expired:
+        return TIMEOUT_IDLE
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if "ConnectionTimeoutError" in names:
+        return TIMEOUT_CONNECT
+    if "SocketTimeoutError" in names:
+        return TIMEOUT_IDLE
+    if isinstance(exc, TimeoutError):
+        return TIMEOUT_TOTAL
+    return ENDPOINT_UNREACHABLE

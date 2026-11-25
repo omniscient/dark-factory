@@ -258,3 +258,66 @@ def test_build_correlation_envelope(monkeypatch):
 def test_resolve_timeout_maps_the_entry_bounds(monkeypatch):
     assert ma.resolve_timeout(_dest(monkeypatch)) == {
         "connect": 10, "time_to_first_token": 120, "idle": 60, "total": 1800}
+
+
+# --- Task 5: response checks, failure classification --------------------------------------
+
+SSE_OK = (b'event: message_start\ndata: {"type":"message_start"}\n\n'
+          b'event: message_stop\ndata: {"type":"message_stop"}\n\n')
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_a_redirect_is_protocol_incompatibility(status):
+    refusal = _refusal(ma.check_response_status, status)
+    assert (refusal.status, refusal.failure_class) == (502, ma.PROTOCOL_INCOMPATIBILITY)
+
+
+@pytest.mark.parametrize("status", [200, 400, 429, 500])
+def test_non_redirect_statuses_pass_the_status_check(status):
+    ma.check_response_status(status)
+
+
+def test_not_ready_statuses_are_endpoint_unreachable():
+    assert [ma.status_failure_class(s) for s in (200, 400, 500, 502, 503, 504)] == [
+        None, None, None, ma.ENDPOINT_UNREACHABLE, ma.ENDPOINT_UNREACHABLE, ma.ENDPOINT_UNREACHABLE]
+
+
+def test_json_body_check():
+    ma.check_json_body(200, b'{"type":"message"}')
+    ma.check_json_body(400, b"upstream says no")  # a non-2xx body is forwarded as-is
+    for bad in (b'{"type":"mess', b"[1]", b""):
+        refusal = _refusal(ma.check_json_body, 200, bad)
+        assert (refusal.status, refusal.failure_class) == (502, ma.PROTOCOL_INCOMPATIBILITY)
+
+
+def test_sse_completeness_check():
+    ma.check_sse_complete(200, SSE_OK)
+    ma.check_sse_complete(200, SSE_OK.replace(b"\n", b"\r\n"))
+    ma.check_sse_complete(500, b"partial")  # only a 2xx stream must be complete
+    for bad in (SSE_OK[:-1], b'event: message_start\ndata: {"type":"message_start"}\n\n', b""):
+        refusal = _refusal(ma.check_sse_complete, 200, bad)
+        assert (refusal.status, refusal.failure_class) == (502, ma.PROTOCOL_INCOMPATIBILITY)
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (aiohttp.ConnectionTimeoutError(), ma.TIMEOUT_CONNECT),
+    (aiohttp.SocketTimeoutError(), ma.TIMEOUT_IDLE),
+    (TimeoutError(), ma.TIMEOUT_TOTAL),
+    (aiohttp.ClientPayloadError("Response payload is not completed"), ma.ENDPOINT_UNREACHABLE),
+    (aiohttp.ServerDisconnectedError(), ma.ENDPOINT_UNREACHABLE),
+    (ConnectionRefusedError(), ma.ENDPOINT_UNREACHABLE),
+    (asyncio.CancelledError(), ma.CANCELLATION),
+    (ma.AdapterRefusal(502, ma.PROTOCOL_INCOMPATIBILITY, "x"), ma.PROTOCOL_INCOMPATIBILITY),
+])
+def test_classify_failure(exc, expected):
+    assert ma.classify_failure(exc) == expected
+
+
+def test_classify_failure_flags():
+    assert ma.classify_failure(TimeoutError(), ttft_expired=True) == ma.TIMEOUT_TIME_TO_FIRST_TOKEN
+    assert ma.classify_failure(TimeoutError(), idle_expired=True) == ma.TIMEOUT_IDLE
+    assert ma.classify_failure(ConnectionResetError(), downstream_gone=True) == ma.CANCELLATION
+
+
+def test_every_class_is_in_the_interim_enumeration():
+    assert len(set(ma.FAILURE_CLASSES)) == 9
