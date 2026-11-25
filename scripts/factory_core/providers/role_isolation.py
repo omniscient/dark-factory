@@ -32,3 +32,60 @@ def bind_dispatch_role(hosting_location, declared_role=None) -> tuple[str | None
     if hosting_location == "local" and declared_role != "actor":
         return None, "nested_checker_refused"  # §4.2: local never hosts an independent checker
     return declared_role, "declared"
+
+
+# The six run_record.py Result-contract keys this proof reads (MODEL_DISPATCH_RESULT_VERSION
+# "1.0", emitted by _compute_model_dispatch); duck-typed, so run_record is never imported.
+RESULT_KEYS = ("schema_version", "outcome", "endpoint_id", "hosting_location", "role",
+               "correlation")
+
+
+def _well_formed(d) -> tuple[bool, str]:
+    """Structure of one model_dispatch["result"] dict: (ok, reason). Never raises."""
+    if not isinstance(d, dict) or any(k not in d for k in RESULT_KEYS):
+        return False, "malformed_dispatch_record"
+    version = d["schema_version"]
+    if not isinstance(version, str) or not version.startswith("1."):  # any minor: Invariant 12
+        return False, "malformed_dispatch_record"
+    if not isinstance(d["outcome"], str) or not isinstance(d["correlation"], str):
+        return False, "malformed_dispatch_record"
+    if any(d[k] is not None and not isinstance(d[k], str) for k in ("endpoint_id", "role")):
+        return False, "malformed_dispatch_record"
+    if d["hosting_location"] not in VALID_HOSTING:
+        return False, "hosting_location_invalid"
+    return True, "well_formed"
+
+
+def check_verdict_independence(actor_dispatch, producer_dispatch, *,
+                               actor_issue, producer_issue, verdict_issue) -> tuple[bool, str]:
+    """The §4.2 independence proof over two model_dispatch["result"]-shaped dicts.
+
+    The three issue numbers bind the proof to one unit of work: each run record's own
+    top-level issue_number, and the issue the verdict is for. A caller (#611) maps every
+    False other than "not_applicable" to STATUS: BLOCKED plus ready-for-human — never PASS,
+    SKIPPED or ERROR (verdict.py's ERROR proceeds); "not_applicable" (a cloud-routed actor)
+    leaves today's all-cloud gate unchanged.
+    """
+    for d in (actor_dispatch, producer_dispatch):
+        ok, reason = _well_formed(d)
+        if not ok:
+            return False, reason
+    if actor_dispatch["hosting_location"] != "local":
+        return False, "not_applicable"  # Invariant 3: only a local-routed actor needs this proof
+    issues = (actor_issue, producer_issue, verdict_issue)
+    if any(type(i) is not int or i <= 0 for i in issues) or len(set(issues)) != 1:
+        return False, "unit_of_work_mismatch"
+    if producer_dispatch["hosting_location"] != "cloud":
+        return False, "producer_not_cloud"
+    if actor_dispatch["outcome"] != "ok" or producer_dispatch["outcome"] != "ok":
+        return False, "dispatch_outcome_not_ok"
+    if (actor_dispatch["correlation"] != "inferred_pointer"
+            or producer_dispatch["correlation"] != "inferred_pointer"):
+        return False, "correlation_unknown"  # Invariant 3 / §4.4: never the proof
+    if producer_dispatch["endpoint_id"] is None:
+        return False, "producer_endpoint_missing"
+    if producer_dispatch["endpoint_id"] == actor_dispatch["endpoint_id"]:
+        return False, "producer_endpoint_same_as_actor"
+    if producer_dispatch["role"] != "checker":
+        return False, "producer_role_not_checker"
+    return True, "independent"
