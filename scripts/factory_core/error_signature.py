@@ -22,7 +22,9 @@ _PREVIEW_INFRA_RE = re.compile(
 # automatically. GATING_PASS_STATUSES is not included: those three statuses make
 # verdict_gate_check.sh exit 0 before the quiet-branch echo is ever reached, so they
 # can never appear in this field.
-_REAL_VERDICT_TOKENS_RE = "|".join(sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSES))
+_REAL_VERDICT_TOKENS_RE = "|".join(
+    re.escape(t) for t in sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSES)
+)
 # Matches the two stderr lines scripts/verdict_gate_check.sh prints when a gate phase
 # never wrote a usable verdict (#373, #591): the "true silent death" line (verdict
 # missing/unparseable, no needs-discussion label) and the quiet-branch line when its
@@ -38,6 +40,14 @@ _REAL_VERDICT_TOKENS_RE = "|".join(sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSE
 # verdict miss gets a signature is #536's decision, not an oversight to fix here. Wording
 # is coupled to both echoes; tests/test_factory_core_error_signature.py fails CI if
 # either side drifts. Deliberately no re.IGNORECASE: it is our own literal.
+# Asymmetry, by design (design doc line 107): verdict_gate_check.sh's own gate decision
+# (the quiet-branch `if` above its echoes) tests STATUS only against the literal
+# "BLOCKED", not against the full real-verdict-token set this regex excludes. So a
+# legacy STATUS (HUMAN_REQUIRED/FAIL) paired with the needs-discussion label takes the
+# quiet "upstream already communicated" branch and is correctly excluded here, but the
+# same STATUS without that label falls through to the unconditional silent-death echo
+# and still gets signed substantive:verdict_missing even though it was a real verdict.
+# Do not "fix" that by widening verdict_gate_check.sh's own BLOCKED check.
 _VERDICT_MISSING_RE = re.compile(
     r"\bverdict_gate_check\.sh: .{0,80}"
     r"(?:verdict missing/unparseable for issue #\d+"
