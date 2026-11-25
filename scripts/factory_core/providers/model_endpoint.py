@@ -170,6 +170,11 @@ def _parse_yaml(data, where):
         mark = getattr(e, "problem_mark", None)
         line = f" at line {mark.line + 1}" if mark else ""
         raise RegistryError([f"{where}: invalid YAML{line}: {_yaml_error_phrase(e)}"]) from None
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        # An explicit core tag (e.g. !!int) constructs its value via a raw exception —
+        # not a YAMLError — whose message quotes the scalar. Same fixed phrase, no text:
+        # a pasted secret must not reach the log as a traceback (#605).
+        raise RegistryError([f"{where}: invalid YAML: unsupported value or tag"]) from None
 
 
 def _parse_version(value, where):

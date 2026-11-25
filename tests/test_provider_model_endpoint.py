@@ -174,6 +174,41 @@ def test_yaml_errors_print_a_fixed_phrase_per_exception_class(tmp_path, text, ph
     assert exc.value.problems[0].endswith(f": {phrase}")
 
 
+@pytest.mark.parametrize("text, exc_type", [
+    # An explicit core tag with a bad scalar: PyYAML constructs the value via a raw
+    # exception (not a YAMLError) whose message quotes the scalar — a pasted secret
+    # would otherwise reach the log as a traceback (#605).
+    ("a: !!int sk-ant-SECRETVALUE\n", ValueError),
+    ("a: !!float sk-ant-SECRETVALUE\n", ValueError),
+    ("a: !!bool sk-ant-SECRETVALUE\n", KeyError),
+    ("a: !!timestamp sk-ant-SECRETVALUE\n", AttributeError),
+])
+def test_explicit_tag_scalars_fail_closed_with_fixed_phrase(tmp_path, text, exc_type):
+    (tmp_path / me.REGISTRY_FILE).write_text(text, encoding="utf-8")
+    with pytest.raises(me.RegistryError) as exc:
+        me.load_registry(tmp_path / me.REGISTRY_FILE)
+    assert exc.value.problems == [
+        f"{tmp_path / me.REGISTRY_FILE}: invalid YAML: unsupported value or tag"]
+    assert "SECRETVALUE" not in " ".join(exc.value.problems)
+
+
+def test_explicit_tag_sentinel_never_reaches_cli_output(tmp_path, monkeypatch, capsys):
+    """#605: the sentinel must appear in neither the error message nor CLI stderr/stdout."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / me.REGISTRY_FILE).write_text("a: !!int sk-ant-SECRETVALUE\n", encoding="utf-8")
+    from factory_core.providers import cli
+    argv = ["model-endpoints", "stage", "--source-dir", str(src),
+            "--dest-dir", str(tmp_path / "dest")]
+    monkeypatch.setattr(sys, "argv", ["providers-cli", *argv])
+    with pytest.raises(SystemExit):
+        cli.main()
+    out = capsys.readouterr()
+    assert "SECRETVALUE" not in out.out
+    assert "SECRETVALUE" not in out.err
+    assert "Traceback" not in out.err
+
+
 def test_cloud_entry_may_not_accept_local_only(tmp_path):
     problems = _problems(tmp_path, [_entry(CLOUD, accepts_payload_classes=["cloud_ok", "local_only"])])
     assert any("a cloud entry may never accept local_only" in p for p in problems)
