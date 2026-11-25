@@ -451,3 +451,45 @@ def test_proxy_passes_gzip_response_through_untouched_and_still_ledgers_usage(
     assert row["status"] == 200
     assert row["gen_ai.usage.input_tokens"] == 42
     assert row["gen_ai.usage.output_tokens"] == 7
+
+
+# --- #558: ledger columns and redaction --------------------------------------------------
+
+def _bare_row(**kw):
+    return mp.build_ledger_row(
+        endpoint="/v1/messages", method="POST", model="m", status=200, duration_ms=1,
+        input_tokens=1, output_tokens=1, cache_read_tokens=0, cache_creation_tokens=0,
+        tool_count=0, tool_bytes=0, system_bytes=0, request_bytes=0, largest_tools=[],
+        streamed=False, **kw,
+    )
+
+
+def test_ledger_row_defaults_are_the_cloud_path_values():
+    row = _bare_row()
+    assert row["hosting_location"] == "cloud"
+    assert row["adapter_id"] == "model_proxy/anthropic-messages-passthrough" == mp.ADAPTER_ID
+    for key in ("endpoint_id", "role", "request_id", "failure_class", "payload_decision"):
+        assert row[key] is None
+    assert row["correlation"] == "unknown"
+
+
+def test_ledger_row_carries_the_local_columns():
+    decision = {"payload_class": "local_only", "endpoint_id": "local-test",
+                "secret_reference": "LOCAL_GATEWAY_TOKEN", "allow": True, "reason": "ok"}
+    row = _bare_row(endpoint_id="local-test", hosting_location="local", role="actor",
+                    request_id="r-1", failure_class="timeout_idle",
+                    correlation="inferred_pointer", payload_decision=decision)
+    assert (row["endpoint_id"], row["hosting_location"], row["role"], row["request_id"]) == (
+        "local-test", "local", "actor", "r-1")
+    assert row["failure_class"] == "timeout_idle" and row["correlation"] == "inferred_pointer"
+    assert row["payload_decision"] == decision
+
+
+def test_correlation_state_follows_the_pointer_file():
+    assert mp._correlation_state({"run_id": "unknown"}) == "unknown"
+    assert mp._correlation_state({"run_id": "run-9"}) == "inferred_pointer"
+
+
+def test_redact_headers_redacts_the_correlation_header():
+    redacted = mp.redact_headers({"X-Factory-Correlation": '{"run_id":"r"}', "X-Factory-Persona": "p"})
+    assert redacted == {"X-Factory-Correlation": "[REDACTED]", "X-Factory-Persona": "p"}

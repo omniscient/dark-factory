@@ -40,7 +40,12 @@ RAW_ARTIFACT_CAPTURE = os.environ.get("RAW_ARTIFACT_CAPTURE", "false").lower() =
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("RAW_ARTIFACT_RETENTION_DAYS", "7"))
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
-_REDACT_EXACT = {"authorization", "x-api-key", "api-key"}
+# Adapter identity on every ledger row (#558): which code path produced the row.
+ADAPTER_ID = "model_proxy/anthropic-messages-passthrough"
+
+# x-factory-correlation carries no secret, but §4.3 puts every correlation header in the
+# redaction set; its fields are already ledger columns (#558).
+_REDACT_EXACT = {"authorization", "x-api-key", "api-key", "x-factory-correlation"}
 _REDACT_PATTERN = re.compile(r"^x-factory-.*-(token|secret)$", re.IGNORECASE)
 
 
@@ -79,11 +84,17 @@ def read_current_run() -> dict:
         return {"run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown"}
 
 
+def _correlation_state(run: dict) -> str:
+    """§4.4: the current-run.json pointer is today's only correlation source — never upgraded."""
+    return "unknown" if run["run_id"] == "unknown" else "inferred_pointer"
+
+
 def build_ledger_row(
     *, endpoint, method, model, status, duration_ms, input_tokens, output_tokens,
     cache_read_tokens, cache_creation_tokens, tool_count, tool_bytes, system_bytes,
     request_bytes, largest_tools, streamed, run_id=None, issue_number=None, intent=None,
-    stage=None,
+    stage=None, endpoint_id=None, hosting_location="cloud", role=None, request_id=None,
+    failure_class=None, correlation="unknown", adapter_id=ADAPTER_ID, payload_decision=None,
 ) -> dict:
     return {
         "timestamp": _timestamp(),
@@ -113,6 +124,16 @@ def build_ledger_row(
         # become their own correlated ledger rows; see the Architecture section's
         # "Retry/fallback metadata" note and the rollout doc.
         "retry_count": 0,
+        # Request/Result contract columns (#558, contract §4.7). None/"cloud" on the default
+        # path; the model column above is the backend model (a local row's served_name).
+        "endpoint_id": endpoint_id,
+        "hosting_location": hosting_location,
+        "role": role,
+        "request_id": request_id,
+        "failure_class": failure_class,
+        "correlation": correlation,
+        "adapter_id": adapter_id,
+        "payload_decision": payload_decision,
     }
 
 
