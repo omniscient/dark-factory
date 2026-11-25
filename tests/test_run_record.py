@@ -675,6 +675,46 @@ def test_assemble_missing_artifacts_skipped(tmp_path, monkeypatch):
     assert rec["artifacts"] == {}
 
 
+@pytest.mark.parametrize("kind", ["undecodable_bytes", "directory_named_review_md"])
+def test_assemble_skips_unreadable_gate_file_but_still_writes_record(tmp_path, monkeypatch, kind):
+    """#583: an unreadable gate file (not valid UTF-8, or a directory with that name)
+    must skip the file — never lose the whole run record or the cost report."""
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    events = []
+    monkeypatch.setattr(rr, "emit_health_event",
+                        lambda event, issue, run_id, detail: events.append((event, issue, run_id, detail)))
+
+    (tmp_path / "validation.md").write_text("STATUS: PASS\n")
+    if kind == "undecodable_bytes":
+        (tmp_path / "review.md").write_bytes(b"\xff\xfe\x00\x01")
+    else:
+        (tmp_path / "review.md").mkdir()
+
+    out = tmp_path / "run-record.json"
+    rr.cmd_assemble(_AssembleArgs(tmp_path, out))
+
+    assert out.exists()
+    rec = json.loads(out.read_text())
+    assert rec["artifacts"] == {"validation": "STATUS: PASS\n"}
+    assert rec["gate_artifact_lookup"]["unreadable"] == ["review"]
+    assert [e[0] for e in events] == ["factory.run_record.gate_artifact_unreadable"]
+    assert events[0][1] == 333
+    assert events[0][2] == "abc123"
+    assert events[0][3]["artifact"] == "review"
+
+
+def test_run_record_paths_reject_trailing_newline_run_id(tmp_path):
+    """#583: `$` would let "ok-1\\n" through; fullmatch must not (can't escape runs/, but
+    the segment must stay a plain path segment)."""
+    assert rr._run_record_path(tmp_path / "root", "ok-1\n") is None
+    assert rr._durable_run_record_path("ok-1\n") is None
+    # positive control: a plain segment still passes
+    assert rr._run_record_path(tmp_path / "root", "ok-1") == tmp_path / "root" / "ok-1" / "run-record.json"
+    assert rr._durable_run_record_path("ok-1") == rr.SCHEDULER_STATE_DIR / "run-records" / "ok-1.json"
+
+
 def test_assemble_incorporates_archon_cost(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(rr, "_post_seq", lambda r: None)
@@ -2165,6 +2205,7 @@ def test_assemble_gate_artifact_lookup_records_workflow_run_dir_hits(
         "found": ["validation", "conformance", "review"],
         "stale": [],
         "own_dir": [],
+        "unreadable": [],
     }
     # Scoring-neutral: never part of the outcome evidence.
     assert "gate_artifact_lookup" not in rec["harness_economics"]["outcome"]["evidence"]
@@ -2195,6 +2236,7 @@ def test_assemble_stale_gate_stages_are_listed_and_warned(tmp_path, monkeypatch,
         "found": [],
         "stale": ["validation", "conformance", "review"],
         "own_dir": [],
+        "unreadable": [],
     }
     err = capsys.readouterr().err
     assert f"{_NO_GATE_WARNING} (workflow_run_id=wf-run, workflow_dir_exists=True)" in err
@@ -2213,6 +2255,7 @@ def test_assemble_absent_workflow_run_dir_is_recorded_and_warned(tmp_path, monke
         "found": [],
         "stale": [],
         "own_dir": [],
+        "unreadable": [],
     }
     assert rec["harness_economics"]["outcome"]["state"] == "produced_ungated"
     err = capsys.readouterr().err
@@ -2231,6 +2274,7 @@ def test_assemble_no_cost_json_is_recorded_and_warned(tmp_path, monkeypatch, cap
         "found": [],
         "stale": [],
         "own_dir": [],
+        "unreadable": [],
     }
     err = capsys.readouterr().err
     assert f"{_NO_GATE_WARNING} (workflow_run_id=None, workflow_dir_exists=False)" in err
@@ -2270,6 +2314,7 @@ def test_assemble_workflow_run_dir_equal_to_own_dir_is_own_dir_only(tmp_path, mo
         "found": [],
         "stale": [],
         "own_dir": ["validation", "conformance", "review"],
+        "unreadable": [],
     }
     assert rec["harness_economics"]["outcome"]["state"] == "delivered_clean"
 
