@@ -271,6 +271,28 @@ def test_tree_sha256_rejects_symlinks(tmp_path):
         me.tree_sha256(reg)
 
 
+def test_tree_sha256_closes_the_fd_when_a_file_is_swapped_for_a_directory(tmp_path, monkeypatch):
+    # A path swapped for a directory after the is_file() check: os.fdopen() would raise
+    # IsADirectoryError without closing the descriptor (#594 R7).
+    reg = _write_registry(tmp_path / "reg", [LOCAL])
+    swapped = tmp_path / "swapped-in"
+    swapped.mkdir()
+    real_os_open, opened = os.open, []
+
+    def _os_open(path, flags, *args, **kwargs):
+        if Path(path).name == me.REGISTRY_FILE:
+            opened.append(real_os_open(swapped, os.O_RDONLY))
+            return opened[-1]
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _os_open)
+    with pytest.raises(me.RegistryError, match="not a regular file"):
+        me.tree_sha256(reg)
+    # Nothing opens a file between the raise and this check, so the fd number is not reused.
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
 def test_tree_sha256_fails_closed_on_an_oversized_file(tmp_path):
     # The staged tree is writable by run containers and is read into memory: cap each file.
     reg = _write_registry(tmp_path / "reg", [LOCAL])

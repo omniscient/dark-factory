@@ -352,9 +352,16 @@ def _read_tree(root) -> tuple[str, dict[str, bytes]]:
             too_big = [f"{root}: {rel} is larger than {MAX_FILE_BYTES} bytes"]
             not_regular = [f"{root}: {rel} is not a regular file or directory"]
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as f:
+            try:
+                # Check the type before os.fdopen: it raises on a directory fd without
+                # taking ownership of it, which would leak the descriptor.
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise RegistryError(not_regular)
+                f = os.fdopen(fd, "rb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
                 data = f.read(MAX_FILE_BYTES + 1)
             if len(data) > MAX_FILE_BYTES:
                 raise RegistryError(too_big)
