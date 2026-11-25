@@ -326,5 +326,33 @@ def test_verdict_missing_regex_matches_gate_script_quiet_branch_wording():
     assert missing_matches, "quiet-branch STATUS=missing wording drifted from the regex"
     sig = _classify(text=render("missing"))
     assert sig == "substantive:verdict_missing"
-    blocked_matches = bool(_VERDICT_MISSING_RE.search(render("BLOCKED")))
-    assert not blocked_matches, "a STATUS=BLOCKED quiet-branch line must not match"
+    for status in ("PAS", "BLOCKEDX", "blocked"):  # unparseable: same signature (#591)
+        unparseable_matches = bool(_VERDICT_MISSING_RE.search(render(status)))
+        assert unparseable_matches, f"quiet-branch STATUS={status} must match as unparseable"
+    for status in ("BLOCKED", "HUMAN_REQUIRED", "FAIL"):  # real verdicts
+        real_matches = bool(_VERDICT_MISSING_RE.search(render(status)))
+        assert not real_matches, f"a STATUS={status} quiet-branch line must not match"
+    path_matches = bool(_VERDICT_MISSING_RE.search("scripts/" + render("missing")))
+    assert path_matches, "a path-prefixed quiet-branch line must still match (#591)"
+
+
+# --- #591: unparseable quiet-branch status, real-verdict tokens, path prefix ----------
+
+
+def test_verdict_missing_matches_quiet_branch_unparseable_status():
+    # A garbled non-empty STATUS is one case with "missing" (same signature, so an
+    # absent/corrupted alternation still trips the breaker's consecutive-match check).
+    # Lowercase "blocked" is not a real verdict to the gate's case-sensitive test either.
+    for status in ("PAS", "BLOCKEDX", "blocked", "garbled123"):
+        sig = _classify(text=_BENIGN_PREVIEW + _QUIET_HEAD + status + _QUIET_TAIL + "\n")
+        assert sig == "substantive:verdict_missing", status
+
+
+def test_verdict_missing_ignores_every_real_verdict_token_from_verdict_py():
+    # The exclusion is derived from verdict.py, so every token in those two sets (not a
+    # hand-typed copy) must stay out of the quiet-branch match.
+    from factory_core.verdict import GATING_BLOCK_STATUSES, LEGACY_STATUSES
+    assert {"BLOCKED", "HUMAN_REQUIRED", "FAIL"} <= GATING_BLOCK_STATUSES | LEGACY_STATUSES
+    for status in sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSES):
+        sig = _classify(text=_BENIGN_PREVIEW + _QUIET_HEAD + status + _QUIET_TAIL + "\n")
+        assert sig == "environmental:preview_infra", status

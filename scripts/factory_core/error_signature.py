@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from .session_window import RATE_LIMIT_RE as _RATE_LIMIT_RE
+from .verdict import GATING_BLOCK_STATUSES, LEGACY_STATUSES
 
 _PREVIEW_INFRA_RE = re.compile(
     r"buildkit|failed to solve|docker[- ]compose|pull access denied|manifest unknown|"
@@ -15,18 +16,29 @@ _PREVIEW_INFRA_RE = re.compile(
     r"preview stack|failed to build preview",
     re.IGNORECASE,
 )
+# Real, non-missing/unparseable verdict tokens that must never be mistaken for a
+# missing one in the quiet-branch STATUS= field. Sourced from verdict.py's own
+# constants (not re-typed here) so a future addition to that enum is excluded
+# automatically. GATING_PASS_STATUSES is not included: those three statuses make
+# verdict_gate_check.sh exit 0 before the quiet-branch echo is ever reached, so they
+# can never appear in this field.
+_REAL_VERDICT_TOKENS_RE = "|".join(sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSES))
 # Matches the two stderr lines scripts/verdict_gate_check.sh prints when a gate phase
-# never wrote its verdict (#373): the "true silent death" line (verdict missing/unparseable,
-# no needs-discussion label) and the quiet-branch line when it reports STATUS=missing
-# (needs-discussion present). A quiet-branch STATUS=BLOCKED line is a real verdict and
-# must not match. Anchored on that script's own "verdict_gate_check.sh: " log prefix and a
-# literal issue number, so a transcript that merely quotes the phrase (e.g. `cat` of the
-# script, whose source has "#${ISSUE_NUM}") is not mis-signed. Wording is coupled to both
-# echoes; tests/test_factory_core_error_signature.py fails CI if either side drifts.
+# never wrote a usable verdict (#373, #591): the "true silent death" line (verdict
+# missing/unparseable, no needs-discussion label) and the quiet-branch line when its
+# STATUS= field is missing or unparseable (needs-discussion present). A quiet-branch
+# STATUS= that is exactly one of the real verdict tokens above is a real verdict and must
+# not match; the check is case-sensitive like the gate's own comparison and anchored at
+# the closing ")", so "blocked" or "BLOCKEDX" still match. Anchored on that script's own
+# "verdict_gate_check.sh: " log prefix and a literal issue number, so a transcript that
+# merely quotes the phrase (e.g. `cat` of the script, whose source has "#${ISSUE_NUM}")
+# is not mis-signed. Wording is coupled to both echoes;
+# tests/test_factory_core_error_signature.py fails CI if either side drifts.
 # Deliberately no re.IGNORECASE: it is our own literal.
 _VERDICT_MISSING_RE = re.compile(
     r"verdict_gate_check\.sh: .{0,80}"
-    r"(?:verdict missing/unparseable for issue #\d+|blocks issue #\d+ \(STATUS=missing\))"
+    r"(?:verdict missing/unparseable for issue #\d+"
+    rf"|blocks issue #\d+ \(STATUS=(?!(?:{_REAL_VERDICT_TOKENS_RE})\))[^)\s]*\))"
 )
 _OOS_FILES_RE = re.compile(r"OOS gate|out-of-scope", re.IGNORECASE)
 _BUILD_FAILURE_RE = re.compile(
