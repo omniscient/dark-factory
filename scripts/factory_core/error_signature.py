@@ -32,11 +32,14 @@ _REAL_VERDICT_TOKENS_RE = "|".join(sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSE
 # the closing ")", so "blocked" or "BLOCKEDX" still match. Anchored on that script's own
 # "verdict_gate_check.sh: " log prefix and a literal issue number, so a transcript that
 # merely quotes the phrase (e.g. `cat` of the script, whose source has "#${ISSUE_NUM}")
-# is not mis-signed. Wording is coupled to both echoes;
-# tests/test_factory_core_error_signature.py fails CI if either side drifts.
-# Deliberately no re.IGNORECASE: it is our own literal.
+# is not mis-signed. The leading \b deliberately excludes the sibling
+# docs_verdict_gate_check.sh (Gate 2.5), whose basename embeds the same prefix: "_" is a
+# word character, so no boundary precedes the embedded "verdict_". Whether a docs-gate
+# verdict miss gets a signature is #536's decision, not an oversight to fix here. Wording
+# is coupled to both echoes; tests/test_factory_core_error_signature.py fails CI if
+# either side drifts. Deliberately no re.IGNORECASE: it is our own literal.
 _VERDICT_MISSING_RE = re.compile(
-    r"verdict_gate_check\.sh: .{0,80}"
+    r"\bverdict_gate_check\.sh: .{0,80}"
     r"(?:verdict missing/unparseable for issue #\d+"
     rf"|blocks issue #\d+ \(STATUS=(?!(?:{_REAL_VERDICT_TOKENS_RE})\))[^)\s]*\))"
 )

@@ -356,3 +356,71 @@ def test_verdict_missing_ignores_every_real_verdict_token_from_verdict_py():
     for status in sorted(GATING_BLOCK_STATUSES | LEGACY_STATUSES):
         sig = _classify(text=_BENIGN_PREVIEW + _QUIET_HEAD + status + _QUIET_TAIL + "\n")
         assert sig == "environmental:preview_infra", status
+
+
+def test_verdict_missing_matches_path_prefixed_gate_lines():
+    # "/" is not a word character, so the leading \b still matches after a path.
+    for line in ("scripts/" + _QUIET_MISSING_LINE, "dark-factory/scripts/" + _GATE_LINE):
+        sig = _classify(text=line + "\n")
+        assert sig == "substantive:verdict_missing", line
+
+
+_DOCS_GATE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "docs_verdict_gate_check.sh"
+
+
+def _docs_gate_echo(marker):
+    # The one docs_verdict_gate_check.sh echo containing `marker`, unquoted.
+    import re
+    hits = [line.strip() for line in _DOCS_GATE_SCRIPT.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("echo ") and marker in line]
+    assert len(hits) == 1, f"expected one {marker!r} echo in {_DOCS_GATE_SCRIPT}, got {len(hits)}"
+    m = re.match(r'echo "(.*)" >&2$', hits[0])
+    assert m, hits[0]
+    return m.group(1)
+
+
+def _render_docs_echo(template, why, decision="block"):
+    return (template
+            .replace("${GATE_LABEL}", "Docs Conformance (Gate 2.5)")
+            .replace("${ISSUE_NUM}", "197")
+            .replace("${DECISION}", decision)
+            .replace("${_WHY}", why))
+
+
+def test_verdict_missing_regex_excludes_docs_gate_enforce_lines():
+    # docs_verdict_gate_check.sh embeds "verdict_gate_check.sh: " in its own prefix. Its
+    # enforce-mode lines must not sign substantive:verdict_missing (#591; #536 decides).
+    from factory_core.error_signature import _VERDICT_MISSING_RE
+    for marker in ("upstream already communicated", "failing closed and posting failure comment"):
+        template = _docs_gate_echo(marker)
+        assert "${_WHY}" in template, f"docs-gate {marker!r} echo no longer prints _WHY"
+        for why in ("STATUS=missing", "STATUS=PAS"):
+            rendered = _render_docs_echo(template, why)
+            assert not _VERDICT_MISSING_RE.search(rendered), rendered
+            assert _classify(text=rendered) != "substantive:verdict_missing", rendered
+            # Not vacuous: without the docs_ prefix the same line would match, so the
+            # leading \b is what keeps it out.
+            bare = rendered.replace("docs_verdict_gate_check.sh", "verdict_gate_check.sh", 1)
+            assert _VERDICT_MISSING_RE.search(bare), bare
+
+
+def test_verdict_missing_regex_excludes_docs_gate_observe_line():
+    # Today's shipped wording ("enforce would block") must stay out for both reasons.
+    from factory_core.error_signature import _VERDICT_MISSING_RE
+    rendered = _render_docs_echo(_docs_gate_echo("observe mode"), "STATUS=missing")
+    assert "would block issue #197" in rendered, rendered
+    assert not _VERDICT_MISSING_RE.search(rendered), rendered
+    assert _classify(text=rendered) != "substantive:verdict_missing", rendered
+
+
+def test_verdict_missing_regex_excludes_docs_gate_tripwire_line():
+    # The head/index tripwire takes the silent-death path in every mode, observe included.
+    from factory_core.error_signature import _VERDICT_MISSING_RE
+    template = _docs_gate_echo("failing closed and posting failure comment")
+    for why in (
+        "STATUS=missing; the branch changed during the read-only docs-conformance node: HEAD moved",
+        "STATUS=PAS",
+    ):
+        rendered = _render_docs_echo(template, why)
+        assert not _VERDICT_MISSING_RE.search(rendered), rendered
+        assert _classify(text=rendered) != "substantive:verdict_missing", rendered
