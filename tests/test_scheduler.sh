@@ -458,7 +458,7 @@ spec_advance_check 20 "$_ITEM_DTP_SPR"
 assert_eq "G2: advance: remove-label called" \
   "1" "$(grep -c -- '--remove spec-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "G2: advance: set_board_status REFINED" \
-  "1" "$(grep -c "set_board_status 20 ${STATUS_REFINED}" "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c "set_board_status 20 ${FACTORY_STATUS_REFINED}" "$STUB_LOG" || echo 0)"
 
 > "$STUB_LOG"
 # G3: flag + no comment + elapsed < grace → no action
@@ -563,7 +563,7 @@ plan_advance_check 40 "$_ITEM_DTP_PPR"
 assert_eq "I2: advance: remove-label called" \
   "1" "$(grep -c -- '--remove plan-pending-review' "$STUB_LOG" || echo 0)"
 assert_eq "I2: advance: set_board_status READY" \
-  "1" "$(grep -c "set_board_status 40 ${STATUS_READY}" "$STUB_LOG" || echo 0)"
+  "1" "$(grep -c "set_board_status 40 ${FACTORY_STATUS_READY}" "$STUB_LOG" || echo 0)"
 
 > "$STUB_LOG"
 # I3: flag + no comment + elapsed < grace → no action

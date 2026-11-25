@@ -139,7 +139,39 @@ def test_duplicate_yaml_key_fails_instead_of_overwriting(tmp_path):
         'schema_version: "1.0"\nendpoints: []\nendpoints: []\n', encoding="utf-8")
     with pytest.raises(me.RegistryError) as exc:
         me.load_registry(tmp_path / me.REGISTRY_FILE)
-    assert "duplicate key 'endpoints'" in exc.value.problems[0]
+    assert exc.value.problems == [f"{tmp_path / me.REGISTRY_FILE}: invalid YAML at line 3: duplicate key"]
+
+
+@pytest.mark.parametrize("text, problem", [
+    # An undefined alias: PyYAML's own message quotes the alias name.
+    ('schema_version: "1.0"\nendpoints: [*sk-ant-SECRETVALUE]\n',
+     "invalid YAML at line 2: undefined or invalid alias/anchor"),
+    # A secret pasted as a mapping key, twice.
+    ('schema_version: "1.0"\nsk-ant-SECRETVALUE: 1\nsk-ant-SECRETVALUE: 2\n',
+     "invalid YAML at line 3: duplicate key"),
+    # An unhashable (sequence) key: already a clean error on main, kept that way (R2).
+    ('schema_version: "1.0"\n? [sk-ant-SECRETVALUE, b]\n: 1\n',
+     "invalid YAML at line 2: found unhashable key"),
+])
+def test_yaml_errors_never_echo_document_text(tmp_path, text, problem):
+    (tmp_path / me.REGISTRY_FILE).write_text(text, encoding="utf-8")
+    with pytest.raises(me.RegistryError) as exc:
+        me.load_registry(tmp_path / me.REGISTRY_FILE)
+    assert exc.value.problems == [f"{tmp_path / me.REGISTRY_FILE}: {problem}"]
+    assert "SECRETVALUE" not in " ".join(exc.value.problems)
+
+
+@pytest.mark.parametrize("text, phrase", [
+    ("a: [1\n", "syntax error"),
+    ('a: "\\q"\n', "malformed token"),
+    ("a: !!python/object:os.system x\n", "unsupported value or tag"),
+    ("a: \x00\n", "invalid characters"),
+])
+def test_yaml_errors_print_a_fixed_phrase_per_exception_class(tmp_path, text, phrase):
+    with pytest.raises(me.RegistryError) as exc:
+        me._parse_yaml(text.encode("utf-8"), "f.yaml")
+    assert exc.value.problems[0].startswith("f.yaml: invalid YAML")
+    assert exc.value.problems[0].endswith(f": {phrase}")
 
 
 def test_cloud_entry_may_not_accept_local_only(tmp_path):
@@ -237,6 +269,28 @@ def test_tree_sha256_rejects_symlinks(tmp_path):
     (reg / "link.yaml").symlink_to(reg / me.REGISTRY_FILE)
     with pytest.raises(me.RegistryError, match="not a regular file"):
         me.tree_sha256(reg)
+
+
+def test_tree_sha256_closes_the_fd_when_a_file_is_swapped_for_a_directory(tmp_path, monkeypatch):
+    # A path swapped for a directory after the is_file() check: os.fdopen() would raise
+    # IsADirectoryError without closing the descriptor (#594 R7).
+    reg = _write_registry(tmp_path / "reg", [LOCAL])
+    swapped = tmp_path / "swapped-in"
+    swapped.mkdir()
+    real_os_open, opened = os.open, []
+
+    def _os_open(path, flags, *args, **kwargs):
+        if Path(path).name == me.REGISTRY_FILE:
+            opened.append(real_os_open(swapped, os.O_RDONLY))
+            return opened[-1]
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _os_open)
+    with pytest.raises(me.RegistryError, match="not a regular file"):
+        me.tree_sha256(reg)
+    # Nothing opens a file between the raise and this check, so the fd number is not reused.
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 def test_tree_sha256_fails_closed_on_an_oversized_file(tmp_path):
@@ -856,6 +910,33 @@ def test_redacted_view_reduces_secret_reference_to_name_and_presence(monkeypatch
     assert [by_id[i].get("base_url_scope") for i in ("local-same-host", "local-lan", "local-remote", "cloud-anthropic")] == [
         "same-host", "lan", "remote", None]
     assert SENTINEL not in repr(view)
+
+
+def _newer_minor_registry_with_unknown_keys(root):
+    """A schema 1.1 registry (unknown keys tolerated) whose local entry carries a secret-like
+    unknown key at the entry level, inside model_identity and inside timeouts."""
+    entry = _entry(LOCAL, api_key=SENTINEL)
+    entry["model_identity"]["api_key"] = SENTINEL
+    entry["timeouts"]["api_key"] = SENTINEL
+    return _write_registry(root, [entry, CLOUD], schema_version="1.1")
+
+
+def test_redacted_view_omits_tolerated_unknown_keys_at_every_level(tmp_path):
+    view = me.redacted_view(_newer_minor_registry_with_unknown_keys(tmp_path / "reg"))
+    assert SENTINEL not in repr(view) and "api_key" not in repr(view)
+    local, cloud = view["endpoints"]
+    assert local["unknown_keys_omitted"] == 3
+    assert local["model_identity"] == LOCAL["model_identity"]
+    assert local["timeouts"] == LOCAL["timeouts"]
+    assert "unknown_keys_omitted" not in cloud
+
+
+def test_redacted_view_staged_omits_tolerated_unknown_keys(tmp_path, monkeypatch):
+    reg = _newer_minor_registry_with_unknown_keys(tmp_path / "staged")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    problems, view = me.redacted_view_staged(reg)
+    assert problems == [] and view == me.redacted_view(reg)
+    assert SENTINEL not in repr(view) and view["endpoints"][0]["unknown_keys_omitted"] == 3
 
 
 def test_redacted_view_staged_matches_the_source_view(tmp_path, monkeypatch):

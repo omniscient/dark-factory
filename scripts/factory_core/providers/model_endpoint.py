@@ -114,14 +114,38 @@ def _construct_unique_mapping(loader, node):
                 "while constructing a mapping", node.start_mark,
                 "found unhashable key", key_node.start_mark) from None
         if duplicate:
+            # The key is never echoed: a secret pasted as a mapping key must not reach a log.
             raise yaml.constructor.ConstructorError(
-                None, None, f"duplicate key {key!r}", key_node.start_mark)
+                None, None, "duplicate key", key_node.start_mark)
         seen.add(key)
     return loader.construct_mapping(node, deep=True)
 
 
 _UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+
+# A YAMLError's own problem text can quote the document (an undefined alias's name), so only
+# a fixed phrase per exception class is ever printed. Most specific class wins (__mro__ order).
+_YAML_ERROR_PHRASES = {
+    yaml.reader.ReaderError: "invalid characters",
+    yaml.scanner.ScannerError: "malformed token",
+    yaml.parser.ParserError: "syntax error",
+    yaml.composer.ComposerError: "undefined or invalid alias/anchor",
+    yaml.constructor.ConstructorError: "unsupported value or tag",
+}
+# _construct_unique_mapping's own problem texts: matched by equality, so they echo nothing.
+_OWN_YAML_PROBLEMS = ("found unhashable key", "duplicate key")
+
+
+def _yaml_error_phrase(e) -> str:
+    problem = getattr(e, "problem", None)
+    if problem in _OWN_YAML_PROBLEMS:
+        return problem
+    for cls in type(e).__mro__:
+        if cls in _YAML_ERROR_PHRASES:
+            return _YAML_ERROR_PHRASES[cls]
+    return "parse error"
 
 
 def _read_file(path) -> bytes:
@@ -141,11 +165,11 @@ def _parse_yaml(data, where):
     try:
         return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 — SafeLoader subclass
     except yaml.YAMLError as e:
-        # Never echo the offending line: a pasted secret would land in the log.
+        # Never echo the offending line or the parser's own problem text: a pasted secret
+        # would land in the log.
         mark = getattr(e, "problem_mark", None)
         line = f" at line {mark.line + 1}" if mark else ""
-        problem = getattr(e, "problem", None) or "parse error"
-        raise RegistryError([f"{where}: invalid YAML{line}: {problem}"]) from None
+        raise RegistryError([f"{where}: invalid YAML{line}: {_yaml_error_phrase(e)}"]) from None
 
 
 def _parse_version(value, where):
@@ -328,9 +352,16 @@ def _read_tree(root) -> tuple[str, dict[str, bytes]]:
             too_big = [f"{root}: {rel} is larger than {MAX_FILE_BYTES} bytes"]
             not_regular = [f"{root}: {rel} is not a regular file or directory"]
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as f:
+            try:
+                # Check the type before os.fdopen: it raises on a directory fd without
+                # taking ownership of it, which would leak the descriptor.
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise RegistryError(not_regular)
+                f = os.fdopen(fd, "rb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
                 data = f.read(MAX_FILE_BYTES + 1)
             if len(data) > MAX_FILE_BYTES:
                 raise RegistryError(too_big)
@@ -768,14 +799,28 @@ def redacted_view_staged(registry_path) -> tuple[list[str], dict | None]:
     return [], _redact(endpoints, path)
 
 
+def _known_keys(obj, allowed) -> tuple[dict, int]:
+    """obj's allowed keys, in obj's order, and how many other keys were left out."""
+    known = {k: v for k, v in obj.items() if k in allowed}
+    return known, len(obj) - len(known)
+
+
 def _redact(endpoints, path) -> dict:
     """The one place that decides what of a registry is safe to print."""
     views = []
     for entry in endpoints:
-        view = {k: v for k, v in entry.items() if k != "secret_reference"}
-        ref = entry["secret_reference"]
+        # An allowlist at every level _unknown_keys tolerates: a newer-minor file's unknown
+        # keys (a future api_key, say) are counted, never printed.
+        view, omitted = _known_keys(entry, _ENTRY_KEYS)
+        for name, allowed in (("model_identity", _MODEL_IDENTITY_KEYS), ("timeouts", TIMEOUT_FIELDS)):
+            if isinstance(view.get(name), dict):
+                view[name], nested = _known_keys(view[name], allowed)
+                omitted += nested
+        ref = view.pop("secret_reference")
         view["secret_reference"] = {"name": ref, "present": bool(os.environ.get(ref))}
         if "base_url" in entry:
             view["base_url_scope"] = base_url_scope(entry["base_url"])
+        if omitted:
+            view["unknown_keys_omitted"] = omitted
         views.append(view)
     return {"registry": str(path), "endpoints": views}
