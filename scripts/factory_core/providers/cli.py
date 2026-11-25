@@ -240,24 +240,19 @@ def _fail(problems):
 
 def _model_endpoints_show(args):
     # Redacted effective-configuration view (#557): secret_reference prints as its name and
-    # presence only. The staged copy is trusted only with this dispatch's digest; --from-source
-    # reads the scheduler's read-only mount instead.
+    # presence only. The staged copy is trusted only with this dispatch's digest and is parsed
+    # from the bytes that digest covered (#593); --from-source reads the scheduler's read-only
+    # mount instead.
     from factory_core.providers import model_endpoint
     if args.from_source:
-        registry_dir, problems = model_endpoint.SOURCE_REGISTRY_DIR, []
+        try:
+            problems, view = [], model_endpoint.redacted_view(model_endpoint.SOURCE_REGISTRY_DIR)
+        except model_endpoint.RegistryError as e:
+            problems, view = e.problems, None
     else:
-        registry_dir = model_endpoint.staged_registry_dir()
-        problems = model_endpoint.verify_staged_digest(registry_dir)
+        problems, view = model_endpoint.redacted_view_staged(model_endpoint.staged_registry_dir())
     if problems:
         _fail(problems)
-    try:
-        view = model_endpoint.redacted_view(registry_dir)
-    except model_endpoint.RegistryError as e:
-        _fail(e.problems)
-    if not args.from_source:
-        problems = model_endpoint.verify_staged_digest(registry_dir)  # unchanged while read?
-        if problems:
-            _fail(problems)
     print(json.dumps(view, indent=2, default=str))
 
 

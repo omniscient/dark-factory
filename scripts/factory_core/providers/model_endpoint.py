@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -45,6 +46,8 @@ CLOUD_CREDENTIALS = (
 )
 TIER_ALIASES = tuple(f"ANTHROPIC_DEFAULT_{t}_MODEL" for t in ("OPUS", "SONNET", "HAIKU", "FABLE"))
 TIMEOUT_FIELDS = ("connect_seconds", "time_to_first_token_seconds", "idle_seconds", "total_seconds")
+# Per-file read cap for a registry tree (#593): larger files fail closed.
+MAX_FILE_BYTES = 1024 * 1024
 
 EVIDENCE_STATES = ("tested", "declared", "stale", "unknown")
 RESULT_VALUES = ("pass", "fail", "unsupported", "not_tested")
@@ -121,18 +124,28 @@ _UniqueKeyLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
 
 
-def _read_yaml(path):
+def _read_file(path) -> bytes:
     try:
-        with open(path, encoding="utf-8") as f:
-            return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506 — SafeLoader subclass
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError as e:
+        raise RegistryError([f"{path}: unreadable ({e.strerror})"]) from None
+
+
+def _parse_yaml(data, where):
+    """Parse YAML from bytes already read, so a caller can hash and parse the same read."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RegistryError([f"{where}: not valid UTF-8"]) from None
+    try:
+        return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 — SafeLoader subclass
     except yaml.YAMLError as e:
         # Never echo the offending line: a pasted secret would land in the log.
         mark = getattr(e, "problem_mark", None)
-        where = f" at line {mark.line + 1}" if mark else ""
+        line = f" at line {mark.line + 1}" if mark else ""
         problem = getattr(e, "problem", None) or "parse error"
-        raise RegistryError([f"{path}: invalid YAML{where}: {problem}"]) from None
-    except OSError as e:
-        raise RegistryError([f"{path}: unreadable ({e.strerror})"]) from None
+        raise RegistryError([f"{where}: invalid YAML{line}: {problem}"]) from None
 
 
 def _parse_version(value, where):
@@ -260,7 +273,12 @@ def load_registry(path) -> list[dict]:
     path = Path(path)
     if not path.is_file():
         raise RegistryError([f"model endpoint registry not found at {path}"])
-    doc = _read_yaml(path)
+    return _parse_registry(_read_file(path), path)
+
+
+def _parse_registry(data, path) -> list[dict]:
+    """load_registry() over bytes already read; path only labels the messages."""
+    doc = _parse_yaml(data, path)
     if not isinstance(doc, dict):
         raise RegistryError([f"{path}: must be a mapping with schema_version and endpoints"])
     version, problems = _parse_version(doc.get("schema_version"), str(path))
@@ -286,33 +304,61 @@ def load_registry(path) -> list[dict]:
     return endpoints
 
 
-def tree_sha256(root) -> str:
-    """SHA-256 over a directory tree: sorted relative paths and file bytes."""
+def _read_tree(root) -> tuple[str, dict[str, bytes]]:
+    """One walk of a directory tree: its SHA-256 (sorted relative paths and file bytes) and
+    the bytes that were hashed, keyed by relative POSIX path (#593).
+
+    A caller that parses these bytes decides on exactly what the digest covers; re-opening a
+    file afterwards would reopen the swap-and-swap-back window this closes.
+    """
     root = Path(root)
     entries = []
     for dirpath, dirnames, filenames in os.walk(root):  # never descends into a symlink
         entries += [Path(dirpath) / name for name in dirnames + filenames]
     digest = hashlib.sha256()
+    files = {}
     for path in sorted(entries):
         rel = path.relative_to(root).as_posix()
         if path.is_symlink() or not (path.is_file() or path.is_dir()):
             raise RegistryError([f"{root}: {rel} is not a regular file or directory"])
         if path.is_file():
+            # The staged tree is writable by run containers: reopen by descriptor (not by
+            # path) and re-check the type on the open fd, so a path-to-FIFO swap after the
+            # is_file() check above can't block this read (TOCTOU, #593).
+            too_big = [f"{root}: {rel} is larger than {MAX_FILE_BYTES} bytes"]
+            not_regular = [f"{root}: {rel} is not a regular file or directory"]
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RegistryError(not_regular)
+                data = f.read(MAX_FILE_BYTES + 1)
+            if len(data) > MAX_FILE_BYTES:
+                raise RegistryError(too_big)
+            files[rel] = data
             digest.update(rel.encode("utf-8") + b"\0")
-            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii") + b"\n")
-    return digest.hexdigest()
+            digest.update(hashlib.sha256(data).hexdigest().encode("ascii") + b"\n")
+    return digest.hexdigest(), files
+
+
+def tree_sha256(root) -> str:
+    """SHA-256 over a directory tree: sorted relative paths and file bytes."""
+    return _read_tree(root)[0]
 
 
 def staged_registry_dir() -> Path:
     # FACTORY_MODEL_REGISTRY_PATH is a test-only override, never forwarded to run containers.
+    # Registry verification must never run from agent-controlled env (#593): today only the
+    # pre-agent entrypoint.sh preflight reads this, and #558 must keep it that way.
     return Path(os.environ.get("FACTORY_MODEL_REGISTRY_PATH") or _DEFAULT_STAGED_DIR)
 
 
 def stage_registry(source=None, dest=None) -> str:
-    """Copy the read-only source registry onto the shared volume; return the staged digest.
+    """Copy the read-only source registry onto the shared volume; return the source's digest.
 
     The copy goes to a temp directory beside dest and is swapped in by rename, so a failed
-    copy never leaves a half-written registry where a run container reads it.
+    copy never leaves a half-written registry where a run container reads it. The returned
+    digest is the read-only source's: a copy that differs from it (a run container shares
+    the volume and can write the temp directory) fails staging instead of being blessed.
     """
     source = Path(source) if source else SOURCE_REGISTRY_DIR
     dest = Path(dest) if dest else staged_registry_dir()
@@ -322,8 +368,8 @@ def stage_registry(source=None, dest=None) -> str:
         try:
             if tree_sha256(dest) == source_digest:
                 # Nothing changed: skip the swap so a concurrent dispatch's
-                # verify_staged_digest()/load_registry() never sees a missing path or a
-                # mid-walk FileNotFoundError while this call replaces an identical tree.
+                # read_verified_tree() never sees a missing path or a mid-walk
+                # FileNotFoundError while this call replaces an identical tree.
                 return source_digest
         except (RegistryError, OSError):
             pass  # dest is unreadable/invalid; fall through and re-stage over it
@@ -333,7 +379,12 @@ def stage_registry(source=None, dest=None) -> str:
     try:
         os.chmod(tmp, 0o755)  # mkdtemp is 0700; run containers must be able to read it
         shutil.copytree(source, tmp, dirs_exist_ok=True)
-        digest = tree_sha256(tmp)
+        staged_digest = tree_sha256(tmp)
+        if staged_digest != source_digest:
+            raise RegistryError([
+                f"{tmp}: staged copy digest does not match the read-only source digest "
+                f"({staged_digest} != {source_digest}) — the source or the staged copy changed "
+                "mid-staging; refusing to publish a digest that does not bind the source"])
         if dest.exists():
             os.replace(dest, old)
         try:
@@ -346,30 +397,38 @@ def stage_registry(source=None, dest=None) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     shutil.rmtree(old, ignore_errors=True)
-    return digest
+    return source_digest
 
 
-def verify_staged_digest(registry_path) -> list[str]:
-    """The staged copy is trusted only if it matches the digest the scheduler passed (Req. 8)."""
+def read_verified_tree(registry_path) -> tuple[list[str], dict[str, bytes] | None]:
+    """The one staged-tree reader (#593): ([], files) only if the bytes read match the digest
+    the scheduler passed (Req. 8); (problems, None) otherwise.
+
+    files maps each relative path to the bytes that were hashed. Parse those — never re-open a
+    staged file, or a swap-and-swap-back between the two reads goes unseen.
+    """
+    # Registry verification must never run from agent-controlled env (#593): today only the
+    # pre-agent entrypoint.sh preflight reads FACTORY_MODEL_REGISTRY_SHA256, and #558 must
+    # keep it that way.
     expected = os.environ.get("FACTORY_MODEL_REGISTRY_SHA256", "")
     if not expected:
         return ["FACTORY_MODEL_REGISTRY_SHA256 is not set — the staged model registry is trusted "
-                "only with the digest the scheduler passes to this dispatch"]
+                "only with the digest the scheduler passes to this dispatch"], None
     if not _SHA256_HEX_RE.match(expected):
-        return ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"]
+        return ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"], None
     registry_path = Path(registry_path)
     if not registry_path.is_dir():
-        return [f"staged model registry not found at {registry_path} — no fallback to cloud"]
+        return [f"staged model registry not found at {registry_path} — no fallback to cloud"], None
     try:
-        actual = tree_sha256(registry_path)
+        actual, files = _read_tree(registry_path)
     except RegistryError as e:
-        return e.problems
+        return e.problems, None
     except OSError:
-        return [f"staged model registry at {registry_path} is unreadable"]
+        return [f"staged model registry at {registry_path} is unreadable"], None
     if not hmac.compare_digest(actual, expected):
         return [f"staged model registry at {registry_path} does not match "
-                "FACTORY_MODEL_REGISTRY_SHA256 — it changed after the scheduler staged it"]
-    return []
+                "FACTORY_MODEL_REGISTRY_SHA256 — it changed after the scheduler staged it"], None
+    return [], files
 
 
 def registry_config_sha256(entry) -> str:
@@ -394,7 +453,12 @@ def load_evidence(evidence_dir, endpoint_id):
     path = Path(evidence_dir) / f"{endpoint_id}.yaml"
     if not path.is_file():
         return None
-    doc = _read_yaml(path)
+    return _parse_evidence(_read_file(path), path)
+
+
+def _parse_evidence(data, path) -> dict:
+    """load_evidence() over bytes already read; path only labels the messages."""
+    doc = _parse_yaml(data, path)
     if (not isinstance(doc, dict) or set(doc) != {"capability_evidence"}
             or not isinstance(doc["capability_evidence"], dict)):
         raise RegistryError([f"{path}: must contain exactly one capability_evidence mapping"])
@@ -497,12 +561,7 @@ def role_problems(record, role="actor"):
             for dim in ACTOR_REQUIRED_DIMENSIONS if record["results"].get(dim) != "pass"]
 
 
-def _select(registry_path, endpoint_id):
-    path = Path(registry_path) / REGISTRY_FILE
-    try:
-        endpoints = load_registry(path)
-    except RegistryError as e:
-        return None, e.problems
+def _pick(endpoints, endpoint_id, path):
     for entry in endpoints:
         if entry["id"] == endpoint_id:
             return entry, []
@@ -510,12 +569,16 @@ def _select(registry_path, endpoint_id):
                   "no other endpoint is chosen instead"]
 
 
-def hosting_location_of(registry_path, endpoint_id):
-    entry, _ = _select(registry_path, endpoint_id)
-    return entry["hosting_location"] if entry else None
+def _select(registry_path, endpoint_id):
+    path = Path(registry_path) / REGISTRY_FILE
+    try:
+        endpoints = load_registry(path)
+    except RegistryError as e:
+        return None, e.problems
+    return _pick(endpoints, endpoint_id, path)
 
 
-def _local_problems(entry, evidence_dir):
+def _local_problems(entry, files, registry_path):
     eid = entry["id"]
     problems = []
     present = sorted(n for n in CLOUD_CREDENTIALS
@@ -532,8 +595,10 @@ def _local_problems(entry, evidence_dir):
         if os.environ.get(alias) != served:
             problems.append(f"endpoint '{eid}': {alias} must equal model_identity.served_name "
                             f"'{served}' (contract §4.11 decision 2)")
+    # The evidence record comes from the verified tree's bytes, never a separate read (#593).
+    rel = f"{EVIDENCE_DIR}/{eid}.yaml"
     try:
-        record = load_evidence(evidence_dir, eid)
+        record = _parse_evidence(files[rel], registry_path / rel) if rel in files else None
     except RegistryError as e:
         problems += e.problems
     else:
@@ -548,37 +613,50 @@ def _local_problems(entry, evidence_dir):
     return problems
 
 
-def preflight(registry_path, evidence_dir, endpoint_id) -> list[str]:
-    """Run-container check of the staged registry for one selected endpoint; [] == OK."""
-    problems = verify_staged_digest(registry_path)
+def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
+    """Run-container check of the staged registry for one selected endpoint.
+
+    Returns (problems, hosting); ([], hosting) == OK. hosting is the selected entry's
+    hosting_location, or None if no entry was selected. Every decision is made on the bytes
+    read_verified_tree() hashed, so no file is read twice (#593).
+    """
+    registry_path = Path(registry_path)
+    problems, files = read_verified_tree(registry_path)
     if problems:
-        return problems
-    entry, problems = _select(registry_path, endpoint_id)
+        return problems, None
+    path = registry_path / REGISTRY_FILE
+    if REGISTRY_FILE not in files:
+        return [f"model endpoint registry not found at {path}"], None
+    try:
+        endpoints = _parse_registry(files[REGISTRY_FILE], path)
+    except RegistryError as e:
+        return e.problems, None
+    entry, problems = _pick(endpoints, endpoint_id, path)
     if entry is None:
-        return problems
+        return problems, None
+    hosting = entry["hosting_location"]
     ref = entry["secret_reference"]
-    if entry["hosting_location"] == "cloud":
+    if hosting == "cloud":
         problems += _missing([ref])  # a cloud entry's secret arrives via .archon/.env
     elif not os.environ.get(ref):
         # Not _missing(): a local secret must not be delivered through .archon/.env (spec §C).
         problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is not set")
-    if entry["hosting_location"] == "local":
-        problems += _local_problems(entry, evidence_dir)
-    # Checked again after every read: a swap between the first check and the reads fails here.
-    problems += verify_staged_digest(registry_path)
-    return problems
+    if hosting == "local":
+        problems += _local_problems(entry, files, registry_path)
+    return problems, hosting
 
 
-def scheduler_preflight(registry_path, endpoint_id) -> list[str]:
+def scheduler_preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
     """Scheduler boot check on its read-only source mount: schema, selected id, §4.11 decision 3.
 
-    The digest, secret presence and credential/alias guards are the run container's: it holds
-    the environment they check.
+    Returns (problems, hosting), like preflight(). The digest, secret presence and
+    credential/alias guards are the run container's: it holds the environment they check.
     """
     entry, problems = _select(registry_path, endpoint_id)
-    if entry is not None and entry["hosting_location"] == "local":
+    hosting = entry["hosting_location"] if entry else None
+    if hosting == "local":
         problems.append(_NO_LOCAL_DISPATCH.format(eid=entry["id"]))
-    return problems
+    return problems, hosting
 
 
 def effective_payload_class(declared, hosting_location) -> str:
@@ -634,14 +712,42 @@ def base_url_scope(url) -> str:
 
 
 def redacted_view(registry_path) -> dict:
-    """Effective configuration with each secret_reference reduced to its name and presence."""
+    """Effective configuration with each secret_reference reduced to its name and presence.
+
+    Path-based, for the scheduler's read-only source mount (--from-source); the staged copy
+    goes through redacted_view_staged().
+    """
     path = Path(registry_path) / REGISTRY_FILE
-    endpoints = []
-    for entry in load_registry(path):
+    return _redact(load_registry(path), path)
+
+
+def redacted_view_staged(registry_path) -> tuple[list[str], dict | None]:
+    """redacted_view() of the staged copy, parsed from the bytes read_verified_tree() hashed.
+
+    Returns (problems, view); view is None whenever problems is non-empty.
+    """
+    registry_path = Path(registry_path)
+    problems, files = read_verified_tree(registry_path)
+    if problems:
+        return problems, None
+    path = registry_path / REGISTRY_FILE
+    if REGISTRY_FILE not in files:
+        return [f"model endpoint registry not found at {path}"], None
+    try:
+        endpoints = _parse_registry(files[REGISTRY_FILE], path)
+    except RegistryError as e:
+        return e.problems, None
+    return [], _redact(endpoints, path)
+
+
+def _redact(endpoints, path) -> dict:
+    """The one place that decides what of a registry is safe to print."""
+    views = []
+    for entry in endpoints:
         view = {k: v for k, v in entry.items() if k != "secret_reference"}
         ref = entry["secret_reference"]
         view["secret_reference"] = {"name": ref, "present": bool(os.environ.get(ref))}
         if "base_url" in entry:
             view["base_url_scope"] = base_url_scope(entry["base_url"])
-        endpoints.append(view)
-    return {"registry": str(path), "endpoints": endpoints}
+        views.append(view)
+    return {"registry": str(path), "endpoints": views}

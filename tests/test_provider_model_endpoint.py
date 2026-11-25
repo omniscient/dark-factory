@@ -5,6 +5,7 @@ the cloud credentials, tier aliases and FACTORY_MODEL_* selection vars cleared �
 container sets several of them, and they would leak into the local-selection checks.
 """
 import copy
+import io
 import os
 import sys
 from datetime import datetime, timezone
@@ -238,6 +239,15 @@ def test_tree_sha256_rejects_symlinks(tmp_path):
         me.tree_sha256(reg)
 
 
+def test_tree_sha256_fails_closed_on_an_oversized_file(tmp_path):
+    # The staged tree is writable by run containers and is read into memory: cap each file.
+    reg = _write_registry(tmp_path / "reg", [LOCAL])
+    (reg / "big.yaml").write_bytes(b"#" * (me.MAX_FILE_BYTES + 1))
+    with pytest.raises(me.RegistryError) as exc:
+        me.tree_sha256(reg)
+    assert exc.value.problems == [f"{reg}: big.yaml is larger than {me.MAX_FILE_BYTES} bytes"]
+
+
 def test_stage_copies_tree_and_returns_its_digest(tmp_path):
     src = _write_registry(tmp_path / "src", [LOCAL, CLOUD])
     dest = tmp_path / "state" / "model-registry"
@@ -278,34 +288,77 @@ def test_stage_copy_failure_leaves_no_partial_tree(tmp_path, monkeypatch):
     assert sorted(p.name for p in dest.parent.iterdir()) == ["model-registry"]
 
 
+def test_stage_fails_when_the_staged_copy_changes_mid_staging(tmp_path, monkeypatch):
+    # #593 defect 1: a run container shares the volume and can write the temp copy between
+    # copytree and the digest. Staging must fail rather than bless the tampered tree.
+    dest = tmp_path / "state" / "model-registry"
+    good = me.stage_registry(_write_registry(tmp_path / "good", [LOCAL]), dest)
+    src = _write_registry(tmp_path / "src", [CLOUD])
+    real_copytree = me.shutil.copytree
+
+    def _copy_then_inject(source, target, **kw):
+        result = real_copytree(source, target, **kw)
+        _write_registry(Path(target), [CLOUD, _entry(CLOUD, id="cloud-injected")])
+        return result
+    monkeypatch.setattr(me.shutil, "copytree", _copy_then_inject)
+    with pytest.raises(me.RegistryError, match="does not match the read-only source digest"):
+        me.stage_registry(src, dest)
+    assert me.tree_sha256(dest) == good
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["model-registry"]
+
+
+def test_stage_skips_the_swap_when_unchanged(tmp_path):
+    # Pins bd6be81's fast path: an unchanged source never replaces dest, so a concurrently
+    # starting run never sees it missing.
+    src = _write_registry(tmp_path / "src", [CLOUD])
+    dest = tmp_path / "state" / "model-registry"
+    first = me.stage_registry(src, dest)
+    before = os.stat(dest).st_ino
+    assert me.stage_registry(src, dest) == first == me.tree_sha256(src)
+    assert os.stat(dest).st_ino == before
+    assert not list(dest.parent.glob(f".{dest.name}.tmp-*"))
+
+
 def test_staged_registry_dir_default_and_test_override(monkeypatch, tmp_path):
     assert me.staged_registry_dir() == Path("/var/lib/dark-factory/model-registry")
     monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(tmp_path))
     assert me.staged_registry_dir() == tmp_path
 
 
-def test_verify_staged_digest_requires_the_digest(tmp_path):
+def test_read_verified_tree_requires_the_digest(tmp_path):
     reg = _write_registry(tmp_path / "reg", [CLOUD])
-    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in me.verify_staged_digest(reg)[0]
+    problems, files = me.read_verified_tree(reg)
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in problems[0] and files is None
 
 
-def test_verify_staged_digest_rejects_malformed_digest(tmp_path, monkeypatch):
+def test_read_verified_tree_rejects_malformed_digest(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "not-hex")
     reg = _write_registry(tmp_path / "reg", [CLOUD])
-    assert me.verify_staged_digest(reg) == ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"]
+    assert me.read_verified_tree(reg) == (
+        ["FACTORY_MODEL_REGISTRY_SHA256 is not a 64-hex SHA-256 digest"], None)
 
 
-def test_verify_staged_digest_missing_dir_never_falls_back(tmp_path, monkeypatch):
+def test_read_verified_tree_missing_dir_never_falls_back(tmp_path, monkeypatch):
     monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64)
-    assert "no fallback to cloud" in me.verify_staged_digest(tmp_path / "absent")[0]
+    problems, files = me.read_verified_tree(tmp_path / "absent")
+    assert "no fallback to cloud" in problems[0] and files is None
 
 
-def test_verify_staged_digest_detects_tampering(tmp_path, monkeypatch):
+def test_read_verified_tree_detects_tampering(tmp_path, monkeypatch):
     reg = _write_registry(tmp_path / "reg", [CLOUD])
     monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
-    assert me.verify_staged_digest(reg) == []
+    assert me.read_verified_tree(reg) == ([], {me.REGISTRY_FILE: (reg / me.REGISTRY_FILE).read_bytes()})
     _write_registry(reg, [_entry(CLOUD, accepts_payload_classes=["cloud_ok"], id="cloud-evil")])
-    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in me.verify_staged_digest(reg)[0]
+    problems, files = me.read_verified_tree(reg)
+    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0] and files is None
+
+
+def test_read_verified_tree_fails_closed_on_an_oversized_file(tmp_path, monkeypatch):
+    reg = _write_registry(tmp_path / "reg", [CLOUD])
+    (reg / "big.yaml").write_bytes(b"#" * (me.MAX_FILE_BYTES + 1))
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64)
+    problems, files = me.read_verified_tree(reg)
+    assert problems == [f"{reg}: big.yaml is larger than {me.MAX_FILE_BYTES} bytes"] and files is None
 
 
 # --- Task 3: capability evidence ------------------------------------------------------------
@@ -455,63 +508,61 @@ def _local_env(monkeypatch, entry=LOCAL):
         monkeypatch.setenv(alias, entry["model_identity"]["served_name"])
 
 
-def _run_preflight(reg, endpoint_id):
-    return me.preflight(reg, reg / me.EVIDENCE_DIR, endpoint_id)
+def _run_preflight(reg, endpoint_id, hosting):
+    """me.preflight()'s problems, after asserting the hosting it returned with them."""
+    problems, got = me.preflight(reg, endpoint_id)
+    assert got == hosting
+    return problems
 
 
 def test_cloud_selection_passes_with_secret_and_digest(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [CLOUD])
     monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
-    assert _run_preflight(reg, "cloud-test") == []
+    assert _run_preflight(reg, "cloud-test", "cloud") == []
 
 
 def test_cloud_selection_needs_no_evidence_but_names_missing_secret(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [CLOUD])
-    assert _run_preflight(reg, "cloud-test") == ["ANTHROPIC_API_KEY is not set. Add it to .archon/.env"]
+    assert _run_preflight(reg, "cloud-test", "cloud") == ["ANTHROPIC_API_KEY is not set. Add it to .archon/.env"]
 
 
 def test_unknown_endpoint_fails_without_choosing_another(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [CLOUD])
-    problems = _run_preflight(reg, "cloud-nope")
+    problems = _run_preflight(reg, "cloud-nope", None)
     assert len(problems) == 1 and "Unknown FACTORY_MODEL_ENDPOINT 'cloud-nope'" in problems[0]
     assert "no other endpoint is chosen instead" in problems[0]
 
 
 def test_preflight_without_digest_fails_before_reading_registry(tmp_path, monkeypatch):
     reg = _write_registry(tmp_path / "staged", [CLOUD])
-    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in _run_preflight(reg, "cloud-test")[0]
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in _run_preflight(reg, "cloud-test", None)[0]
 
 
 def test_preflight_fails_on_tampered_staged_copy(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [CLOUD])
     monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
     _write_registry(reg, [CLOUD, _entry(CLOUD, id="cloud-extra")])
-    problems = _run_preflight(reg, "cloud-test")
+    problems = _run_preflight(reg, "cloud-test", None)
     assert len(problems) == 1 and "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0]
 
 
-def test_preflight_rechecks_digest_after_reading(tmp_path, monkeypatch):
-    reg = _stage(tmp_path, monkeypatch, [CLOUD])
-    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
-    real_select = me._select
-
-    def _select_then_tamper(path, endpoint_id):
-        result = real_select(path, endpoint_id)
-        (Path(path) / "planted.yaml").write_text("x: 1\n", encoding="utf-8")
-        return result
-    monkeypatch.setattr(me, "_select", _select_then_tamper)
-    problems = _run_preflight(reg, "cloud-test")
-    assert len(problems) == 1 and "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0]
+def test_preflight_without_registry_file_reports_it_not_found(tmp_path, monkeypatch):
+    reg = tmp_path / "staged"
+    (reg / me.EVIDENCE_DIR).mkdir(parents=True)
+    (reg / me.EVIDENCE_DIR / "cloud-test.yaml").write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    assert _run_preflight(reg, "cloud-test", None) == [
+        f"model endpoint registry not found at {reg / me.REGISTRY_FILE}"]
 
 
 def test_preflight_reports_schema_violations(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [_entry(CLOUD, protocol="openai-chat")])
-    assert any("unsupported protocol" in p for p in _run_preflight(reg, "cloud-test"))
+    assert any("unsupported protocol" in p for p in _run_preflight(reg, "cloud-test", None))
 
 
 def test_local_selection_missing_secret_names_it_without_archon_env_hint(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [LOCAL])
-    problems = _run_preflight(reg, "local-test")
+    problems = _run_preflight(reg, "local-test", "local")
     assert "LOCAL_GATEWAY_TOKEN (secret_reference of endpoint 'local-test') is not set" in problems
     assert not any(".archon/.env" in p for p in problems)
 
@@ -521,7 +572,7 @@ def test_local_selection_fails_when_a_cloud_credential_is_present(tmp_path, monk
     reg = _stage(tmp_path, monkeypatch, [LOCAL])
     _local_env(monkeypatch)
     monkeypatch.setenv(name, SENTINEL + "-cloud")
-    problems = _run_preflight(reg, "local-test")
+    problems = _run_preflight(reg, "local-test", "local")
     assert any(f"cloud model credential(s) are set in this container: {name}" in p for p in problems)
     assert SENTINEL not in " ".join(problems)
 
@@ -531,7 +582,7 @@ def test_local_selection_requires_matching_base_url(tmp_path, monkeypatch):
     _local_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     assert any("ANTHROPIC_BASE_URL must equal the entry's base_url" in p
-               for p in _run_preflight(reg, "local-test"))
+               for p in _run_preflight(reg, "local-test", "local"))
 
 
 @pytest.mark.parametrize("alias", me.TIER_ALIASES)
@@ -540,20 +591,20 @@ def test_local_selection_requires_every_tier_alias_to_be_the_served_model(tmp_pa
     _local_env(monkeypatch)
     monkeypatch.setenv(alias, "claude-opus-5-5")
     assert any(f"{alias} must equal model_identity.served_name" in p
-               for p in _run_preflight(reg, "local-test"))
+               for p in _run_preflight(reg, "local-test", "local"))
 
 
 def test_local_selection_requires_evidence(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [LOCAL])
     _local_env(monkeypatch)
-    problems = _run_preflight(reg, "local-test")
+    problems = _run_preflight(reg, "local-test", "local")
     assert "endpoint 'local-test': capability evidence is 'unknown', not 'tested' (contract §4.5)" in problems
 
 
 def test_local_selection_always_fails_as_an_existing_phase(tmp_path, monkeypatch, pinned_suite):
     reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
     _local_env(monkeypatch)
-    assert _run_preflight(reg, "local-test") == [
+    assert _run_preflight(reg, "local-test", "local") == [
         "endpoint 'local-test' is local, but no local-eligible dispatch exists yet — every "
         "current dispatch runs a gated phase (contract §4.11 decision 3; the first helper "
         "dispatch is #587)"]
@@ -564,34 +615,117 @@ def test_local_selection_with_failed_dimension_reports_it(tmp_path, monkeypatch,
     reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": record})
     _local_env(monkeypatch)
     assert "capability evidence for 'local-test': tool_call_fidelity is fail, not pass" in \
-        _run_preflight(reg, "local-test")
+        _run_preflight(reg, "local-test", "local")
 
 
 def test_preflight_output_never_contains_secret_values(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [LOCAL, CLOUD])
     _local_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
-    for eid in ("local-test", "cloud-test"):
-        assert SENTINEL not in " ".join(_run_preflight(reg, eid))
+    for eid, hosting in (("local-test", "local"), ("cloud-test", "cloud")):
+        assert SENTINEL not in " ".join(_run_preflight(reg, eid, hosting))
+
+
+def _serve_first_read(monkeypatch, root, tampered):
+    """Swap-and-swap-back (#593): each file under root reads as its real bytes on its first
+    read and as tampered[rel] on every later read. Returns {rel: read count}.
+
+    Hooks every read primitive this module has used or could reach for: os.open() (what
+    _read_tree uses, via os.fdopen), the module's builtin open() and Path.read_bytes(). The
+    last two do not go through os.open, so each needs its own hook for a re-read to be
+    observed whichever primitive performs it.
+    """
+    root = Path(root).resolve()
+    real_os_open, real_open, real_read_bytes = os.open, open, Path.read_bytes
+    reads = {}
+
+    def _serve(path):
+        """None if path is outside root; else count the read and return (rel, tampered bytes
+        or None for the real file)."""
+        try:
+            rel = Path(path).resolve().relative_to(root).as_posix()
+        except (ValueError, OSError):
+            return None
+        reads[rel] = reads.get(rel, 0) + 1
+        return rel, (tampered[rel] if reads[rel] > 1 and rel in tampered else None)
+
+    def _os_open(path, flags, *args, **kwargs):
+        served = _serve(path) if isinstance(path, (str, os.PathLike)) else None
+        if served is None or served[1] is None:
+            return real_os_open(path, flags, *args, **kwargs)
+        # A throwaway regular file (unlinked once open), so the caller's fstat()-based
+        # regular-file check still passes.
+        tmp = f"{path}.tamper-{reads[served[0]]}"
+        fd = real_os_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        os.write(fd, served[1])
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.unlink(tmp)
+        return fd
+
+    def _open(file, mode="r", *args, **kwargs):
+        served = _serve(file) if isinstance(file, (str, os.PathLike)) else None
+        if served is None or served[1] is None:
+            return real_open(file, mode, *args, **kwargs)
+        return io.BytesIO(served[1]) if "b" in mode else io.StringIO(served[1].decode("utf-8"))
+
+    def _read_bytes(self):
+        served = _serve(self)
+        return real_read_bytes(self) if served is None or served[1] is None else served[1]
+
+    monkeypatch.setattr(os, "open", _os_open)
+    monkeypatch.setattr(me, "open", _open, raising=False)
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+    return reads
+
+
+def _registry_bytes(endpoints):
+    return yaml.safe_dump({"schema_version": "1.0", "endpoints": endpoints},
+                          sort_keys=False).encode("utf-8")
+
+
+def test_preflight_uses_only_the_first_read_of_each_staged_file(tmp_path, monkeypatch, pinned_suite):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    evidence = f"{me.EVIDENCE_DIR}/local-test.yaml"
+    reads = _serve_first_read(monkeypatch, reg, {
+        me.REGISTRY_FILE: _registry_bytes([_entry(CLOUD, id="local-test")]),
+        evidence: yaml.safe_dump({"capability_evidence": _record(
+            LOCAL, results=dict(_record(LOCAL)["results"], streaming="fail"))}).encode("utf-8"),
+    })
+    assert me.preflight(reg, "local-test") == ([me._NO_LOCAL_DISPATCH.format(eid="local-test")], "local")
+    assert reads == {me.REGISTRY_FILE: 1, evidence: 1}
+
+
+def test_swap_and_swap_back_cannot_change_the_endpoint_decision(base_env, tmp_path, monkeypatch):
+    # Through the public, unchanged providers.preflight(): on main the later reads see the
+    # swapped-in local entry and preflight fails on them. After #593 there are no later reads.
+    from factory_core import providers
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL)
+    reads = _serve_first_read(monkeypatch, reg, {
+        me.REGISTRY_FILE: _registry_bytes([_entry(LOCAL, id="cloud-test")])})
+    assert providers.preflight() == []
+    assert reads == {me.REGISTRY_FILE: 1}
 
 
 def test_scheduler_preflight_checks_schema_and_id_only(tmp_path):
     src = _write_registry(tmp_path / "src", [CLOUD, LOCAL])
-    assert me.scheduler_preflight(src, "cloud-test") == []
-    assert "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in me.scheduler_preflight(src, "nope")[0]
+    assert me.scheduler_preflight(src, "cloud-test") == ([], "cloud")
+    problems, hosting = me.scheduler_preflight(src, "nope")
+    assert "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in problems[0] and hosting is None
 
 
 def test_scheduler_preflight_blocks_a_local_selection(tmp_path):
     src = _write_registry(tmp_path / "src", [LOCAL])
-    assert me.scheduler_preflight(src, "local-test") == [me._NO_LOCAL_DISPATCH.format(eid="local-test")]
+    assert me.scheduler_preflight(src, "local-test") == (
+        [me._NO_LOCAL_DISPATCH.format(eid="local-test")], "local")
 
 
-def test_hosting_location_of(tmp_path):
-    src = _write_registry(tmp_path / "src", [CLOUD, LOCAL])
-    assert me.hosting_location_of(src, "local-test") == "local"
-    assert me.hosting_location_of(src, "cloud-test") == "cloud"
-    assert me.hosting_location_of(src, "nope") is None
-    assert me.hosting_location_of(tmp_path / "absent", "local-test") is None
+def test_scheduler_preflight_without_a_registry_has_no_hosting(tmp_path):
+    problems, hosting = me.scheduler_preflight(tmp_path / "absent", "local-test")
+    assert "model endpoint registry not found" in problems[0] and hosting is None
 
 
 # --- Task 5: payload class predicate and redacted view --------------------------------------
@@ -660,6 +794,19 @@ def test_redacted_view_reduces_secret_reference_to_name_and_presence(monkeypatch
     assert SENTINEL not in repr(view)
 
 
+def test_redacted_view_staged_matches_the_source_view(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL, CLOUD])
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    assert me.redacted_view_staged(reg) == ([], me.redacted_view(reg))
+
+
+def test_redacted_view_staged_refuses_an_unverified_copy(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    _write_registry(reg, [CLOUD, _entry(CLOUD, id="cloud-extra")])
+    problems, view = me.redacted_view_staged(reg)
+    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0] and view is None
+
+
 # --- Task 6: providers.preflight() wiring ---------------------------------------------------
 
 @pytest.fixture
@@ -726,15 +873,17 @@ def test_run_side_local_selection_skips_cloud_credential_check(base_env, tmp_pat
 
 
 def test_undetermined_hosting_never_skips_the_cloud_credential_check(base_env, tmp_path, monkeypatch):
-    # The first registry read fails (hosting None) but the endpoint check then passes on a
-    # valid cloud entry: the missing cloud credential must still be reported.
+    # The endpoint check reports no problem but no hosting either: the missing cloud
+    # credential must still be reported.
     from factory_core import providers
     monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD]))
-    monkeypatch.setattr(me, "hosting_location_of", lambda registry_dir, endpoint_id: None)
+    real_scheduler_preflight = me.scheduler_preflight
+    monkeypatch.setattr(me, "scheduler_preflight", lambda registry_dir, endpoint_id: ([], None))
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
     assert providers.preflight(side="scheduler") == [
         "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env"]
     # An unknown id still fails on the endpoint check alone, with no credential noise.
+    monkeypatch.setattr(me, "scheduler_preflight", real_scheduler_preflight)
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "nope")
     problems = providers.preflight(side="scheduler")
     assert len(problems) == 1 and "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in problems[0]
