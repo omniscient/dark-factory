@@ -3107,6 +3107,8 @@ def test_assemble_local_run_records_null_cost_never_zero(tmp_path, monkeypatch):
     ])
     assert [n["cost_usd"] for n in rec["nodes"]] == [None, None]
     assert rec["totals"]["cost_usd"] is None and rec["totals"]["known_cost_usd"] is None
+    # #608: the capture status must match the null cost — not applicable, not "complete"
+    assert rec["totals"]["cost_capture"] == "not_applicable"
     assert rec["harness_economics"]["cost_per_task"] is None
     assert rec["nodes"][0]["gen_ai.usage.input_tokens"] == 100
     assert rec["totals"]["gen_ai.usage.input_tokens"] == 100

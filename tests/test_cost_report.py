@@ -349,6 +349,97 @@ def test_render_matches_golden_a_multi_node_first_run():
     assert body == GOLDEN_A_MULTI_NODE_FIRST_RUN
 
 
+# ---------------------------------------------------------------------------
+# #608: a local-routed run records cost_usd null (hybrid contract §4.10) — the
+# report must render it as unknown, never $0, in per-node rows, the Subtotal,
+# the cumulative marker and header; cloud runs render exactly as before.
+# ---------------------------------------------------------------------------
+
+RUN_RECORD_LOCAL = {
+    "status": "completed",
+    "totals": {"cost_usd": None, "known_cost_usd": None, "cost_capture": "not_applicable",
+               "gen_ai.usage.input_tokens": 20, "gen_ai.usage.output_tokens": 270},
+    "nodes": [
+        {"node_id": "parse-intent", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 270, "cost_usd": None, "cost_capture": "cost_unknown",
+         "duration_ms": 7800},
+    ],
+    "harness_economics": {"factory_cpm": None,
+                          "outcome": {"state": "produced_ungated", "score": 1.0}},
+    "archon_cost_capture": {"ok": True},
+}
+
+
+def test_local_node_row_renders_unknown_not_zero():
+    row = cr.format_node_row(RUN_RECORD_LOCAL["nodes"][0])
+    assert "n/a (local endpoint)" in row
+    assert "$0" not in row
+    # tokens (kept per §4.10) and duration still render
+    assert " 20 | 270 |" in row and "7.8s" in row
+
+
+def test_local_render_subtotal_header_and_marker_unknown_never_zero():
+    body = cr.render(RUN_RECORD_LOCAL, prior_comment_body="",
+                     timestamp="2026-11-25 12:00 UTC", intent="fix")
+    subtotal_line = next(l for l in body.splitlines() if l.startswith("| **Subtotal**"))
+    assert "n/a (local endpoint)" in subtotal_line
+    header = next(l for l in body.splitlines() if "run(s) — Total:" in l)
+    assert "n/a (local endpoint)" in header
+    marker = next(l for l in body.splitlines() if l.startswith("<!-- cumulative:"))
+    assert "cost=n/a" in marker
+    # the CPM line renders its own n/a, and nowhere in the report is there a $0
+    assert "**Factory CPM:** n/a" in body
+    assert "$0" not in body
+    # token figures are preserved, not lost with the cost
+    assert "20 in / 270 out" in header
+
+
+def test_cumulative_stays_unknown_after_a_local_run():
+    """Once any run's cost is unknown the cumulative is unknown: a later cloud run
+    cannot price the history, so it must never read as prior + 0."""
+    prior = (
+        "<!-- dark-factory-cost-report -->\n"
+        "<!-- cumulative: cost=n/a in=20 out=270 -->\n"
+        "## Dark Factory — Cost Report\n\n"
+        "**1 run(s) — Total: n/a (local endpoint) (20 in / 270 out)**\n\n\n"
+        "### Run: 2026-11-25 12:00 UTC (fix, completed)\n\n"
+        "| Step | Model | In tokens | Out tokens | Cost | Duration |\n"
+        "|------|-------|-----------|------------|------|----------|\n"
+        "| parse-intent |  | 20 | 270 | n/a (local endpoint) | 7.8s |\n"
+        "| **Subtotal** | | **20** | **270** | **n/a (local endpoint)** | |\n\n"
+        "---\n"
+        "*Updated by Dark Factory Dark Factory*"
+    )
+    cloud = {
+        "status": "completed",
+        "totals": {"cost_usd": 0.0207,
+                   "gen_ai.usage.input_tokens": 20, "gen_ai.usage.output_tokens": 270},
+        "nodes": [
+            {"node_id": "parse-intent", "model": "", "gen_ai.usage.input_tokens": 20,
+             "gen_ai.usage.output_tokens": 270, "cost_usd": 0.0207, "duration_ms": 7800},
+        ],
+        "harness_economics": {"factory_cpm": 17.4,
+                              "outcome": {"state": "produced_ungated", "score": 1.0}},
+        "archon_cost_capture": {"ok": True},
+    }
+    body = cr.render(cloud, prior_comment_body=prior,
+                     timestamp="2026-11-25 13:00 UTC", intent="fix")
+    header = next(l for l in body.splitlines() if "run(s) — Total:" in l)
+    assert "n/a (local endpoint)" in header
+    marker = next(l for l in body.splitlines() if l.startswith("<!-- cumulative:"))
+    assert "cost=n/a" in marker
+    # the cloud run's own Subtotal still renders its real cost
+    subtotals = [l for l in body.splitlines() if l.startswith("| **Subtotal**")]
+    assert "$0.0207" in subtotals[-1]
+
+
+def test_parse_prior_cumulative_unknown_marker():
+    parsed = cr.parse_prior_cumulative("<!-- cumulative: cost=n/a in=20 out=270 -->")
+    assert parsed["prev_cost"] == "n/a"
+    assert parsed["prev_in"] == 20
+    assert parsed["prev_out"] == 270
+
+
 GOLDEN_B_PRIOR_COMMENT_CUMULATIVE = (
     "<!-- dark-factory-cost-report -->\n"
     "<!-- cumulative: cost=1.2707 in=520 out=12270 -->\n"
