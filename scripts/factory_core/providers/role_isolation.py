@@ -65,6 +65,16 @@ def check_verdict_independence(actor_dispatch, producer_dispatch, *,
     False other than "not_applicable" to STATUS: BLOCKED plus ready-for-human — never PASS,
     SKIPPED or ERROR (verdict.py's ERROR proceeds); "not_applicable" (a cloud-routed actor)
     leaves today's all-cloud gate unchanged.
+
+    ADVISORY, NOT A SECURITY BOUNDARY: `producer_dispatch["role"]` traces back to
+    FACTORY_DISPATCH_ROLE, written into current-run.json by entrypoint.sh inside the very
+    run container whose dispatch it describes (see entrypoint.sh's ROLE_FIELD comment). That
+    container can rewrite the pointer before this proof ever reads it, so a True return here
+    must not, by itself, stand in for "never by the model" (refinement constraint 1) in an
+    automated gate. Before #611 (or any other caller) treats True as sufficient to unblock a
+    merge or close, either (a) source `producer_dispatch["role"]` from a carrier the run
+    container cannot write — scheduler-side dispatch metadata or a proxy-only env var — or
+    (b) keep this proof gated on human sign-off rather than full automation.
     """
     for d in (actor_dispatch, producer_dispatch):
         ok, reason = _well_formed(d)
@@ -72,6 +82,11 @@ def check_verdict_independence(actor_dispatch, producer_dispatch, *,
             return False, reason
     if actor_dispatch["hosting_location"] != "local":
         return False, "not_applicable"  # Invariant 3: only a local-routed actor needs this proof
+    # Symmetry with producer_role_not_checker below: a None/tampered local role (bind_
+    # dispatch_role only ever emits "actor" for a local dispatch) is never treated as
+    # satisfying the proof either.
+    if actor_dispatch["role"] != "actor":
+        return False, "actor_role_not_actor"
     issues = (actor_issue, producer_issue, verdict_issue)
     if any(type(i) is not int or i <= 0 for i in issues) or len(set(issues)) != 1:
         return False, "unit_of_work_mismatch"

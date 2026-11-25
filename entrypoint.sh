@@ -160,6 +160,11 @@ mkdir -p "$CURRENT_RUN_DIR" 2>/dev/null || true
 # #559: the dispatching harness's declared role, folded in only when set, so a pointer
 # without one is byte-identical. Pointer-grade (this container can write the file): the
 # proxy uses it only to narrow what a selected endpoint may do, never to grant authority.
+# ADVISORY, NOT A SECURITY BOUNDARY: this same container is free to rewrite
+# current-run.json after this point (e.g. a cloud dispatch could self-declare role=checker
+# before #611 reads it back for role_isolation.check_verdict_independence). Any caller that
+# wires that proof into an automated merge/close gate must first source the producer's role
+# from a carrier this container cannot write, or keep the decision gated on human sign-off.
 ROLE_FIELD=""
 if [ -n "${FACTORY_DISPATCH_ROLE:-}" ]; then
   # Only a bare lowercase token is folded in; anything else becomes "invalid", which the

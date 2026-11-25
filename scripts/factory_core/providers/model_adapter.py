@@ -266,11 +266,13 @@ def _response_model(data, streamed):
     return None
 
 
-def check_response_model(dest, data, streamed) -> None:
+def check_response_model(dest, data, streamed) -> bool:
     """§4.11 decision 2, response side (#559): the model actually invoked is the served model.
 
     An absent field passes (check_model_identity pinned the request before it left); a
     different one — a backend fallback or a swapped model — is refused, never accepted.
+    Returns whether the model field was present (found and matching) — a streaming caller
+    checks on every buffered chunk until this is True, then stops re-parsing.
     """
     model = _response_model(data, streamed)
     if model is not None and model != dest["served_name"]:
@@ -278,6 +280,7 @@ def check_response_model(dest, data, streamed) -> None:
                              f"local endpoint '{dest['endpoint_id']}' answered as model "
                              f"{model!r}, not its served model {dest['served_name']!r}; a "
                              "backend fallback is never accepted")
+    return model is not None
 
 
 def classify_failure(exc, *, ttft_expired=False, idle_expired=False,

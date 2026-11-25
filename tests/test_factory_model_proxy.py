@@ -1340,8 +1340,10 @@ async def _sse_wrong_model(request):
 
 
 def test_streamed_model_mismatch_is_aborted_and_fails_the_run(local_env, monkeypatch):
-    # Chunks are already forwarded when the check can run: this is not a pre-forward refusal.
-    # The proxy withholds the clean EOF (like check_sse_complete) and records the class, which
+    # The proxy checks the model as soon as message_start is buffered — here, in the single
+    # upstream chunk that carries it — so the mismatch is caught before that chunk is
+    # forwarded. response.prepare() already ran, so there is no clean JSON error body; the
+    # proxy withholds the clean EOF (like check_sse_complete) and records the class, which
     # makes the run's model_dispatch outcome "failed".
     assert SSE_WRONG_MODEL != SSE_OK
     _pointer(local_env / "current-run.json", "run-s")
@@ -1350,6 +1352,44 @@ def test_streamed_model_mismatch_is_aborted_and_fails_the_run(local_env, monkeyp
     rows, _ = rr._read_ledger_rows("run-s", local_env / "ledger.jsonl")
     assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
     assert rr._compute_model_dispatch(rows)["result"]["outcome"] == "failed"
+
+
+async def _sse_wrong_model_then_sentinel(request):
+    # message_start (wrong model) arrives in its own write/chunk; message_stop with a
+    # sentinel payload arrives in a second one. If the check ran only after the whole
+    # stream (the pre-fix behavior), the sentinel would already be downstream by the time
+    # the mismatch is noticed.
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(b'event: message_start\ndata: {"type":"message_start","message":'
+                     b'{"model":"claude-opus-5-5","usage":{"input_tokens":7}}}\n\n')
+    await resp.write(b'event: message_stop\ndata: {"type":"message_stop","sentinel":'
+                     b'"SHOULD_NEVER_REACH_CLIENT"}\n\n')
+    await resp.write_eof()
+    return resp
+
+
+def test_streamed_model_mismatch_is_refused_before_the_rest_of_the_stream_is_forwarded(
+        local_env, monkeypatch):
+    # #559 advisory: the check must run as soon as message_start is buffered, not after
+    # message_stop — proven here by a sentinel in the second chunk that must never arrive.
+    _pointer(local_env / "current-run.json", "run-sentinel")
+
+    async def capture_truncated(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        received = bytearray()
+        with pytest.raises(_TRUNCATED):
+            async for chunk in resp.content.iter_any():
+                received.extend(chunk)
+        return bytes(received)
+
+    received, _, _ = _local_scenario(local_env, monkeypatch, _sse_wrong_model_then_sentinel,
+                                     capture_truncated)
+    assert b"SHOULD_NEVER_REACH_CLIENT" not in received
+    assert received == b""  # the mismatching chunk itself was never forwarded either
+    rows, _ = rr._read_ledger_rows("run-sentinel", local_env / "ledger.jsonl")
+    assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
 
 
 CLOUD_SENTINEL = "sk-ant-sentinel-cloud-checker-key"

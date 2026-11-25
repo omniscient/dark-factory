@@ -466,8 +466,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 if local and not is_streamed:
                     await _write_downstream(response, bytes(usage_scan))
                 else:
+                    model_confirmed = False
                     async for chunk in upstream_resp.content.iter_any():
                         _got_chunk()
+                        if local and not model_confirmed:
+                            # #559: check as soon as the message_start frame is buffered —
+                            # before this chunk (which carries it) is forwarded — so a
+                            # fallback/swapped model is refused right away, not after
+                            # message_stop has already reached the client looking complete.
+                            candidate = _decode_scan(bytes(usage_scan) + chunk, encoding)
+                            model_confirmed = ma.check_response_model(
+                                dest, candidate, streamed=True)
                         await _write_downstream(response, chunk)
                         usage_scan.extend(chunk)
                         _await_next_chunk()
@@ -475,8 +484,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                     if local:
                         scan = _decode_scan(bytes(usage_scan), encoding)
                         ma.check_sse_complete(upstream_resp.status, scan)
-                        # #559: already forwarded — a mismatch aborts before EOF and is ledgered.
-                        ma.check_response_model(dest, scan, streamed=True)
+                        if not model_confirmed:
+                            # message_start never arrived (or decoding never caught up,
+                            # e.g. a gzip stream): fall back to the full-body check.
+                            ma.check_response_model(dest, scan, streamed=True)
                 await response.write_eof()
     except handled as exc:
         prepared = response is not None and response.prepared

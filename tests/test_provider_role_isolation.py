@@ -144,6 +144,9 @@ def test_the_proof_binds_actor_producer_and_verdict_to_one_issue(issues):
 
 
 @pytest.mark.parametrize("actor,producer,reason", [
+    (dict(ACTOR, role=None), CHECKER, "actor_role_not_actor"),
+    (dict(ACTOR, role="checker"), CHECKER, "actor_role_not_actor"),
+    (dict(ACTOR, role="monitor"), CHECKER, "actor_role_not_actor"),
     (ACTOR, dict(CHECKER, hosting_location="local"), "producer_not_cloud"),
     (dict(ACTOR, outcome="failed"), CHECKER, "dispatch_outcome_not_ok"),
     (ACTOR, dict(CHECKER, outcome="failed"), "dispatch_outcome_not_ok"),
