@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -321,11 +322,15 @@ def _read_tree(root) -> tuple[str, dict[str, bytes]]:
         if path.is_symlink() or not (path.is_file() or path.is_dir()):
             raise RegistryError([f"{root}: {rel} is not a regular file or directory"])
         if path.is_file():
-            # The staged tree is writable by run containers: cap what is read into memory.
+            # The staged tree is writable by run containers: reopen by descriptor (not by
+            # path) and re-check the type on the open fd, so a path-to-FIFO swap after the
+            # is_file() check above can't block this read (TOCTOU, #593).
             too_big = [f"{root}: {rel} is larger than {MAX_FILE_BYTES} bytes"]
-            if path.stat().st_size > MAX_FILE_BYTES:
-                raise RegistryError(too_big)
-            with open(path, "rb") as f:
+            not_regular = [f"{root}: {rel} is not a regular file or directory"]
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RegistryError(not_regular)
                 data = f.read(MAX_FILE_BYTES + 1)
             if len(data) > MAX_FILE_BYTES:
                 raise RegistryError(too_big)

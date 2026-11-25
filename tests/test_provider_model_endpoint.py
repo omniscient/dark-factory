@@ -5,7 +5,6 @@ the cloud credentials, tier aliases and FACTORY_MODEL_* selection vars cleared â
 container sets several of them, and they would leak into the local-selection checks.
 """
 import copy
-import io
 import os
 import sys
 from datetime import datetime, timezone
@@ -630,35 +629,31 @@ def _serve_first_read(monkeypatch, root, tampered):
     """Swap-and-swap-back (#593): each file under root reads as its real bytes on its first
     read and as tampered[rel] on every later read. Returns {rel: read count}.
 
-    Hooks both read primitives this module has used (open() and Path.read_bytes), so a
-    re-read is observed whichever primitive performs it.
+    Hooks os.open(), the read primitive _read_tree uses (via os.fdopen) since it was changed
+    to reopen by descriptor and fstat-check the result instead of trusting open(path, "rb").
+    A tampered re-read is served through a throwaway regular file (unlinked once open) so the
+    caller's fstat()-based regular-file check still passes.
     """
     root = Path(root).resolve()
-    real_open, real_read_bytes = open, Path.read_bytes
+    real_open = os.open
     reads = {}
 
-    def _serve(path):
+    def _open(path, flags, *args, **kwargs):
         try:
             rel = Path(path).resolve().relative_to(root).as_posix()
-        except ValueError:
-            return None
+        except (ValueError, OSError):
+            return real_open(path, flags, *args, **kwargs)
         reads[rel] = reads.get(rel, 0) + 1
         if reads[rel] > 1 and rel in tampered:
-            return tampered[rel]
-        return real_read_bytes(Path(path))
+            tmp = f"{path}.tamper-{reads[rel]}"
+            fd = real_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            os.write(fd, tampered[rel])
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.unlink(tmp)
+            return fd
+        return real_open(path, flags, *args, **kwargs)
 
-    def _open(file, mode="r", *args, **kwargs):
-        data = _serve(file) if isinstance(file, (str, os.PathLike)) else None
-        if data is None:
-            return real_open(file, mode, *args, **kwargs)
-        return io.BytesIO(data) if "b" in mode else io.StringIO(data.decode("utf-8"))
-
-    def _read_bytes(self):
-        data = _serve(self)
-        return real_read_bytes(self) if data is None else data
-
-    monkeypatch.setattr(me, "open", _open, raising=False)
-    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+    monkeypatch.setattr(os, "open", _open)
     return reads
 
 
