@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -7,11 +8,31 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import model_proxy as mp
+from factory_core.providers import model_adapter as ma  # noqa: E402
+from factory_core.providers import model_endpoint as me  # noqa: E402
+
+SENTINEL = "sk-sentinel-local-gateway-token"
+SERVED = "qwen2.5-coder-32b"
+LOCAL_ENTRY = {
+    "id": "local-test", "hosting_location": "local", "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["local_only"],
+    "model_identity": {"served_name": SERVED, "digest_or_revision": "sha256:" + "ab" * 32},
+    "base_url": "http://127.0.0.1:9", "secret_reference": "LOCAL_GATEWAY_TOKEN",
+    "timeouts": {"connect_seconds": 2, "time_to_first_token_seconds": 2, "idle_seconds": 2,
+                 "total_seconds": 10},
+}
+CLOUD_ENTRY = {
+    "id": "cloud-test", "hosting_location": "cloud", "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["cloud_ok"],
+    "model_identity": {"served_name": "claude-opus-5-5", "digest_or_revision": "claude-opus-5-5"},
+    "secret_reference": "ANTHROPIC_API_KEY",
+}
 
 
 def test_redact_headers_strips_known_secrets():
@@ -493,3 +514,106 @@ def test_correlation_state_follows_the_pointer_file():
 def test_redact_headers_redacts_the_correlation_header():
     redacted = mp.redact_headers({"X-Factory-Correlation": '{"run_id":"r"}', "X-Factory-Persona": "p"})
     assert redacted == {"X-Factory-Correlation": "[REDACTED]", "X-Factory-Persona": "p"}
+
+
+# --- #558: proxy startup -----------------------------------------------------------------
+
+@pytest.fixture
+def startup(monkeypatch):
+    """main() with web.run_app() recorded instead of serving, and a clean selection env."""
+    served = []
+    monkeypatch.setattr(mp.web, "run_app", lambda app, **kw: served.append(app))
+    monkeypatch.setattr(mp, "sweep_raw_artifacts", lambda: None)
+    for name in (*me.CLOUD_CREDENTIALS, *me.TIER_ALIASES, "ANTHROPIC_BASE_URL",
+                 "MODEL_PROXY_UPSTREAM", "LOCAL_GATEWAY_TOKEN", "FACTORY_MODEL_ENDPOINT",
+                 "FACTORY_MODEL_REGISTRY_SHA256", "FACTORY_MODEL_REGISTRY_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    return served
+
+
+def _stage_registry(tmp_path, monkeypatch, endpoints):
+    reg = tmp_path / "staged"
+    reg.mkdir()
+    (reg / me.REGISTRY_FILE).write_text(
+        yaml.safe_dump({"schema_version": "1.0", "endpoints": endpoints}, sort_keys=False),
+        encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    return reg
+
+
+def _main_exit(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mp.main()
+    assert exc.value.code == 1
+    return capsys.readouterr().err
+
+
+def test_create_app_defaults_to_no_destination():
+    assert mp.create_app()["local_destination"] is None
+
+
+def test_unset_endpoint_serves_the_cloud_default_without_loading_the_adapter(startup, monkeypatch):
+    monkeypatch.delitem(sys.modules, "factory_core.providers.model_adapter", raising=False)
+    mp.main()
+    assert len(startup) == 1 and startup[0]["local_destination"] is None
+    assert "factory_core.providers.model_adapter" not in sys.modules
+
+
+def test_a_verified_cloud_entry_starts_with_its_destination(startup, tmp_path, monkeypatch):
+    _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY, LOCAL_ENTRY])
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    mp.main()
+    dest = startup[0]["local_destination"]
+    assert dest["endpoint_id"] == "cloud-test" and dest["hosting_location"] == "cloud"
+    assert dest["upstream"] is None
+
+
+def test_digest_mismatch_fails_startup_before_binding(startup, tmp_path, monkeypatch, capsys):
+    reg = _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY])
+    (reg / me.REGISTRY_FILE).write_text(
+        yaml.safe_dump({"schema_version": "1.0", "endpoints": [CLOUD_ENTRY, dict(CLOUD_ENTRY, id="cloud-extra")]}),
+        encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert "does not match FACTORY_MODEL_REGISTRY_SHA256" in _main_exit(capsys)
+    assert startup == []
+
+
+def test_unset_digest_fails_startup(startup, tmp_path, monkeypatch, capsys):
+    _stage_registry(tmp_path, monkeypatch, [CLOUD_ENTRY])
+    monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256")
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    assert "FACTORY_MODEL_REGISTRY_SHA256 is not set" in _main_exit(capsys)
+    assert startup == []
+
+
+def test_a_local_entry_still_fails_startup_on_no_local_dispatch(startup, tmp_path, monkeypatch, capsys):
+    _stage_registry(tmp_path, monkeypatch, [LOCAL_ENTRY])
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    assert "no local-eligible dispatch exists yet" in _main_exit(capsys)
+    assert startup == []
+
+
+@pytest.mark.parametrize("setup,needle", [
+    (lambda mpatch: mpatch.setenv("MODEL_PROXY_UPSTREAM", "https://api.anthropic.com"), "MODEL_PROXY_UPSTREAM"),
+    (lambda mpatch: mpatch.setenv("ANTHROPIC_API_KEY", "cloud-sentinel"), "ANTHROPIC_API_KEY"),
+    (lambda mpatch: mpatch.delenv("LOCAL_GATEWAY_TOKEN"), "LOCAL_GATEWAY_TOKEN"),
+])
+def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeypatch, capsys, setup, needle):
+    # A fixture entry stands in for the loader: a real local entry never passes it (#587).
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], copy.deepcopy(LOCAL_ENTRY)))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    setup(monkeypatch)
+    err = _main_exit(capsys)
+    assert needle in err and SENTINEL not in err and "cloud-sentinel" not in err
+    assert startup == []
+
+
+def test_payload_decision_allow_false_fails_startup(startup, monkeypatch, capsys):
+    entry = dict(copy.deepcopy(LOCAL_ENTRY), accepts_payload_classes=["cloud_ok"])
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], entry))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    assert "payload decision does not allow dispatch" in _main_exit(capsys)
+    assert startup == []

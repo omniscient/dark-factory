@@ -5,6 +5,17 @@ Generic reverse proxy for ANTHROPIC_BASE_URL: forwards every request to the real
 Anthropic API unchanged (streaming responses forwarded byte-for-byte), while writing
 a compact per-request ledger row and optional raw artifacts. See
 docs/archive/2026-07-11-transparent-model-proxy-design.md.
+
+Local destination (#558; docs/archive/2026-11-25-hybrid-runtime-adapter-design.md):
+when FACTORY_MODEL_ENDPOINT is set, main() resolves the endpoint once at startup through
+providers.model_adapter — never providers.preflight(), which needs GH_TOKEN — and exits
+non-zero on any problem before binding. A local entry's upstream is its verified base_url;
+no code path reaches the cloud default. Interfaces this process must hold for a local
+selection: FACTORY_MODEL_ENDPOINT, FACTORY_MODEL_REGISTRY_SHA256, MODEL_PROXY_UPSTREAM
+(optional; must equal the entry's base_url when set), ANTHROPIC_BASE_URL and the four
+ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL aliases (checked by the loader), and the
+variable named by the entry's secret_reference. The proxy service receives none of these
+today; delivering them is #587's.
 """
 import asyncio
 import fcntl
@@ -13,6 +24,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -386,9 +398,11 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     return response
 
 
-def create_app() -> web.Application:
+def create_app(destination=None) -> web.Application:
     app = web.Application()
     app["client_session"] = None
+    # The endpoint resolved once at startup (#558); None on the cloud-default path.
+    app["local_destination"] = destination
     app.router.add_route("*", "/{tail:.*}", handle_proxy)
 
     async def _startup(app):
@@ -411,8 +425,20 @@ def create_app() -> web.Application:
 
 
 def main() -> None:
+    destination = None
+    endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT")
+    if endpoint_id:
+        # Lazy: the default cloud path never loads the adapter or registry code (#558).
+        from factory_core.providers import model_adapter, model_endpoint
+        try:
+            destination = model_adapter.resolve_local_destination(
+                model_endpoint.staged_registry_dir(), endpoint_id)
+        except model_adapter.DestinationError as e:
+            for problem in e.problems:
+                print(f"factory-model-proxy: {problem}", file=sys.stderr)
+            sys.exit(1)
     sweep_raw_artifacts()
-    web.run_app(create_app(), port=PORT)
+    web.run_app(create_app(destination), port=PORT)
 
 
 if __name__ == "__main__":
