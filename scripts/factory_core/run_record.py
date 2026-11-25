@@ -249,6 +249,19 @@ def _find_run_obj(content: str) -> "dict | None":
     return None
 
 
+def _node_cost(n: dict):
+    """A node's reported cost. A key present with a null value is an unknown cost (a
+    local-routed node, #558, contract §4.10) and stays None; an absent key stays 0."""
+    value = n.get("costUsd") or n.get("cost_usd")
+    if value:
+        return value
+    if any(n.get(k) is not None for k in ("costUsd", "cost_usd")):
+        return 0  # a reported zero stays a zero
+    if "costUsd" in n or "cost_usd" in n:
+        return None
+    return 0
+
+
 def _nodes_from_run_obj(run_obj: dict) -> list:
     """Map a run object's nodes to OTel field names."""
     nodes = []
@@ -269,7 +282,7 @@ def _nodes_from_run_obj(run_obj: dict) -> list:
                 "gen_ai.usage.output_tokens": (
                     n.get("outputTokens") or n.get("output_tokens") or 0
                 ),
-                "cost_usd": n.get("costUsd") or n.get("cost_usd") or 0,
+                "cost_usd": _node_cost(n),
                 "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
             }
         )
@@ -453,6 +466,10 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
                 "reason": "no_usage_reported",
             })
             missing.append({"node_id": node.get("node_id", ""), "reason": "no_usage_reported"})
+        elif node.get("cost_usd") is None:
+            # Reported, but its cost is unknown (#558): tokens kept, and the null cost
+            # nulls every cost total it joins instead of reading as 0.
+            node["cost_capture"] = "cost_unknown"
         else:
             node["cost_capture"] = "completed"
         out.append(node)
@@ -475,10 +492,12 @@ def _classify_node_capture(nodes: list, node_types: dict, log_events: "dict | No
 
 
 def _sum_usage(nodes: list) -> "tuple":
+    # An unknown (null) cost is not zero (#558): any one makes the cost sum null.
+    costs = [n.get("cost_usd", 0) for n in nodes]
     return (
         sum(n.get("gen_ai.usage.input_tokens", 0) for n in nodes),
         sum(n.get("gen_ai.usage.output_tokens", 0) for n in nodes),
-        sum(n.get("cost_usd", 0) for n in nodes),
+        None if any(c is None for c in costs) else sum(costs),
     )
 
 
@@ -531,14 +550,18 @@ def _capture_totals(nodes: list, *, capture_ok: bool, clone_dir, archon_log_file
     for entry in missing:
         emit_health_event("factory.cost_report.node_missing", issue, run_id, dict(entry))
 
-    known_in, known_out, known_cost = _sum_usage(
-        [n for n in nodes if n.get("cost_capture") == "completed"]
-    )
+    counted = [n for n in nodes if n.get("cost_capture") in ("completed", "cost_unknown")]
+    priced = [n for n in counted if n.get("cost_capture") == "completed"]
+    known_in, known_out, _ = _sum_usage(counted)
+    # A cost_unknown node (#558) is excluded from the known cost like a missing node; with no
+    # priced node to bound it, the known cost is unknown (null) — never a fabricated 0.
+    known_cost = _sum_usage(priced)[2] if priced or not counted else None
+    cost_unknown = len(priced) != len(counted)
     complete = not missing
     totals.update({
         "gen_ai.usage.input_tokens": known_in if complete else None,
         "gen_ai.usage.output_tokens": known_out if complete else None,
-        "cost_usd": known_cost if complete else None,
+        "cost_usd": known_cost if complete and not cost_unknown else None,
         "cost_capture": "complete" if complete else "partial",
         "node_log": "unavailable" if log_events is None else "parsed",
         "known_cost_usd": known_cost,

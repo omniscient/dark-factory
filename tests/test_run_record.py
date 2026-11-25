@@ -2909,3 +2909,66 @@ def test_healthy_run_comment_is_byte_identical_to_pre_453_shape(tmp_path, monkey
                                  intent="fix")
     assert render(rec) == render(legacy)
     assert "| **Subtotal** | | **320** | **52.2K** |" in render(rec)
+
+
+# ---------------------------------------------------------------------------
+# #558: an unknown (null) cost is never coerced to 0
+# ---------------------------------------------------------------------------
+
+def test_nodes_from_run_obj_keeps_an_explicit_null_cost():
+    nodes = rr._nodes_from_run_obj({"nodes": [
+        {"nodeId": "a", "costUsd": None, "inputTokens": 5},
+        {"nodeId": "b", "inputTokens": 1},
+        {"nodeId": "c", "costUsd": 0},
+        {"nodeId": "d", "cost_usd": None},
+        {"nodeId": "e", "costUsd": 0.25},
+    ]})
+    assert [n["cost_usd"] for n in nodes] == [None, 0, 0, None, 0.25]
+
+
+def test_null_cost_node_is_cost_unknown_with_tokens_kept():
+    nodes, missing = rr._classify_node_capture(
+        [{"node_id": "implement", "cost_usd": None,
+          "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 1}],
+        {"implement": "command"}, None)
+    assert missing == []
+    assert nodes[0]["cost_capture"] == "cost_unknown"
+    assert nodes[0]["gen_ai.usage.input_tokens"] == 5
+
+
+def test_sum_usage_nulls_the_cost_without_a_type_error():
+    assert rr._sum_usage([{"cost_usd": 0.5, "gen_ai.usage.input_tokens": 1,
+                           "gen_ai.usage.output_tokens": 1},
+                          {"cost_usd": None, "gen_ai.usage.input_tokens": 2,
+                           "gen_ai.usage.output_tokens": 3}]) == (3, 4, None)
+    assert rr._sum_usage([{"cost_usd": 0.5}, {}]) == (0, 0, 0.5)
+
+
+def _stub_node_maps(monkeypatch):
+    monkeypatch.setattr(rr, "_load_workflow_node_maps", lambda clone_dir: ({"implement": "command", "review": "command"}, {}))
+    monkeypatch.setattr(rr, "_parse_node_log", lambda log_file, tokens: None)
+    monkeypatch.setattr(rr, "emit_health_event", lambda *a, **k: None)
+
+
+def test_capture_totals_mixed_null_cost_keeps_the_known_lower_bound(monkeypatch):
+    _stub_node_maps(monkeypatch)
+    _, totals = rr._capture_totals(
+        [{"node_id": "implement", "cost_usd": 0.5,
+          "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 1},
+         {"node_id": "review", "cost_usd": None,
+          "gen_ai.usage.input_tokens": 2, "gen_ai.usage.output_tokens": 2}],
+        capture_ok=True, clone_dir=".", archon_log_file=None, issue=1, run_id="r")
+    assert totals["cost_usd"] is None
+    assert totals["known_cost_usd"] == pytest.approx(0.5)
+    assert totals["gen_ai.usage.input_tokens"] == 7 and totals["known_output_tokens"] == 3
+
+
+def test_capture_totals_null_cost_is_null_not_zero(monkeypatch):
+    _stub_node_maps(monkeypatch)
+    nodes, totals = rr._capture_totals(
+        [{"node_id": "implement", "cost_usd": None,
+          "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 1}],
+        capture_ok=True, clone_dir=".", archon_log_file=None, issue=1, run_id="r")
+    assert totals["cost_usd"] is None and totals["known_cost_usd"] is None
+    assert totals["gen_ai.usage.input_tokens"] == 5 and totals["known_input_tokens"] == 5
+    assert totals["missing_nodes"] == []
