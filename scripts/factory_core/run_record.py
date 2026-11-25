@@ -45,13 +45,13 @@ _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _run_record_path(artifacts_root: pathlib.Path, run_id: str) -> "pathlib.Path | None":
-    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+    if not run_id or not _SAFE_RUN_ID_RE.fullmatch(run_id):
         return None
     return artifacts_root / run_id / "run-record.json"
 
 
 def _durable_run_record_path(run_id: str) -> "pathlib.Path | None":
-    if not run_id or not _SAFE_RUN_ID_RE.match(run_id):
+    if not run_id or not _SAFE_RUN_ID_RE.fullmatch(run_id):
         return None
     return SCHEDULER_STATE_DIR / "run-records" / f"{run_id}.json"
 
@@ -976,7 +976,7 @@ def _archon_workflow_run_id(archon_cost_path: "pathlib.Path | None") -> "str | N
     except Exception:
         return None
     run_id = (run_obj or {}).get("run_id") or (run_obj or {}).get("runId")
-    if not isinstance(run_id, str) or not _SAFE_RUN_ID_RE.match(run_id):
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID_RE.fullmatch(run_id):
         return None
     return run_id
 
@@ -1014,6 +1014,9 @@ def cmd_assemble(args) -> None:
         "found": [],
         "stale": [],
         "own_dir": [],
+        # #583: gate files that existed but could not be read (not valid UTF-8, a
+        # directory with the name, ...) — skipped, never losing the whole record.
+        "unreadable": [],
     }
     for name in artifact_names:
         md_path = artifacts_dir / f"{name}.md"
@@ -1026,9 +1029,28 @@ def cmd_assemble(args) -> None:
                 else:
                     gate_artifact_lookup["stale"].append(name)
         if md_path.exists():
+            try:
+                content = md_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                # #583: an unreadable gate file is a visible missing-evidence condition,
+                # not a lost record: skip it, name it in the lookup (it is NOT counted
+                # as found/own_dir evidence since it could not be read), and emit one
+                # health event so the skip is not silent. It must not count as accepted
+                # delivery — the stage simply does not appear in stages/artifacts.
+                gate_artifact_lookup["unreadable"].append(name)
+                print(
+                    f"run-record: gate artifact {md_path} unreadable "
+                    f"({type(exc).__name__}); skipped, record still written",
+                    file=sys.stderr,
+                )
+                emit_health_event(
+                    "factory.run_record.gate_artifact_unreadable",
+                    args.issue, args.run_id,
+                    {"artifact": name, "source": source, "error": type(exc).__name__},
+                )
+                continue
             if name in GATE_STAGE_NAMES:
                 gate_artifact_lookup[source].append(name)
-            content = md_path.read_text(encoding="utf-8")
             artifacts[name] = content
             stage = _parse_artifact_stage(name, content)
             if stage:
