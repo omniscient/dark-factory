@@ -728,6 +728,70 @@ def test_scheduler_preflight_without_a_registry_has_no_hosting(tmp_path):
     assert "model endpoint registry not found" in problems[0] and hosting is None
 
 
+# --- #558: load_verified_entry (the proxy's Configuration-contract loader) -----------------
+
+def _forbidden(*args, **kwargs):
+    raise AssertionError("load_verified_entry() must never call _select() or load_registry()")
+
+
+def test_load_verified_entry_returns_a_verified_cloud_entry(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD, LOCAL])
+    assert me.load_verified_entry(reg, "cloud-test") == ([], CLOUD)
+
+
+def test_load_verified_entry_fails_closed_on_a_digest_mismatch(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    _write_registry(reg, [CLOUD, _entry(CLOUD, id="cloud-extra")])
+    problems, entry = me.load_verified_entry(reg, "cloud-test")
+    assert entry is None
+    assert len(problems) == 1 and "does not match FACTORY_MODEL_REGISTRY_SHA256" in problems[0]
+
+
+def test_load_verified_entry_requires_the_digest(tmp_path):
+    reg = _write_registry(tmp_path / "staged", [CLOUD])
+    problems, entry = me.load_verified_entry(reg, "cloud-test")
+    assert entry is None and "FACTORY_MODEL_REGISTRY_SHA256 is not set" in problems[0]
+
+
+def test_load_verified_entry_unknown_id_chooses_no_other(tmp_path, monkeypatch):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD])
+    problems, entry = me.load_verified_entry(reg, "cloud-nope")
+    assert entry is None and "no other endpoint is chosen instead" in problems[0]
+
+
+def test_load_verified_entry_without_registry_file(tmp_path, monkeypatch):
+    reg = tmp_path / "staged"
+    (reg / me.EVIDENCE_DIR).mkdir(parents=True)
+    (reg / me.EVIDENCE_DIR / "cloud-test.yaml").write_text("x: 1\n", encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    assert me.load_verified_entry(reg, "cloud-test") == (
+        [f"model endpoint registry not found at {reg / me.REGISTRY_FILE}"], None)
+
+
+def test_load_verified_entry_keeps_no_local_dispatch(tmp_path, monkeypatch, pinned_suite):
+    # Not filtered: a local entry with perfect evidence and env still comes back as a problem.
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    assert me.load_verified_entry(reg, "local-test") == (
+        [me._NO_LOCAL_DISPATCH.format(eid="local-test")], None)
+
+
+def test_load_verified_entry_reads_each_staged_file_once(tmp_path, monkeypatch, pinned_suite):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    monkeypatch.setattr(me, "_select", _forbidden)
+    monkeypatch.setattr(me, "load_registry", _forbidden)
+    evidence = f"{me.EVIDENCE_DIR}/local-test.yaml"
+    reads = _serve_first_read(monkeypatch, reg, {
+        me.REGISTRY_FILE: _registry_bytes([_entry(CLOUD, id="local-test")]),
+        evidence: yaml.safe_dump({"capability_evidence": _record(
+            LOCAL, results=dict(_record(LOCAL)["results"], streaming="fail"))}).encode("utf-8"),
+    })
+    assert me.load_verified_entry(reg, "local-test") == (
+        [me._NO_LOCAL_DISPATCH.format(eid="local-test")], None)
+    assert reads == {me.REGISTRY_FILE: 1, evidence: 1}
+
+
 # --- Task 5: payload class predicate and redacted view --------------------------------------
 
 @pytest.mark.parametrize("declared,hosting,expected", [
