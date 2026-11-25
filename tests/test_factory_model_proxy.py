@@ -1106,3 +1106,15 @@ def test_cloud_mid_stream_failure_now_aborts_instead_of_completing(tmp_path, mon
     _run(scenario())
     row = _rows(tmp_path)[0]
     assert row["status"] == 504 and row["failure_class"] is None
+
+
+def test_rollout_doc_lists_exactly_the_supported_and_refused_local_modes():
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "dark-factory-model-proxy-rollout.md"
+           ).read_text(encoding="utf-8")
+    section = doc.split("## Local destination: supported and uncertified modes (#558)", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    for needle in (f"`{ma.SUPPORTED_METHOD} {ma.SUPPORTED_PATH}`", "count_tokens",
+                   *(f"`{c}`" for c in ma.FORCED_TOOL_CHOICES), f"`{ma.DEFERRED_TOOL_FIELD}`",
+                   *(f"`{f}`" for f in ma.STRUCTURED_OUTPUT_FIELDS), "served_name",
+                   "uncertified", "/v1/chat/completions", *ma.FAILURE_CLASSES):
+        assert needle in section, needle
