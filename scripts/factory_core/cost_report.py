@@ -328,7 +328,7 @@ def format_missing_diagnostic(diagnostic: dict, run_id: str, issue: int) -> str:
 
 
 _CUMULATIVE_MARKER_RE = re.compile(
-    r"<!-- cumulative: cost=([0-9.]+) in=(\d+) out=(\d+) -->"
+    r"<!-- cumulative: cost=([0-9.]+|n/a) in=(\d+) out=(\d+) -->"
 )
 
 
@@ -424,6 +424,13 @@ COST_MARKER = "<!-- dark-factory-cost-report -->"
 # Token/duration cell for a node whose usage Archon did not report (#453) — never "0".
 MISSING_CELL = "—"
 
+# #608: a local-routed run records cost_usd null (hybrid contract §4.10) — rendered as
+# unknown, never $0. The cumulative marker carries the short parseable token so the
+# next run's parse_prior_cumulative keeps working; the human-facing lines carry the
+# full phrase.
+UNKNOWN_COST = "n/a (local endpoint)"
+UNKNOWN_COST_MARKER = "n/a"
+
 
 def format_node_row(node: dict) -> str:
     """One per-node table row. A cost-missing node (#453) shows its reason in the cost
@@ -437,11 +444,17 @@ def format_node_row(node: dict) -> str:
             f"{MISSING_CELL} | {MISSING_CELL} | "
             f"missing ({node.get('reason') or 'unknown'}) | {duration} |"
         )
+    # #608: a null cost (local endpoint) renders as unknown, never $0 — a measured
+    # zero (e.g. a bash: node) is 0, not None, and still renders $0.
+    cost_cell = (
+        UNKNOWN_COST if node.get("cost_usd") is None
+        else format_cost(node.get("cost_usd", 0) or 0)
+    )
     return (
         f"| {node.get('node_id', '')} | {node.get('model') or ''} | "
         f"{format_tokens_table(node.get('gen_ai.usage.input_tokens', 0) or 0)} | "
         f"{format_tokens_table(node.get('gen_ai.usage.output_tokens', 0) or 0)} | "
-        f"{format_cost(node.get('cost_usd', 0) or 0)} | "
+        f"{cost_cell} | "
         f"{format_duration(node.get('duration_ms', 0) or 0)} |"
     )
 
@@ -486,9 +499,16 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
         total_cost_raw = totals.get("cost_usd")
         total_in = totals.get("gen_ai.usage.input_tokens") or 0
         total_out = totals.get("gen_ai.usage.output_tokens") or 0
-    if total_cost_raw is None:
-        total_cost_raw = 0
-    total_cost_str = _passthrough_num(total_cost_raw)
+    # #608: an unknown cost (a local-routed run records cost_usd null — contract §4.10)
+    # is never coerced to 0; it renders as unknown in the Subtotal and, through the
+    # cumulative, in the header. A measured zero is 0, not None, and renders $0.
+    cost_unknown = total_cost_raw is None
+    if cost_unknown:
+        total_cost_str = UNKNOWN_COST
+        total_cost_display = UNKNOWN_COST
+    else:
+        total_cost_str = _passthrough_num(total_cost_raw)
+        total_cost_display = f"${total_cost_str}"
     partial_note = format_partial_capture_note(totals)
     partial_segment = f"\n\n{partial_note}" if partial_note else ""
 
@@ -500,7 +520,16 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
     run_rows = "\n".join(format_node_row(node) for node in run_record.get("nodes") or [])
 
     prior = parse_prior_cumulative(prior_comment_body)
-    cum_cost = _bc_add(prior["prev_cost"], total_cost_str)
+    # #608: once any run's cost is unknown — this one, or one in the parsed prior
+    # history (marker cost=n/a) — the cumulative is unknown: it can't be recomputed,
+    # and must never read as prior + 0. The marker keeps the short parseable token.
+    cum_unknown = cost_unknown or prior["prev_cost"] == UNKNOWN_COST_MARKER
+    if cum_unknown:
+        cum_cost = UNKNOWN_COST_MARKER
+        cum_display = UNKNOWN_COST
+    else:
+        cum_cost = _bc_add(prior["prev_cost"], total_cost_str)
+        cum_display = f"${cum_cost}"
     cum_in = prior["prev_in"] + total_in
     cum_out = prior["prev_out"] + total_out
     run_count = prior["run_count"] + 1
@@ -523,7 +552,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 <!-- cumulative: cost={cum_cost} in={cum_in} out={cum_out} -->
 ## Dark Factory — Cost Report
 
-**{run_count} run(s) — Total: ${cum_cost} ({format_tokens_cumulative(cum_in)} in / {format_tokens_cumulative(cum_out)} out){lower_bound_suffix}**
+**{run_count} run(s) — Total: {cum_display} ({format_tokens_cumulative(cum_in)} in / {format_tokens_cumulative(cum_out)} out){lower_bound_suffix}**
 
 {prior['prior_runs']}
 ### Run: {timestamp} ({intent}, {status})
@@ -531,7 +560,7 @@ def render(run_record: dict, prior_comment_body: str, timestamp: str, intent: st
 | Step | Model | In tokens | Out tokens | Cost | Duration |
 |------|-------|-----------|------------|------|----------|
 {run_rows}
-| **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **${total_cost_str}** | |{partial_segment}
+| **Subtotal** | | **{format_tokens_cumulative(total_in)}** | **{format_tokens_cumulative(total_out)}** | **{total_cost_display}** | |{partial_segment}
 {economics_segment}{push_segment}
 
 ---

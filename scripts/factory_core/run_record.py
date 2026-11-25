@@ -1099,8 +1099,10 @@ def cmd_assemble(args) -> None:
     if local_run:
         # Contract §4.10: a local-routed run's cost is unknown — null, never the harness's
         # Claude-priced figure and never 0 (sum([]) included). Token counts are kept.
+        # #608: the capture status says "not applicable", never "complete" beside a null
+        # cost; the cost report renders such costs as unknown, never $0.
         nodes = [dict(n, cost_usd=None) for n in nodes]
-        totals = dict(totals, cost_usd=None, known_cost_usd=None)
+        totals = dict(totals, cost_usd=None, known_cost_usd=None, cost_capture="not_applicable")
 
     from . import adapter
     try:

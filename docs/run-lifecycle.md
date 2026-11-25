@@ -969,7 +969,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:610-631
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:984-1223`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:984-1226`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
    validate, conformance and code-review nodes write the first three into Archon's
    per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
@@ -995,7 +995,11 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:610-631
    stage to `runs.jsonl`. It reads this run's request-ledger rows once: they feed
    `harness_economics` and the `model_dispatch` Request/Result record (#558), and when any
    row is `hosting_location: local` every node's `cost_usd` and the cost totals are set to
-   null (contract §4.10). For `refine`/`plan` it also records `artifact_check`
+   null (contract §4.10) with the run's `cost_capture` set to `not_applicable` — never
+   `complete` beside a null cost; the cost report renders such a cost as
+   `n/a (local endpoint)`, never `$0`, in per-node rows, the Subtotal and the cumulative,
+   which carries the short `cost=n/a` marker and stays unknown for later runs too (#608).
+   For `refine`/`plan` it also records `artifact_check`
    (`push-result.json` presence, resolved the same two-directory way, else a
    `needs-discussion` label lookup), folds `push_result` from that resolved path, and
    scores an artifact-less run `failed` or `clean_abort`. Failure is ignored.
