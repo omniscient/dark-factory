@@ -455,8 +455,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         usage_scan.extend(chunk)
                         _await_next_chunk()
                     deadline.reschedule(None)
-                    ma.check_json_body(upstream_resp.status,
-                                       _decode_scan(bytes(usage_scan), encoding))
+                    scan = _decode_scan(bytes(usage_scan), encoding)
+                    ma.check_json_body(upstream_resp.status, scan)
+                    # #559: refused before prepare(), so the client gets a real error body.
+                    ma.check_response_model(dest, scan, streamed=False)
                 response = web.StreamResponse(
                     status=upstream_resp.status, headers=upstream_resp.headers
                 )
@@ -471,8 +473,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         _await_next_chunk()
                     deadline.reschedule(None)
                     if local:
-                        ma.check_sse_complete(upstream_resp.status,
-                                              _decode_scan(bytes(usage_scan), encoding))
+                        scan = _decode_scan(bytes(usage_scan), encoding)
+                        ma.check_sse_complete(upstream_resp.status, scan)
+                        # #559: already forwarded — a mismatch aborts before EOF and is ledgered.
+                        ma.check_response_model(dest, scan, streamed=True)
                 await response.write_eof()
     except handled as exc:
         prepared = response is not None and response.prepared

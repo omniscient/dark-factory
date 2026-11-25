@@ -1275,3 +1275,78 @@ def test_default_path_never_consults_the_declared_role(local_env, monkeypatch):
     assert (row["role"], row["endpoint_id"], row["hosting_location"], row["request_id"]) == (
         None, None, "cloud", None)
     assert "factory_core.providers.role_isolation" not in sys.modules
+
+
+async def _redirect_elsewhere(request):
+    if request.path == "/elsewhere":
+        return web.json_response({"usage": {}})
+    raise web.HTTPFound("/elsewhere")
+
+
+def _answering_as(model):
+    async def handler(request):
+        return web.json_response({"type": "message", "model": model,
+                                  "usage": {"input_tokens": 1, "output_tokens": 1}})
+    return handler
+
+
+@pytest.mark.parametrize("model,handler,status,failure_class,upstream_calls", [
+    # Request side — pins #558's check_model_identity (model_adapter.py) through the proxy.
+    pytest.param("claude-opus-5-5", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0,
+                 id="literal-cloud-model-id"),
+    pytest.param("opus", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0, id="alias"),
+    pytest.param("qwen2.5-coder-7b", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0,
+                 id="alias-mismatch-other-local-model"),
+    # Transport — pins #558's check_response_status: a redirect is refused, never followed.
+    pytest.param(SERVED, _redirect_elsewhere, 502, ma.PROTOCOL_INCOMPATIBILITY, 1,
+                 id="redirect"),
+    # Response side — new in #559: what the endpoint actually served is checked.
+    pytest.param(SERVED, _answering_as("claude-opus-5-5"), 502, ma.PROTOCOL_INCOMPATIBILITY, 1,
+                 id="upstream-model-mismatch-backend-fallback"),
+    pytest.param(SERVED, _answering_as("qwen2.5-coder-7b"), 502, ma.PROTOCOL_INCOMPATIBILITY,
+                 1, id="upstream-model-mismatch-swapped-model"),
+])
+def test_model_identity_policy_model_is_the_model_actually_invoked(
+        local_env, monkeypatch, model, handler, status, failure_class, upstream_calls):
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": model, "messages": []})
+        return resp.status, await resp.json()
+
+    (got, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, handler, send)
+    assert got == status and cloud_calls == [] and len(calls) == upstream_calls
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == failure_class
+    row = _rows(local_env)[0]
+    assert row["failure_class"] == failure_class and row["model"] == model
+
+
+def test_upstream_answering_as_the_served_model_passes(local_env, monkeypatch):
+    (status, body), calls, _ = _local_scenario(local_env, monkeypatch, _answering_as(SERVED),
+                                               _post_json)
+    assert status == 200 and body["model"] == SERVED and len(calls) == 1
+    assert _rows(local_env)[0]["failure_class"] is None
+
+
+SSE_WRONG_MODEL = SSE_OK.replace(b'"message":{"usage"',
+                                 b'"message":{"model":"claude-opus-5-5","usage"')
+
+
+async def _sse_wrong_model(request):
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(SSE_WRONG_MODEL)
+    await resp.write_eof()
+    return resp
+
+
+def test_streamed_model_mismatch_is_aborted_and_fails_the_run(local_env, monkeypatch):
+    # Chunks are already forwarded when the check can run: this is not a pre-forward refusal.
+    # The proxy withholds the clean EOF (like check_sse_complete) and records the class, which
+    # makes the run's model_dispatch outcome "failed".
+    assert SSE_WRONG_MODEL != SSE_OK
+    _pointer(local_env / "current-run.json", "run-s")
+    _local_scenario(local_env, monkeypatch, _sse_wrong_model,
+                    lambda c: _expect_truncated(c, stream=True))
+    rows, _ = rr._read_ledger_rows("run-s", local_env / "ledger.jsonl")
+    assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+    assert rr._compute_model_dispatch(rows)["result"]["outcome"] == "failed"
