@@ -130,7 +130,7 @@ Fixed cost, every poll:
 | Call | API | Source |
 |------|-----|--------|
 | `tracker get-rate-budget` → `gh api rate_limit --jq .resources.graphql` | REST | `check_rate_limit`, `scheduler.sh:70-85`; `providers/tracker/github.py` `get_rate_budget()` |
-| Board fetch: `providers/cli.py tracker board-items`, which runs `gh api graphql` with `items(first: 100)` per page, following `endCursor` until `hasNextPage` is false. One call per 100 board items. Each item carries status name, issue number, title and the first 10 labels | GraphQL | `fetch_board_items`, `scheduler.sh:616-621`; `providers/tracker/github.py` `list_board_items()` (`:223`) and the query template (`:23`) |
+| Board fetch: `providers/cli.py tracker board-items`, which runs `gh api graphql` with `items(first: 100)` per page, following `endCursor` until `hasNextPage` is false. One call per 100 board items. Each item carries status name, issue number, title, the first 10 labels and the item's ProjectV2 id (the `id` selection, #607 — the scheduler's board moves use it to skip the item-list lookup). The query also selects `rateLimit { cost remaining resetAt }`, and each page call appends one line to the GraphQL cost log under `SCHEDULER_STATE_DIR` (written only when that variable is set; fail-soft; #607) | GraphQL | `fetch_board_items`, `scheduler.sh:634-638`; `providers/tracker/github.py` `list_board_items()` (`:268`) and the query template (`:28`); `factory_core/cost_log.py` (`log_call`, `:21`) |
 | `tracker get-rate-budget` again, for the `graphql=` field of the summary line | REST | `scheduler.sh:1650-1651` |
 | Only when the poll dispatched nothing: `providers/cli.py tracker list-items --label ready-for-agent --limit 200`, which runs `gh issue list --repo <slug> --state open --label ready-for-agent --limit 200 --json number` | `gh` subcommand | `off_board_ready_issues`, `scheduler.sh:628-644`, `:1645`; `providers/tracker/github.py` `list_items()` (`:264`) |
 
@@ -149,12 +149,12 @@ or polls, except the comment-classifier verdict:
 
 | Stage | Calls per item it looks at |
 |-------|----------------------------|
-| `stage_ci_gate` | `gh pr list --search head:feat/issue-N-`; if a PR exists, `gh pr checks`. On a red PR: a board move (`gh project item-list --limit 200` + `gh project item-edit`, `board.py`) and a comment through `tracker add-comment` |
+| `stage_ci_gate` | `gh pr list --search head:feat/issue-N-`; if a PR exists, `gh pr checks`. On a red PR: a board move (`board.py`: `gh project item-edit` — the `item-list` lookup is skipped because the in-loop snapshot's item id is passed, #607) and a comment through `tracker add-comment` |
 | `stage_rescue_blocked` | `gh pr list` and `gh pr checks`; on rescue a second `gh pr list`, optionally `gh pr ready`, a board move, and a comment upsert (`rescue.py`, `board.py` `post_or_update_comment`) |
 | `stage_orphan_sweep` | Only for orphans: board move + a comment through `tracker add-comment` |
 | `stage_conflict_resolve` | `gh pr list`, then `gh pr view --json mergeable` |
 | `stage_review_triage` | With `direct-to-pr`: `gh pr list` + `gh pr view --json reviews`. Then `gh issue view --json comments`. With new comments and no cached verdict: one `claude -p --model haiku` call |
-| `stage_ready_implement` | `gh issue view --json body`; one `gh issue view --json state` per dependency that is not on the board |
+| `stage_ready_implement` | `gh issue view --json body`; one batched `tracker states` call for all dependencies that are not on the board (#607; one aliased GraphQL query per 25-issue chunk) |
 | `stage_blocked_retry` | `git ls-remote` over smart HTTP (no API quota, per the comment at `scheduler.sh:539-559`); `gh pr list` only when no branch was found |
 | `stage_plan`, `stage_refine` | Gate-labelled items: `gh issue view --json comments`, twice when the grace timer is evaluated. On dispatch: a comment through `tracker add-comment` |
 | `stage_epic_autopilot` | One board GraphQL query for in-progress epics, one sub-issue GraphQL query per epic, one `gh issue view` per gated child, optionally a Contents API read and a `claude -p` review (`epic_autopilot.py`) |
@@ -170,7 +170,9 @@ ceiling comments, the feedback re-run comments) use `tracker add-comment`
 (`providers/tracker/github.py` `add_comment()`, `:175`), which runs
 `gh issue comment <n> --repo <slug> --body …`. Still direct `gh`, outside the provider
 layer: board moves (`set_board_status` → `factory_core/cli.py board-move` →
-`board.py`, `gh project item-list` and `item-edit`), the rescue comment upsert
+`board.py`, `gh project item-edit` — the `item-list` lookup is skipped when the
+scheduler passes the in-loop snapshot's item id, #607, and remains the fallback when it
+does not), the rescue comment upsert
 (`board.py` `post_or_update_comment`), and `smoke_gate.sh`. Tracking issue:
 [#507](https://github.com/omniscient/dark-factory/issues/507) (open).
 
@@ -348,8 +350,8 @@ Changing a board limit needs a scheduler restart, because the limits are cached 
 
 ### Dependency gating
 
-`dependencies_met` (`scheduler.sh:733-770`) is called only by `stage_ready_implement`.
-It reads the issue body and `_scan_body_for_deps` (`:685-719`) collects issue numbers
+`dependencies_met` (`scheduler.sh:751-809`) is called only by `stage_ready_implement`.
+It reads the issue body and `_scan_body_for_deps` (`:715-749`) collects issue numbers
 from:
 
 - any line containing `Depends on:` (case-insensitive; `*` emphasis is stripped first;
@@ -359,10 +361,15 @@ from:
 Fenced code blocks and inline code spans are removed first; an unclosed fence hides
 everything after it.
 
-For each dependency: if it is on the board, its status must be exactly `Done`. If it is
-not on the board, the issue state is fetched; `CLOSED` passes (`resolved=closed_off_board`),
-anything else, including a failed lookup, blocks. A blocked item logs a `dep_gate` line
-and is skipped for this poll. `tests/test_scheduler.sh` section N covers these cases.
+For each dependency: if it is on the board, its status must be exactly `Done`. Deps not
+on the board are resolved by ONE batched state read — `tracker states --ids …`
+(`GitHubTracker.get_states`, `providers/tracker/github.py:159`: one aliased GraphQL query
+per 25-issue chunk, issue numbers validated `\d+` before interpolation) — instead of one
+read per dependency (#607): `CLOSED` passes (`resolved=closed_off_board`); a missing or
+null state, and a failed batch read, block — a failed read means every dep is
+`dep_status=unknown`, the same safe direction the former per-call failure produced
+(`:784-806`). A blocked item logs a `dep_gate` line and is skipped for this poll.
+`tests/test_scheduler.sh` section N covers these cases.
 
 ### Size and type dispatch ceiling
 
@@ -430,6 +437,7 @@ the named volume `<FACTORY_INSTANCE>-scheduler-state` mounted into both the sche
 | `deps-fixer-state.json` | `deps_fixer.py` in the `Audit deps` run | Same | Attempts per advisory-set hash |
 | `autopilot-state.json` | `epic_autopilot.py` in the scheduler process | Same | Daily advance count, cached verdicts |
 | `runs.jsonl` | Run containers (`entrypoint.sh`); scheduler appends a `stop_condition` row when `evaluate_stop` reports a stop (`breaker.py` `_append_stop_audit_row`) | Reporting | Run ledger |
+| `graphql-costs.jsonl` (rotates to `.1`) | Scheduler and run containers via `factory_core/cost_log.py` — **only when `SCHEDULER_STATE_DIR` is set in the child's environment** (unset in CI's pytest job, which asserts this dir stays empty) | Operator (manual tailing; no factory code reads it) | One JSONL line per measured GraphQL call (`board_items`, `issue_states`): `ts`, `source` (`scheduler` or a run id, via `DARK_FACTORY_COST_SOURCE`), `context`, `cost`, `remaining`, `reset_at`. Size rotation at ~1 MiB, one retained generation. Fail-soft by design (#607) |
 
 Because retry state is on the volume, counters survive a scheduler restart
 (`scheduler.sh:1484-1488`).
@@ -897,11 +905,14 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     Comment at `:1609-1610`. On a poll where `Recheck main` or `Fix main` is dispatched,
     `DISPATCHED` is set and review triage, plan and refine all break on their first item.
 
-17. **The dependency gate fails open on a body fetch error and closed on a state fetch
+17. **The dependency gate fails open on a body fetch error and closed on a state read
     error.** `dependencies_met` returns 0 (met) when the issue body cannot be fetched
-    (`:725-726`; test N20 calls this "pre-existing behaviour"), but blocks when a
-    dependency's state cannot be fetched (`:745-750`). The on-board comparison is
-    case-sensitive (`!= "Done"`, `:752`) while status grouping elsewhere is not.
+    (`:755-756`; test N20 calls this "pre-existing behaviour"), but blocks when a
+    dependency's state cannot be read: the batched `tracker states` call failing means
+    every off-board dep is `dep_status=unknown` (`:784-806`; #607 — one aliased GraphQL
+    query per 25-issue chunk instead of the former one read per dependency). The on-board
+    comparison is case-sensitive (`!= "Done"`, `:778`) while status grouping elsewhere is
+    not.
 
 18. **No counter on the Ready stage.** `stage_ready_implement` has no retry counter. If
     `docker compose run` fails for a Ready ticket, the ticket stays Ready and the
@@ -912,11 +923,15 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     The ticket is in Blocked, so once the label is gone `stage_blocked_retry` will
     dispatch it by itself on the next poll.
 
-20. **Board moves look up the item in the first 200 board items.**
-    `board._find_item_by_number_checked` runs `gh project item-list --limit 200`;
-    `set_board_status` silently does nothing when the item is not found. The scheduler's
-    own fetch paginates. On a board with more than 200 items a move may be a no-op
-    while the stage logs it as done (for example `ci_gate … action=move_to_blocked`).
+20. **Board moves without a supplied item id look up the item in the first 200 board
+    items.** The scheduler's five per-item-loop moves now pass the item's ProjectV2 id
+    from the in-loop board snapshot (`set_board_status … --item-id`, #607), so they make
+    no `item-list` call at all. The remaining callers (breaker, rescue, deconflict,
+    epic_autopilot) still go through `board._find_item_by_number_checked`
+    (`gh project item-list --limit 200`); `set_board_status` silently does nothing when
+    the item is not found, and an empty `item_id` falls back to that lookup rather than
+    no-op-ing the edit. On a board with more than 200 items a lookup-based move may still
+    be a no-op while the caller logs it as done.
 
 21. **`post_or_update_comment` creates a comment without `--repo`.** Still true on
     `64cd44a`: `scripts/factory_core/board.py` (`:124`) calls
@@ -947,3 +962,16 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     linked above as the homes for run behaviour and config reference. They did not
     exist on `origin/main` when this document was first written against `254c9d2`; they
     do now, together with [features.md](features.md) (a status for each feature).
+
+25. **GraphQL cost is measured in points, not calls, and never written during tests.**
+    The board fetch query and the batched `tracker states` query each select
+    `rateLimit { cost remaining resetAt }` (1 point, no extra round trip), and each call
+    appends one line to `$SCHEDULER_STATE_DIR/graphql-costs.jsonl`
+    (`factory_core/cost_log.py` `log_call`, `:21`): `ts`, `source` (`scheduler` —
+    exported at `scheduler.sh:16` — or a run id, `entrypoint.sh:117`), `context`, and the
+    call's own `cost`/`remaining`/`reset_at`. The write happens **only when
+    `SCHEDULER_STATE_DIR` is set in the child's environment** (no default) — CI's pytest
+    job leaves it unset and separately asserts `/var/lib/dark-factory` stays empty — and
+    every failure path is swallowed (a cost log must never break the call it measures).
+    Codehost PR lookups go through the code-host provider, not the tracker, and are
+    deliberately unmeasured (#607).

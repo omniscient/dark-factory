@@ -958,20 +958,33 @@ _N_DEP200_GH_EXIT=0
 _N_DEP201_STATE=""
 _N_DEP202_STATE=""
 
-# python3 stub: routes by --id; body call (issue 100) → _N_BODY; state calls → per-dep
-# state var. _N_DEP200_GH_EXIT=1 simulates the underlying gh failure that
-# GitHubTracker.get_item swallows internally and returns as {} (no state key).
+# python3 stub: routes by verb. body call (issue 100) → _N_BODY; #607: off-board
+# deps are answered by ONE `tracker states --ids` batch call from the same
+# _N_DEPNNN_STATE vars. _N_DEP200_GH_EXIT=1 simulates the batch call failing
+# (old: the underlying gh failure; new: the whole batch read failing — same safe
+# direction).
 python3() {
   echo "python3 $*" >> "$STUB_LOG"
   case "$*" in
     *"--id 100 --fields body"*)
       jq -n --arg body "$_N_BODY" '{body:$body}' ;;
-    *"--id 200 --fields state"*)
-      if [ "$_N_DEP200_GH_EXIT" -ne 0 ]; then echo '{}'; else jq -n --arg state "$_N_DEP200_STATE" '{state:$state}'; fi ;;
-    *"--id 201 --fields state"*)
-      jq -n --arg state "$_N_DEP201_STATE" '{state:$state}' ;;
-    *"--id 202 --fields state"*)
-      jq -n --arg state "$_N_DEP202_STATE" '{state:$state}' ;;
+    *"tracker states --ids"*)
+      if [ "${_N_DEP200_GH_EXIT:-0}" -ne 0 ]; then return 1; fi
+      _N_CSV="${*}"
+      _N_CSV="${_N_CSV##*states --ids }"
+      _N_OUT="{}"
+      IFS=',' read -ra _N_IDS <<< "$_N_CSV"
+      for _N_ID in "${_N_IDS[@]}"; do
+        case "$_N_ID" in
+          200) _N_ST="${_N_DEP200_STATE}" ;;
+          201) _N_ST="${_N_DEP201_STATE}" ;;
+          202) _N_ST="${_N_DEP202_STATE}" ;;
+          *) _N_ST="" ;;
+        esac
+        _N_OUT=$(jq -c --arg k "$_N_ID" --arg s "$_N_ST" \
+          '. + {($k): (if $s == "" then null else $s end)}' <<< "$_N_OUT")
+      done
+      echo "$_N_OUT" ;;
     *providers/cli.py*) return 0 ;;
     *) "$_REAL_PY3" "$@" ;;
   esac
@@ -1127,6 +1140,36 @@ _N_DEP201_STATE="OPEN"
 dependencies_met "100" "$_BOARD_200_DONE" && _N_RET=0 || _N_RET=1
 assert_eq "N19: multi-ref bullet, second off-board OPEN → returns 1" "1" "$_N_RET"
 
+# N21: #607 — two off-board deps are resolved by ONE batched states call, both CLOSED → 0
+_N_BODY="Depends on: #200, #201"
+_N_DEP200_STATE="CLOSED"; _N_DEP201_STATE="CLOSED"; _N_DEP200_GH_EXIT=0
+> "$STUB_LOG"
+dependencies_met "100" "$_BOARD_EMPTY" && _N_RET=0 || _N_RET=1
+assert_eq "N21: two off-board deps → exactly one batched states call" \
+  "1" "$(grep -c 'tracker states --ids' "$STUB_LOG" || true)"
+assert_eq "N21: both CLOSED → returns 0" "0" "$_N_RET"
+
+# N22: #607 — batch call fails → deps read unknown; first unmet dep blocks (short-circuit,
+# as the old per-call code did), so exactly the first dep (#200) is logged unknown.
+_N_BODY="Depends on: #200, #201"
+_N_DEP200_GH_EXIT=1
+> "$STUB_LOG"
+_N_OUTPUT=$(dependencies_met "100" "$_BOARD_EMPTY" 2>&1) && _N_RET=0 || _N_RET=1
+assert_eq "N22: batch failure → returns 1 (safe)" "1" "$_N_RET"
+assert_eq "N22: first dep logged unknown before short-circuit" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'dep=#200 blocked_by=#200 dep_status=unknown' || true)"
+
+# N23: #607 — null state for a dep (missing issue) means unmet; CLOSED sibling still resolves
+_N_BODY="Depends on: #200, #201"
+_N_DEP200_STATE="CLOSED"; _N_DEP201_STATE=""; _N_DEP200_GH_EXIT=0
+> "$STUB_LOG"
+_N_OUTPUT=$(dependencies_met "100" "$_BOARD_EMPTY" 2>&1) && _N_RET=0 || _N_RET=1
+assert_eq "N23: null-state dep → returns 1 (missing means unmet)" "1" "$_N_RET"
+assert_eq "N23: missing dep logged unknown" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'dep=#201 blocked_by=#201 dep_status=unknown' || true)"
+assert_eq "N23: the CLOSED sibling still resolves" \
+  "1" "$(echo "$_N_OUTPUT" | grep -c 'dep=#200 resolved=closed_off_board' || true)"
+
 # N20: body fetch fails → returns 0 (pre-existing behaviour)
 # Override python3 so the body call for issue 100 returns non-zero
 python3() {
@@ -1184,7 +1227,7 @@ assert_eq "fetch_board_items requests the cursor page" "1" "$(grep -c 'after: "C
 assert_eq "fetch_board_items makes exactly one gh api graphql call per page (2 pages, 2 calls)" \
   "2" "$(grep -c '^gh api graphql -f query=' "$SHIM_LOG" || true)"
 assert_eq "fetch_board_items keeps the {content:{number,title,type},labels,status} shape" \
-  '{"content":{"number":101,"title":"first page issue","type":"Issue"},"labels":["ready-for-agent"],"status":"Backlog"}' \
+  '{"content":{"number":101,"title":"first page issue","type":"Issue"},"labels":["ready-for-agent"],"status":"Backlog","item_id":null}' \
   "$(echo "$_BOARD_PAGE_RESULT" | jq -c '.items[0]')"
 
 gh() { echo "gh $*" >> "$STUB_LOG"; return 0; }

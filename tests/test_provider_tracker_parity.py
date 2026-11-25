@@ -223,10 +223,12 @@ def test_list_work_items_single_page_query_matches_scheduler_fetch_board_items(m
         }))
     monkeypatch.setattr(subprocess, "run", fake)
     items = GitHubTracker().list_work_items(["ready"])
+    # #607: shared template with the board fetch — rateLimit (per-call cost) and the
+    # node `id` selection added to the pre-#607 byte-for-byte query.
     expected_query = (
-        '\n      query {\n        node(id: "' + identity.PROJECT_ID + '") {\n'
+        '\n      query {\n        rateLimit { cost remaining resetAt }\n        node(id: "' + identity.PROJECT_ID + '") {\n'
         '          ... on ProjectV2 {\n            items(first: 100) {\n'
-        '              pageInfo { hasNextPage endCursor }\n              nodes {\n'
+        '              pageInfo { hasNextPage endCursor }\n              nodes {\n                id\n'
         '                fieldValueByName(name: "Status") {\n'
         '                  ... on ProjectV2ItemFieldSingleSelectValue { name }\n                }\n'
         '                content {\n                  ... on Issue {\n                    number\n'
@@ -342,12 +344,15 @@ def test_tracker_methods_pass_opaque_id_through_unchanged(monkeypatch, opaque_id
 # --- #507: append-only comment / comment lookup / board read / label list -----------------
 
 _LEGACY_BOARD_QUERY = (
-    # Byte-for-byte what scheduler.sh's pre-#507 fetch_board_items passed to
-    # `gh api graphql -f query=...` (captured from the main branch with a gh stub, project
-    # id normalised to the default).
-    '\n      query {\n        node(id: "PVT_kwHOAAFds84BWh4w") {\n          ... on ProjectV2 {\n'
+    # The scheduler's board fetch query. Pre-#607 this was byte-for-byte what
+    # scheduler.sh's pre-#507 fetch_board_items passed to `gh api graphql -f query=...`
+    # (captured from the main branch with a gh stub, project id normalised to the
+    # default). #607 deliberately extends it: each node now carries its ProjectV2
+    # `id` (board-move's item-id cache skips the item-list lookup) and the root
+    # selects `rateLimit` so each page call records its own point cost.
+    '\n      query {\n        rateLimit { cost remaining resetAt }\n        node(id: "PVT_kwHOAAFds84BWh4w") {\n          ... on ProjectV2 {\n'
     '            items(first: 100%s) {\n              pageInfo { hasNextPage endCursor }\n'
-    '              nodes {\n                fieldValueByName(name: "Status") {\n'
+    '              nodes {\n                id\n                fieldValueByName(name: "Status") {\n'
     '                  ... on ProjectV2ItemFieldSingleSelectValue { name }\n                }\n'
     '                content {\n                  ... on Issue {\n                    number\n'
     '                    title\n                    labels(first: 10) { nodes { name } }\n'
@@ -355,7 +360,8 @@ _LEGACY_BOARD_QUERY = (
     '        }\n      }\n    '
 )
 
-# Output of the pre-#507 `jq '{items: [...]}'` for the page in _BOARD_PAGE below.
+# Output of the pre-#507 `jq '{items: [...]}'` for the page in _BOARD_PAGE below;
+# #607 adds the carried `item_id` per item.
 _LEGACY_BOARD_OUTPUT = '''{
   "items": [
     {
@@ -367,7 +373,8 @@ _LEGACY_BOARD_OUTPUT = '''{
       "labels": [
         "a"
       ],
-      "status": "Ready"
+      "status": "Ready",
+      "item_id": "ITEM5"
     },
     {
       "content": {
@@ -376,21 +383,25 @@ _LEGACY_BOARD_OUTPUT = '''{
         "type": "Issue"
       },
       "labels": [],
-      "status": "Done"
+      "status": "Done",
+      "item_id": "ITEM6"
     }
   ]
 }'''
 
-_BOARD_PAGE = {"data": {"node": {"items": {
-    "pageInfo": {"hasNextPage": False, "endCursor": None},
-    "nodes": [
-        {"fieldValueByName": {"name": "Ready"},
-         "content": {"number": 5, "title": "Tïtle é \"q\"", "labels": {"nodes": [{"name": "a"}]}}},
-        {"fieldValueByName": None, "content": {}},
-        {"fieldValueByName": {"name": "Done"},
-         "content": {"number": 6, "title": None, "labels": {"nodes": []}}},
-    ],
-}}}}
+_BOARD_PAGE = {"data": {
+    "rateLimit": {"cost": 13, "remaining": 4887, "resetAt": "2026-11-25T19:00:00Z"},
+    "node": {"items": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [
+            {"id": "ITEM5", "fieldValueByName": {"name": "Ready"},
+             "content": {"number": 5, "title": "Tïtle é \"q\"", "labels": {"nodes": [{"name": "a"}]}}},
+            {"fieldValueByName": None, "content": {}},
+            {"id": "ITEM6", "fieldValueByName": {"name": "Done"},
+             "content": {"number": 6, "title": None, "labels": {"nodes": []}}},
+        ],
+    }}},
+}
 
 
 def test_add_comment_argv_matches_scheduler_and_entrypoint_posts(monkeypatch):
@@ -493,6 +504,46 @@ def test_board_items_cli_output_is_byte_identical_to_pre_507_jq_output(monkeypat
     monkeypatch.setattr(sys, "argv", ["cli.py", "tracker", "board-items"])
     cli_mod.main()
     assert capsys.readouterr().out == _LEGACY_BOARD_OUTPUT + "\n"
+
+
+def test_list_board_items_carries_item_id_for_board_move_cache(monkeypatch):
+    # #607: the snapshot carries each item's ProjectV2 id so the scheduler's
+    # board-move can skip the item-list lookup; nodes without an id get null.
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout=json.dumps(_BOARD_PAGE)))
+    out = GitHubTracker().list_board_items()
+    assert [i["item_id"] for i in out["items"]] == ["ITEM5", "ITEM6"]
+
+
+def test_list_board_items_logs_one_cost_line_per_page(monkeypatch, tmp_path):
+    # #607: measure points, not calls — one JSONL line per page call, carrying the
+    # query's own rateLimit cost, source-tagged; written because SCHEDULER_STATE_DIR
+    # is explicitly set (it would be a no-op unset — CI's empty-dir assertion).
+    from factory_core import cost_log
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("DARK_FACTORY_COST_SOURCE", "scheduler")
+    page1 = json.loads(json.dumps(_BOARD_PAGE))
+    page1["data"]["node"]["items"]["pageInfo"] = {"hasNextPage": True, "endCursor": "CUR1"}
+    page2 = {"data": {"rateLimit": {"cost": 11, "remaining": 4876, "resetAt": "2026-11-25T19:00:00Z"},
+                     "node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}
+
+    def fake(cmd, **kw):
+        return _ok(stdout=json.dumps(page2 if 'after: "CUR1"' in cmd[-1] else page1))
+    monkeypatch.setattr(subprocess, "run", fake)
+    GitHubTracker().list_board_items()
+    lines = (tmp_path / cost_log.LOG_NAME).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2  # one per page call, not one per item
+    import json as _json
+    first, second = (_json.loads(l) for l in lines)
+    assert first["cost"] == 13 and second["cost"] == 11  # each call's own rateLimit.cost
+    assert first["source"] == "scheduler" and first["context"] == "board_items"
+
+
+def test_list_board_items_cost_log_noop_when_state_dir_unset(monkeypatch, tmp_path):
+    # #607: written only when the path variable is set.
+    monkeypatch.delenv("SCHEDULER_STATE_DIR", raising=False)
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout=json.dumps(_BOARD_PAGE)))
+    GitHubTracker().list_board_items()
+    assert not list(tmp_path.iterdir())
 
 
 def test_list_board_items_graphql_error_body_means_empty_board_like_old_jq_default(monkeypatch):

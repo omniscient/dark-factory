@@ -99,6 +99,29 @@ class Tracker(ABC):
     def resolve_item(self, id: str) -> None:
         """Explicit close-on-merge / Done transition."""
 
+    def get_states(self, ids: list[str]) -> dict:
+        """Batched state read (#607): mapping of each requested id -> "OPEN"/"CLOSED";
+        None when the item does not exist or its state is unknown. Callers treat
+        None as unmet (fail closed).
+
+        Contract for non-GitHub providers: the degradable per-id `get_item` read loop
+        below is a conforming implementation — a provider that raises on transport
+        failure (Jira) maps the failed id to None, and a provider that swallows it
+        (GitHub) maps the missing `state` key to None. Providers with a batch-capable
+        API may override with fewer calls (GitHub: one aliased GraphQL query per
+        chunk). IDs are opaque strings and flow through unmodified, like every id
+        in this contract."""
+        out: dict = {}
+        for i in ids:
+            key = str(i)
+            try:
+                item = self.get_item(key, fields=("state",))
+            except Exception:
+                out[key] = None
+                continue
+            out[key] = item.get("state") if isinstance(item, dict) else None
+        return out
+
     def get_status_limits(self) -> dict:
         """WIP limits per canonical status. Degradable: safe default is 'no limits known'."""
         return {}

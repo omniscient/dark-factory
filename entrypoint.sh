@@ -111,6 +111,10 @@ esac
 # ARCHON_RUN_ID is not set by archon; always generate a UUID for correlation.
 RUN_ID=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
 RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# #607: cost-log tagging — if a run-side GraphQL call is measured (the board fetch /
+# batched states read), its log line carries this run's id rather than "scheduler".
+export SCHEDULER_STATE_DIR
+export DARK_FACTORY_COST_SOURCE="$RUN_ID"
 ARTIFACTS_DIR="${HOME}/.archon/workspaces/${FACTORY_REPO_SLUG}/artifacts/runs/${RUN_ID}"
 export ARTIFACTS_DIR
 mkdir -p "$ARTIFACTS_DIR"
