@@ -771,14 +771,28 @@ def redacted_view_staged(registry_path) -> tuple[list[str], dict | None]:
     return [], _redact(endpoints, path)
 
 
+def _known_keys(obj, allowed) -> tuple[dict, int]:
+    """obj's allowed keys, in obj's order, and how many other keys were left out."""
+    known = {k: v for k, v in obj.items() if k in allowed}
+    return known, len(obj) - len(known)
+
+
 def _redact(endpoints, path) -> dict:
     """The one place that decides what of a registry is safe to print."""
     views = []
     for entry in endpoints:
-        view = {k: v for k, v in entry.items() if k != "secret_reference"}
-        ref = entry["secret_reference"]
+        # An allowlist at every level _unknown_keys tolerates: a newer-minor file's unknown
+        # keys (a future api_key, say) are counted, never printed.
+        view, omitted = _known_keys(entry, _ENTRY_KEYS)
+        for name, allowed in (("model_identity", _MODEL_IDENTITY_KEYS), ("timeouts", TIMEOUT_FIELDS)):
+            if isinstance(view.get(name), dict):
+                view[name], nested = _known_keys(view[name], allowed)
+                omitted += nested
+        ref = view.pop("secret_reference")
         view["secret_reference"] = {"name": ref, "present": bool(os.environ.get(ref))}
         if "base_url" in entry:
             view["base_url_scope"] = base_url_scope(entry["base_url"])
+        if omitted:
+            view["unknown_keys_omitted"] = omitted
         views.append(view)
     return {"registry": str(path), "endpoints": views}

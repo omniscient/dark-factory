@@ -499,6 +499,28 @@ def test_model_endpoints_show_invalid_registry_exits_1_with_field_errors(tmp_pat
     assert "ERROR: endpoint 'local-same-host': unsupported protocol 'openai-chat'" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("from_source", [False, True])
+def test_model_endpoints_show_never_prints_tolerated_unknown_keys(tmp_path, monkeypatch, capsys, from_source):
+    import factory_core.providers.cli as cli_mod
+    from factory_core.providers import model_endpoint
+    staged = _staged_fixture(tmp_path, monkeypatch)
+    registry = staged / "model-endpoints.yaml"
+    registry.write_text(registry.read_text(encoding="utf-8")
+                        .replace('schema_version: "1.0"', 'schema_version: "1.1"', 1)
+                        .replace("    secret_reference: LOCAL_GATEWAY_TOKEN\n",
+                                 "    secret_reference: LOCAL_GATEWAY_TOKEN\n"
+                                 "    api_key: sk-sentinel-unknown-key\n", 1), encoding="utf-8")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", model_endpoint.tree_sha256(staged))
+    monkeypatch.setattr(model_endpoint, "SOURCE_REGISTRY_DIR", staged)
+    argv = ["cli.py", "model-endpoints", "show"] + (["--from-source"] if from_source else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_mod.main()
+    out = capsys.readouterr().out
+    assert "sk-sentinel-unknown-key" not in out and "api_key" not in out
+    view = {e["id"]: e for e in json.loads(out)["endpoints"]}
+    assert view["local-same-host"]["unknown_keys_omitted"] == 1
+
+
 def test_model_endpoints_stage_prints_staged_digest(tmp_path, monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
     from factory_core.providers import model_endpoint

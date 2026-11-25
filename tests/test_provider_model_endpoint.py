@@ -848,6 +848,33 @@ def test_redacted_view_reduces_secret_reference_to_name_and_presence(monkeypatch
     assert SENTINEL not in repr(view)
 
 
+def _newer_minor_registry_with_unknown_keys(root):
+    """A schema 1.1 registry (unknown keys tolerated) whose local entry carries a secret-like
+    unknown key at the entry level, inside model_identity and inside timeouts."""
+    entry = _entry(LOCAL, api_key=SENTINEL)
+    entry["model_identity"]["api_key"] = SENTINEL
+    entry["timeouts"]["api_key"] = SENTINEL
+    return _write_registry(root, [entry, CLOUD], schema_version="1.1")
+
+
+def test_redacted_view_omits_tolerated_unknown_keys_at_every_level(tmp_path):
+    view = me.redacted_view(_newer_minor_registry_with_unknown_keys(tmp_path / "reg"))
+    assert SENTINEL not in repr(view) and "api_key" not in repr(view)
+    local, cloud = view["endpoints"]
+    assert local["unknown_keys_omitted"] == 3
+    assert local["model_identity"] == LOCAL["model_identity"]
+    assert local["timeouts"] == LOCAL["timeouts"]
+    assert "unknown_keys_omitted" not in cloud
+
+
+def test_redacted_view_staged_omits_tolerated_unknown_keys(tmp_path, monkeypatch):
+    reg = _newer_minor_registry_with_unknown_keys(tmp_path / "staged")
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    problems, view = me.redacted_view_staged(reg)
+    assert problems == [] and view == me.redacted_view(reg)
+    assert SENTINEL not in repr(view) and view["endpoints"][0]["unknown_keys_omitted"] == 3
+
+
 def test_redacted_view_staged_matches_the_source_view(tmp_path, monkeypatch):
     reg = _stage(tmp_path, monkeypatch, [LOCAL, CLOUD])
     monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
