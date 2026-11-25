@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import model_proxy as mp
 from factory_core.providers import model_adapter as ma  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
+from factory_core import run_record as rr  # noqa: E402
+from factory_core.providers import role_isolation as ri  # noqa: E402
 
 SENTINEL = "sk-sentinel-local-gateway-token"
 SERVED = "qwen2.5-coder-32b"
@@ -1118,3 +1120,158 @@ def test_rollout_doc_lists_exactly_the_supported_and_refused_local_modes():
                    *(f"`{f}`" for f in ma.STRUCTURED_OUTPUT_FIELDS), "served_name",
                    "uncertified", "/v1/chat/completions", *ma.FAILURE_CLASSES):
         assert needle in section, needle
+
+
+# --- #559: harness-declared dispatch role -------------------------------------------------
+
+ISSUE = 559
+
+
+def _pointer(path, run_id, *, issue=ISSUE, role=None):
+    """A current-run.json as entrypoint.sh writes it; "role" only when the harness set one."""
+    data = {"run_id": run_id, "issue_number": issue, "intent": "fix", "stage": "unknown",
+            "started_at": "2026-11-25T00:00:00Z"}
+    if role is not None:
+        data["role"] = role
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _cloud_destination():
+    """A selected cloud registry entry (non-null endpoint_id) — what a checker must select."""
+    return ma.destination_from_entry(copy.deepcopy(CLOUD_ENTRY))
+
+
+async def _post_cloud(client, headers=None):
+    resp = await client.post("/v1/messages", json={"model": "claude-opus-5-5", "messages": []},
+                             headers=headers or {})
+    return resp.status, await resp.json()
+
+
+def _cloud_scenario(local_env, monkeypatch, destination, send, *, current_run_path=None):
+    """send(client) against a proxy with a cloud entry selected (or None: the default path);
+    returns (send's result, cloud-upstream calls)."""
+    calls = []
+
+    async def scenario():
+        upstream = await _make_upstream(_recording(_ok_json, calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app(destination,
+                                                     current_run_path=current_run_path)))
+        await client.start_server()
+        try:
+            result = await send(client)
+            await _wait_for(lambda: len(_rows(local_env)) >= 1)
+        finally:
+            await client.close()
+            await upstream.close()
+        return result
+
+    return _run(scenario()), calls
+
+
+def test_read_current_run_carries_the_declared_role_from_a_given_path(tmp_path):
+    assert mp.read_current_run(_pointer(tmp_path / "a.json", "run-a", role="checker")) == {
+        "run_id": "run-a", "issue_number": ISSUE, "intent": "fix", "stage": "unknown",
+        "declared_role": "checker"}
+    assert mp.read_current_run(_pointer(tmp_path / "b.json", "run-b"))["declared_role"] is None
+    assert mp.read_current_run(tmp_path / "missing.json") == {
+        "run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown",
+        "declared_role": None}
+
+
+def test_read_current_run_defaults_to_the_module_pointer(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", _pointer(tmp_path / "c.json", "run-c"))
+    assert mp.read_current_run()["run_id"] == "run-c"
+
+
+def test_create_app_takes_a_per_app_pointer_path(tmp_path):
+    assert mp.create_app()["current_run_path"] is None
+    assert mp.create_app(current_run_path=tmp_path / "p.json")["current_run_path"] == (
+        tmp_path / "p.json")
+
+
+@pytest.mark.parametrize("declared,reason", [
+    ("checker", "nested_checker_refused"),
+    ("monitor", "nested_checker_refused"),
+    ("verifier", "role_invalid"),
+    ("invalid", "role_invalid"),  # what entrypoint.sh writes for a non-token value
+])
+def test_local_destination_refuses_a_non_actor_role_before_any_outbound_call(
+        local_env, monkeypatch, declared, reason):
+    _pointer(local_env / "current-run.json", "run-w", role=declared)
+    (status, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, _ok_json,
+                                                         _post_json)
+    assert status == 403 and calls == [] and cloud_calls == []
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    assert body["error"]["endpoint_id"] == "local-test" and reason in body["error"]["message"]
+    row = _rows(local_env)[0]
+    assert row["failure_class"] == ma.DESTINATION_POLICY_DENIAL and row["status"] == 403
+    # Never silently coerced to actor; nothing was signed.
+    assert row["role"] is None and row["request_id"] is None
+
+
+@pytest.mark.parametrize("declared", [None, "actor"])
+def test_local_destination_records_actor_declared_or_defaulted(local_env, monkeypatch, declared):
+    _pointer(local_env / "current-run.json", "run-w", role=declared)
+    (status, _), calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, _post_json)
+    assert status == 200 and len(calls) == 1
+    envelope = json.loads(calls[0]["headers"]["x-factory-correlation"])
+    row = _rows(local_env)[0]
+    assert row["role"] == envelope["role"] == "actor"
+    assert row["request_id"] == envelope["request_id"]
+
+
+@pytest.mark.parametrize("declared", ["verifier", "", "orchestrator", "invalid"])
+def test_selected_cloud_entry_refuses_an_invalid_role_too(local_env, monkeypatch, declared):
+    ptr = _pointer(local_env / "checker-run.json", "run-c", role=declared)
+    (status, body), calls = _cloud_scenario(local_env, monkeypatch, _cloud_destination(),
+                                            _post_cloud, current_run_path=ptr)
+    assert status == 403 and calls == []
+    assert body["error"]["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    assert body["error"]["endpoint_id"] == "cloud-test"
+    row = _rows(local_env)[0]
+    assert row["role"] is None and row["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+
+
+def test_selected_cloud_entry_records_a_declared_checker(local_env, monkeypatch):
+    ptr = _pointer(local_env / "checker-run.json", "run-c", role="checker")
+    (status, _), calls = _cloud_scenario(local_env, monkeypatch, _cloud_destination(),
+                                         _post_cloud, current_run_path=ptr)
+    assert status == 200 and len(calls) == 1
+    row = _rows(local_env)[0]
+    assert (row["role"], row["endpoint_id"], row["hosting_location"]) == (
+        "checker", "cloud-test", "cloud")
+
+
+def test_selection_alone_grants_no_role_and_an_inbound_claim_is_ignored(local_env, monkeypatch):
+    # Spec req. 6/7: an endpoint selected instance-wide, no declared role, and a model-side
+    # X-Factory-Correlation claiming checker -> the cloud row records no role at all.
+    ptr = _pointer(local_env / "checker-run.json", "run-c")
+    (status, _), calls = _cloud_scenario(
+        local_env, monkeypatch, _cloud_destination(),
+        lambda c: _post_cloud(c, headers={"X-Factory-Correlation": '{"role":"checker"}'}),
+        current_run_path=ptr)
+    assert status == 200 and len(calls) == 1
+    assert _rows(local_env)[0]["role"] is None
+
+
+def test_default_path_never_consults_the_declared_role(local_env, monkeypatch):
+    # FACTORY_MODEL_ENDPOINT unset: byte-identical to today, even with a role in the pointer.
+    # Drop both the sys.modules entry and the package attribute: with only the former, a
+    # lazy `from factory_core.providers import role_isolation` would reuse the attribute
+    # without re-registering, and the final assertion could never fail.
+    import factory_core.providers as providers_pkg
+    monkeypatch.delitem(sys.modules, "factory_core.providers.role_isolation", raising=False)
+    monkeypatch.delattr(providers_pkg, "role_isolation", raising=False)
+    _pointer(local_env / "current-run.json", "run-d", role="checker")
+    (status, _), calls = _cloud_scenario(
+        local_env, monkeypatch, None,
+        lambda c: _post_cloud(c, headers={"X-Factory-Correlation": "client-value"}))
+    assert status == 200 and len(calls) == 1
+    assert calls[0]["headers"]["x-factory-correlation"] == "client-value"
+    row = _rows(local_env)[0]
+    assert (row["role"], row["endpoint_id"], row["hosting_location"], row["request_id"]) == (
+        None, None, "cloud", None)
+    assert "factory_core.providers.role_isolation" not in sys.modules
