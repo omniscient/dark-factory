@@ -1121,7 +1121,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    ranked above the preview noise every self-target run leaves, #373),
    `environmental:preview_infra`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:70-104`).
+   (`entrypoint.sh:418-477`, `scripts/factory_core/error_signature.py:80-114`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see

@@ -40,7 +40,7 @@ _REAL_VERDICT_TOKENS_RE = "|".join(
 # verdict miss gets a signature is #536's decision, not an oversight to fix here. Wording
 # is coupled to both echoes; tests/test_factory_core_error_signature.py fails CI if
 # either side drifts. Deliberately no re.IGNORECASE: it is our own literal.
-# Asymmetry, by design (design doc line 107): verdict_gate_check.sh's own gate decision
+# Asymmetry, by design (#591 spec, Requirement 4): verdict_gate_check.sh's own gate decision
 # (the quiet-branch `if` above its echoes) tests STATUS only against the literal
 # "BLOCKED", not against the full real-verdict-token set this regex excludes. So a
 # legacy STATUS (HUMAN_REQUIRED/FAIL) paired with the needs-discussion label takes the
