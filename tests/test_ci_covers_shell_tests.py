@@ -80,7 +80,6 @@ CI_EXEMPT_SHELL_TESTS = {
     "test_off_board_detection.sh": "passes standalone — wire in follow-up",
     "test_preview_differentiator.sh": "passes standalone — wire in follow-up",
     "test_restore_drill.sh": "fails: R2: no-backup exits 2 (expected 0); spec requires exit 0 on fresh-deploy skip",
-    "test_scheduler.sh": "fails: line 411: STATUS_REFINED: unbound variable",
     "test_scheduler_autopilot_guard.sh": "passes standalone — wire in follow-up",
     "test_scheduler_ceiling.sh": "passes standalone — wire in follow-up",
     "test_scheduler_main_red_fixer.sh": "passes standalone — wire in follow-up",

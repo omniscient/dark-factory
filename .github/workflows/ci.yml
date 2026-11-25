@@ -50,6 +50,7 @@ jobs:
       - run: bash tests/test_blast_gate_check.sh
       - run: bash tests/test_budget_context.sh
       - run: bash tests/test_scheduler_lib.sh
+      - run: bash tests/test_scheduler.sh
       - run: bash tests/test_gate_diff_md_visibility.sh
   dag-check:
     runs-on: ubuntu-latest
