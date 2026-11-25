@@ -139,7 +139,39 @@ def test_duplicate_yaml_key_fails_instead_of_overwriting(tmp_path):
         'schema_version: "1.0"\nendpoints: []\nendpoints: []\n', encoding="utf-8")
     with pytest.raises(me.RegistryError) as exc:
         me.load_registry(tmp_path / me.REGISTRY_FILE)
-    assert "duplicate key 'endpoints'" in exc.value.problems[0]
+    assert exc.value.problems == [f"{tmp_path / me.REGISTRY_FILE}: invalid YAML at line 3: duplicate key"]
+
+
+@pytest.mark.parametrize("text, problem", [
+    # An undefined alias: PyYAML's own message quotes the alias name.
+    ('schema_version: "1.0"\nendpoints: [*sk-ant-SECRETVALUE]\n',
+     "invalid YAML at line 2: undefined or invalid alias/anchor"),
+    # A secret pasted as a mapping key, twice.
+    ('schema_version: "1.0"\nsk-ant-SECRETVALUE: 1\nsk-ant-SECRETVALUE: 2\n',
+     "invalid YAML at line 3: duplicate key"),
+    # An unhashable (sequence) key: already a clean error on main, kept that way (R2).
+    ('schema_version: "1.0"\n? [sk-ant-SECRETVALUE, b]\n: 1\n',
+     "invalid YAML at line 2: found unhashable key"),
+])
+def test_yaml_errors_never_echo_document_text(tmp_path, text, problem):
+    (tmp_path / me.REGISTRY_FILE).write_text(text, encoding="utf-8")
+    with pytest.raises(me.RegistryError) as exc:
+        me.load_registry(tmp_path / me.REGISTRY_FILE)
+    assert exc.value.problems == [f"{tmp_path / me.REGISTRY_FILE}: {problem}"]
+    assert "SECRETVALUE" not in " ".join(exc.value.problems)
+
+
+@pytest.mark.parametrize("text, phrase", [
+    ("a: [1\n", "syntax error"),
+    ('a: "\\q"\n', "malformed token"),
+    ("a: !!python/object:os.system x\n", "unsupported value or tag"),
+    ("a: \x00\n", "invalid characters"),
+])
+def test_yaml_errors_print_a_fixed_phrase_per_exception_class(tmp_path, text, phrase):
+    with pytest.raises(me.RegistryError) as exc:
+        me._parse_yaml(text.encode("utf-8"), "f.yaml")
+    assert exc.value.problems[0].startswith("f.yaml: invalid YAML")
+    assert exc.value.problems[0].endswith(f": {phrase}")
 
 
 def test_cloud_entry_may_not_accept_local_only(tmp_path):
