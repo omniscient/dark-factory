@@ -149,3 +149,74 @@ def test_adapter_module_does_not_import_aiohttp():
     imported |= {n.module.split(".")[0] for n in ast.walk(tree)
                  if isinstance(n, ast.ImportFrom) and n.module}
     assert "aiohttp" not in imported
+
+
+# --- Task 3: request refusals --------------------------------------------------------------
+
+def _dest(monkeypatch):
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    return ma.destination_from_entry(LOCAL)
+
+
+def _body(**fields):
+    return json.dumps({"model": SERVED, "max_tokens": 16,
+                       "messages": [{"role": "user", "content": "hi"}], **fields}).encode()
+
+
+def _refusal(fn, *args):
+    with pytest.raises(ma.AdapterRefusal) as exc:
+        fn(*args)
+    return exc.value
+
+
+def test_plain_and_tool_result_turns_are_supported(monkeypatch):
+    dest = _dest(monkeypatch)
+    assert ma.check_request(dest, "POST", "/v1/messages", _body())["model"] == SERVED
+    tool_turn = _body(
+        tools=[{"name": "Bash", "input_schema": {"type": "object"}}],
+        tool_choice={"type": "auto"},
+        messages=[
+            {"role": "user", "content": "list files"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {"cmd": "ls"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_01", "content": "a.txt"}]},
+        ],
+    )
+    assert ma.check_request(dest, "POST", "/v1/messages", tool_turn)["tool_choice"] == {"type": "auto"}
+
+
+@pytest.mark.parametrize("extra,needle", [
+    ({"tool_choice": {"type": "any"}}, "forced tool"),
+    ({"tool_choice": {"type": "tool", "name": "Bash"}}, "forced tool"),
+    ({"tools": [{"name": "Bash", "input_schema": {}, "defer_loading": True}]}, "defer_loading"),
+    ({"output_config": {"format": {"type": "json_schema", "schema": {}}}}, "output_config"),
+    ({"output_format": {"type": "json_schema", "schema": {}}}, "output_format"),
+])
+def test_unsupported_modes_are_refused_400(monkeypatch, extra, needle):
+    refusal = _refusal(ma.check_request, _dest(monkeypatch), "POST", "/v1/messages", _body(**extra))
+    assert (refusal.status, refusal.failure_class) == (400, ma.PROTOCOL_INCOMPATIBILITY)
+    assert needle in refusal.message
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/v1/messages"), ("POST", "/v1/messages/count_tokens"), ("POST", "/v1/complete"),
+])
+def test_unsupported_endpoints_are_refused_400(monkeypatch, method, path):
+    refusal = _refusal(ma.check_request, _dest(monkeypatch), method, path, _body())
+    assert (refusal.status, refusal.failure_class) == (400, ma.PROTOCOL_INCOMPATIBILITY)
+    assert "only POST /v1/messages" in refusal.message
+
+
+@pytest.mark.parametrize("body", [b"", b"not json", b"[1, 2]"])
+def test_a_body_that_is_not_a_json_object_is_refused_400(monkeypatch, body):
+    refusal = _refusal(ma.check_request, _dest(monkeypatch), "POST", "/v1/messages", body)
+    assert (refusal.status, refusal.failure_class) == (400, ma.PROTOCOL_INCOMPATIBILITY)
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "qwen2.5-coder-7b", None])
+def test_model_identity_mismatch_is_refused_403_never_remapped(monkeypatch, model):
+    refusal = _refusal(ma.check_request, _dest(monkeypatch), "POST", "/v1/messages",
+                       _body(model=model))
+    assert (refusal.status, refusal.failure_class) == (403, ma.DESTINATION_POLICY_DENIAL)
+    assert "never remapped" in refusal.message

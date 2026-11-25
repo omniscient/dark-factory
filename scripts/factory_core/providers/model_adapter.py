@@ -121,3 +121,47 @@ def resolve_local_destination(registry_path, endpoint_id):
     if problems:
         raise DestinationError(problems)
     return destination_from_entry(entry)
+
+
+def _incompatible(message):
+    return AdapterRefusal(400, PROTOCOL_INCOMPATIBILITY, message)
+
+
+def check_request(dest, method, path, body) -> dict:
+    """Local-path refusals, before any outbound call (spec Req. 9, 10); the parsed body.
+
+    Field-based and fixed: only POST /v1/messages (path compared without its query string);
+    forced tool choice, deferred tools and structured output are refused, never forwarded.
+    """
+    if method != SUPPORTED_METHOD or path != SUPPORTED_PATH:
+        raise _incompatible(f"{method} {path} is not supported on a local destination — "
+                            f"only {SUPPORTED_METHOD} {SUPPORTED_PATH}")
+    try:
+        parsed = json.loads(body) if body else None
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise _incompatible("request body is not a JSON object")
+    choice = parsed.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") in FORCED_TOOL_CHOICES:
+        raise _incompatible(f"forced tool choice ({choice['type']}) is not supported on a "
+                            "local destination")
+    tools = parsed.get("tools")
+    if isinstance(tools, list) and any(isinstance(t, dict) and DEFERRED_TOOL_FIELD in t
+                                       for t in tools):
+        raise _incompatible(f"deferred tools ({DEFERRED_TOOL_FIELD}) are not supported on a "
+                            "local destination")
+    for field in STRUCTURED_OUTPUT_FIELDS:
+        if field in parsed:
+            raise _incompatible(f"structured output ({field}) is not supported on a local "
+                                "destination")
+    check_model_identity(dest, parsed.get("model"))
+    return parsed
+
+
+def check_model_identity(dest, model) -> None:
+    """§4.11 decision 2: a local request names exactly the served model — refused, not remapped."""
+    if model != dest["served_name"]:
+        raise AdapterRefusal(403, DESTINATION_POLICY_DENIAL,
+                             f"model {model!r} is not endpoint '{dest['endpoint_id']}' served "
+                             f"model {dest['served_name']!r}; models are never remapped")
