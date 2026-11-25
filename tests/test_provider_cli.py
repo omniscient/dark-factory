@@ -523,32 +523,57 @@ def test_model_endpoints_stage_failure_exits_1(tmp_path, monkeypatch, capsys):
 def test_model_endpoints_show_uses_only_the_first_read_of_the_staged_registry(tmp_path, monkeypatch, capsys):
     # Swap-and-swap-back (#593): the staged registry reads as its real bytes once, then as a
     # registry with an injected endpoint on every later read. show must print the first read.
-    # Hooks os.open(), the read primitive _read_tree uses (via os.fdopen) since it was changed
-    # to reopen by descriptor and fstat-check the result instead of trusting open(path, "rb").
+    # Hooks os.open() (what _read_tree uses, via os.fdopen), the builtin open() of both modules
+    # and Path.read_bytes(): the last two do not go through os.open, so each needs its own
+    # hook for a re-read to be observed whichever primitive performs it.
+    import io
     import os
     import factory_core.providers.cli as cli_mod
+    from factory_core.providers import model_endpoint
     staged = _staged_fixture(tmp_path, monkeypatch).resolve()
     registry = staged / "model-endpoints.yaml"
     tampered = registry.read_bytes().replace(b"- id: local-lan", b"- id: injected", 1)
-    real_open = os.open
+    real_os_open, real_open, real_read_bytes = os.open, open, Path.read_bytes
     reads = []
 
-    def _open(path, flags, *args, **kwargs):
-        if Path(path).resolve() != registry:
-            return real_open(path, flags, *args, **kwargs)
+    def _serve(path):
+        """False if path is not the registry; else count the read and return the tampered
+        bytes, or None for the real file (first read)."""
+        try:
+            if Path(path).resolve() != registry:
+                return False
+        except OSError:
+            return False
         reads.append(path)
-        if len(reads) == 1:
-            return real_open(path, flags, *args, **kwargs)
+        return None if len(reads) == 1 else tampered
+
+    def _os_open(path, flags, *args, **kwargs):
+        data = _serve(path) if isinstance(path, (str, os.PathLike)) else False
+        if not data:
+            return real_os_open(path, flags, *args, **kwargs)
         # Serve the tampered bytes through a throwaway regular file (unlinked once open) so
         # the caller's fstat()-based regular-file check still passes.
         tmp = f"{path}.tamper"
-        fd = real_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-        os.write(fd, tampered)
+        fd = real_os_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        os.write(fd, data)
         os.lseek(fd, 0, os.SEEK_SET)
         os.unlink(tmp)
         return fd
 
-    monkeypatch.setattr(os, "open", _open)
+    def _open(file, mode="r", *args, **kwargs):
+        data = _serve(file) if isinstance(file, (str, os.PathLike)) else False
+        if not data:
+            return real_open(file, mode, *args, **kwargs)
+        return io.BytesIO(data) if "b" in mode else io.StringIO(data.decode("utf-8"))
+
+    def _read_bytes(self):
+        data = _serve(self)
+        return data if data else real_read_bytes(self)
+
+    monkeypatch.setattr(os, "open", _os_open)
+    monkeypatch.setattr(model_endpoint, "open", _open, raising=False)
+    monkeypatch.setattr(cli_mod, "open", _open, raising=False)
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
     monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show"])
     cli_mod.main()
     ids = [e["id"] for e in json.loads(capsys.readouterr().out)["endpoints"]]

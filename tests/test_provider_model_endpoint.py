@@ -5,6 +5,7 @@ the cloud credentials, tier aliases and FACTORY_MODEL_* selection vars cleared â
 container sets several of them, and they would leak into the local-selection checks.
 """
 import copy
+import io
 import os
 import sys
 from datetime import datetime, timezone
@@ -629,31 +630,51 @@ def _serve_first_read(monkeypatch, root, tampered):
     """Swap-and-swap-back (#593): each file under root reads as its real bytes on its first
     read and as tampered[rel] on every later read. Returns {rel: read count}.
 
-    Hooks os.open(), the read primitive _read_tree uses (via os.fdopen) since it was changed
-    to reopen by descriptor and fstat-check the result instead of trusting open(path, "rb").
-    A tampered re-read is served through a throwaway regular file (unlinked once open) so the
-    caller's fstat()-based regular-file check still passes.
+    Hooks every read primitive this module has used or could reach for: os.open() (what
+    _read_tree uses, via os.fdopen), the module's builtin open() and Path.read_bytes(). The
+    last two do not go through os.open, so each needs its own hook for a re-read to be
+    observed whichever primitive performs it.
     """
     root = Path(root).resolve()
-    real_open = os.open
+    real_os_open, real_open, real_read_bytes = os.open, open, Path.read_bytes
     reads = {}
 
-    def _open(path, flags, *args, **kwargs):
+    def _serve(path):
+        """None if path is outside root; else count the read and return (rel, tampered bytes
+        or None for the real file)."""
         try:
             rel = Path(path).resolve().relative_to(root).as_posix()
         except (ValueError, OSError):
-            return real_open(path, flags, *args, **kwargs)
+            return None
         reads[rel] = reads.get(rel, 0) + 1
-        if reads[rel] > 1 and rel in tampered:
-            tmp = f"{path}.tamper-{reads[rel]}"
-            fd = real_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            os.write(fd, tampered[rel])
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.unlink(tmp)
-            return fd
-        return real_open(path, flags, *args, **kwargs)
+        return rel, (tampered[rel] if reads[rel] > 1 and rel in tampered else None)
 
-    monkeypatch.setattr(os, "open", _open)
+    def _os_open(path, flags, *args, **kwargs):
+        served = _serve(path) if isinstance(path, (str, os.PathLike)) else None
+        if served is None or served[1] is None:
+            return real_os_open(path, flags, *args, **kwargs)
+        # A throwaway regular file (unlinked once open), so the caller's fstat()-based
+        # regular-file check still passes.
+        tmp = f"{path}.tamper-{reads[served[0]]}"
+        fd = real_os_open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        os.write(fd, served[1])
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.unlink(tmp)
+        return fd
+
+    def _open(file, mode="r", *args, **kwargs):
+        served = _serve(file) if isinstance(file, (str, os.PathLike)) else None
+        if served is None or served[1] is None:
+            return real_open(file, mode, *args, **kwargs)
+        return io.BytesIO(served[1]) if "b" in mode else io.StringIO(served[1].decode("utf-8"))
+
+    def _read_bytes(self):
+        served = _serve(self)
+        return real_read_bytes(self) if served is None or served[1] is None else served[1]
+
+    monkeypatch.setattr(os, "open", _os_open)
+    monkeypatch.setattr(me, "open", _open, raising=False)
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
     return reads
 
 
