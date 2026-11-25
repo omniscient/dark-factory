@@ -2972,3 +2972,129 @@ def test_capture_totals_null_cost_is_null_not_zero(monkeypatch):
     assert totals["cost_usd"] is None and totals["known_cost_usd"] is None
     assert totals["gen_ai.usage.input_tokens"] == 5 and totals["known_input_tokens"] == 5
     assert totals["missing_nodes"] == []
+
+
+# ---------------------------------------------------------------------------
+# #558: model_dispatch (Request/Result contracts) and the local-run cost override
+# ---------------------------------------------------------------------------
+
+LOCAL_DECISION = {"payload_class": "local_only", "endpoint_id": "local-test",
+                  "secret_reference": "LOCAL_GATEWAY_TOKEN", "allow": True,
+                  "reason": "effective class accepted by endpoint"}
+
+
+def _dispatch_row(run_id="abc123", **kw):
+    row = {**_ledger_row(run_id=run_id), "endpoint_id": None, "hosting_location": "cloud",
+           "role": None, "request_id": None, "failure_class": None,
+           "correlation": "inferred_pointer",
+           "adapter_id": "model_proxy/anthropic-messages-passthrough", "payload_decision": None}
+    row.update(kw)
+    return row
+
+
+def _local_row(**kw):
+    return _dispatch_row(**{"endpoint_id": "local-test", "hosting_location": "local",
+                            "role": "actor", "request_id": "r-1",
+                            "payload_decision": dict(LOCAL_DECISION), **kw})
+
+
+def test_model_dispatch_without_rows_is_unknown():
+    md = rr._compute_model_dispatch([])
+    assert md["request"] == {"schema_version": "1.0", "payload_class": None, "endpoint_id": None,
+                             "secret_reference": None, "allow": None,
+                             "reason": "no endpoint selected"}
+    assert md["result"] == {"schema_version": "1.0", "outcome": "unknown", "endpoint_id": None,
+                            "hosting_location": None, "role": None, "correlation": "unknown",
+                            "request_count": 0, "failure_classes_seen": []}
+
+
+def test_model_dispatch_cloud_parity():
+    md = rr._compute_model_dispatch([_dispatch_row(), _dispatch_row()])
+    assert md["request"]["reason"] == "no endpoint selected"
+    assert md["result"] == {"schema_version": "1.0", "outcome": "ok", "endpoint_id": None,
+                            "hosting_location": "cloud", "role": None,
+                            "correlation": "inferred_pointer", "request_count": 2,
+                            "failure_classes_seen": []}
+
+
+def test_model_dispatch_copies_the_payload_decision_never_a_secret():
+    md = rr._compute_model_dispatch([_local_row(), _local_row()])
+    assert md["request"] == {"schema_version": "1.0", **LOCAL_DECISION}
+    assert md["result"]["endpoint_id"] == "local-test" and md["result"]["role"] == "actor"
+    assert md["result"]["hosting_location"] == "local" and md["result"]["outcome"] == "ok"
+
+
+def test_model_dispatch_failures_and_unknown_correlation():
+    md = rr._compute_model_dispatch([
+        _local_row(failure_class="timeout_idle"), _local_row(failure_class="cancellation"),
+        _local_row(failure_class="timeout_idle", correlation="unknown")])
+    assert md["result"]["outcome"] == "failed"
+    assert md["result"]["failure_classes_seen"] == ["cancellation", "timeout_idle"]
+    assert md["result"]["correlation"] == "unknown"
+
+
+def test_model_dispatch_two_endpoints_is_failed_with_null_endpoint():
+    md = rr._compute_model_dispatch([_local_row(), _local_row(endpoint_id="local-other")])
+    assert md["result"]["endpoint_id"] is None and md["result"]["outcome"] == "failed"
+
+
+def _assemble_with_ledger(tmp_path, monkeypatch, rows, nodes):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(rr, "LEDGER_PATH", ledger)
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({"runId": "abc123", "nodes": nodes}))
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    rr.cmd_assemble(args)
+    return json.loads(out.read_text())
+
+
+def test_assemble_local_run_records_null_cost_never_zero(tmp_path, monkeypatch):
+    rec = _assemble_with_ledger(tmp_path, monkeypatch, [_local_row()], [
+        {"nodeId": "implement", "inputTokens": 100, "outputTokens": 50, "costUsd": 0.42,
+         "durationMs": 1000, "modelUsage": {}},
+        {"nodeId": "fetch-issue", "inputTokens": 0, "outputTokens": 0, "costUsd": 0,
+         "durationMs": 10, "modelUsage": {}},
+    ])
+    assert [n["cost_usd"] for n in rec["nodes"]] == [None, None]
+    assert rec["totals"]["cost_usd"] is None and rec["totals"]["known_cost_usd"] is None
+    assert rec["harness_economics"]["cost_per_task"] is None
+    assert rec["nodes"][0]["gen_ai.usage.input_tokens"] == 100
+    assert rec["totals"]["gen_ai.usage.input_tokens"] == 100
+    assert rec["model_dispatch"]["result"]["hosting_location"] == "local"
+    assert rec["model_dispatch"]["request"] == {"schema_version": "1.0", **LOCAL_DECISION}
+    assert "0.42" not in json.dumps(rec["totals"])
+
+
+def test_assemble_cloud_run_keeps_its_cost_and_gains_model_dispatch(tmp_path, monkeypatch):
+    rec = _assemble_with_ledger(tmp_path, monkeypatch, [_dispatch_row()], [
+        {"nodeId": "implement", "inputTokens": 100, "outputTokens": 50, "costUsd": 0.01,
+         "durationMs": 1000, "modelUsage": {}}])
+    assert rec["totals"]["cost_usd"] == pytest.approx(0.01)
+    assert rec["harness_economics"]["cost_per_task"] == pytest.approx(0.01)
+    assert rec["harness_economics"]["ledger_rows_correlated"] == 1
+    assert rec["model_dispatch"]["result"]["hosting_location"] == "cloud"
+    assert rec["model_dispatch"]["result"]["role"] is None
+
+
+def test_assemble_without_a_ledger_has_unknown_model_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", tmp_path / "no-ledger.jsonl")
+    out = tmp_path / "run-record.json"
+    rr.cmd_assemble(_AssembleArgs(tmp_path, out))
+    rec = json.loads(out.read_text())
+    assert rec["model_dispatch"]["result"]["outcome"] == "unknown"
+    assert rec["harness_economics"]["ledger_available"] is False
+
+
+def test_assemble_reads_the_ledger_once(tmp_path, monkeypatch):
+    reads = []
+    real = rr._read_ledger_rows
+    monkeypatch.setattr(rr, "_read_ledger_rows", lambda run_id, path: reads.append(run_id) or real(run_id, path))
+    _assemble_with_ledger(tmp_path, monkeypatch, [_dispatch_row()], [])
+    assert reads == ["abc123"]
