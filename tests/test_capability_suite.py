@@ -300,7 +300,7 @@ def test_written_result_is_rejected_as_evidence(tmp_path):
 
 # --- fixture tree and run_cases -------------------------------------------------------------
 
-def _summary(cases=None, context_tokens=mock_server.CONTEXT_TOKENS):
+def _summary(cases=None, context_tokens=mock_server.CONTEXT_TOKENS, tier2_mode="skip"):
     """runner.run_cases over the shipped tree (or `cases`), the mock standing in for the
     endpoint."""
     async def go():
@@ -309,7 +309,8 @@ def _summary(cases=None, context_tokens=mock_server.CONTEXT_TOKENS):
             mock = runner.Target(url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
             return await runner.run_cases(runner.load_cases() if cases is None else cases,
                                           endpoint=mock, mock=mock,
-                                          context_tokens=context_tokens)
+                                          context_tokens=context_tokens,
+                                          mock_app=mock_runner.app, tier2_mode=tier2_mode)
         finally:
             await mock_runner.cleanup()
     return asyncio.run(go())
@@ -323,6 +324,16 @@ def _copy_fixtures(tmp_path):
     dest = tmp_path / "fixtures"
     shutil.copytree(runner.FIXTURES_DIR, dest)
     return dest
+
+
+def _with_harness_case(tmp_path, case=None):
+    """A fixture-tree copy with one extra harness case, streaming/via_cli (no shipped harness
+    case lives under streaming, so it never collides with one)."""
+    fixtures = _copy_fixtures(tmp_path)
+    case_dir = fixtures / "streaming" / "via_cli"
+    case_dir.mkdir()
+    (case_dir / "case.yaml").write_text(yaml.safe_dump(case or HARNESS_CASE))
+    return fixtures
 
 
 def test_dimension_directories_are_exactly_the_actor_required_dimensions():
@@ -452,12 +463,39 @@ def test_an_unsupported_observation_changes_no_dimension(monkeypatch, check, cas
         "unsupported:not_found"]
 
 
-def test_a_harness_case_is_reported_not_run():
-    case = {"case": "via_cli", "dimension": "streaming", "driver": "harness", "kind": "probe",
-            "target": "mock"}
-    summary = _summary([case])
-    assert summary.not_run == ["streaming/via_cli"]
-    assert runner.dimension_results(summary.probe_values)["streaming"] == "not_tested"
+HARNESS_CASE = {"case": "via_cli", "dimension": "streaming", "driver": "harness",
+                "kind": "probe", "target": "mock", "check": "cli_sigint"}
+
+
+@pytest.mark.parametrize("mode", ["skip", "missing"])
+def test_a_skipped_harness_case_is_not_tested_and_never_a_failure(mode):
+    summary = _summary([HARNESS_CASE], tier2_mode=mode)
+    assert summary.not_run == [] and summary.probes == []
+    assert summary.probe_values == {"streaming": ["not_tested"]}
+    assert summary.harness_pending == ["streaming"]
+    assert runner.exit_code(summary, True, mode) == (6 if mode == "missing" else 0)
+
+
+@pytest.mark.parametrize("edit, message", [
+    (lambda c: c.update(check="nope"), "check must be one of"),
+    (lambda c: c.update(target="endpoint"), "a harness case is a mock-target probe"),
+    (lambda c: c.update(kind="observation"), "a harness case is a mock-target probe"),
+])
+def test_a_malformed_harness_case_is_rejected(tmp_path, edit, message):
+    case = dict(HARNESS_CASE)
+    edit(case)
+    fixtures = _with_harness_case(tmp_path, case)
+    with pytest.raises(runner.CaseError, match=message):
+        runner.load_cases(fixtures)
+
+
+def test_exit_code_priority():
+    S = runner.Summary
+    assert runner.exit_code(S(controls=[{"ok": False}], not_run=["x"]), True, "missing") == 3
+    assert runner.exit_code(S(not_run=["x"], probes=[("x", "fail")]), True, "missing") == 6
+    assert runner.exit_code(S(not_run=["x"], probes=[("x", "fail")]), True, "ok") == 4
+    assert runner.exit_code(S(probes=[("x", "fail")]), True, "ok") == 5
+    assert runner.exit_code(S(probes=[("x", "pass")]), True, "ok") == 0
 
 
 def test_the_context_probe_does_not_run_without_a_window():
@@ -566,14 +604,86 @@ def test_a_malformed_tree_exits_3_and_writes_nothing(tmp_path):
     assert code == 3 and result is None
 
 
-def test_a_harness_case_in_the_tree_exits_4(tmp_path):
-    fixtures = _copy_fixtures(tmp_path)
-    case_dir = fixtures / "streaming" / "via_cli"
-    case_dir.mkdir()
-    (case_dir / "case.yaml").write_text(
-        "case: via_cli\ndimension: streaming\ndriver: harness\nkind: probe\ntarget: mock\n")
+def _fake_harness(monkeypatch, outcome):
+    """Every HARNESS_CHECKS entry -> a fake that arms a script (which the runner must clear
+    again) and returns `outcome`, or raises it if it is an exception. Returns the base URLs."""
+    calls = []
+
+    async def fake(app, base_url):
+        calls.append(base_url)
+        mock_server.arm(app, mock_server.Script("text"))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    for name in runner.HARNESS_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_CHECKS, name, fake)
+    return calls
+
+
+def _tier2(monkeypatch, version=None):
+    monkeypatch.setenv(harness.TIER2_ENV, "1")
+    monkeypatch.setattr(me, "observed_harness_version",
+                        lambda: harness.PINNED_HARNESS_VERSION if version is None else version)
+
+
+def test_tier2_runs_every_harness_case_and_clears_its_script(tmp_path, monkeypatch):
+    _tier2(monkeypatch)
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    fixtures = _with_harness_case(tmp_path)
     code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
-    assert code == 4 and result["certification_result"]["results"]["streaming"] == "not_tested"
+    harness_cases = [c for c in runner.load_cases(fixtures) if c["driver"] == "harness"]
+    # Exit 0 also proves the script was cleared: a left-armed `text` script would turn part A's
+    # tool_call_fidelity controls and probe (which run after streaming/via_cli) red.
+    assert code == 0 and len(calls) == len(harness_cases)
+    assert all(url.startswith("http://127.0.0.1:") for url in calls)
+    body = result["certification_result"]
+    assert body["results"]["streaming"] == "pass" and "streaming" not in body["harness_pending"]
+
+
+@pytest.mark.parametrize("fault", [FileNotFoundError("claude"), KeyError("messages")])
+def test_a_harness_probe_that_cannot_run_exits_4(tmp_path, monkeypatch, fault):
+    _tier2(monkeypatch)
+    _fake_harness(monkeypatch, fault)
+    code, result, _ = _run(tmp_path, "--base-url", "mock",
+                           fixtures_dir=_with_harness_case(tmp_path))
+    body = result["certification_result"]
+    assert code == 4 and body["results"]["streaming"] == "not_tested"
+    assert "streaming" in body["harness_pending"]
+
+
+def test_a_failing_harness_probe_in_mock_mode_exits_5(tmp_path, monkeypatch):
+    _tier2(monkeypatch)
+    _fake_harness(monkeypatch, ("fail", "connection_not_closed"))
+    code, result, _ = _run(tmp_path, "--base-url", "mock",
+                           fixtures_dir=_with_harness_case(tmp_path))
+    assert code == 5 and result["certification_result"]["results"]["streaming"] == "fail"
+
+
+def test_tier2_without_a_claude_binary_exits_6_and_still_writes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(harness.TIER2_ENV, "1")  # observed_harness_version is None (autouse)
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _ = _run(tmp_path, "--base-url", "mock",
+                           fixtures_dir=_with_harness_case(tmp_path))
+    body = result["certification_result"]
+    assert code == 6 and calls == []
+    assert body["results"]["streaming"] == "not_tested" and "streaming" in body["harness_pending"]
+    assert "no claude binary" in capsys.readouterr().err
+
+
+def test_tier2_version_mismatch_exits_7_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    _tier2(monkeypatch, version="0.0.1")
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, out = _run(tmp_path, "--base-url", "mock")
+    err = capsys.readouterr().err
+    assert code == 7 and result is None and not out.parent.exists() and calls == []
+    assert "0.0.1" in err and harness.PINNED_HARNESS_VERSION in err
+
+
+def test_a_usage_error_stays_exit_2_whatever_cli_is_installed(tmp_path, monkeypatch):
+    _tier2(monkeypatch, version="0.0.1")
+    assert _usage_error("--base-url", "mock", "--context-tokens", "0",
+                        "--out", str(tmp_path / "r.json")) == 2
 
 
 def test_a_failing_probe_in_mock_mode_exits_5(tmp_path):
