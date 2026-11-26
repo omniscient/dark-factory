@@ -424,3 +424,89 @@ def test_verdict_missing_regex_excludes_docs_gate_tripwire_line():
         rendered = _render_docs_echo(template, why)
         assert not _VERDICT_MISSING_RE.search(rendered), rendered
         assert _classify(text=rendered) != "substantive:verdict_missing", rendered
+
+
+# --- #586: a verified-local rate-limit/exhaustion match is a counted substantive failure ---
+
+_REJECTED_EVENT_LINE = (
+    '{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":1000600,'
+    '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}'
+)
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1] / "scripts")
+
+
+def test_local_rate_limit_text_is_substantive_endpoint_unreachable():
+    assert _classify(text="HTTP 429 — rate limit exceeded", exit_code=1,
+                     hosting_location="local") == "substantive:endpoint_unreachable:1"
+    assert _classify(text="Error: you have hit your usage limit for this session", exit_code=2,
+                     hosting_location="local") == "substantive:endpoint_unreachable:2"
+
+
+def test_cloud_and_omitted_hosting_rate_limit_text_unchanged():
+    assert _classify(text="HTTP 429 — rate limit exceeded") == "environmental:rate_limit"
+    assert _classify(text="HTTP 429 — rate limit exceeded",
+                     hosting_location="cloud") == "environmental:rate_limit"
+
+
+def test_local_rejected_structured_event_is_substantive_endpoint_unreachable():
+    # The event line does not match _RATE_LIMIT_RE, which is why the local branch also tests
+    # is_session_window_failure().
+    assert _classify(text=_REJECTED_EVENT_LINE, exit_code=1,
+                     hosting_location="local") == "substantive:endpoint_unreachable:1"
+
+
+def test_cloud_and_omitted_hosting_rejected_structured_event_unchanged():
+    assert _classify(text=_REJECTED_EVENT_LINE) == "substantive:unknown:1"
+    assert _classify(text=_REJECTED_EVENT_LINE,
+                     hosting_location="cloud") == "substantive:unknown:1"
+
+
+def test_local_non_rate_limit_failure_keeps_its_existing_class():
+    assert _classify(text="npm ERR! build failed", exit_code=2,
+                     hosting_location="local") == "substantive:build_failure:2"
+    assert _classify(text="", exit_code=3, hosting_location="local") == "substantive:unknown:3"
+
+
+def test_local_rate_limit_outranks_delivery_failure():
+    fast_and_empty = dict(elapsed=5, commits=0, dirty=False, artifact=False)
+    assert _classify(text="HTTP 429 Too Many Requests", exit_code=1, hosting_location="local",
+                     **fast_and_empty) == "substantive:endpoint_unreachable:1"
+    assert _classify(text="", exit_code=1, hosting_location="local",
+                     **fast_and_empty) == "environmental:delivery_failure"
+    assert _classify(text="HTTP 429 Too Many Requests", exit_code=1,
+                     **fast_and_empty) == "environmental:delivery_failure"
+
+
+def test_cloud_path_never_imports_model_adapter():
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {_SCRIPTS_DIR!r})\n"
+        "from factory_core.error_signature import classify\n"
+        "kw = dict(elapsed_seconds=999, commits_since_start=1, worktree_dirty=False,\n"
+        "          artifact_present=True)\n"
+        "for text in ('HTTP 429 Too Many Requests', '', 'npm ERR! build failed'):\n"
+        "    classify(text, 1, **kw)\n"
+        "    classify(text, 1, hosting_location='cloud', **kw)\n"
+        "loaded = [m for m in ('factory_core.providers.model_adapter',\n"
+        "                      'factory_core.providers.model_endpoint') if m in sys.modules]\n"
+        "assert not loaded, loaded\n"
+    )
+    result = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_cli_error_signature_write_local_hosting_end_to_end(tmp_path):
+    text_file = tmp_path / "out.txt"
+    text_file.write_text("HTTP 429 Too Many Requests")
+    result = subprocess.run(
+        [_sys.executable, CLI, "error-signature-write",
+         "--issue", "586", "--phase", "plan", "--exit-code", "1",
+         "--text-file", str(text_file),
+         "--elapsed-seconds", "5", "--commits-since-start", "0",
+         "--state-dir", str(tmp_path), "--hosting-location", "local"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "signature=substantive:endpoint_unreachable:1" in result.stdout
+    sig_file = tmp_path / "error-signatures" / "586.plan.sig"
+    assert json.loads(sig_file.read_text())["signature"] == "substantive:endpoint_unreachable:1"

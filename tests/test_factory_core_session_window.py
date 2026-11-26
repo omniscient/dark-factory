@@ -539,3 +539,57 @@ def test_reset_prose_and_warning_banners_do_not_pause():
         "You've hit your limit · resets 1:40pm (UTC)",
     ):
         assert is_session_window_failure(text), text
+
+
+# --- #586: a verified-local match never writes the pause sentinel ------------------------
+
+_REJECTED_EVENT_LINE = (
+    '{"level":40,"rateLimitInfo":{"status":"rejected","resetsAt":1000600,'
+    '"rateLimitType":"five_hour"},"msg":"claude.rate_limit_event"}'
+)
+
+
+def test_check_and_pause_local_exhaustion_text_returns_none_and_writes_no_sentinel(tmp_path):
+    text = "429 too many requests, session limit reached"
+    assert check_and_pause(text, tmp_path, 1_000_000, 5, 30, hosting_location="local") is None
+    assert not (tmp_path / "session-window-paused").exists()
+
+
+def test_check_and_pause_local_rejected_structured_event_writes_no_sentinel(tmp_path):
+    assert check_and_pause(_REJECTED_EVENT_LINE, tmp_path, 1_000_000, 5, 30,
+                           hosting_location="local") is None
+    assert not (tmp_path / "session-window-paused").exists()
+
+
+def test_check_and_pause_cloud_and_omitted_hosting_still_pause(tmp_path):
+    text = "429 too many requests, session limit reached"
+    for sub, kwargs in (("omitted", {}), ("cloud", {"hosting_location": "cloud"})):
+        state_dir = tmp_path / sub
+        epoch = check_and_pause(text, state_dir, 1_000_000, 5, 30, **kwargs)
+        assert epoch == 1_000_000 + 1800
+        assert (state_dir / "session-window-paused").read_text() == str(epoch)
+    state_dir = tmp_path / "structured"
+    epoch = check_and_pause(_REJECTED_EVENT_LINE, state_dir, 1_000_000, 5, 30,
+                            hosting_location="cloud")
+    assert epoch == 1_000_600 + 300
+    assert (state_dir / "session-window-paused").read_text() == str(epoch)
+
+
+def test_cli_session_window_check_local_prints_unmatched_and_writes_no_sentinel(tmp_path):
+    tmp_out = tmp_path / "run.out"
+    tmp_out.write_text("429 too many requests, session limit reached")
+    state_dir = tmp_path / "state"
+    result = subprocess.run(
+        [_sys.executable,
+         str(Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"),
+         "session-window-check",
+         "--tmp-out", str(tmp_out),
+         "--state-dir", str(state_dir),
+         "--buffer-minutes", "5",
+         "--fallback-minutes", "30",
+         "--hosting-location", "local"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "matched=false resume_epoch=0\n"
+    assert not (state_dir / "session-window-paused").exists()
