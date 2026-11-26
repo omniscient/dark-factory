@@ -7,6 +7,7 @@ container sets several of them, and they would leak into the local-selection che
 import copy
 import io
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +82,7 @@ def _problems(tmp_path, endpoints, **kw):
 def test_fixture_registry_loads_same_host_lan_remote_and_cloud():
     endpoints = me.load_registry(FIXTURES / me.REGISTRY_FILE)
     assert [e["id"] for e in endpoints] == [
-        "local-same-host", "local-lan", "local-remote", "cloud-anthropic"]
+        "local-same-host", "local-lan", "local-remote", "cloud-anthropic", "lan-ollama-qwen3-coder"]
 
 
 def test_valid_local_and_cloud_entries_load(tmp_path):
@@ -815,6 +816,26 @@ def test_scheduler_preflight_blocks_a_local_selection(tmp_path):
 def test_scheduler_preflight_without_a_registry_has_no_hosting(tmp_path):
     problems, hosting = me.scheduler_preflight(tmp_path / "absent", "local-test")
     assert "model endpoint registry not found" in problems[0] and hosting is None
+
+
+LAN_OLLAMA = "lan-ollama-qwen3-coder"
+
+
+def test_lan_ollama_profile_validates_but_activates_no_routing(tmp_path, monkeypatch):
+    # #560: the runbook's worked LAN entry is schema-valid, and selecting it still fails on
+    # _NO_LOCAL_DISPATCH on both sides — the profile routes nothing until #587.
+    entry = {e["id"]: e for e in me.load_registry(FIXTURES / me.REGISTRY_FILE)}[LAN_OLLAMA]
+    assert entry["hosting_location"] == "local" and me.base_url_scope(entry["base_url"]) == "lan"
+    assert me.scheduler_preflight(FIXTURES, LAN_OLLAMA) == (
+        [me._NO_LOCAL_DISPATCH.format(eid=LAN_OLLAMA)], "local")
+    staged = tmp_path / "staged"
+    shutil.copytree(FIXTURES, staged)
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(staged))
+    monkeypatch.setenv("LOCAL_OLLAMA_DUMMY_TOKEN", "dummy-not-a-credential")
+    _local_env(monkeypatch, entry)
+    problems = _run_preflight(staged, LAN_OLLAMA, "local")
+    assert f"endpoint '{LAN_OLLAMA}': capability evidence is 'unknown', not 'tested' (contract §4.5)" in problems
+    assert problems[-1] == me._NO_LOCAL_DISPATCH.format(eid=LAN_OLLAMA)
 
 
 # --- #558: load_verified_entry (the proxy's Configuration-contract loader) -----------------
