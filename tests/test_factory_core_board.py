@@ -268,7 +268,6 @@ def test_post_or_update_comment_unparseable_lookup_posts_nothing(monkeypatch, ca
     assert "skipping" in capsys.readouterr().err
 
 
-
 def test_add_to_board_success(monkeypatch):
     calls = []
     def fake(cmd, **kw):
