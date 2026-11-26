@@ -524,6 +524,7 @@ containers (`run-compose.yml:31-47`).
 Optional. With `FACTORY_MODEL_ENDPOINT` unset (the default) nothing below is read, staged or
 checked, and dispatch argv and env are unchanged. Design:
 `docs/archive/2026-11-23-endpoint-registry-secrets-preflight-design.md`.
+Operator runbook for registering a candidate local endpoint: `docs/local-inference-deployment-runbook.md` (#560).
 
 | Variable | Set where | Read by | Notes |
 |---|---|---|---|
