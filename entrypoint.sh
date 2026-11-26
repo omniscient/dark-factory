@@ -9,6 +9,17 @@ source "$IDENTITY_SH"
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
 python3 "$FACTORY_PROVIDERS_CLI" preflight
 
+# --- Model-endpoint hosting location (#586) ---
+# Resolved once, here, through the baked providers CLI: the clone does not exist yet, and
+# branch-controlled code must never decide something that relaxes a safety mechanism (the
+# factory-wide pause sentinel and the breaker's rate-limit class). Fails closed: anything
+# but exactly "hosting=local" (an error, a crash, no output) is cloud. Assigned
+# unconditionally, so an inherited value is overwritten; not readonly, because
+# tests/test_entrypoint_current_run.sh sources this file twice in one shell.
+DF_ENDPOINT_HOSTING=$(python3 "$FACTORY_PROVIDERS_CLI" model-endpoints hosting 2>/dev/null \
+  | grep -o '^hosting=local$' || echo "hosting=cloud")
+DF_ENDPOINT_HOSTING="${DF_ENDPOINT_HOSTING#hosting=}"
+
 # --- Configuration ---
 # Plain URL on purpose: a token embedded as URL userinfo is dropped by git when it
 # rewrites the base URL after the first request ("warning: redirecting to ..."), so
@@ -301,13 +312,19 @@ _handle_session_window_pause() {
   [ "${SESSION_WINDOW_BACKOFF_ENABLED:-true}" = "true" ] || return 1
 
   local sw_result sw_rc
+  # #586: only a verified-local run passes the flag; the default argv is unchanged, so a
+  # target's older cli.py copy never sees an argument it would reject. On local the CLI
+  # writes no sentinel and prints matched=false, so this returns 1 below.
+  local hosting_flag=()
+  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
   # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
   # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-check \
     --tmp-out "$tmp_out" \
     --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
     --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}" \
-    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" 2>&1)
+    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" \
+    "${hosting_flag[@]}" 2>&1)
   sw_rc=$?
   if [ "$sw_rc" -ne 0 ]; then
     echo "WARNING: session-window-check failed (exit ${sw_rc}) — path/import likely broken, falling through to legacy detection: ${sw_result}" >&2
@@ -482,6 +499,11 @@ _write_error_signature() {
       fi
     done
   fi
+  # #586: a verified-local run signs rate-limit/exhaustion output as a counted
+  # substantive:endpoint_unreachable failure; the flag is passed only on local (default argv
+  # unchanged, as in _handle_session_window_pause).
+  local hosting_flag=()
+  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
   # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
   # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
   python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" error-signature-write \
@@ -494,6 +516,7 @@ _write_error_signature() {
     $dirty_flag $artifact_flag \
     --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}" \
     --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
+    "${hosting_flag[@]}" \
     2>/dev/null || true
 }
 
@@ -1120,7 +1143,11 @@ while true; do
       rm -f "$TMP_OUT"
       exit 0
     fi
-    if python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-match \
+    # #586: never on a verified-local run -- this sleeps and retries forever with no
+    # signature or retry count. Bash-only, so rate-limit-match itself is unchanged, and it
+    # also holds with the kill-switch off (_handle_session_window_pause returns early then).
+    if [ "${DF_ENDPOINT_HOSTING:-cloud}" != "local" ] \
+        && python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" rate-limit-match \
         --tmp-out "$TMP_OUT" | grep -q '^matched=true$'; then
       # Kill-switch fallback (SESSION_WINDOW_BACKOFF_ENABLED=false): old sleep-forever
       # behavior, unchanged.
