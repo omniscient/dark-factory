@@ -24,7 +24,7 @@ YAML_BLOCK_RE = re.compile(r"```yaml\n(.*?)\n```", re.DOTALL)
 
 
 def _runbook_lan_ollama_entry():
-    text = DOC_PATH.read_text()
+    text = DOC_PATH.read_text(encoding="utf-8")
     blocks = YAML_BLOCK_RE.findall(text)
     assert blocks, "expected at least one fenced ```yaml block in the runbook"
     # The worked example is the first (and, today, only) yaml block with a lan-ollama entry.
