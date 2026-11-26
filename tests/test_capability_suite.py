@@ -5,8 +5,10 @@ Hermetic: every connection is to 127.0.0.1, no secret is read (the endpoint-mode
 a sentinel set by monkeypatch), nothing touches GitHub.
 """
 import asyncio
+import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,13 +23,13 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from factory_core.capability_suite import emit, mock_server, runner  # noqa: E402
+from factory_core.capability_suite import emit, harness, mock_server, runner  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _no_claude(monkeypatch):
-    # harness_version is informational in part A; never spawn `claude --version` in a test.
+    # Never spawn `claude --version` in a test (emit's harness_version, Tier 2 preflight).
     monkeypatch.setattr(me, "observed_harness_version", lambda: None)
 
 
@@ -712,3 +714,246 @@ def test_pycache_never_changes_the_digest(tmp_path):
     (package / "__pycache__").mkdir()
     (package / "__pycache__" / "runner.cpython-312.pyc").write_bytes(b"\0bytecode")
     assert emit.suite_digest(package) == before
+
+
+# --- harness driver (#624) ------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_pinned_harness_version_is_the_dockerfile_pin():
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+    assert re.findall(r"@anthropic-ai/claude-code@(\S+)", dockerfile) == [
+        harness.PINNED_HARNESS_VERSION]
+
+
+def test_scrubbed_env_is_exactly_the_allow_list(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SENTINEL)
+    monkeypatch.setenv("GH_TOKEN", SENTINEL)
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home"))
+    env = harness.scrubbed_env(base_url="http://127.0.0.1:9",
+                               served_name=mock_server.SERVED_NAME, home=tmp_path / "h")
+    assert set(env) == set(harness.BASE_ENV_KEYS)
+    assert env["HOME"] == str(tmp_path / "h")
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9"
+    assert env["ANTHROPIC_API_KEY"] == mock_server.DUMMY_CREDENTIAL
+    assert all(env[alias] == mock_server.SERVED_NAME for alias in me.TIER_ALIASES)
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert SENTINEL not in json.dumps(env) and str(tmp_path / "caller-home") not in env.values()
+
+
+def test_scrubbed_env_refuses_an_unlisted_extra(tmp_path):
+    with pytest.raises(ValueError, match="ALLOWED_ENV_EXTRA"):
+        harness.scrubbed_env(base_url="http://127.0.0.1:9", served_name="m", home=tmp_path,
+                             extra={"GH_TOKEN": "x"})
+
+
+def _stub_claude(bin_dir, dump):
+    """A `claude` on PATH that dumps the environment it was exec'd with (/proc/self/environ:
+    the initial block, untouched by Python's own locale coercion), its cwd, argv and stdin."""
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "raw = open('/proc/self/environ', 'rb').read().split(b'\\0')\n"
+        "env = dict(item.decode().split('=', 1) for item in raw if item)\n"
+        f"with open({str(dump)!r}, 'w') as f:\n"
+        "    json.dump({'env': env, 'cwd': os.getcwd(), 'argv': sys.argv[1:],\n"
+        "               'stdin': sys.stdin.read()}, f)\n")
+    stub.chmod(0o755)
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                    reason="reads the child's initial environment from /proc")
+def test_the_spawned_cli_gets_only_the_scrubbed_environment(tmp_path, monkeypatch):
+    dump = tmp_path / "dump.json"
+    _stub_claude(tmp_path / "bin", dump)
+    caller_home = tmp_path / "caller-home"
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SENTINEL)
+    monkeypatch.setenv("GH_TOKEN", SENTINEL)
+    monkeypatch.setenv("HOME", str(caller_home))
+
+    async def go():
+        with harness.workdir() as root:
+            status, _ = await harness.run_cli("http://127.0.0.1:9", root, "a prompt",
+                                              "--model", "opus")
+            return status, root
+    status, root = asyncio.run(go())
+    seen = json.loads(dump.read_text())
+    assert status == 0
+    assert set(seen["env"]) == set(harness.BASE_ENV_KEYS)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in seen["env"] and "GH_TOKEN" not in seen["env"]
+    assert SENTINEL not in json.dumps(seen)
+    assert seen["env"]["HOME"] == str(root / "home") != str(caller_home)
+    assert Path(seen["cwd"]).resolve() == (root / "cwd").resolve()
+    assert Path(seen["cwd"]).resolve() != Path.cwd().resolve()
+    assert seen["stdin"] == ""
+    assert seen["argv"] == ["-p", "a prompt", "--model", "opus"]
+    assert not root.exists()  # the temporary HOME and cwd are removed afterwards
+
+
+@pytest.mark.parametrize("value, enabled", [("1", True), ("", False), ("0", False),
+                                            ("true", False), (None, False)])
+def test_tier2_is_enabled_only_by_exactly_1(value, enabled):
+    environ = {} if value is None else {harness.TIER2_ENV: value}
+    assert harness.tier2_enabled(environ) is enabled
+
+
+def test_preflight_with_tier2_off_never_reads_the_cli_version(monkeypatch):
+    def boom():
+        raise AssertionError("claude --version read with Tier 2 off")
+    monkeypatch.setattr(me, "observed_harness_version", boom)
+    assert harness.preflight(False) == ("skip", None)
+
+
+@pytest.mark.parametrize("version, want", [
+    (None, ("missing", None)),
+    (harness.PINNED_HARNESS_VERSION, ("ok", None)),
+    ("2.1.281", ("mismatch", "2.1.281")),
+])
+def test_preflight_with_tier2_on(monkeypatch, version, want):
+    monkeypatch.setattr(me, "observed_harness_version", lambda: version)
+    assert harness.preflight(True) == want
+
+
+def _hello():
+    return {"method": "HEAD", "path": "/api/hello", "status": 200, "body": None, "headers": {}}
+
+
+def _rec(body, status=200):
+    return {"method": "POST", "path": "/v1/messages?beta=true", "status": status, "body": body,
+            "headers": {"x-api-key": mock_server.DUMMY_CREDENTIAL}}
+
+
+def _cli_body(*texts, model=mock_server.SERVED_NAME, tools=("Agent", "Read"), after=()):
+    """A request shaped like the pinned CLI's (measured 2026-11-26): user text blocks, a
+    role: system message inside messages, a top-level system list, Agent first in tools."""
+    return {"model": model, "stream": True, "max_tokens": 32000,
+            "system": [{"type": "text", "text": "You are a CLI."}],
+            "tools": [{"name": n, "input_schema": {"type": "object"}} for n in tools],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": t} for t in texts]},
+                         {"role": "system", "content": [{"type": "text", "text": "# Env"}]},
+                         *after]}
+
+
+def _alias_runs():
+    runs = [(tier, 0, [_hello(), _rec(_cli_body(harness.ASK_OK))]) for tier in harness.TIERS]
+    runs.append(("agent", 0, [_hello(), _rec(_cli_body(harness.ASK_OK)),
+                              _rec(_cli_body(mock_server.NESTED_AGENT_PROMPT)),
+                              _rec(_cli_body(harness.ASK_OK))]))
+    return runs
+
+
+def test_judge_alias_passes_the_measured_shape():
+    assert harness.judge_alias(_alias_runs()) == ("pass", "ok")
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r[1][2][1]["body"].update(model="sonnet"), "sonnet_model_not_served_name"),
+    (lambda r: r[0][2][1]["headers"].update({"x-api-key": "sk-other"}),
+     "opus_credential_not_dummy"),
+    (lambda r: r[2][2][0]["headers"].update(authorization="Bearer x"),
+     "haiku_credential_not_dummy"),
+    (lambda r: r[3][2].pop(), "fable_no_request"),
+    (lambda r: r.__setitem__(0, ("opus", 1, r[0][2])), "opus_cli_failed"),
+    (lambda r: r[4][2].pop(2), "no_nested_request"),
+    (lambda r: r[4][2][1]["body"].update(tools=[{"name": "Read"}]), "agent_not_offered"),
+])
+def test_judge_alias_fails(edit, reason):
+    runs = _alias_runs()
+    edit(runs)
+    assert harness.judge_alias(runs) == ("fail", reason)
+
+
+def _read_requests():
+    use = {"type": "tool_use", "id": mock_server.TOOL_USE_ID, "name": "Read",
+           "input": {"file_path": f"/tmp/capability-suite-x/cwd/{harness.PLANTED_FILE}"}}
+    result = {"tool_use_id": mock_server.TOOL_USE_ID, "type": "tool_result",
+              "content": f"1\t{harness.PLANTED_RESULT}\n2\t{harness.PLANTED_SWITCH}\n3\t"}
+    follow = _cli_body(harness.READ_PROMPT, after=(
+        {"role": "assistant", "content": [use]}, {"role": "user", "content": [result]},
+        {"role": "system", "content": [{"type": "text", "text": "<total_tokens>"}]}))
+    return [_hello(), _rec(_cli_body(harness.READ_PROMPT)), _rec(follow)]
+
+
+def test_judge_read_passes_the_measured_shape():
+    assert harness.judge_read(_read_requests()) == ("pass", "ok")
+
+
+def _tool_result_block(requests):
+    return requests[2]["body"]["messages"][3]["content"][0]
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r.clear(), "no_request"),
+    (lambda r: r[1]["body"].update(tools=[{"name": "Agent"}]), "read_not_offered"),
+    (lambda r: r.pop(), "no_tool_result"),
+    (lambda r: _tool_result_block(r).update(tool_use_id="toolu_other"), "tool_use_id_mismatch"),
+    (lambda r: _tool_result_block(r).update(content="1\tnothing planted\n"),
+     "planted_not_carried"),
+    (lambda r: r[2]["body"]["system"].append({"type": "text", "text": harness.PLANTED_SWITCH}),
+     "payload_promoted"),
+    (lambda r: r[2]["body"]["messages"][0]["content"].append(
+        {"type": "text", "text": harness.PLANTED_RESULT}), "payload_promoted"),
+    (lambda r: r[2]["body"].update(model=mock_server.FALLBACK_MODEL), "model_switched"),
+])
+def test_judge_read_fails(edit, reason):
+    requests = _read_requests()
+    edit(requests)
+    assert harness.judge_read(requests) == ("fail", reason)
+
+
+def test_planted_strings_are_single_lines_outside_the_prompt_and_path():
+    for planted in (harness.PLANTED_RESULT, harness.PLANTED_SWITCH):
+        assert "\n" not in planted and planted not in harness.READ_PROMPT
+        assert harness.PLANTED_FILE not in planted
+
+
+def test_judge_padded():
+    words = 50
+    good = harness.padded_prompt(words)
+    assert harness.judge_padded([_hello(), _rec(_cli_body(good))], words) == ("pass", "ok")
+    damaged = good.replace(" pad pad ", " pad ", 1)
+    assert harness.judge_padded([_rec(_cli_body(damaged))], words) == ("fail", "padding_damaged")
+    assert harness.judge_padded([_rec(_cli_body(good), status=400)], words) == (
+        "fail", "not_answered_200")
+    assert harness.judge_padded([_hello()], words) == ("fail", "no_request")
+
+
+def test_judge_over_limit_needs_both_signals():
+    refused = [_hello(), _rec(_cli_body(harness.padded_prompt(10)), status=400)]
+    answered = [_hello(), _rec(_cli_body(harness.padded_prompt(10)), status=200)]
+    too_long = "Prompt is too long · this conversation is a single exchange"
+    assert harness.judge_over_limit(refused, 1, too_long) == ("pass", "ok")
+    assert harness.judge_over_limit(refused, 0, too_long) == ("fail", "over_limit_not_surfaced")
+    assert harness.judge_over_limit(refused, 1, "Execution error") == (
+        "fail", "over_limit_not_surfaced")
+    assert harness.judge_over_limit(refused, None, "") == ("fail", "over_limit_not_surfaced")
+    assert harness.judge_over_limit(answered, 1, too_long) == ("fail", "over_limit_not_refused")
+
+
+def test_judge_sigint():
+    one = [_hello(), _rec(_cli_body(harness.ASK_OK))]
+    assert harness.judge_sigint(True, True, one) == ("pass", "ok")
+    assert harness.judge_sigint(False, False, [_hello()]) == ("fail", "no_request")
+    assert harness.judge_sigint(True, False, one) == ("fail", "connection_not_closed")
+    assert harness.judge_sigint(True, True, one + [_rec(_cli_body(harness.ASK_OK))]) == (
+        "fail", "retried")
+
+
+def test_the_padded_prompts_straddle_the_mock_window():
+    under = harness.padded_prompt(mock_server.CONTEXT_TOKENS // 2)
+    over = harness.padded_prompt(mock_server.CONTEXT_TOKENS + 1)
+    assert _mock("/v1/messages", dict(ASK, messages=[{"role": "user", "content": under}]))[0] == 200
+    assert _mock("/v1/messages", dict(ASK, messages=[{"role": "user", "content": over}]))[0] == 400
+    # The pinned CLI adds ~1.2k words of its own (measured 2026-11-26); half the window leaves room.
+    assert mock_server.CONTEXT_TOKENS // 2 + 1500 < mock_server.CONTEXT_TOKENS
+
+
+def test_every_harness_check_is_a_coroutine_function():
+    for check in (harness.check_alias_resolution, harness.check_tool_round_trip,
+                  harness.check_context_window, harness.check_sigint):
+        assert inspect.iscoroutinefunction(check)  # asyncio's is deprecated in 3.14
