@@ -704,3 +704,31 @@ def test_reset_retry_still_clears_existing_suffixes_alongside_new_ones(tmp_path)
     assert get_state_str("9:cverdict", sf) is None
     assert get_state_str("9:cid", sf) is None
     assert get_state_str("9:crawlog", sf) is None
+
+
+# --- #586: a local endpoint failure trips through the one existing signature bucket -------
+
+def test_two_consecutive_local_endpoint_failures_trip_the_breaker(tmp_path):
+    from factory_core.error_signature import write_signature
+    sf = tmp_path / "state.json"
+    sig = "substantive:endpoint_unreachable:1"
+    write_signature(586, "plan", sig, 1, tmp_path)
+    assert (tmp_path / "error-signatures" / "586.plan.sig").exists()
+    assert record_failure_signature(586, "plan", sf, tmp_path) == (False, sig)
+    write_signature(586, "plan", sig, 1, tmp_path)
+    assert record_failure_signature(586, "plan", sf, tmp_path) == (True, sig)
+    assert json.loads(sf.read_text())["586:plan:sig"] == sig
+    assert sorted(p.name for p in (tmp_path / "error-signatures").iterdir()) == []
+
+
+def test_reset_retry_pops_exactly_the_existing_key_family(tmp_path):
+    # Regression guard against the rejected endpoint-split bucket (#586 owner decision 2):
+    # reset_retry gained no new key, so a stray "<key>:local:sig" is not one of its pops.
+    sf = tmp_path / "state.json"
+    key = "586:plan"
+    owned = [key, f"{key}:sig", f"{key}:delivery", f"{key}:loop:nightly:iter",
+             f"{key}:cverdict", f"{key}:cid", f"{key}:crawlog"]
+    kept = {f"{key}:local:sig": "x", "586:refine:sig": "y", "587": 1}
+    sf.write_text(json.dumps({**{k: 1 for k in owned}, **kept}))
+    reset_retry(key, sf)
+    assert json.loads(sf.read_text()) == kept
