@@ -265,8 +265,9 @@ For planning only, the KV cache per parallel request is at most about
 bound, not a substitute for measuring.
 
 **Concurrency defaults to 1** until you measure otherwise. Only single-request behaviour has been
-observed, and the contract's v1 local role is the actor alone (`LOCAL_ROLE = "actor"`), with no
-parallel local checker.
+observed, and the contract's v1 local role is the actor alone (`bind_dispatch_role()` in
+`scripts/factory_core/providers/role_isolation.py` refuses any other role for a local dispatch),
+with no parallel local checker.
 
 ## Readiness
 
