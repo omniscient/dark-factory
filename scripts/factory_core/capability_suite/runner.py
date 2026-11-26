@@ -27,10 +27,10 @@ from factory_core.capability_suite import emit, harness, mock_server
 from factory_core.providers import model_adapter, model_endpoint, role_isolation
 
 FIXTURES_DIR = emit.PACKAGE_DIR / "fixtures"
-# Dimensions whose required harness (`claude -p`) probes are not shipped yet; part B (#624)
-# removes a dimension in the change that adds its harness cases.
-HARNESS_PENDING = ("protocol_compatibility", "tool_call_fidelity", "context_length",
-                   "timeout_cancellation")
+# Dimensions whose required harness (`claude -p`) probes are not shipped: none since #624. A
+# harness case skipped in one run (Tier 2 off, no claude binary) is listed in that run's
+# result harness_pending instead.
+HARNESS_PENDING = ()
 DRIVERS = ("http", "harness", "function")
 KINDS = ("probe", "control", "observation")
 TARGETS = ("mock", "endpoint")

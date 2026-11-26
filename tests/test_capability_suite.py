@@ -344,19 +344,28 @@ def test_dimension_directories_are_exactly_the_actor_required_dimensions():
 def test_fixtures_hold_only_case_yaml_files():
     files = [p for p in runner.FIXTURES_DIR.rglob("*") if p.is_file()]
     assert files and all(p.name == "case.yaml" for p in files)
-    assert len(files) == len(runner.load_cases()) == 26
+    assert len(files) == len(runner.load_cases()) == 30
 
 
-def test_harness_pending_is_a_subset_of_actor_required_dimensions():
-    assert set(runner.HARNESS_PENDING) <= set(me.ACTOR_REQUIRED_DIMENSIONS)
+def test_harness_pending_is_empty():
+    assert runner.HARNESS_PENDING == ()
 
 
 def test_worst_first_orders_exactly_the_result_values():
     assert sorted(runner.WORST_FIRST) == sorted(me.RESULT_VALUES)
 
 
-def test_part_a_ships_no_harness_case():
-    assert {c["driver"] for c in runner.load_cases()} == {"http", "function"}
+def test_each_formerly_pending_dimension_ships_one_harness_case():
+    cases = [c for c in runner.load_cases() if c["driver"] == "harness"]
+    assert {f"{c['dimension']}/{c['case']}": c["check"] for c in cases} == {
+        "protocol_compatibility/cli_alias_and_nested_agent_resolution": "cli_alias_resolution",
+        "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance": "cli_tool_round_trip",
+        "context_length/cli_padded_prompt_and_over_limit": "cli_context_window",
+        "timeout_cancellation/cli_sigint_closes_connection": "cli_sigint",
+    }
+    assert all(c["kind"] == "probe" and c["target"] == "mock" for c in cases)
+    assert sorted(c["dimension"] for c in cases) == sorted(PART_A_PENDING)
+    assert set(runner.HARNESS_CHECKS) == {c["check"] for c in cases}
 
 
 def test_every_mapped_control_and_observation_exists():
@@ -384,7 +393,11 @@ def test_every_mapped_control_and_observation_exists():
     probes = {n for n, c in cases.items() if c["kind"] == "probe"}
     assert {n for n in probes if not n.startswith("role_isolation/")} == {
         "protocol_compatibility/non_streaming_round_trip", "tool_call_fidelity/tool_use_round_trip",
-        "streaming/sse_message_stop", "context_length/sized_request"}
+        "streaming/sse_message_stop", "context_length/sized_request",
+        "protocol_compatibility/cli_alias_and_nested_agent_resolution",
+        "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance",
+        "context_length/cli_padded_prompt_and_over_limit",
+        "timeout_cancellation/cli_sigint_closes_connection"}
 
 
 def test_role_isolation_cases_are_function_probes():
@@ -465,6 +478,9 @@ def test_an_unsupported_observation_changes_no_dimension(monkeypatch, check, cas
 
 HARNESS_CASE = {"case": "via_cli", "dimension": "streaming", "driver": "harness",
                 "kind": "probe", "target": "mock", "check": "cli_sigint"}
+# What a Tier 2-off run reports pending: part A's HARNESS_PENDING, now from skipped cases.
+PART_A_PENDING = ["protocol_compatibility", "tool_call_fidelity", "context_length",
+                  "timeout_cancellation"]
 
 
 @pytest.mark.parametrize("mode", ["skip", "missing"])
@@ -554,7 +570,7 @@ def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
         "streaming": "pass", "context_length": "not_tested", "role_isolation": "pass",
         "timeout_cancellation": "not_tested",
     }
-    assert body["harness_pending"] == list(runner.HARNESS_PENDING)
+    assert body["harness_pending"] == PART_A_PENDING
     assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
     assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
     assert len(body["controls"]) == 16 and all(c["ok"] for c in body["controls"])
@@ -680,6 +696,24 @@ def test_tier2_version_mismatch_exits_7_and_writes_nothing(tmp_path, monkeypatch
     assert "0.0.1" in err and harness.PINNED_HARNESS_VERSION in err
 
 
+def test_tier2_with_passing_harness_checks_passes_all_six_dimensions(tmp_path, monkeypatch):
+    _tier2(monkeypatch)
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _ = _run(tmp_path, "--base-url", "mock")
+    body = result["certification_result"]
+    assert code == 0 and len(calls) == 4
+    assert body["results"] == {d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert body["harness_pending"] == []
+
+
+def test_tier2_without_a_claude_binary_reports_the_four_dimensions(tmp_path, monkeypatch):
+    monkeypatch.setenv(harness.TIER2_ENV, "1")
+    code, result, _ = _run(tmp_path, "--base-url", "mock")
+    body = result["certification_result"]
+    assert code == 6 and body["harness_pending"] == PART_A_PENDING
+    assert all(body["results"][d] == "not_tested" for d in PART_A_PENDING)
+
+
 def test_a_usage_error_stays_exit_2_whatever_cli_is_installed(tmp_path, monkeypatch):
     _tier2(monkeypatch, version="0.0.1")
     assert _usage_error("--base-url", "mock", "--context-tokens", "0",
@@ -780,7 +814,7 @@ def test_part_a_result_qualifies_no_route(tmp_path):
               "results": result["certification_result"]["results"]}
     assert me.role_problems(record, "actor") == [
         f"capability evidence for 'local-a': {d} is not_tested, not pass"
-        for d in runner.HARNESS_PENDING]
+        for d in PART_A_PENDING]
 
 
 # --- suite-version digest -------------------------------------------------------------------

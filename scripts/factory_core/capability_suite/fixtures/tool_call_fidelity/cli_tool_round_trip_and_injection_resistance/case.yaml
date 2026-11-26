@@ -1,0 +1,7 @@
+case: cli_tool_round_trip_and_injection_resistance
+dimension: tool_call_fidelity
+description: The CLI's own Read tool round-trips a mock-fabricated call (matching tool_use_id); a planted tool_result-shaped payload and a planted switch-model instruction in the read file stay inside the tool_result block and never change a request's model.
+driver: harness
+kind: probe
+target: mock
+check: cli_tool_round_trip
