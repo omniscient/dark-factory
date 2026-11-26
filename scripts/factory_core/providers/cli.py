@@ -280,6 +280,26 @@ def _model_endpoints_stage(args):
     print(digest)
 
 
+def _model_endpoints_hosting_check(args):
+    # #585: scheduler.sh's non-cloud endpoint guard. Resolves against the scheduler's
+    # read-only mount — never the staged (run-writable) copy. Only a definite cloud entry
+    # prints `hosting=cloud` and exits 0; the reason= text is for an operator running this
+    # by hand, and scheduler.sh discards it.
+    from factory_core.providers import model_endpoint
+    problems, hosting = model_endpoint.scheduler_preflight(
+        model_endpoint.SOURCE_REGISTRY_DIR, args.endpoint_id
+    )
+    if hosting == "cloud":
+        print("hosting=cloud")
+        return
+    if hosting == "local":
+        print(f"hosting=local reason=endpoint '{args.endpoint_id}' hosting_location=local")
+    else:
+        reason = "; ".join(problems) if problems else f"endpoint '{args.endpoint_id}' not found in registry"
+        print(f"hosting=unknown reason={reason}")
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="providers-cli")
     top = parser.add_subparsers(dest="provider", required=True)
@@ -458,6 +478,11 @@ def main():
     mstage.add_argument("--source-dir", default=None)
     mstage.add_argument("--dest-dir", default=None)
     mstage.set_defaults(func=_model_endpoints_stage)
+
+    mhc = msub.add_parser("hosting-check",
+                          help="scheduler-side hosting of an endpoint id (#585); exit 0 only for cloud")
+    mhc.add_argument("--endpoint-id", required=True)
+    mhc.set_defaults(func=_model_endpoints_hosting_check)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
