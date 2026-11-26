@@ -246,13 +246,15 @@ def test_strip_and_sign_refuses_when_the_secret_is_gone(monkeypatch):
 def test_build_correlation_envelope(monkeypatch):
     dest = _dest(monkeypatch)
     run = {"run_id": "run-9", "issue_number": 558, "intent": "plan", "stage": "plan"}
-    header, envelope = ma.build_correlation(dest, run)
+    header, envelope = ma.build_correlation(dest, run, "actor")
     assert json.loads(header) == envelope
     assert set(envelope) == {"run_id", "issue", "phase", "role", "endpoint_id", "request_id"}
     assert envelope["run_id"] == "run-9" and envelope["issue"] == 558
     assert envelope["phase"] == "plan" and envelope["role"] == "actor"
     assert envelope["endpoint_id"] == "local-test"
-    assert ma.build_correlation(dest, run)[1]["request_id"] != envelope["request_id"]
+    assert ma.build_correlation(dest, run, "actor")[1]["request_id"] != envelope["request_id"]
+    # #559: the role is bound per dispatch by the caller, not a module constant.
+    assert not hasattr(ma, "LOCAL_ROLE")
 
 
 def test_resolve_timeout_maps_the_entry_bounds(monkeypatch):
@@ -321,3 +323,34 @@ def test_classify_failure_flags():
 
 def test_every_class_is_in_the_interim_enumeration():
     assert len(set(ma.FAILURE_CLASSES)) == 9
+
+
+# --- #559: response-side model identity (§4.11 decision 2) -------------------------------
+
+def _sse_start(model_json):
+    return (b'event: message_start\ndata: {"type":"message_start","message":' + model_json
+            + b'}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n')
+
+
+@pytest.mark.parametrize("data,streamed", [
+    (json.dumps({"type": "message", "model": SERVED}).encode(), False),
+    (b'{"type":"message","usage":{}}', False),  # absent: request side already pinned identity
+    (b"not json at all", False),
+    (b"[1, 2]", False),
+    (_sse_start(json.dumps({"model": SERVED}).encode()), True),
+    (_sse_start(b'{"usage":{"input_tokens":1}}'), True),
+    (b"event: ping\ndata: {not json}\n\n", True),
+])
+def test_response_model_matching_or_absent_passes(monkeypatch, data, streamed):
+    ma.check_response_model(_dest(monkeypatch), data, streamed)
+
+
+@pytest.mark.parametrize("data,streamed", [
+    (b'{"type":"message","model":"claude-opus-5-5"}', False),  # a backend fallback to cloud
+    (b'{"type":"message","model":"qwen2.5-coder-7b"}', False),  # a smaller local model
+    (_sse_start(b'{"model":"claude-opus-5-5"}'), True),
+])
+def test_response_model_mismatch_is_refused_never_accepted(monkeypatch, data, streamed):
+    refusal = _refusal(ma.check_response_model, _dest(monkeypatch), data, streamed)
+    assert (refusal.status, refusal.failure_class) == (502, ma.PROTOCOL_INCOMPATIBILITY)
+    assert SERVED in refusal.message

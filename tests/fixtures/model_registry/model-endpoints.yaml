@@ -52,3 +52,19 @@ endpoints:
       served_name: claude-opus-5-5
       digest_or_revision: claude-opus-5-5
     secret_reference: ANTHROPIC_API_KEY
+  # #560: the worked example in docs/local-inference-deployment-runbook.md — keep the two
+  # identical. Documentation-range address (RFC 5737) and a placeholder digest.
+  - id: lan-ollama-qwen3-coder
+    hosting_location: local
+    protocol: anthropic-messages
+    accepts_payload_classes: [local_only]
+    model_identity:
+      served_name: qwen3-coder-128k
+      digest_or_revision: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    base_url: http://192.0.2.10:11434
+    secret_reference: LOCAL_OLLAMA_DUMMY_TOKEN
+    timeouts:
+      connect_seconds: 10
+      time_to_first_token_seconds: 30
+      idle_seconds: 60
+      total_seconds: 1800

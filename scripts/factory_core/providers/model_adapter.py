@@ -17,8 +17,6 @@ from types import MappingProxyType
 from factory_core.providers import model_endpoint
 
 CORRELATION_HEADER = "X-Factory-Correlation"
-# §4.2: a local-routed container never hosts an independent checker — a contract constant.
-LOCAL_ROLE = "actor"
 REFUSAL_TYPE = "factory_model_adapter_refused"
 # Dropped from every local-destined request: a client-supplied credential is self-report (#288).
 INBOUND_AUTH_HEADERS = ("authorization", "x-api-key", "api-key")
@@ -182,13 +180,14 @@ def strip_and_sign_headers(headers, dest, environ=None) -> dict:
     return out
 
 
-def build_correlation(dest, run) -> tuple[str, dict]:
-    """§4.4's envelope from read_current_run()'s pointer fields: (header value, envelope)."""
+def build_correlation(dest, run, role) -> tuple[str, dict]:
+    """§4.4's envelope from read_current_run()'s pointer fields and the dispatch role the
+    caller bound (role_isolation.bind_dispatch_role, #559): (header value, envelope)."""
     envelope = {
         "run_id": run["run_id"],
         "issue": run["issue_number"],
         "phase": run["stage"],
-        "role": LOCAL_ROLE,
+        "role": role,
         "endpoint_id": dest["endpoint_id"],
         "request_id": str(uuid.uuid4()),
     }
@@ -243,6 +242,45 @@ def check_sse_complete(status, data) -> None:
         raise AdapterRefusal(502, PROTOCOL_INCOMPATIBILITY,
                              "local endpoint's event stream ended without a complete "
                              "message_stop frame")
+
+
+def _response_model(data, streamed):
+    """The model a local response says it is: a JSON body's top-level "model", or a stream's
+    message_start event's message.model. None when absent or unparseable."""
+    if not streamed:
+        try:
+            parsed = json.loads(data)
+        except ValueError:
+            return None
+        return parsed.get("model") if isinstance(parsed, dict) else None
+    for line in data.splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        try:
+            event = json.loads(line[5:])
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "message_start":
+            message = event.get("message")
+            return message.get("model") if isinstance(message, dict) else None
+    return None
+
+
+def check_response_model(dest, data, streamed) -> bool:
+    """§4.11 decision 2, response side (#559): the model actually invoked is the served model.
+
+    An absent field passes (check_model_identity pinned the request before it left); a
+    different one — a backend fallback or a swapped model — is refused, never accepted.
+    Returns whether the model field was present (found and matching) — a streaming caller
+    checks on every buffered chunk until this is True, then stops re-parsing.
+    """
+    model = _response_model(data, streamed)
+    if model is not None and model != dest["served_name"]:
+        raise AdapterRefusal(502, PROTOCOL_INCOMPATIBILITY,
+                             f"local endpoint '{dest['endpoint_id']}' answered as model "
+                             f"{model!r}, not its served model {dest['served_name']!r}; a "
+                             "backend fallback is never accepted")
+    return model is not None
 
 
 def classify_failure(exc, *, ttft_expired=False, idle_expired=False,

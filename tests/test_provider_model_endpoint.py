@@ -7,6 +7,7 @@ container sets several of them, and they would leak into the local-selection che
 import copy
 import io
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +82,7 @@ def _problems(tmp_path, endpoints, **kw):
 def test_fixture_registry_loads_same_host_lan_remote_and_cloud():
     endpoints = me.load_registry(FIXTURES / me.REGISTRY_FILE)
     assert [e["id"] for e in endpoints] == [
-        "local-same-host", "local-lan", "local-remote", "cloud-anthropic"]
+        "local-same-host", "local-lan", "local-remote", "cloud-anthropic", "lan-ollama-qwen3-coder"]
 
 
 def test_valid_local_and_cloud_entries_load(tmp_path):
@@ -817,6 +818,27 @@ def test_scheduler_preflight_without_a_registry_has_no_hosting(tmp_path):
     assert "model endpoint registry not found" in problems[0] and hosting is None
 
 
+LAN_OLLAMA = "lan-ollama-qwen3-coder"
+
+
+def test_lan_ollama_profile_validates_but_activates_no_routing(tmp_path, monkeypatch):
+    # #560: the runbook's worked LAN entry is schema-valid, and selecting it still fails on
+    # _NO_LOCAL_DISPATCH on both sides — the profile routes nothing until #587.
+    entry = {e["id"]: e for e in me.load_registry(FIXTURES / me.REGISTRY_FILE)}[LAN_OLLAMA]
+    assert entry["hosting_location"] == "local" and me.base_url_scope(entry["base_url"]) == "lan"
+    assert me.scheduler_preflight(FIXTURES, LAN_OLLAMA) == (
+        [me._NO_LOCAL_DISPATCH.format(eid=LAN_OLLAMA)], "local")
+    staged = tmp_path / "staged"
+    shutil.copytree(FIXTURES, staged)
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(staged))
+    monkeypatch.setenv("LOCAL_OLLAMA_DUMMY_TOKEN", "dummy-not-a-credential")
+    _local_env(monkeypatch, entry)
+    problems = _run_preflight(staged, LAN_OLLAMA, "local")
+    assert any(f"endpoint '{LAN_OLLAMA}'" in p and "capability evidence is 'unknown'" in p
+               for p in problems)
+    assert problems[-1] == me._NO_LOCAL_DISPATCH.format(eid=LAN_OLLAMA)
+
+
 # --- #558: load_verified_entry (the proxy's Configuration-contract loader) -----------------
 
 def _forbidden(*args, **kwargs):
@@ -1077,3 +1099,20 @@ def test_scheduler_side_reads_the_source_mount_without_a_digest(base_env, tmp_pa
     assert providers.preflight(side="scheduler") == []
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     assert providers.preflight(side="scheduler") == [me._NO_LOCAL_DISPATCH.format(eid="local-test")]
+
+
+def test_unselected_lan_profile_leaves_the_cloud_default_path_unchanged(base_env, tmp_path, monkeypatch):
+    # #560: the new profile staged and mounted, FACTORY_MODEL_ENDPOINT unset — both preflight
+    # sides pass and neither the registry nor the adapter module is loaded.
+    from factory_core import providers
+    staged = tmp_path / "staged"
+    shutil.copytree(FIXTURES, staged)
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(staged))
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", FIXTURES)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    for name in ("model_endpoint", "model_adapter"):
+        monkeypatch.delitem(sys.modules, f"factory_core.providers.{name}", raising=False)
+        monkeypatch.delattr(providers, name, raising=False)
+    assert providers.preflight() == [] and providers.preflight(side="scheduler") == []
+    assert "factory_core.providers.model_endpoint" not in sys.modules
+    assert "factory_core.providers.model_adapter" not in sys.modules
