@@ -157,27 +157,115 @@ def test_set_board_status_still_returns_none(monkeypatch):
     assert board.set_board_status(42, "opt_abc") is None
 
 
-def test_post_or_update_comment_new_comment(monkeypatch):
-    calls = []
+MARKER = "<!-- marker -->"
+
+
+def _lookup_argv(issue_num=42):
+    return ["gh", "api",
+            f"repos/{board.OWNER}/{board.REPO}/issues/{issue_num}/comments?per_page=100",
+            "--paginate"]
+
+
+def _comment_recorder(lookup_results):
+    """subprocess.run fake: lookup calls (argv contains --paginate) pop the next
+    CompletedProcess off lookup_results; every other call returns _ok(). Records argv,
+    plus the --body-file contents of any create call (the temp file is unlinked after)."""
+    calls, bodies = [], []
+    results = list(lookup_results)
+
     def fake(cmd, **kw):
         calls.append(cmd)
-        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        if "--paginate" in cmd:
+            return results.pop(0)
+        if cmd[:3] == ["gh", "issue", "comment"]:
+            bodies.append(Path(cmd[cmd.index("--body-file") + 1]).read_text())
+        return _ok()
+    return fake, calls, bodies
+
+
+def _json_cp(payload, returncode=0):
+    return subprocess.CompletedProcess([], returncode, stdout=json.dumps(payload), stderr="")
+
+
+def test_post_or_update_comment_new_comment(monkeypatch):
+    fake, calls, bodies = _comment_recorder([_json_cp([{"id": 1, "body": "unrelated"}])])
     monkeypatch.setattr(subprocess, "run", fake)
-    board.post_or_update_comment(42, "<!-- marker -->", "body text")
-    assert any("issue" in " ".join(c) and "comment" in " ".join(c) for c in calls)
+    board.post_or_update_comment(42, MARKER, "body text")
+    assert calls[0] == _lookup_argv()
+    assert len(calls) == 2
+    create = calls[1]
+    assert create[:-1] == ["gh", "issue", "comment", "42",
+                           "--repo", f"{board.OWNER}/{board.REPO}", "--body-file"]
+    assert create[-1].endswith(".md")
+    assert bodies == ["body text"]
 
 
 def test_post_or_update_comment_updates_existing(monkeypatch):
-    calls = []
-    def fake(cmd, **kw):
-        calls.append(cmd)
-        if "--jq" in " ".join(cmd):
-            return subprocess.CompletedProcess([], 0, stdout="12345\n", stderr="")
-        return _ok()
+    fake, calls, _ = _comment_recorder([_json_cp([{"id": 12345, "body": f"{MARKER}\nold"}])])
     monkeypatch.setattr(subprocess, "run", fake)
-    board.post_or_update_comment(42, "<!-- marker -->", "updated body")
-    assert any("PATCH" in " ".join(c) for c in calls)
-    assert any("12345" in " ".join(c) for c in calls)
+    board.post_or_update_comment(42, MARKER, "updated body")
+    assert len(calls) == 2
+    patch = calls[1]
+    assert patch[:5] == ["gh", "api", f"repos/{board.OWNER}/{board.REPO}/issues/comments/12345",
+                         "--method", "PATCH"]
+    assert not any(c[:3] == ["gh", "issue", "comment"] for c in calls)
+
+
+def test_post_or_update_comment_marker_on_second_page_is_patched_not_duplicated(monkeypatch):
+    # gh --paginate merges every page into one array; the newest marker comment sits past
+    # index 29 (beyond GitHub's default first page), an older one is on "page 1".
+    comments = [{"id": i, "body": f"unrelated {i}"} for i in range(1, 41)]
+    comments[3] = {"id": 9003, "body": f"{MARKER}\nolder"}
+    comments[31] = {"id": 9031, "body": f"{MARKER}\nnewest"}
+    fake, calls, _ = _comment_recorder([_json_cp(comments)])
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.post_or_update_comment(42, MARKER, "updated body")
+    lookup = calls[0]
+    assert lookup == _lookup_argv()
+    assert "--paginate" in lookup and "--jq" not in lookup
+    assert len(calls) == 2
+    assert calls[1][2] == f"repos/{board.OWNER}/{board.REPO}/issues/comments/9031"
+    assert "PATCH" in calls[1]
+    assert not any(c[:3] == ["gh", "issue", "comment"] for c in calls)
+
+
+def test_post_or_update_comment_tolerates_null_body_and_non_dict_entries(monkeypatch):
+    comments = [{"id": 1, "body": None}, "garbage", {"id": 2, "body": f"{MARKER}\nx"}]
+    fake, calls, _ = _comment_recorder([_json_cp(comments)])
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.post_or_update_comment(42, MARKER, "updated body")
+    assert calls[1][2] == f"repos/{board.OWNER}/{board.REPO}/issues/comments/2"
+
+
+def test_post_or_update_comment_lookup_fails_twice_posts_nothing(monkeypatch, capsys):
+    fail = subprocess.CompletedProcess([], 1, stdout="", stderr="HTTP 502")
+    fake, calls, _ = _comment_recorder([fail, fail])
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.post_or_update_comment(42, MARKER, "body text")
+    assert calls == [_lookup_argv(), _lookup_argv()]
+    err = capsys.readouterr().err
+    assert "#42" in err and "skipping" in err
+
+
+def test_post_or_update_comment_lookup_retry_then_success_posts(monkeypatch):
+    fail = subprocess.CompletedProcess([], 1, stdout="", stderr="HTTP 502")
+    fake, calls, bodies = _comment_recorder([fail, _json_cp([])])
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.post_or_update_comment(42, MARKER, "body text")
+    assert calls[:2] == [_lookup_argv(), _lookup_argv()]
+    assert len(calls) == 3
+    assert calls[2][:6] == ["gh", "issue", "comment", "42", "--repo", f"{board.OWNER}/{board.REPO}"]
+    assert bodies == ["body text"]
+
+
+@pytest.mark.parametrize("stdout", ["not json", "", '{"message": "Not Found"}', "null"])
+def test_post_or_update_comment_unparseable_lookup_posts_nothing(monkeypatch, capsys, stdout):
+    bad = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+    fake, calls, _ = _comment_recorder([bad, bad])
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.post_or_update_comment(42, MARKER, "body text")
+    assert calls == [_lookup_argv(), _lookup_argv()]
+    assert "skipping" in capsys.readouterr().err
 
 
 def test_add_to_board_success(monkeypatch):

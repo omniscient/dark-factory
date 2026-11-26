@@ -64,8 +64,8 @@ def _fake_gh(pr=None, checks=None, *, record=None):
             return _cp(json.dumps({"items": [
                 {"id": "ITEM", "content": {"number": 7, "type": "Issue"}}]}))
         # item-edit, gh api comments lookup, gh issue comment, anything else
-        if "--jq" in cmd:           # comment-id lookup -> none exists
-            return _cp("")
+        if "--paginate" in cmd:     # comment lookup -> none exists
+            return _cp("[]")
         return _cp()
 
     return run
@@ -81,7 +81,7 @@ def test_rescue_green_mergeable_promotes(monkeypatch):
     edits = [c for c in calls if "item-edit" in " ".join(c)]
     assert edits and rescue.board.STATUS_IN_REVIEW in edits[0]
     # posted the rescue comment
-    assert any("comment" in " ".join(c) for c in calls)
+    assert any(c[:3] == ["gh", "issue", "comment"] for c in calls)
 
 
 def test_rescue_marks_draft_ready_first(monkeypatch):

@@ -162,10 +162,10 @@ def test_upsert_comment_delegates_to_board_post_or_update_comment(monkeypatch):
     calls = []
     def fake(cmd, **kw):
         calls.append(cmd)
-        return _ok()
+        return _ok(stdout="[]") if "--paginate" in cmd else _ok()
     monkeypatch.setattr(subprocess, "run", fake)
     GitHubTracker().upsert_comment("42", "<!-- marker -->", "body text")
-    assert any("issue" in c and "comment" in c for c in calls)
+    assert any(c[:3] == ["gh", "issue", "comment"] for c in calls)
 
 
 def test_upsert_comment_opaque_id_passthrough(monkeypatch):
@@ -173,7 +173,7 @@ def test_upsert_comment_opaque_id_passthrough(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
     GitHubTracker().upsert_comment("PROJ-123", "<!-- marker -->", "body")
     lookup = calls[0]
-    assert f"repos/{identity.OWNER}/{identity.REPO}/issues/PROJ-123/comments" in lookup
+    assert f"repos/{identity.OWNER}/{identity.REPO}/issues/PROJ-123/comments?per_page=100" in lookup
 
 
 def test_create_item_matches_smoke_gate_regression_ticket(monkeypatch):
