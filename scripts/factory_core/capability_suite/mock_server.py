@@ -1,12 +1,14 @@
-"""In-process Anthropic-Messages mock for the capability suite (#561).
+"""In-process Anthropic-Messages mock for the capability suite (#561, #624).
 
 Plain aiohttp.web (the tests/ TestServer helpers are not in the image), bound to an ephemeral
 127.0.0.1 port. With no fault header it answers like a well-behaved endpoint serving
 SERVED_NAME; a control names one scripted fault in FAULT_HEADER. It never forwards, never
-dials out and never checks the credential it is sent.
+dials out and never checks the credential it is sent. It records every request it answers in
+app[OBSERVED]; a harness case (#624) arms a Script there before it spawns the CLI.
 """
 import asyncio
 import json
+from dataclasses import dataclass, field
 
 from aiohttp import web
 
@@ -24,6 +26,54 @@ FAULTS = (
 # Longer than any control's timeout; a stalled handler is cancelled when the client hangs up.
 STALL_SECONDS = 3.0
 TRUNCATED_INPUT_TOKENS = 100
+# Harness cases (#624): the id of every fabricated tool_use, and the reply scripts.
+TOOL_USE_ID = "toolu_capability_suite_1"
+SCRIPTS = ("text", "read", "agent", "stall")
+# The `agent` script's nested dispatch: the prompt marks the nested request in the log.
+NESTED_AGENT_PROMPT = "capability-suite nested agent: reply with the single word ok."
+NESTED_AGENT_MODEL = "opus"  # the explicit model: the fabricated Agent call carries
+STALL_INTERVAL_SECONDS = 0.1
+_SCRIPT_TOOLS = {"read": "Read", "agent": "Agent"}
+
+
+@dataclass
+class Script:
+    """A harness case's reply script, armed in-process before the CLI is spawned."""
+    name: str
+    read_path: str = ""  # the `read` script's seeded file
+    fired: bool = False  # the script's one tool call has been sent
+
+
+@dataclass
+class _Observed:
+    """What the mock saw: every request as {method, path, headers, body, status}, whether a
+    client hung up mid-response, and the armed Script (None: part A's replies)."""
+    requests: list = field(default_factory=list)
+    disconnected: bool = False
+    script: Script | None = None
+
+
+# One mutable object per app, set before start: aiohttp deprecates changing a started app.
+OBSERVED = web.AppKey("observed", _Observed)
+
+
+def arm(app, script=None) -> _Observed:
+    """Clear app's observation log and arm `script` (None restores part A's replies)."""
+    if script is not None and script.name not in SCRIPTS:
+        raise ValueError(f"script must be one of {', '.join(SCRIPTS)}")
+    observed = app[OBSERVED]
+    observed.requests.clear()
+    observed.disconnected = False
+    observed.script = script
+    return observed
+
+
+def _observe(request, body) -> dict:
+    record = {"method": request.method, "path": request.path_qs,
+              "headers": {k.lower(): v for k, v in request.headers.items()},
+              "body": body, "status": None}
+    request.app[OBSERVED].requests.append(record)
+    return record
 
 
 def _texts(messages):
@@ -47,14 +97,33 @@ def _is_tool_result(message) -> bool:
     return isinstance(content, list) and any(b.get("type") == "tool_result" for b in content)
 
 
-def _tool_use(tool, name=None):
+def _tool_use(tool, name=None, tool_input=None):
     schema = tool.get("input_schema") or {}
-    return {"type": "tool_use", "id": "toolu_capability_suite_1", "name": name or tool["name"],
-            "input": {key: "Paris" for key in schema.get("required", [])}}
+    if tool_input is None:
+        tool_input = {key: "Paris" for key in schema.get("required", [])}
+    return {"type": "tool_use", "id": TOOL_USE_ID, "name": name or tool["name"],
+            "input": tool_input}
 
 
-def _reply(body, fault):
-    """(content blocks, stop_reason) for one request."""
+def _scripted(body, script):
+    """A harness Script's reply: at most one call to the script's tool, picked by name from the
+    request's own tools (never a substitute), then plain text. Stateful (script.fired): the
+    pinned CLI's follow-up ends in a role: system message, not the tool_result."""
+    tool = _SCRIPT_TOOLS.get(script.name)
+    offered = {t.get("name"): t for t in body.get("tools") or []}
+    if tool is not None and tool in offered and not script.fired:
+        script.fired = True
+        tool_input = ({"file_path": script.read_path} if tool == "Read" else
+                      {"description": "capability-suite probe", "prompt": NESTED_AGENT_PROMPT,
+                       "subagent_type": "general-purpose", "model": NESTED_AGENT_MODEL})
+        return [_tool_use(offered[tool], tool_input=tool_input)], "tool_use"
+    return [{"type": "text", "text": "ok"}], "end_turn"
+
+
+def _reply(body, fault, script=None):
+    """(content blocks, stop_reason) for one request; an armed Script replaces part A's logic."""
+    if script is not None:
+        return _scripted(body, script)
     tools = body.get("tools") or []
     if tools and not _is_tool_result(body["messages"][-1]):
         choice = body.get("tool_choice") or {}
@@ -109,9 +178,34 @@ async def _stream(request, message, fault):
     return resp
 
 
+async def _stall(request, message, observed):
+    """The `stall` script: message_start, then an SSE comment every STALL_INTERVAL_SECONDS
+    until the client hangs up. aiohttp reports the hang-up as a cancelled handler
+    (handler_cancellation=True) or a reset write; either sets observed.disconnected."""
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    start = dict(message, content=[], stop_reason=None,
+                 usage=dict(message["usage"], output_tokens=0))
+    try:
+        await _event(resp, {"type": "message_start", "message": start})
+        while True:
+            await resp.write(b": capability-suite stall\n\n")
+            await asyncio.sleep(STALL_INTERVAL_SECONDS)
+    except (ConnectionResetError, asyncio.CancelledError):
+        observed.disconnected = True
+        raise
+
+
 async def _messages(request):
-    fault = request.headers.get(FAULT_HEADER)
     body = await request.json()
+    record = _observe(request, body)
+    resp = await _answer(request, body)
+    record["status"] = resp.status
+    return resp
+
+
+async def _answer(request, body):
+    fault = request.headers.get(FAULT_HEADER)
     if fault == "stall_first_byte":
         await asyncio.sleep(STALL_SECONDS)
     words = _word_count(body["messages"])
@@ -120,7 +214,8 @@ async def _messages(request):
     if fault == "malformed_json":
         return web.Response(body=b'{"type": "message", "content": [',
                             content_type="application/json")
-    content, stop_reason = _reply(body, fault)
+    script = request.app[OBSERVED].script
+    content, stop_reason = _reply(body, fault, script)
     message = {
         "id": "msg_capability_suite", "type": "message", "role": "assistant",
         "model": FALLBACK_MODEL if fault == "wrong_model" else SERVED_NAME,
@@ -130,22 +225,36 @@ async def _messages(request):
         "usage": {"input_tokens": TRUNCATED_INPUT_TOKENS if fault == "truncate_input" else words,
                   "output_tokens": 1},
     }
+    if script is not None and script.name == "stall":
+        return await _stall(request, message, request.app[OBSERVED])
     if body.get("stream"):
         return await _stream(request, message, fault)
     return web.json_response(message)
 
 
 async def _count_tokens(request):
-    if request.headers.get(FAULT_HEADER) == "count_tokens_404":
-        return _error(404, "not_found_error", "Not Found")
     body = await request.json()
-    return web.json_response({"input_tokens": _word_count(body["messages"])})
+    record = _observe(request, body)
+    if request.headers.get(FAULT_HEADER) == "count_tokens_404":
+        resp = _error(404, "not_found_error", "Not Found")
+    else:
+        resp = web.json_response({"input_tokens": _word_count(body["messages"])})
+    record["status"] = resp.status
+    return resp
+
+
+async def _hello(request):
+    """HEAD /api/hello, the pinned CLI's first request (#624): 200, no body."""
+    _observe(request, None)["status"] = 200
+    return web.Response()
 
 
 def create_app() -> web.Application:
     app = web.Application()
+    app[OBSERVED] = _Observed()
     app.router.add_post("/v1/messages", _messages)
     app.router.add_post("/v1/messages/count_tokens", _count_tokens)
+    app.router.add_head("/api/hello", _hello)
     return app
 
 

@@ -130,6 +130,129 @@ def test_mock_scripted_faults(fault, path, body, check):
     assert check(*_mock(path, body, fault))
 
 
+def _on_mock(script, *calls):
+    """([(status, body bytes)] of `calls` — (method, path, json body or None) — to one fresh
+    mock armed with `script`, and that mock's _Observed)."""
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            observed = mock_server.arm(mock_runner.app, script)
+            replies = []
+            async with aiohttp.ClientSession() as session:
+                for method, path, body in calls:
+                    async with session.request(method, url + path, json=body) as resp:
+                        replies.append((resp.status, await resp.read()))
+            return replies, observed
+        finally:
+            await mock_runner.cleanup()
+    return asyncio.run(go())
+
+
+def test_mock_answers_the_cli_hello_probe():
+    replies, observed = _on_mock(None, ("HEAD", "/api/hello", None))
+    assert replies == [(200, b"")]
+    assert [(r["method"], r["path"], r["status"]) for r in observed.requests] == [
+        ("HEAD", "/api/hello", 200)]
+
+
+def test_mock_accepts_the_cli_beta_query_string():
+    replies, observed = _on_mock(None, ("POST", "/v1/messages?beta=true", ASK))
+    status, data = replies[0]
+    assert status == 200 and json.loads(data)["model"] == mock_server.SERVED_NAME
+    assert observed.requests[0]["path"] == "/v1/messages?beta=true"
+
+
+def test_mock_records_every_request_with_lower_cased_headers():
+    replies, observed = _on_mock(None, ("POST", "/v1/messages", ASK),
+                                 ("POST", "/v1/messages/count_tokens", ASK))
+    assert [s for s, _ in replies] == [200, 200]
+    first, second = observed.requests
+    assert first["method"] == "POST" and first["body"] == ASK and first["status"] == 200
+    assert "content-type" in first["headers"] and "Content-Type" not in first["headers"]
+    assert second["path"] == "/v1/messages/count_tokens" and second["status"] == 200
+
+
+def test_arm_clears_the_log_and_refuses_an_unknown_script():
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url + "/v1/messages", json=ASK) as resp:
+                    await resp.read()
+            observed = mock_runner.app[mock_server.OBSERVED]
+            assert len(observed.requests) == 1
+            assert mock_server.arm(mock_runner.app) is observed and observed.requests == []
+            with pytest.raises(ValueError, match="script must be one of"):
+                mock_server.arm(mock_runner.app, mock_server.Script("nope"))
+        finally:
+            await mock_runner.cleanup()
+    asyncio.run(go())
+
+
+# The pinned CLI's tools as the scripts see them (measured: about 20, Agent first, Read present).
+CLI_TOOLS = [{"name": "Agent", "input_schema": {"type": "object", "required": ["prompt"]}},
+             {"name": "Read", "input_schema": {"type": "object", "required": ["file_path"]}}]
+OK_TEXT = [{"type": "text", "text": "ok"}]
+
+
+def test_text_script_never_calls_a_tool():
+    replies, _ = _on_mock(mock_server.Script("text"),
+                          ("POST", "/v1/messages", dict(ASK, tools=CLI_TOOLS)))
+    assert json.loads(replies[0][1])["content"] == OK_TEXT
+
+
+def test_read_script_fabricates_one_read_call_then_text():
+    ask = dict(ASK, tools=CLI_TOOLS)
+    replies, observed = _on_mock(mock_server.Script("read", read_path="/tmp/seeded.txt"),
+                                 ("POST", "/v1/messages", ask), ("POST", "/v1/messages", ask))
+    first, second = (json.loads(data) for _, data in replies)
+    assert first["content"] == [{"type": "tool_use", "id": mock_server.TOOL_USE_ID,
+                                 "name": "Read", "input": {"file_path": "/tmp/seeded.txt"}}]
+    assert first["stop_reason"] == "tool_use" and second["content"] == OK_TEXT
+    assert observed.script.fired
+
+
+def test_read_script_never_substitutes_another_tool():
+    replies, observed = _on_mock(mock_server.Script("read", read_path="/tmp/seeded.txt"),
+                                 ("POST", "/v1/messages", dict(ASK, tools=CLI_TOOLS[:1])))
+    assert json.loads(replies[0][1])["content"] == OK_TEXT and not observed.script.fired
+
+
+def test_agent_script_fabricates_one_agent_call_with_an_explicit_model():
+    ask = dict(ASK, tools=CLI_TOOLS)
+    replies, _ = _on_mock(mock_server.Script("agent"),
+                          ("POST", "/v1/messages", ask), ("POST", "/v1/messages", ask))
+    first, second = (json.loads(data) for _, data in replies)
+    (use,) = first["content"]
+    assert use["name"] == "Agent" and use["id"] == mock_server.TOOL_USE_ID
+    assert use["input"] == {"description": "capability-suite probe",
+                            "prompt": mock_server.NESTED_AGENT_PROMPT,
+                            "subagent_type": "general-purpose",
+                            "model": mock_server.NESTED_AGENT_MODEL}
+    assert second["content"] == OK_TEXT
+
+
+def test_stall_script_sees_the_client_hang_up():
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            observed = mock_server.arm(mock_runner.app, mock_server.Script("stall"))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url + "/v1/messages",
+                                        json=dict(ASK, stream=True)) as resp:
+                    assert (await resp.content.readline()).startswith(b"event: message_start")
+                    await asyncio.sleep(0.3)  # still streaming keep-alive comments
+                    assert not observed.disconnected
+            for _ in range(50):  # the hang-up reaches the handler asynchronously
+                if observed.disconnected:
+                    break
+                await asyncio.sleep(0.1)
+            return observed.disconnected
+        finally:
+            await mock_runner.cleanup()
+    assert asyncio.run(go())
+
+
 # --- certification_result -------------------------------------------------------------------
 
 def _result(**kw):
