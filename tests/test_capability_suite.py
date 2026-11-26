@@ -533,3 +533,46 @@ def test_part_a_result_qualifies_no_route(tmp_path):
     assert me.role_problems(record, "actor") == [
         f"capability evidence for 'local-a': {d} is not_tested, not pass"
         for d in runner.HARNESS_PENDING]
+
+
+# --- suite-version digest -------------------------------------------------------------------
+
+needs_nofollow = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"),
+                                    reason="tree_sha256 opens files with os.O_NOFOLLOW")
+
+
+def _package_copy(tmp_path):
+    package = tmp_path / "capability_suite"
+    shutil.copytree(emit.PACKAGE_DIR, package, ignore=shutil.ignore_patterns("__pycache__"))
+    return package
+
+
+@needs_nofollow
+def test_pinned_fixture_suite_version_matches_the_recomputed_digest():
+    assert me.PINNED_FIXTURE_SUITE_VERSION == emit.suite_digest(), (
+        "capability_suite/fixtures/ or a capability_suite module changed: set "
+        "model_endpoint.PINNED_FIXTURE_SUITE_VERSION to emit.suite_digest() in the same change")
+
+
+@needs_nofollow
+@pytest.mark.parametrize("edit", ["fixture", "module", "new_module"])
+def test_any_suite_edit_changes_the_digest(tmp_path, edit):
+    package = _package_copy(tmp_path)
+    before = emit.suite_digest(package)
+    if edit == "fixture":
+        path = package / "fixtures" / "streaming" / "sse_message_stop" / "case.yaml"
+        path.write_text(path.read_text() + "# edited\n")
+    elif edit == "module":
+        (package / "runner.py").write_text((package / "runner.py").read_text() + "# edited\n")
+    else:
+        (package / "extra.py").write_text("")
+    assert emit.suite_digest(package) != before
+
+
+@needs_nofollow
+def test_pycache_never_changes_the_digest(tmp_path):
+    package = _package_copy(tmp_path)
+    before = emit.suite_digest(package)
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "runner.cpython-312.pyc").write_bytes(b"\0bytecode")
+    assert emit.suite_digest(package) == before

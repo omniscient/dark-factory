@@ -60,9 +60,10 @@ ACTOR_REQUIRED_DIMENSIONS = (
     "protocol_compatibility", "tool_call_fidelity", "streaming", "context_length",
     "role_isolation", "timeout_cancellation",
 )
-# No fixture suite is pinned until #561 ships one, so every local selection's evidence
-# resolves to `unknown` until then.
-PINNED_FIXTURE_SUITE_VERSION = None
+# The pinned capability fixture suite (#561): capability_suite.emit.suite_digest(), a SHA-256
+# over capability_suite/fixtures/ and the package's top-level modules. Never hand-bumped:
+# tests/test_capability_suite.py fails when it differs from the recomputed digest.
+PINNED_FIXTURE_SUITE_VERSION = "07c5fe247b21980fe31a7f3e985bac04daede0b757b8bbcf6c8d4721dbd6b9cd"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")

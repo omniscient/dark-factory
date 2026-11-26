@@ -490,7 +490,7 @@ def test_fixture_evidence_matches_fixture_entry_but_stays_unknown():
     assert record["registry_config"] == me.registry_config_sha256(entry)
     state, reasons = me.evidence_state(record, entry)
     assert state == "unknown"
-    assert "quantisation" in reasons[0] and "fixture_suite_version" in reasons[0]
+    assert "quantisation" in reasons[0]
 
 
 def test_missing_evidence_file_loads_as_none(tmp_path):
@@ -553,7 +553,8 @@ def test_unresolvable_fingerprint_is_unknown(pinned_suite, name):
     assert state == "unknown" and name in reasons[0]
 
 
-def test_unpinned_fixture_suite_is_unknown():
+def test_unpinned_fixture_suite_is_unknown(monkeypatch):
+    monkeypatch.setattr(me, "PINNED_FIXTURE_SUITE_VERSION", None)
     state, reasons = me.evidence_state(_record(LOCAL, invalidated_by=["model_digest"]), LOCAL)
     assert state == "unknown" and "fixture_suite_version" in reasons[0]
 
