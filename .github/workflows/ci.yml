@@ -67,3 +67,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f Dockerfile -t dark-factory:pr .
+      - name: Capability suite — Tier 2 (harness-driven, hermetic)
+        timeout-minutes: 10
+        run: |
+          mkdir -p /tmp/capability-tier2 && chmod 777 /tmp/capability-tier2  # the image writes as uid 1000
+          docker run --rm --network none \
+            -e PYTHONPATH=/opt/dark-factory/scripts -e FACTORY_CAPABILITY_TIER2=1 \
+            -v /tmp/capability-tier2:/out --entrypoint python3 dark-factory:pr \
+            -m factory_core.capability_suite run --base-url mock --out /out/result.json
+            # No --context-tokens: mock mode already sizes the window from
+            # mock_server.CONTEXT_TOKENS; check_context_window never reads this flag.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: capability-tier2-result, path: /tmp/capability-tier2/result.json }

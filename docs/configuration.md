@@ -568,13 +568,17 @@ A record's `fixture_suite_version` is compared with
 `scripts/factory_core/capability_suite/` (#561). A pytest fails when the committed pin differs
 from the recomputed digest, so any edit to the suite's fixtures or modules must re-pin in the
 same change, and evidence recorded against an older suite then resolves `stale`. The suite is
-operator-run and nothing calls it:
+operator-run. No factory phase calls it; CI runs it against its own mock:
 `python3 -m factory_core.capability_suite run --base-url <mock|http(s)://...> --out <path>`
 (endpoint mode also takes `--served-name`, `--secret-env <NAME>` and `--context-tokens`). It
 writes a `certification_result`, never a capability-evidence record: `load_evidence()` rejects
-it and `--out` under a `model-registry` directory is refused. Part A stores `not_tested` for the
-four dimensions whose `claude -p` probes are still pending (`runner.HARNESS_PENDING`), so its
-result alone qualifies no route.
+it and `--out` under a `model-registry` directory is refused. Four dimensions also need a
+harness case that spawns the pinned `claude -p` against the suite's mock (#624). Those cases run
+only with `FACTORY_CAPABILITY_TIER2=1` and a `claude` whose version is
+`harness.PINNED_HARNESS_VERSION`: exit 6 if the binary is missing, exit 7 and no result on a
+version mismatch. Without the variable they are skipped, stored `not_tested` and listed in the
+result's `harness_pending`, so that result qualifies no route. The `docker-build` CI job runs
+them in the built image with no network.
 
 Inspect the effective configuration without printing secret values:
 `python3 /opt/dark-factory/scripts/factory_core/providers/cli.py model-endpoints show --from-source`

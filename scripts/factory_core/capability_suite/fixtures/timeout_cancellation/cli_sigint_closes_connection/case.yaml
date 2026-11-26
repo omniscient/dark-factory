@@ -1,0 +1,7 @@
+case: cli_sigint_closes_connection
+dimension: timeout_cancellation
+description: SIGINT to claude -p during a stalled stream is seen by the mock as the client closing the connection, with no retry.
+driver: harness
+kind: probe
+target: mock
+check: cli_sigint

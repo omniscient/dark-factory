@@ -1,0 +1,7 @@
+case: cli_padded_prompt_and_over_limit
+dimension: context_length
+description: A delimited padded block of half the mock's window reaches the mock intact and is answered 200; a prompt over the window counts as exceeded-and-surfaced only when the mock answered 400 and the CLI exited non-zero naming the error. The CLI's stop_reason is never read.
+driver: harness
+kind: probe
+target: mock
+check: cli_context_window
