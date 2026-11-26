@@ -8,6 +8,12 @@ set -E  # inherit ERR trap into functions (stage_* bodies) so SCHED_UNHANDLED_ER
 # ready-for-human ticket has no container because a HUMAN is on it, not because a run died.
 SKIP_LABELS="needs-discussion,epic,ready-for-human"
 SCHEDULER_STATE_DIR="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+# #607: export so child processes (providers/cli.py) see the cost-log gate: the
+# GraphQL cost log writes one line per measured call under this dir ONLY when the
+# variable is set (unset in CI's pytest job, which asserts /var/lib/dark-factory
+# stays empty), and DARK_FACTORY_COST_SOURCE tags each line as scheduler-side.
+export SCHEDULER_STATE_DIR
+export DARK_FACTORY_COST_SOURCE="scheduler"
 STATE_FILE="${SCHEDULER_STATE_DIR}/scheduler-state.json"
 RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 
@@ -274,7 +280,8 @@ ${FOOTER}" 2>/dev/null || true
       echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
       python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
         --remove "spec-pending-review" || true
-      set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" || true
+      # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+      set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" "$(echo "$item" | jq -r '.item_id // empty')" || true
     else
       echo "[$(date -u +%FT%TZ)] spec_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${SPEC_GRACE_MINUTES}m action=waiting"
     fi
@@ -315,7 +322,8 @@ ${FOOTER}" 2>/dev/null || true
       echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
       python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
         --remove "plan-pending-review" || true
-      set_board_status "$issue_num" "$FACTORY_STATUS_READY" || true
+      # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+      set_board_status "$issue_num" "$FACTORY_STATUS_READY" "$(echo "$item" | jq -r '.item_id // empty')" || true
     else
       echo "[$(date -u +%FT%TZ)] plan_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${PLAN_GRACE_MINUTES}m action=waiting"
     fi
@@ -417,8 +425,18 @@ dispatch() {
 }
 
 # --- Move an issue to a board status (thin adapter — logic lives in factory_core/board.py) ---
+# #607: optional third arg — the item's ProjectV2 id from the in-loop board snapshot.
+# Present → board-move makes ZERO item-list lookup calls (the id cache); absent/empty
+# → board-move falls back to the lookup, so a stale snapshot never no-ops the move.
+# set_board_status is an EDIT: the exit status of the item-edit passes through here,
+# and skipping the lookup read must never turn a refused edit into a silent success.
 set_board_status() {
-  python3 "$FACTORY_CORE_CLI" board-move --issue "$1" --status "$2"
+  local issue_num="$1" status="$2" item_id="${3:-}"
+  if [ -n "$item_id" ]; then
+    python3 "$FACTORY_CORE_CLI" board-move --issue "$issue_num" --status "$status" --item-id "$item_id"
+  else
+    python3 "$FACTORY_CORE_CLI" board-move --issue "$issue_num" --status "$status"
+  fi
 }
 
 # --- Universal circuit-breaker (thin adapter — logic lives in factory_core/breaker.py) ---
@@ -741,31 +759,52 @@ dependencies_met() {
   if [ -z "$deps" ]; then
     return 0
   fi
+
+  # Pass 1: board-snapshot status (free — no API call). Deps not on the board are
+  # collected for ONE batched state read below (#607) instead of one read each.
+  local dep_num dep_status offboard=""
   while IFS= read -r dep_num; do
-    local dep_status
+    # Validate before any use: a non-numeric ref can never be met (and can never be
+    # interpolated into a query). The scanner only emits digits; this is the defence.
+    if ! [[ "$dep_num" =~ ^[0-9]+$ ]]; then
+      echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} blocked_by=#${dep_num} dep_status=invalid"
+      return 1
+    fi
     dep_status=$(echo "$board_items" | jq -r ".items[] | select(.content.number == $dep_num) | .status" 2>/dev/null)
     if [ -z "$dep_status" ]; then
-      # Dep not found on board (archived or beyond fetch window) — fall back to issue state
-      local dep_state
-      local dep_gh_exit=0
-      dep_state=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get --id "$dep_num" --fields state 2>/dev/null \
-        | jq -r '.state // ""') || dep_gh_exit=$?
-      if [ "$dep_state" = "CLOSED" ]; then
-        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} resolved=closed_off_board"
-        continue
-      fi
-      if [ "$dep_gh_exit" -ne 0 ] || [ -z "$dep_state" ]; then
-        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} blocked_by=#${dep_num} dep_status=unknown"
-      else
-        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} blocked_by=#${dep_num} dep_status=off_board"
-      fi
-      return 1
+      offboard="${offboard} ${dep_num}"
+      continue
     fi
     if [ "$dep_status" != "Done" ]; then
       echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} blocked_by=#${dep_num} dep_status=${dep_status}"
       return 1
     fi
   done <<< "$deps"
+
+  if [ -n "${offboard// /}" ]; then
+    # #607: one batched state read (tracker states → one GraphQL query per chunk)
+    # for every off-board dep. A failed batch read means every dep is unknown —
+    # the same safe direction the former per-call failure produced, never "met".
+    local ids states_json states_rc=0 dep_state
+    ids=$(echo "${offboard# }" | tr ' ' ',')
+    states_json=$(python3 "$FACTORY_PROVIDERS_CLI" tracker states --ids "$ids" 2>/dev/null) || states_rc=$?
+    for dep_num in $offboard; do
+      dep_state=""
+      if [ "$states_rc" -eq 0 ]; then
+        dep_state=$(echo "$states_json" | jq -r --arg d "$dep_num" '.[$d] // ""' 2>/dev/null)
+      fi
+      if [ "$dep_state" = "CLOSED" ]; then
+        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} resolved=closed_off_board"
+        continue
+      fi
+      if [ "$states_rc" -ne 0 ] || [ -z "$dep_state" ]; then
+        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} blocked_by=#${dep_num} dep_status=unknown"
+      else
+        echo "[$(date -u +%FT%TZ)] dep_gate issue=#${issue_num} dep=#${dep_num} blocked_by=#${dep_num} dep_status=off_board"
+      fi
+      return 1
+    done
+  fi
   return 0
 }
 
@@ -995,7 +1034,8 @@ stage_ci_gate() {
     [ "$FAIL_COUNT" -eq 0 ] && continue
 
     echo "[$(date -u +%FT%TZ)] ci_gate issue=#${ISSUE} pr=#${PR_NUM} failing=${FAIL_COUNT} action=move_to_blocked"
-    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+    # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" "$(echo "$item" | jq -r '.item_id // empty')"
 
     FAIL_LIST=$(echo "$FAILED" | jq -r '.[] | "- [\(.name)](\(.link))"')
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
@@ -1056,7 +1096,8 @@ stage_orphan_sweep() {
     if has_skip_label "$item"; then continue; fi
     if is_issue_running "$ISSUE"; then continue; fi
     echo "[$(date -u +%FT%TZ)] sweep=orphaned_in_progress issue=#${ISSUE} action=move_to_blocked"
-    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED"
+    # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+    set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" "$(echo "$item" | jq -r '.item_id // empty')"
     FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
     python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" --body="## Dark Factory — Orphaned Run Recovered
 
@@ -1193,7 +1234,8 @@ stage_ready_implement() {
         echo "[$(date -u +%FT%TZ)] ceiling_gate issue=#${ISSUE} action=above_ceiling_blocked"
         python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$ISSUE" \
           --add "$ABOVE_CEILING_LABEL" || true
-        set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" || true
+        # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+        set_board_status "$ISSUE" "$FACTORY_STATUS_BLOCKED" "$(echo "$item" | jq -r '.item_id // empty')" || true
         FOOTER=$(python3 "$FACTORY_CORE_CLI" marker scheduler)
         python3 "$FACTORY_PROVIDERS_CLI" tracker add-comment --id "$ISSUE" \
   --body="## Scheduler — Above Dispatch Ceiling

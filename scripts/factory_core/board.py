@@ -71,7 +71,22 @@ def find_board_item(issue_num: int) -> str:
     return _find_item_by_number(str(issue_num))
 
 
-def set_board_status(issue_num: int, option_id: str) -> None:
+def set_board_status(issue_num: int, option_id: str, item_id: str | None = None) -> None:
+    """Move an issue's board card. This is an EDIT (a board-state mutation): the
+    `gh project item-edit` call is the write; the item-list lookup below is only
+    the read that resolves which item to edit.
+
+    #607: when `item_id` is supplied (the scheduler's board snapshot carries each
+    item's ProjectV2 id), the lookup read is skipped entirely and the edit goes
+    straight through — no `gh project item-list` call. An empty/absent id falls
+    back to the lookup so a stale snapshot never turns the edit into a no-op.
+    Failure signalling is unchanged on both paths: a refused edit prints stderr
+    and `_item_edit_status` returns False; this function still returns None so
+    its 4 direct callers (breaker.py, rescue.py, deconflict.py, epic_autopilot.py)
+    see zero behavior change."""
+    if item_id:
+        _item_edit_status(item_id, option_id)
+        return
     item_id = _find_item_by_number(str(issue_num))
     if not item_id:
         return

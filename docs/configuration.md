@@ -494,12 +494,13 @@ containers (`run-compose.yml:31-47`).
 
 | Variable | Default | Reader | Notes |
 |---|---|---|---|
-| `SCHEDULER_STATE_DIR` | `/var/lib/dark-factory` | `scheduler.sh:10`, `entrypoint.sh:36`, `breaker.py`, `epic_autopilot.py:653`, `main_red_fixer.py:279` | shared state volume; do not change independently of the volume mount |
+| `SCHEDULER_STATE_DIR` | `/var/lib/dark-factory` | `scheduler.sh:10`, `entrypoint.sh:36`, `breaker.py`, `epic_autopilot.py:653`, `main_red_fixer.py:279`, `cost_log.py` (write gate) | shared state volume; do not change independently of the volume mount. Also the GraphQL cost-log gate: `graphql-costs.jsonl` is written under it only when the variable is set in the child's environment (unset in CI's pytest job); #607 |
 | `STATE_FILE` | `${SCHEDULER_STATE_DIR}/scheduler-state.json` | `scripts/factory_core/breaker.py:15`, `scripts/factory_core/cli.py:47` | breaker state |
 | (path) blast-radius approvals | `${SCHEDULER_STATE_DIR}/blast-approvals/` — `<issue>.json` + `<issue>.json.sig` (signed, written only by the operator's `approve-blast.sh`), `<issue>.request.json` (unsigned review request written on a hold) | `scripts/gate_blast_radius.py` (`--approvals-dir`), `scripts/blast_gate_check.sh` | `factory:factory`, dir `0755`, files `0644`; the public key is `blast-approvers.asc` under `.factory/` in the target repo, read only from origin `main` (#551) |
 | `CLONE_DIR` | `.` | `epic_autopilot.py:390,434` (`_effective_exclude_paths`, `_target_dir`), `main_red_fixer.py:278-292`, `adapter.py:306`, `diff_rank.py`, `budget_gate.sh:39` | set by `entrypoint.sh` in runs. The scheduler does not set it; epic autopilot then uses `/workspace/project` if that holds an adapter (`_SCHEDULER_TARGET_DIR`, [PR #524](https://github.com/omniscient/dark-factory/pull/524)) |
 | `ARTIFACTS_DIR` | per run | `entrypoint.sh:115`; `budget_gate.sh:31` (required) | |
 | `FACTORY_CORE_CLI`, `FACTORY_PROVIDERS_CLI` | baked paths | `scheduler.sh:19-20`, `entrypoint.sh:9` | override seams |
+| `DARK_FACTORY_COST_SOURCE` | unset (lines then read `source: unknown`) | `factory_core/cost_log.py` | tags each GraphQL cost-log line with its writer: exported as `scheduler` by `scheduler.sh:16`, or as the run id by `entrypoint.sh:117`; #607 |
 | `FACTORY_BLAST_HOLD_FILE` | `$ARTIFACTS_DIR/blast-hold.json` (the entrypoint's own run directory) | `entrypoint.sh` (export, `_handle_blast_hold`), `scripts/blast_gate_check.sh` | hold marker handoff across Archon's per-node `ARTIFACTS_DIR` (#551); never set by hand |
 | `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR`, `BLAST_GATE_BAKED_DIR` | baked paths | `entrypoint.sh:5,61-62`; `gate_blast_radius.py:82,91`; `scripts/blast_gate_check.sh` | "never set in the image"; test seams |
 | `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1477`, `entrypoint.sh:89,830` | tests only |

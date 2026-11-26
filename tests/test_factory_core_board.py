@@ -106,6 +106,47 @@ def test_find_item_by_number_checked_found(monkeypatch):
     assert board._find_item_by_number_checked("42") == ("ITEM42", True)
 
 
+def test_set_board_status_with_item_id_makes_zero_item_list_calls(monkeypatch):
+    # #607: the scheduler's board snapshot now carries each item's ProjectV2 id;
+    # board-move with a supplied item_id goes straight to the item-edit and makes
+    # NO item-list lookup call (five per-item-loop call sites were paying one
+    # unbounded item-list call per move).
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok())[1])
+    board.set_board_status(42, "opt_abc", item_id="ITEM_FROM_SNAPSHOT")
+    assert not any("item-list" in " ".join(c) for c in calls), "supplied item_id must not trigger a lookup"
+    assert len(calls) == 1
+    edit = calls[0]
+    assert "item-edit" in " ".join(edit)
+    assert "ITEM_FROM_SNAPSHOT" in edit
+    assert "opt_abc" in edit
+
+
+def test_set_board_status_with_item_id_still_reports_edit_failure(monkeypatch, capsys):
+    # #607: skipping the lookup must not weaken the edit's failure signalling —
+    # a refused item-edit still prints stderr and returns False (board.set_board_status
+    # itself keeps returning None for its 4 direct callers).
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw:
+        subprocess.CompletedProcess([], 1, stdout="", stderr="rate limited"))
+    assert board._item_edit_status("ITEM42", "opt_abc") is False
+    assert "rate limited" in capsys.readouterr().err
+
+
+def test_set_board_status_empty_item_id_falls_back_to_lookup(monkeypatch):
+    # #607: an empty/absent item_id (e.g. an item with no id in an old snapshot)
+    # falls back to the historical lookup path — never a no-op.
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "item-list" in " ".join(cmd):
+            return _items([{"id": "ITEM42", "content": {"number": 42, "type": "Issue"}}])
+        return _ok()
+    monkeypatch.setattr(subprocess, "run", fake)
+    board.set_board_status(42, "opt_abc", item_id="")
+    assert any("item-list" in " ".join(c) for c in calls)
+    assert any("item-edit" in " ".join(c) for c in calls)
+
+
 def test_set_board_status_still_returns_none(monkeypatch):
     # Pins Requirement 3 / Design Decision 3: set_board_status's 4 direct callers
     # (breaker.py, rescue.py, deconflict.py, epic_autopilot.py) must see zero

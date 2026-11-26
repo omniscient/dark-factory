@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-from factory_core import board, identity
+from factory_core import board, cost_log, identity
 from factory_core.providers.tracker.base import Tracker
 
 _DEFAULT_GET_ITEM_FIELDS = ("title", "body", "labels", "comments")
@@ -20,13 +20,20 @@ _CANONICAL_STATUS_NAMES = {
 }
 _STATUS_NAME_TO_CANONICAL = {v: k for k, v in _CANONICAL_STATUS_NAMES.items()}
 
+# #607: two deliberate extensions over the pre-#607 query (parity goldens updated):
+#   - `id` per node: the scheduler's snapshot now carries each item's ProjectV2 id,
+#     so `board-move` with a supplied item_id skips the item-list lookup entirely.
+#   - root-level `rateLimit { cost remaining resetAt }`: each page call records its
+#     own point cost (1 point, no extra round trip) for the cost log.
 _BOARD_ITEMS_QUERY_TEMPLATE = '''
       query {
+        rateLimit { cost remaining resetAt }
         node(id: "%s") {
           ... on ProjectV2 {
             items(first: 100%s) {
               pageInfo { hasNextPage endCursor }
               nodes {
+                id
                 fieldValueByName(name: "Status") {
                   ... on ProjectV2ItemFieldSingleSelectValue { name }
                 }
@@ -141,6 +148,44 @@ class GitHubTracker(Tracker):
                 break
         return results
 
+    # #607: batched dependency-state read — one aliased query per chunk instead of
+    # one `tracker get` per dependency (the scheduler's per-item-loop hot path).
+    # Numbers are validated \d+ before interpolation (an invalid id is never sent
+    # and reads as unmet); a nonexistent issue returns null for its alias, i.e.
+    # missing means unmet. gh failure raises so the CLI exits non-zero and the
+    # scheduler treats every dependency as unmet — fail closed.
+    _STATES_CHUNK_SIZE = 25
+
+    def get_states(self, ids: list[str]) -> dict:
+        out: dict = {str(i): None for i in ids}
+        valid = [str(i) for i in ids if re.fullmatch(r"\d+", str(i))]
+        for start in range(0, len(valid), self._STATES_CHUNK_SIZE):
+            chunk = valid[start:start + self._STATES_CHUNK_SIZE]
+            selections = " ".join(
+                f"i{n}: issue(number:{num}) {{ state }}" for n, num in enumerate(chunk))
+            query = (
+                'query { rateLimit { cost remaining resetAt } '
+                'repository(owner:"%s", name:"%s") { %s } }'
+                % (identity.OWNER, identity.REPO, selections)
+            )
+            r = subprocess.run(
+                ["gh", "api", "graphql", "-f", "query=" + query],
+                capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"gh api graphql (issue states) failed: {r.stderr.strip()}")
+            try:
+                data = json.loads(r.stdout)
+                repo = ((data.get("data") or {}).get("repository") or {})
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"gh api graphql (issue states) returned non-JSON: {e}") from e
+            for n, num in enumerate(chunk):
+                node = repo.get(f"i{n}")
+                out[num] = (node or {}).get("state") if isinstance(node, dict) else None
+            cost_log.log_call("issue_states", (data.get("data") or {}).get("rateLimit"))
+        return out
+
     def set_status(self, id: str, canonical: str) -> bool:
         item_id, lookup_ok = board._find_item_by_number_checked(id)
         if not lookup_ok:
@@ -241,6 +286,9 @@ class GitHubTracker(Tracker):
                 page_info = items.get("pageInfo") or {}
             except (json.JSONDecodeError, AttributeError, TypeError) as e:
                 raise RuntimeError(f"github: unreadable project-items response: {e}") from e
+            # #607: one cost line per page call (the query's own rateLimit payload).
+            # No-op unless SCHEDULER_STATE_DIR is set; never raises.
+            cost_log.log_call("board_items", (data.get("data") or {}).get("rateLimit"))
             has_next = page_info.get("hasNextPage") is True
             cursor = page_info.get("endCursor") or ""
             if has_next and not cursor:
@@ -258,6 +306,9 @@ class GitHubTracker(Tracker):
                             "type": "Issue"},
                 "labels": [n["name"] for n in (content.get("labels") or {}).get("nodes") or []],
                 "status": (node.get("fieldValueByName") or {}).get("name"),
+                # #607: carried for board-move's --item-id (None in older/stubbed
+                # responses; a None id simply falls back to the lookup path).
+                "item_id": node.get("id"),
             })
         return {"items": out}
 

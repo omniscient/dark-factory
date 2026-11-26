@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def _board_move(args):
     from factory_core.board import set_board_status
-    set_board_status(args.issue, args.status)
+    # #607: --item-id (from the scheduler's board snapshot) skips the item-list
+    # lookup; board.set_board_status is the edit, its failure signalling is unchanged.
+    set_board_status(args.issue, args.status, item_id=args.item_id)
 
 
 def _board_add(args):
@@ -351,6 +353,8 @@ def main():
     bm = sub.add_parser("board-move")
     bm.add_argument("--issue", type=int, required=True)
     bm.add_argument("--status", required=True)
+    bm.add_argument("--item-id", default=None,
+                    help="#607: the item's ProjectV2 id from the board snapshot; skips the item-list lookup")
     bm.set_defaults(func=_board_move)
 
     ba = sub.add_parser("board-add")

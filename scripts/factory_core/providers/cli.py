@@ -165,6 +165,17 @@ def _tracker_children(args):
     _print(get_tracker().get_children(args.epic))
 
 
+def _tracker_states(args):
+    # #607: batched dependency-state read — one query for all referenced issues.
+    # Exit 1 on failure: a refused read must read as unmet, never as met.
+    ids = [i for i in args.ids.split(",") if i.strip()]
+    try:
+        _print(get_tracker().get_states(ids))
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _codehost_remote_url(args):
     url = get_codehost().remote_url()
     _print(re.sub(r"://[^@/]+@", "://***@", url))
@@ -353,6 +364,11 @@ def main():
     tch = tsub.add_parser("children")
     tch.add_argument("--epic", required=True)
     tch.set_defaults(func=_tracker_children)
+
+    tst = tsub.add_parser("states")
+    tst.add_argument("--ids", required=True,
+                     help="#607: comma-joined issue numbers, one query for all of them")
+    tst.set_defaults(func=_tracker_states)
 
     codehost = top.add_parser("codehost")
     csub = codehost.add_subparsers(dest="verb", required=True)

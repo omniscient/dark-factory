@@ -353,8 +353,13 @@ def test_list_board_items_has_the_scheduler_snapshot_shape(tracker_and_controlle
     assert set(snapshot) == {"items"}
     by_title = {i["content"]["title"]: i for i in snapshot["items"]}
     assert set(by_title) == {"a", "b"}
+    # #607: GitHub's snapshot carries the item's ProjectV2 id for board-move's
+    # item-id cache; Jira keeps the base contract shape.
+    expected_keys = {"content", "labels", "status"}
+    if gh:
+        expected_keys.add("item_id")
     for item in snapshot["items"]:
-        assert set(item) == {"content", "labels", "status"}
+        assert set(item) == expected_keys
         assert item["content"]["type"] == "Issue"
         assert item["content"]["number"] is not None
     assert by_title["a"]["labels"] == ["ready-for-agent"]
