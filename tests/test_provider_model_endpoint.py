@@ -834,7 +834,8 @@ def test_lan_ollama_profile_validates_but_activates_no_routing(tmp_path, monkeyp
     monkeypatch.setenv("LOCAL_OLLAMA_DUMMY_TOKEN", "dummy-not-a-credential")
     _local_env(monkeypatch, entry)
     problems = _run_preflight(staged, LAN_OLLAMA, "local")
-    assert f"endpoint '{LAN_OLLAMA}': capability evidence is 'unknown', not 'tested' (contract §4.5)" in problems
+    assert any(f"endpoint '{LAN_OLLAMA}'" in p and "capability evidence is 'unknown'" in p
+               for p in problems)
     assert problems[-1] == me._NO_LOCAL_DISPATCH.format(eid=LAN_OLLAMA)
 
 

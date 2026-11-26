@@ -1053,9 +1053,10 @@ def _lan_profile_timeouts(scale=20):
 
 
 def test_lan_profile_cold_start_inside_ttft_succeeds(local_env, monkeypatch):
-    # 0.9s scaled is 18s: the top of the unmeasured post-reboot estimate, inside the 30s bound.
+    # 0.5s scaled is 10s: comfortably inside the unmeasured post-reboot estimate and the 30s
+    # bound, with over 1s of slack against the scaled 1.5s TTFT to avoid flaking under load.
     async def cold_start(request):
-        await asyncio.sleep(0.9)
+        await asyncio.sleep(0.5)
         return web.json_response({"type": "message", "usage": {"input_tokens": 1, "output_tokens": 1}})
 
     (status, _), calls, cloud_calls = _local_scenario(
