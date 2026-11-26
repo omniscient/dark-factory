@@ -53,11 +53,11 @@ The scheduler starts a run with
 (`scheduler.sh:388-417`; the compose file is `run-compose.yml`, baked to that path by
 `Dockerfile:150`). The command string is the only argument. A human can start the same
 run by hand; with no argument the entrypoint prints usage and exits 1
-(`entrypoint.sh:88-97`).
+(`entrypoint.sh:99-108`).
 
 The command is interpreted twice, by two different mechanisms:
 
-1. **Entrypoint intent.** `entrypoint.sh:102-108` takes the first `#<digits>` as the issue
+1. **Entrypoint intent.** `entrypoint.sh:113-119` takes the first `#<digits>` as the issue
    number and matches the first word, case-insensitively, against
    `fix|continue|close|refine|plan|deconflict|recheck`. No match means `fix`. The exact
    strings `Fix main` / `fix main` become `fix-main`, and `Audit deps` / `audit deps`
@@ -112,35 +112,36 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 |---|---|---|---|
 | 1 | Source instance identity (`scripts/identity.sh`) | 5-6 | Provides repo slug, clone dir, board constants |
 | 2 | Provider preflight (`providers/cli.py preflight`) | 9-10 | Validates required environment. When `FACTORY_MODEL_ENDPOINT` is set it also checks the staged model endpoint registry against `FACTORY_MODEL_REGISTRY_SHA256` and the selected entry (#557; [configuration.md](configuration.md) "Model endpoint registry"). A failure here ends the run before any ticket signal exists |
-| 3 | Git identity (`<Product> Factory`, `factory@<repo>`) | 20-25 | |
-| 4 | Parse arguments into `ISSUE_NUM` and `INTENT` | 88-108 | See [section 1](#1-intents) |
-| 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 112-116 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
-| 6 | Ledger-writability check on `runs.jsonl` | 122-140 | Warning plus a health event; never fatal |
-| 7 | Write `current-run.json` to the state dir | 154-179 | Read by the model proxy. `stage` is the intent for single-phase intents and `unknown` for `fix`/`continue`. A `role` field is added only when `FACTORY_DISPATCH_ROLE` is non-empty (a non-token value is written as `invalid`); the proxy reads it only when `FACTORY_MODEL_ENDPOINT` is set (#559, [configuration.md](configuration.md) "Model endpoint registry") |
-| 8 | Concurrency guard | 186-196 | Counts other running containers whose name contains `FACTORY_RUN_PREFIX`; exits 1 if that count is at or above `FACTORY_WIP_LIMIT` |
-| 9 | Move the issue to **In Progress** | 210-213 | Skipped for `close`, `refine`, `plan`, `deconflict`, and when there is no issue number |
-| 10 | Install the `ERR` trap `on_failure` | 652 | From here on, an unguarded failing command runs `on_failure` ([section 9](#9-how-a-run-ends)) |
-| 11 | `gh auth setup-git` | 775 | Credentials come from the `gh` helper, not the remote URL (reason at `:13-17`) |
-| 12 | Delete any existing clone dir, `git clone`, `cd` into it | 778-783 | |
-| 13 | Adapter validity gate | 786 | [Gate A2](#a-run-start-gates-entrypoint) |
-| 14 | Self-contained fallbacks | 797-814 | If the clone lacks `dark-factory/scripts`, `.archon/workflows` or `.archon/commands`, copy the baked copies in and add them to `.git/info/exclude` |
-| 15 | Materialize the effective config | 822-826 | `factory_core.effective_config --materialize --out-dir "$ARTIFACTS_DIR"`: the clone-side `.claude/skills/refinement/config.yaml` (unless the target commits one) plus `$ARTIFACTS_DIR/run-config.{json,env}`; exports `FACTORY_RUN_CONFIG_JSON`; fail-open |
-| 16 | Apply config knobs | 830 (`apply_run_config_env`, `scripts/run_config_env.sh`) | Reads `scheduler.factory_wip_limit`, `conflict_resolution.ai_tier` and the three `scheduler.session_window_*` keys from `$ARTIFACTS_DIR/run-config.env`; a missing file warns and keeps the bootstrap defaults |
-| 17 | Compute the side-effect level, prepend the git/gh shim dir to `PATH` | 834 (`_compute_side_effect_level`, 60-85) | Reads only the baked config. Falls back to level 1 if resolution fails |
-| 18 | Copy the preview compose template and `seed/` into `dark-factory/` in the clone; git-exclude both | 839-846 | |
-| 19 | Install target dependencies | 851-865 | `pip install -r backend/requirements.txt` and `npm install` in `frontend/`, each only if the file exists |
-| 20 | Write `.claude/settings.local.json` (Workflow tool disabled; codeindex MCP server if the binary exists); git-exclude it | 874-884 | |
-| 21 | `pre-commit install` | 887 | Failure ignored |
-| 22 | `fix-main` branch | 889-897 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
+| 2a | Resolve the model-endpoint hosting location (`providers/cli.py model-endpoints hosting`, the baked copy) | 12-21 | Sets `DF_ENDPOINT_HOSTING` to `local` only when the resolver prints exactly `hosting=local`; anything else is `cloud`. Built on `load_verified_entry`, so it stays `cloud` until #587 lifts the local-dispatch block (#586, [section 6.F](#f-rate-limit-and-session-window-handling-entrypoint)) |
+| 3 | Git identity (`<Product> Factory`, `factory@<repo>`) | 31-36 | |
+| 4 | Parse arguments into `ISSUE_NUM` and `INTENT` | 99-119 | See [section 1](#1-intents) |
+| 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 123-131 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
+| 6 | Ledger-writability check on `runs.jsonl` | 137-155 | Warning plus a health event; never fatal |
+| 7 | Write `current-run.json` to the state dir | 169-194 | Read by the model proxy. `stage` is the intent for single-phase intents and `unknown` for `fix`/`continue`. A `role` field is added only when `FACTORY_DISPATCH_ROLE` is non-empty (a non-token value is written as `invalid`); the proxy reads it only when `FACTORY_MODEL_ENDPOINT` is set (#559, [configuration.md](configuration.md) "Model endpoint registry") |
+| 8 | Concurrency guard | 201-211 | Counts other running containers whose name contains `FACTORY_RUN_PREFIX`; exits 1 if that count is at or above `FACTORY_WIP_LIMIT` |
+| 9 | Move the issue to **In Progress** | 225-228 | Skipped for `close`, `refine`, `plan`, `deconflict`, and when there is no issue number |
+| 10 | Install the `ERR` trap `on_failure` | 679 | From here on, an unguarded failing command runs `on_failure` ([section 9](#9-how-a-run-ends)) |
+| 11 | `gh auth setup-git` | 802 | Credentials come from the `gh` helper, not the remote URL (reason at `:24-28`) |
+| 12 | Delete any existing clone dir, `git clone`, `cd` into it | 805-810 | |
+| 13 | Adapter validity gate | 813 | [Gate A2](#a-run-start-gates-entrypoint) |
+| 14 | Self-contained fallbacks | 824-841 | If the clone lacks `dark-factory/scripts`, `.archon/workflows` or `.archon/commands`, copy the baked copies in and add them to `.git/info/exclude` |
+| 15 | Materialize the effective config | 849-853 | `factory_core.effective_config --materialize --out-dir "$ARTIFACTS_DIR"`: the clone-side `.claude/skills/refinement/config.yaml` (unless the target commits one) plus `$ARTIFACTS_DIR/run-config.{json,env}`; exports `FACTORY_RUN_CONFIG_JSON`; fail-open |
+| 16 | Apply config knobs | 857 (`apply_run_config_env`, `scripts/run_config_env.sh`) | Reads `scheduler.factory_wip_limit`, `conflict_resolution.ai_tier` and the three `scheduler.session_window_*` keys from `$ARTIFACTS_DIR/run-config.env`; a missing file warns and keeps the bootstrap defaults |
+| 17 | Compute the side-effect level, prepend the git/gh shim dir to `PATH` | 861 (`_compute_side_effect_level`, 71-96) | Reads only the baked config. Falls back to level 1 if resolution fails |
+| 18 | Copy the preview compose template and `seed/` into `dark-factory/` in the clone; git-exclude both | 866-873 | |
+| 19 | Install target dependencies | 878-892 | `pip install -r backend/requirements.txt` and `npm install` in `frontend/`, each only if the file exists |
+| 20 | Write `.claude/settings.local.json` (Workflow tool disabled; codeindex MCP server if the binary exists); git-exclude it | 901-911 | |
+| 21 | `pre-commit install` | 914 | Failure ignored |
+| 22 | `fix-main` branch | 916-924 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
 | 22a | `audit-deps` branch | after the `fix-main` branch | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
-| 23 | Smoke gate, for `fix`, `continue`, `deconflict`, `recheck` | 919-922 | [Gate A3](#a-run-start-gates-entrypoint) |
-| 24 | `recheck` exit | 928-931 | Reaching this line means the gate passed |
-| 25 | `deconflict` flow | 937-1033 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
-| 26 | Run the workflow | 1036-1095 | `archon workflow run archon-dark-factory "$ARGUMENTS"`, output tee'd to a temp file |
+| 23 | Smoke gate, for `fix`, `continue`, `deconflict`, `recheck` | 946-949 | [Gate A3](#a-run-start-gates-entrypoint) |
+| 24 | `recheck` exit | 955-958 | Reaching this line means the gate passed |
+| 25 | `deconflict` flow | 964-1060 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
+| 26 | Run the workflow | 1063-1122 | `archon workflow run archon-dark-factory "$ARGUMENTS"`, output tee'd to a temp file |
 
 The workflow therefore runs for `refine`, `plan`, `fix`, `continue` and `close` only.
 `refine`, `plan` and `close` skip the smoke gate; `close` and `recheck` skip the adapter
-gate (`entrypoint.sh:732-737`).
+gate (`entrypoint.sh:759-764`).
 
 ---
 
@@ -150,14 +151,14 @@ gate (`entrypoint.sh:732-737`).
 
 Runs steps 1-23 above with no issue number. The smoke gate's green path clears the
 main-red sentinel and closes the regression ticket; the run then exits 0
-(`entrypoint.sh:991-994`). If main is still red, the gate itself exits 0
+(`entrypoint.sh:1018-1021`). If main is still red, the gate itself exits 0
 (`smoke_gate.sh:66-135`).
 
 ### `Fix main`
 
 After the clone and setup, if `MAIN_RED_AUTOFIX_ENABLED` is not `true` the run logs that
 and exits 0. Otherwise it calls `factory_core/cli.py main-red-fix --once` and exits 0
-regardless of the result (`entrypoint.sh:952-960`). The fixer itself
+regardless of the result (`entrypoint.sh:979-987`). The fixer itself
 (`scripts/factory_core/main_red_fixer.py`) is outside this document; its knobs are the
 `main_red_autofix.*` keys ([configuration.md](configuration.md)).
 
@@ -178,9 +179,9 @@ No Archon workflow is involved. The side-effect config says the same:
 
 1. Smoke gate (step 23).
 2. Find the remote branch `origin/feat/issue-<N>-*`; take the first match
-   (`entrypoint.sh:1001-1002`). None found: escalate.
+   (`entrypoint.sh:1028-1029`). None found: escalate.
 3. `git reset --hard` and `git clean -fd dark-factory/ .claude/` to undo the setup
-   copies, then check the branch out; verify `HEAD` is on it (`:1000-1016`). Either
+   copies, then check the branch out; verify `HEAD` is on it (`:1027-1043`). Either
    failing: escalate.
 4. Resolve (`factory_core/cli.py deconflict`, implemented in
    `scripts/factory_core/deconflict.py:325-421`):
@@ -207,7 +208,7 @@ No Archon workflow is involved. The side-effect config says the same:
    - Writes `conflict_resolution.md` with `CONFLICT_VERDICT`
      (`none|tier1|tier2|clean_merge|escalate`), `FILES_CONFLICTED`, `TIER1_RESOLVED`,
      `TIER2_RESOLVED`, `ESCALATED` (`:211-220`).
-5. Validate (`entrypoint.sh:1041-1062`): if `.factory/hooks/validate` is a non-empty file,
+5. Validate (`entrypoint.sh:1068-1089`): if `.factory/hooks/validate` is a non-empty file,
    run it through `run_hook --gate validate`; otherwise run `npx tsc --noEmit` in
    `frontend/`. Failure: escalate.
 6. `git push origin <branch>`, move the board to **In Review**, overwrite
@@ -216,12 +217,12 @@ No Archon workflow is involved. The side-effect config says the same:
 
 **Escalation** means: move the board to **Blocked**, post one
 "Dark Factory — Conflict Resolution Escalated" comment with the reason and manual steps,
-and exit 0 (`entrypoint.sh:802-825` for the entrypoint's own guards;
+and exit 0 (`entrypoint.sh:829-852` for the entrypoint's own guards;
 `scripts/factory_core/deconflict.py:223-243` for resolver failures). Exit 0 is deliberate so `on_failure` does
-not add a second comment (`entrypoint.sh:799-801`).
+not add a second comment (`entrypoint.sh:826-828`).
 
 Success in this path does not assemble a run record or post a cost report: every branch
-exits before `entrypoint.sh:1164`.
+exits before `entrypoint.sh:1195`.
 
 ---
 
@@ -597,8 +598,8 @@ and defaults are in [configuration.md](configuration.md).
 
 | Gate | Checks | Pass | Fail | Tuned by |
 |---|---|---|---|---|
-| **A1. Concurrency guard** (`entrypoint.sh:186-196`) | Number of other running run containers | Continue | Exit 1 before the trap is installed and before any board move: nothing appears on the ticket | `scheduler.factory_wip_limit` / `FACTORY_WIP_LIMIT` |
-| **A2. Adapter validity** (`entrypoint.sh:739-780`, called at `:846`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
+| **A1. Concurrency guard** (`entrypoint.sh:201-211`) | Number of other running run containers | Continue | Exit 1 before the trap is installed and before any board move: nothing appears on the ticket | `scheduler.factory_wip_limit` / `FACTORY_WIP_LIMIT` |
+| **A2. Adapter validity** (`entrypoint.sh:766-807`, called at `:873`) | `python3 -m factory_core.adapter --validate` on the clone's `.factory/adapter.yaml`. A missing file is valid. Not run for `close` and `recheck` | Continue | Writes the error to stderr, one `adapter-invalid` line to `hook-warnings.log`, and a "Dark Factory — Invalid adapter.yaml" comment (marker `df-adapter-invalid`); returns 1, which fires `on_failure` | none; see [adapter-authoring-guide.md](adapter-authoring-guide.md) |
 | **A3. Smoke gate** (`scripts/hooks.sh:24-76`, `smoke_gate.sh`) | Runs the target's `.factory/hooks/smoke-gate` for `fix`, `continue`, `deconflict`, `recheck`. Exit 0 means `main` is green | Green (`smoke_gate.sh:140-163`): remove the `main-is-red` sentinel, close every open `regression` ticket carrying the `df-main-red` marker, continue | Red (`:66-135`): write `main-is-red` and `main-red-last-recheck` to the state dir; comment on the existing regression ticket or create "main is red: tsc/python import failure"; **exit 0**. The ticket being worked on gets no comment and no board change from the gate | `scheduler.main_red_recheck_*` (scheduler side) |
 | **A3b. Smoke hook missing** (`smoke_gate.sh:179-223`) | The hook is absent, a directory, or empty | n/a | Refuses the run: stderr, a `smoke-gate-hook-missing` line in `hook-warnings.log`, a "Dark Factory — Smoke-gate hook missing" comment (marker `df-smoke-hook-missing`), a health event; returns 1, which fires `on_failure`. Does not write or clear the main-red sentinel | none |
 
@@ -939,11 +940,18 @@ The failure surfaces as a failed workflow ([section 9](#9-how-a-run-ends)).
 ### F. Rate-limit and session-window handling (entrypoint)
 
 When the workflow exits non-zero, the entrypoint first checks the captured output for a
-Claude session-window exhaustion (`entrypoint.sh:295-366`, `1122-1126`). On a match it
+Claude session-window exhaustion (`entrypoint.sh:310-387`, called at `:596` and `:1138-1141`). On a match it
 writes the resume time to `session-window-paused` in the state dir, drops an
 `environmental:session_window_pause` signature for the scheduler, appends a `paused`
 entry to `runs.jsonl`, and exits 0. Tuned by `scheduler.session_window_backoff_enabled`,
 `scheduler.session_window_buffer_minutes`, `scheduler.session_window_fallback_minutes`.
+
+On a verified-local run (`DF_ENDPOINT_HOSTING=local`, #586) a session-window or rate-limit
+match is never a pause: `session-window-check --hosting-location local` writes no sentinel,
+the legacy sleep below is skipped, and the run takes the normal failure path with the
+signature `substantive:endpoint_unreachable:<exit code>`, so two in a row trip the breaker
+(`scripts/factory_core/session_window.py`, `scripts/factory_core/error_signature.py`). On
+cloud, the only hosting before #587, nothing changes and no new argument is passed.
 
 Next it checks for the hold marker (#551, `_handle_blast_hold`): `blast-hold.json` in the
 entrypoint's own artifacts directory, exported as `FACTORY_BLAST_HOLD_FILE` before the
@@ -954,17 +962,17 @@ different issue than the run's is ignored. On a match it appends a `blast_hold` 
 no change to any retry counter. While `needs-discussion` is on the issue the scheduler
 skips it; after approval the next dispatch counts as one ordinary attempt.
 
-With the backoff disabled, a rate-limit match makes the entrypoint sleep until the
+With the backoff disabled, a rate-limit match on a cloud run makes the entrypoint sleep until the
 parsed reset time plus 60 s (300 s when the time cannot be parsed or the result is
 negative or above 90000 s) and re-run the whole workflow
-(`:1102-1137`).
+(`entrypoint.sh:1149-1185`, the guarded `rate-limit-match` block).
 
 ---
 
 ## 7. After the workflow
 
-When `archon workflow run` exits 0 (`entrypoint.sh:1164-1192`), the steps below run in
-order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:627-648`), with
+When `archon workflow run` exits 0 (`entrypoint.sh:1195-1223`), the steps below run in
+order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:654-675`), with
 `--status failed`, which scores the run `failed`:
 
 1. `archon workflow cost --last --json --quiet` is captured.
@@ -1003,7 +1011,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:627-648
    (`push-result.json` presence, resolved the same two-directory way, else a
    `needs-discussion` label lookup), folds `push_result` from that resolved path, and
    scores an artifact-less run `failed` or `clean_abort`. Failure is ignored.
-3. `post_cost_report` (`entrypoint.sh:496-563`): if `run-record.json` exists and has
+3. `post_cost_report` (`entrypoint.sh:523-590`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
    `delivered-savings.jsonl`; the legacy single `context-budget.json` is read only when no
@@ -1028,7 +1036,7 @@ The script then ends; the container is removed (`--rm`).
 ## 8. The artifacts directory
 
 `ARTIFACTS_DIR` is `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` inside
-the run container (`entrypoint.sh:114`). It is exported to every node. It is not on the
+the run container (`entrypoint.sh:129`). It is exported to every node. It is not on the
 shared volume, so it does not outlive the container; what survives a run is what was
 pushed, posted, or written to `/var/lib/dark-factory`.
 
@@ -1065,7 +1073,7 @@ pushed, posted, or written to `/var/lib/dark-factory`.
 | `review.md` | code-review command | `review-gate`, `report`, `run-record assemble` (from the workflow-run directory, see [section 7](#7-after-the-workflow)), post-mortem |
 | `revise_advisory_*.md`, `revise_summary.txt`, `revise_advisory.md` | revise-advisory command | Fix subagent; PR comment |
 | `conflict_resolution.md` | `deconflict.py`; overwritten by the entrypoint deconflict success path | `report`; `run-record assemble`; failure classification |
-| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:462-465`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
+| `factory-failures.jsonl` | post-mortem (per the comment at `entrypoint.sh:483-486`; `scripts/factory_core/post_mortem.py:105-112`) | Not traced |
 | `run-record.json` | `run-record assemble` | `post_cost_report` |
 
 State written outside the artifacts directory, under `/var/lib/dark-factory`:
@@ -1116,17 +1124,20 @@ this repository; see [oddity 5](#open-questions-and-oddities).
 
 ### Workflow failure (non-zero exit from `archon workflow run`)
 
-`entrypoint.sh:1110-1159`, in order:
+`entrypoint.sh:1137-1190`, in order:
 
-1. Session-window match: exit 0 (gate F).
-2. Rate-limit match with backoff disabled: sleep and retry.
+1. Session-window match on a cloud run: exit 0 (gate F).
+2. Rate-limit match with backoff disabled, on a cloud run: sleep and retry. A verified-local
+   run (#586) takes neither branch and continues below.
 3. Otherwise: for intents other than `refine`/`plan`, a Haiku session writes a 3-5
    sentence post-mortem from the last 200 transcript lines and the first 100 lines of
    `implementation.md`, `conformance.md`, `review.md`, `plan.md`; it is posted as
    "Dark Factory — Post-Mortem" (marker `df-post-mortem`)
-   (`entrypoint.sh:237-287`, `scripts/factory_core/post_mortem.py`).
+   (`entrypoint.sh:252-302`, `scripts/factory_core/post_mortem.py`).
 4. An error signature is written to `error-signatures/<issue>.<phase>.sig` in the state
-   dir for the scheduler. Classes, in check order: `environmental:delivery_failure` (run
+   dir for the scheduler. Classes, in check order: on a verified-local run only (#586),
+   `substantive:endpoint_unreachable:<exit code>` for rate-limit or exhaustion output (text
+   or a rejected `claude.rate_limit_event`); then `environmental:delivery_failure` (run
    shorter than `DELIVERY_FAILURE_MAX_SECONDS`, no commits, clean tree, no phase artifact),
    `environmental:rate_limit`, `substantive:verdict_missing` (either of the two
    missing-verdict stderr lines of `scripts/verdict_gate_check.sh`, the quiet-branch one
@@ -1134,7 +1145,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    ranked above the preview noise every self-target run leaves, #373),
    `environmental:preview_infra`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:435-494`, `scripts/factory_core/error_signature.py:80-114`).
+   (`entrypoint.sh:456-521`, `scripts/factory_core/error_signature.py:80-126`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see
@@ -1142,18 +1153,18 @@ This path does not go through `on_failure`; see
 
 ### Entrypoint failure (`on_failure`, the `ERR` trap)
 
-Any unguarded failing command after `entrypoint.sh:712`: clone failure, dependency
+Any unguarded failing command after `entrypoint.sh:739`: clone failure, dependency
 install failure, the adapter gate, the missing smoke hook, a failed push in the
-deconflict path. `on_failure` (`:549-694`):
+deconflict path. `on_failure` (`:576-721`):
 
 1. Appends a `failed` entry to `runs.jsonl` and assembles a `run-record.json` with
    `status: failed`.
 2. For `refine`, `plan`, `deconflict`: writes the error signature and posts
    "Refinement Pipeline — Failed" (marker `df-refine-failure`) with the exit code and the
-   retry command. **No board change**; the scheduler's breaker owns that (`:642-663`).
+   retry command. **No board change**; the scheduler's breaker owns that (`:669-690`).
 3. For `fix`, `continue`: writes the error signature, posts the post-mortem, moves the
    board to **Blocked**, and posts "Dark Factory Run — Failed" (marker
-   `df-factory-failure`) saying so (`:664-688`).
+   `df-factory-failure`) saying so (`:691-715`).
 4. For `close` or runs without an issue number: no comment.
 5. Posts the cost report.
 
@@ -1210,7 +1221,7 @@ The scheduler-side oddities are tracked in
 1. **The workflow's `resolve` path appears unreachable.** The scheduler's
    conflict command is `Deconflict issue #N` (`scheduler.sh:1130`). The entrypoint
    handles `deconflict` inline and every branch of that block ends in `exit 0` before the
-   workflow is started (`entrypoint.sh:1000-1096`). No dispatched command contains the
+   workflow is started (`entrypoint.sh:1027-1123`). No dispatched command contains the
    word "resolve". The nodes `setup-branch-resolve`, `preview-up-resolve`,
    `push-resolve`, and the `resolve` branches of `de-conflict`, `validate`,
    `status-in-review` and `report` would run only if `parse-intent` (a model call)
@@ -1245,7 +1256,7 @@ The scheduler-side oddities are tracked in
 4. **Resolved by #551**: the `df-blast-hold` comment names `approve-blast.sh` instead. The
    original finding: **the blast-radius comment names a command that does not exist.** It tells the human
    to re-run `"Validate issue #N"` (`commands/dark-factory-validate.md:104-107`, pre-#551). The
-   entrypoint's intent pattern has no `validate` (`entrypoint.sh:103`), so that string
+   entrypoint's intent pattern has no `validate` (`entrypoint.sh:114`), so that string
    falls through to `fix`, and what the workflow's `parse-intent` would make of it is a
    model decision.
 
@@ -1262,38 +1273,38 @@ The scheduler-side oddities are tracked in
    after a review block.
 
 6. **A failed workflow does not run `on_failure`.** The failure branch ends in
-   `exit "$EXIT_CODE"` (`entrypoint.sh:1155-1158`), and an `ERR` trap does not fire on
-   `exit` (the script says so itself at `:709-711`; confirmed with a small bash probe).
+   `exit "$EXIT_CODE"` (`entrypoint.sh:1186-1189`), and an `ERR` trap does not fire on
+   `exit` (the script says so itself at `:736-738`; confirmed with a small bash probe).
    So on this path there is no "Dark Factory Run — Failed" comment, no move to Blocked,
    no `failed` run-record entry, no assembled `run-record.json`, and no cost report. The
-   comment above `_write_error_signature` (`:410-417`) calls this the load-bearing call
+   comment above `_write_error_signature` (`:431-438`) calls this the load-bearing call
    site, so it may be intended that the scheduler owns the board here, but the failure
-   bookkeeping in `on_failure` (`:595-633`) is then only reached by setup-time failures.
+   bookkeeping in `on_failure` (`:622-660`) is then only reached by setup-time failures.
 
 7. **The "Paused (session window)" issue comment looks unreachable.** It is posted only
    inside `on_failure`, when `TMP_OUT` exists and the pause check matches
-   (`entrypoint.sh:569-597`). `TMP_OUT` is created inside the workflow loop and, on success, kept until
-   `run-record assemble` has read it; inside the loop a pause match exits 0 directly (`:1094-1097`) without posting anything. In normal
+   (`entrypoint.sh:596-624`). `TMP_OUT` is created inside the workflow loop and, on success, kept until
+   `run-record assemble` has read it; inside the loop a pause match exits 0 directly (`:1121-1124`) without posting anything. In normal
    operation a paused run therefore leaves no comment on the issue and posts no cost
    report.
 
 8. **The adapter gate runs before the self-contained fallback copy.**
-   `_adapter_invalid_refuse` is called at `entrypoint.sh:846`; the baked scripts are
-   copied into `dark-factory/scripts` at `:840-845`. `on_failure` then calls
+   `_adapter_invalid_refuse` is called at `entrypoint.sh:873`; the baked scripts are
+   copied into `dark-factory/scripts` at `:867-872`. `on_failure` then calls
    `$CLONE_DIR/dark-factory/scripts/factory_core/cli.py` for the comment footer with no
-   guard (`:649`, `:672`). For a target that does not carry `dark-factory/scripts` in its
+   guard (`:676`, `:699`). For a target that does not carry `dark-factory/scripts` in its
    repository (the self target has `scripts/` at the root), that call fails; a bash probe
    confirms a failing assignment inside the trap handler aborts the handler. The
-   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:669`) happen
+   adapter-invalid comment and, for `fix`/`continue`, the move to Blocked (`:696`) happen
    first, but the generic failure comment and the cost report would not be posted.
-   `run_post_mortem` (`:233`) uses the same missing path. Not verified against a live run.
+   `run_post_mortem` (`:248`) uses the same missing path. Not verified against a live run.
 
 9. **Kill-switch retry path has unguarded pipelines.** With the session-window backoff
    disabled, `RESET_TIME=$(grep … | head -1)` and the `RESET_TZ` line
-   (`entrypoint.sh:1124-1125`) run under `set -euo pipefail` with no `|| true`. When the
+   (`entrypoint.sh:1155-1156`) run under `set -euo pipefail` with no `|| true`. When the
    output has no "resets <time>" text the pipeline status is non-zero, which would fire
    the `ERR` trap instead of using the 300 s default on the next line. The script's own
-   comment at `:100-102` describes this exact hazard for another `grep`.
+   comment at `:111-113` describes this exact hazard for another `grep`.
 
 10. **`BENCH_MODE` handling is inconsistent.** In stub mode `classify-preview` is skipped
     by its `when:` (`workflows/archon-dark-factory.yaml:875`). `preview-up` depends only
@@ -1334,19 +1345,19 @@ The scheduler-side oddities are tracked in
 
 14. **The AI-tier switch for conflict resolution is not wired through.** The entrypoint
     reads `conflict_resolution.ai_tier` into `CONFLICT_RESOLUTION_AI_TIER`
-    (`entrypoint.sh:35`, then the `CONFLICT_RESOLUTION_AI_TIER` row of `run-config.env`), and `config/config.yaml:64` documents `false` as "only
+    (`entrypoint.sh:46`, then the `CONFLICT_RESOLUTION_AI_TIER` row of `run-config.env`), and `config/config.yaml:64` documents `false` as "only
     Tier 1". But both callers run `cli.py deconflict --issue N` with no further flag
-    (`entrypoint.sh:791-792`, `workflows/archon-dark-factory.yaml:796-797`); the CLI
+    (`entrypoint.sh:818-819`, `workflows/archon-dark-factory.yaml:796-797`); the CLI
     computes `ai_tier=not args.no_ai_tier` from a `--no-ai-tier` flag that nothing
     passes (`scripts/factory_core/cli.py:40,364`); and `deconflict.py` does not read the
     environment variable. As far as this trace goes, Tier 2 always runs.
 
 15. **Smaller inconsistencies.**
     - `on_failure` logs "Moving issue #N back to Ready..." and then sets **Blocked**
-      (`entrypoint.sh:683-686`).
+      (`entrypoint.sh:710-713`).
     - The entrypoint's deconflict success path overwrites the resolver's key=value
       `conflict_resolution.md` with prose, labelled "TypeScript validation" even when the
-      validate hook ran instead (`entrypoint.sh:1072-1080`). `run-record` is not assembled
+      validate hook ran instead (`entrypoint.sh:1099-1107`). `run-record` is not assembled
       on that path, so only failure classification sees the file.
     - `close-preview` tests for `needs-discussion` with a substring `grep -c`
       (`workflows/archon-dark-factory.yaml:237-239`); the push gates and
