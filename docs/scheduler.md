@@ -481,6 +481,10 @@ writes `session-window-paused` containing a resume epoch, and a signature
 `session_window.py`). The resume time is the reset time found in the output plus a
 buffer, or a fallback number of minutes, never more than 5 h plus the buffer ahead
 (`compute_resume_epoch`).
+A run whose model endpoint resolved as verified-local (`DF_ENDPOINT_HOSTING=local`, #586;
+always `cloud` until #587) never writes the sentinel: it fails normally with the signature
+`substantive:endpoint_unreachable:<exit code>`, so two in a row trip the breaker
+([run-lifecycle.md](run-lifecycle.md) section 6.F).
 
 In the scheduler (`scheduler.sh:1718-1733`), while the epoch is in the future:
 

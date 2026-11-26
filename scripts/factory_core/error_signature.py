@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from .session_window import RATE_LIMIT_RE as _RATE_LIMIT_RE
+from .session_window import RATE_LIMIT_RE as _RATE_LIMIT_RE, is_session_window_failure
 from .verdict import GATING_BLOCK_STATUSES, LEGACY_STATUSES
 
 _PREVIEW_INFRA_RE = re.compile(
@@ -86,7 +86,19 @@ def classify(
     worktree_dirty: bool,
     artifact_present: bool,
     delivery_failure_max_seconds: int = 30,
+    hosting_location: str = "cloud",
 ) -> str:
+    # #586: on a verified-local run, rate-limit/exhaustion output (text, or a rejected
+    # structured claude.rate_limit_event, which _RATE_LIMIT_RE does not match) is a counted
+    # local endpoint failure, so two in a row trip the breaker. Above delivery_failure: a
+    # local 429 within seconds must not take the full retry ceiling as environmental.
+    if hosting_location == "local" and (
+        _RATE_LIMIT_RE.search(text) or is_session_window_failure(text)
+    ):
+        # Imported here, never at module top: the default cloud path must not load
+        # model_adapter/model_endpoint (model_adapter.py's own module docstring).
+        from .providers.model_adapter import ENDPOINT_UNREACHABLE  # contract §4.6 interim class
+        return f"substantive:{ENDPOINT_UNREACHABLE}:{exit_code}"
     if (
         elapsed_seconds < delivery_failure_max_seconds
         and commits_since_start == 0

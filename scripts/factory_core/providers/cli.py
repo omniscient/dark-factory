@@ -9,6 +9,7 @@ ticket's plan, "Design decisions" #4.
 """
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -267,6 +268,29 @@ def _model_endpoints_show(args):
     print(json.dumps(view, indent=2, default=str))
 
 
+def _model_endpoints_hosting(args):
+    # #586: entrypoint.sh resolves the run's hosting location once, before the clone, through
+    # this baked copy. Built only on load_verified_entry(), which keeps _NO_LOCAL_DISPATCH, so
+    # every real registry prints hosting=cloud until #587. Always exits 0: any problem or
+    # exception prints hosting=cloud (the caller fails closed on content, never on rc).
+    hosting = "cloud"
+    endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT", "")
+    try:
+        if endpoint_id:
+            from factory_core.providers import model_endpoint
+            problems, entry = model_endpoint.load_verified_entry(
+                model_endpoint.staged_registry_dir(), endpoint_id)
+            if problems:
+                print(f"WARNING: model-endpoints hosting: {'; '.join(problems)}", file=sys.stderr)
+            elif entry["hosting_location"] == "local":
+                hosting = "local"
+    except Exception as e:  # noqa: BLE001 — fail closed to cloud on anything unexpected
+        print(f"WARNING: model-endpoints hosting: {type(e).__name__} — resolving to cloud",
+              file=sys.stderr)
+        hosting = "cloud"
+    print(f"hosting={hosting}")
+
+
 def _model_endpoints_stage(args):
     # scheduler.sh dispatch() calls this before each dispatch when FACTORY_MODEL_ENDPOINT is
     # set; stdout is the staged tree's digest, forwarded as FACTORY_MODEL_REGISTRY_SHA256.
@@ -478,6 +502,9 @@ def main():
     mstage.add_argument("--source-dir", default=None)
     mstage.add_argument("--dest-dir", default=None)
     mstage.set_defaults(func=_model_endpoints_stage)
+
+    mhost = msub.add_parser("hosting")
+    mhost.set_defaults(func=_model_endpoints_hosting)
 
     mhc = msub.add_parser("hosting-check",
                           help="scheduler-side hosting of an endpoint id (#585); exit 0 only for cloud")

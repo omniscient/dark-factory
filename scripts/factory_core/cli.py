@@ -163,6 +163,7 @@ def _session_window_check(args):
         now_epoch=int(time.time()),
         buffer_minutes=args.buffer_minutes,
         fallback_minutes=args.fallback_minutes,
+        hosting_location=args.hosting_location,
     )
     if resume_epoch is not None:
         print(f"matched=true resume_epoch={resume_epoch}")
@@ -207,6 +208,7 @@ def _error_signature_write(args):
         worktree_dirty=args.worktree_dirty,
         artifact_present=args.artifact_present,
         delivery_failure_max_seconds=args.delivery_failure_max_seconds,
+        hosting_location=args.hosting_location,
     )
     write_signature(args.issue, args.phase, signature, args.exit_code, Path(args.state_dir))
     print(f"signature={signature}")
@@ -432,6 +434,8 @@ def main():
     sw.add_argument("--state-dir", default="/var/lib/dark-factory")
     sw.add_argument("--buffer-minutes", type=int, default=5)
     sw.add_argument("--fallback-minutes", type=int, default=30)
+    # #586: entrypoint.sh passes this only when the baked resolver said local.
+    sw.add_argument("--hosting-location", choices=["cloud", "local"], default="cloud")
     sw.set_defaults(func=_session_window_check)
 
     rlm = sub.add_parser("rate-limit-match")
@@ -450,6 +454,7 @@ def main():
     esw.add_argument("--delivery-failure-max-seconds", type=int, default=30,
                       dest="delivery_failure_max_seconds")
     esw.add_argument("--state-dir", default="/var/lib/dark-factory")
+    esw.add_argument("--hosting-location", choices=["cloud", "local"], default="cloud")
     esw.set_defaults(func=_error_signature_write)
 
     swp = sub.add_parser("session-window-pause-signature-write")

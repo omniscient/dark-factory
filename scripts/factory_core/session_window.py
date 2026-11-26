@@ -251,8 +251,13 @@ def check_and_pause(
     now_epoch: int,
     buffer_minutes: int,
     fallback_minutes: int,
+    hosting_location: str = "cloud",
 ) -> Optional[int]:
     resume_epoch = compute_resume_epoch(text, now_epoch, buffer_minutes, fallback_minutes)
-    if resume_epoch is not None:
-        write_pause_sentinel(resume_epoch, state_dir)
+    # #586: a verified-local endpoint's exhaustion-shaped output must never pause the whole
+    # factory. Returning None makes the CLI print the same matched=false wire shape as "no
+    # match", so entrypoint.sh routes it to the counted-failure path unchanged.
+    if resume_epoch is None or hosting_location == "local":
+        return None
+    write_pause_sentinel(resume_epoch, state_dir)
     return resume_epoch

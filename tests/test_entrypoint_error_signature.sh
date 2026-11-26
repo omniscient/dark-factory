@@ -196,6 +196,35 @@ rm -f "$TMP_OUT"
 rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR"
 
 echo ""
+echo "--- F2: #586 hosting flag — a fast local 429 is a counted failure, cloud is unchanged ---"
+# Fast, zero commits, clean tree, no artifact: the delivery_failure conjunction holds, so
+# only the local branch placed above it can change the class (operator review, #586).
+SCHEDULER_STATE_DIR=$(mktemp -d /tmp/ep-es-statedir6-XXXXXX)
+export SCHEDULER_STATE_DIR
+ARTIFACTS_DIR=$(mktemp -d /tmp/ep-es-artifacts6-XXXXXX)
+RUN_STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+STUB_COMMIT_COUNT=0
+STUB_DIRTY=false
+INTENT=plan
+TMP_OUT=$(mktemp)
+echo "HTTP 429 Too Many Requests" > "$TMP_OUT"
+SIG_FILE="${SCHEDULER_STATE_DIR}/error-signatures/33.plan.sig"
+DF_ENDPOINT_HOSTING=local
+_write_error_signature "plan" 1 "$TMP_OUT"
+assert_true "local → substantive:endpoint_unreachable:1" \
+  "grep -q 'substantive:endpoint_unreachable:1' '$SIG_FILE'"
+DF_ENDPOINT_HOSTING=cloud
+_write_error_signature "plan" 1 "$TMP_OUT"
+assert_true "cloud → environmental:delivery_failure (unchanged)" \
+  "grep -q 'environmental:delivery_failure' '$SIG_FILE'"
+unset DF_ENDPOINT_HOSTING
+_write_error_signature "plan" 1 "$TMP_OUT"
+assert_true "unset → treated as cloud" \
+  "grep -q 'environmental:delivery_failure' '$SIG_FILE'"
+rm -f "$TMP_OUT"
+rm -rf "$SCHEDULER_STATE_DIR" "$ARTIFACTS_DIR"
+
+echo ""
 echo "--- G: isolation -- the real /var/lib/dark-factory ledger was never touched (#362) ---"
 if [ -f /var/lib/dark-factory/runs.jsonl ]; then
   AFTER_TESTRUN_COUNT=$(grep -c '"run_id": "test-run-' /var/lib/dark-factory/runs.jsonl 2>/dev/null)
