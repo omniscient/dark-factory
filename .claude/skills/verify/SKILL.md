@@ -92,6 +92,18 @@ factory-dispatched container: the docker-socket-proxy grants `EXEC`/`CONTAINERS`
 attempt to reproduce this locally from a run container — recognize it as CI-only output when
 reading a CI run, not as a check to replicate.
 
+After the build, the same job runs the blocking Tier 2 capability suite in the built image
+with `--network none` (#624). Its in-container equivalent needs no daemon — the factory image
+has the pinned `claude`:
+
+```bash
+FACTORY_CAPABILITY_TIER2=1 PYTHONPATH=scripts python3 -m factory_core.capability_suite run \
+  --base-url mock --out /tmp/capability-tier2/result.json --context-tokens 8192
+```
+
+Exit 0 with all six dimensions `pass`; 6 means no `claude`, 7 a CLI version other than
+`harness.PINNED_HARNESS_VERSION` (no result written).
+
 ## 5. Evaluating effectiveness
 
 Intent: fewer repeated exploratory tool calls once these recipes exist, replacing ad hoc

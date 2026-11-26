@@ -1101,3 +1101,21 @@ def test_every_harness_check_is_a_coroutine_function():
     for check in (harness.check_alias_resolution, harness.check_tool_round_trip,
                   harness.check_context_window, harness.check_sigint):
         assert inspect.iscoroutinefunction(check)  # asyncio's is deprecated in 3.14
+
+
+def test_ci_runs_tier2_as_a_blocking_docker_build_step():
+    ci = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
+    steps = ci["jobs"]["docker-build"]["steps"]
+    runs = [step.get("run", "") for step in steps]
+    build = next(i for i, run in enumerate(runs) if run.startswith("docker build"))
+    tier2 = next(i for i, run in enumerate(runs) if "factory_core.capability_suite run" in run)
+    step = steps[tier2]
+    assert tier2 > build and "continue-on-error" not in step
+    assert step["timeout-minutes"] == 10
+    for needle in ("chmod 777", "--network none", "FACTORY_CAPABILITY_TIER2=1",
+                   "PYTHONPATH=/opt/dark-factory/scripts", "--entrypoint python3 dark-factory:pr",
+                   "--base-url mock", f"--context-tokens {mock_server.CONTEXT_TOKENS}"):
+        assert needle in step["run"], needle
+    upload = steps[tier2 + 1]
+    assert upload["uses"].startswith("actions/upload-artifact@") and upload["if"] == "always()"
+    assert "continue-on-error" not in upload
