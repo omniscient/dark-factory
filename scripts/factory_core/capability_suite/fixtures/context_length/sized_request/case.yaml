@@ -1,0 +1,7 @@
+case: sized_request
+dimension: context_length
+description: A request sized to --context-tokens is answered completely, and usage.input_tokens shows the input arrived (never count_tokens).
+driver: http
+kind: probe
+target: endpoint
+check: context_window

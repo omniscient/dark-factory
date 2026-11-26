@@ -1,0 +1,10 @@
+case: response_model_mismatch
+dimension: protocol_compatibility
+description: A response naming a model other than the served name is classified as fail.
+driver: http
+kind: control
+target: mock
+check: round_trip
+fault: wrong_model
+expect: fail
+expect_reason: model_mismatch

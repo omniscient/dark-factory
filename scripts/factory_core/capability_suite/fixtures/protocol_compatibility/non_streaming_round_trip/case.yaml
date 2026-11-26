@@ -1,0 +1,7 @@
+case: non_streaming_round_trip
+dimension: protocol_compatibility
+description: A non-streaming message is answered as a JSON message whose model is the served name.
+driver: http
+kind: probe
+target: endpoint
+check: round_trip

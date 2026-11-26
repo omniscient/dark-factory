@@ -1,0 +1,11 @@
+case: stall_before_first_byte
+dimension: timeout_cancellation
+description: An endpoint that stalls before the first byte is classified timeout_time_to_first_token.
+driver: http
+kind: control
+target: mock
+check: sse
+fault: stall_first_byte
+timeouts: {time_to_first_token_seconds: 0.3}
+expect: fail
+expect_reason: timeout_time_to_first_token

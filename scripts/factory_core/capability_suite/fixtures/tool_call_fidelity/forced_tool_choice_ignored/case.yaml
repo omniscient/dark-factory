@@ -1,0 +1,10 @@
+case: forced_tool_choice_ignored
+dimension: tool_call_fidelity
+description: A forced tool_choice answered without the forced tool is classified as unsupported.
+driver: http
+kind: control
+target: mock
+check: forced_tool_choice
+fault: ignore_tool_choice
+expect: unsupported
+expect_reason: ignored

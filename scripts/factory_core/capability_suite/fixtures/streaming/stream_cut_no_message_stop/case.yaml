@@ -1,0 +1,10 @@
+case: stream_cut_no_message_stop
+dimension: streaming
+description: A stream cut mid-content with no message_stop is classified as fail.
+driver: http
+kind: control
+target: mock
+check: sse
+fault: cut_stream
+expect: fail
+expect_reason: stream_incomplete

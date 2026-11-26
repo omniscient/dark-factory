@@ -1,0 +1,7 @@
+case: count_tokens_observed
+dimension: protocol_compatibility
+description: Records what POST /v1/messages/count_tokens returns. Observation only, feeds no dimension.
+driver: http
+kind: observation
+target: endpoint
+check: count_tokens

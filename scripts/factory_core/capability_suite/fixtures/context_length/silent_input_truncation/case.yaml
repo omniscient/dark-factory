@@ -1,0 +1,10 @@
+case: silent_input_truncation
+dimension: context_length
+description: A usage.input_tokens far below what was sent (silent input truncation) is classified as fail.
+driver: http
+kind: control
+target: mock
+check: context_window
+fault: truncate_input
+expect: fail
+expect_reason: input_truncated
