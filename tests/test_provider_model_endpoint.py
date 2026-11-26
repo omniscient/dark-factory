@@ -1098,3 +1098,20 @@ def test_scheduler_side_reads_the_source_mount_without_a_digest(base_env, tmp_pa
     assert providers.preflight(side="scheduler") == []
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     assert providers.preflight(side="scheduler") == [me._NO_LOCAL_DISPATCH.format(eid="local-test")]
+
+
+def test_unselected_lan_profile_leaves_the_cloud_default_path_unchanged(base_env, tmp_path, monkeypatch):
+    # #560: the new profile staged and mounted, FACTORY_MODEL_ENDPOINT unset — both preflight
+    # sides pass and neither the registry nor the adapter module is loaded.
+    from factory_core import providers
+    staged = tmp_path / "staged"
+    shutil.copytree(FIXTURES, staged)
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(staged))
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", FIXTURES)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
+    for name in ("model_endpoint", "model_adapter"):
+        monkeypatch.delitem(sys.modules, f"factory_core.providers.{name}", raising=False)
+        monkeypatch.delattr(providers, name, raising=False)
+    assert providers.preflight() == [] and providers.preflight(side="scheduler") == []
+    assert "factory_core.providers.model_endpoint" not in sys.modules
+    assert "factory_core.providers.model_adapter" not in sys.modules
