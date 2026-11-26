@@ -1,0 +1,7 @@
+case: cli_alias_and_nested_agent_resolution
+dimension: protocol_compatibility
+description: claude -p with each tier alias (--model opus, sonnet, haiku, fable) and a mock-fabricated nested Agent call with an explicit model reaches the mock as the single served name, with only the dummy credential.
+driver: harness
+kind: probe
+target: mock
+check: cli_alias_resolution
