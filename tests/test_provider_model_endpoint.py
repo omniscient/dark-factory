@@ -1116,3 +1116,98 @@ def test_unselected_lan_profile_leaves_the_cloud_default_path_unchanged(base_env
     assert providers.preflight() == [] and providers.preflight(side="scheduler") == []
     assert "factory_core.providers.model_endpoint" not in sys.modules
     assert "factory_core.providers.model_adapter" not in sys.modules
+
+
+# --- #586: model-endpoints hosting (the run container's pre-clone hosting resolver) --------
+
+def _hosting(monkeypatch, capsys):
+    """Run `providers-cli model-endpoints hosting`; returns (stdout, stderr)."""
+    from factory_core.providers import cli
+    monkeypatch.setattr(sys, "argv", ["providers-cli", "model-endpoints", "hosting"])
+    cli.main()  # returns normally: the verb never exits non-zero
+    out = capsys.readouterr()
+    return out.out, out.err
+
+
+def _select_staged(monkeypatch, reg, endpoint_id):
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(reg))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", endpoint_id)
+
+
+def test_hosting_without_an_endpoint_is_cloud(monkeypatch, capsys):
+    assert _hosting(monkeypatch, capsys) == ("hosting=cloud\n", "")
+
+
+def test_hosting_verified_cloud_entry_is_cloud(tmp_path, monkeypatch, capsys):
+    reg = _stage(tmp_path, monkeypatch, [CLOUD, LOCAL])
+    _select_staged(monkeypatch, reg, "cloud-test")
+    assert _hosting(monkeypatch, capsys) == ("hosting=cloud\n", "")
+
+
+@pytest.mark.parametrize("breakage, problem", [
+    ("digest_missing", "FACTORY_MODEL_REGISTRY_SHA256 is not set"),
+    ("digest_mismatch", "does not match FACTORY_MODEL_REGISTRY_SHA256"),
+    ("unknown_id", "Unknown FACTORY_MODEL_ENDPOINT 'local-nope'"),
+    ("unreadable_registry", "model endpoint registry not found"),
+])
+def test_hosting_fails_closed_to_cloud(tmp_path, monkeypatch, capsys, pinned_suite,
+                                       breakage, problem):
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    if breakage == "digest_missing":
+        monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256")
+    elif breakage == "digest_mismatch":
+        _write_registry(reg, [LOCAL, CLOUD])
+    elif breakage == "unknown_id":
+        monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-nope")
+    else:
+        (reg / me.REGISTRY_FILE).unlink()
+        monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+    out, err = _hosting(monkeypatch, capsys)
+    assert out == "hosting=cloud\n"
+    assert problem in err
+
+
+def test_hosting_keeps_the_no_local_dispatch_hard_block(tmp_path, monkeypatch, capsys,
+                                                        pinned_suite):
+    # Owner decision 1: a fully valid local entry still resolves to cloud until #587.
+    reg = _stage(tmp_path, monkeypatch, [LOCAL], evidence={"local-test": _record(LOCAL)})
+    _local_env(monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    out, err = _hosting(monkeypatch, capsys)
+    assert out == "hosting=cloud\n"
+    assert me._NO_LOCAL_DISPATCH.format(eid="local-test") in err
+
+
+def test_hosting_is_local_only_for_a_verified_local_entry(tmp_path, monkeypatch, capsys):
+    # The local branch is reachable only by patching the verified loader (spec Req. 1;
+    # patching _NO_LOCAL_DISPATCH cannot work, _local_problems appends it unconditionally).
+    calls = []
+
+    def verified_local(path, eid):
+        calls.append((Path(path), eid))
+        return [], {"hosting_location": "local"}
+
+    monkeypatch.setattr(me, "load_verified_entry", verified_local)
+    _select_staged(monkeypatch, tmp_path / "staged", "local-test")
+    assert _hosting(monkeypatch, capsys) == ("hosting=local\n", "")
+    assert calls == [(tmp_path / "staged", "local-test")]
+
+
+def test_hosting_any_problem_from_the_verified_loader_is_cloud(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "load_verified_entry",
+                        lambda path, eid: (["some problem"], {"hosting_location": "local"}))
+    _select_staged(monkeypatch, tmp_path / "staged", "local-test")
+    out, err = _hosting(monkeypatch, capsys)
+    assert out == "hosting=cloud\n" and "some problem" in err
+
+
+def test_hosting_exception_is_cloud_and_exits_zero(tmp_path, monkeypatch, capsys):
+    def boom(path, eid):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(me, "load_verified_entry", boom)
+    _select_staged(monkeypatch, tmp_path / "staged", "local-test")
+    out, err = _hosting(monkeypatch, capsys)
+    assert out == "hosting=cloud\n" and "OSError" in err
