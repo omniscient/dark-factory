@@ -63,7 +63,7 @@ ACTOR_REQUIRED_DIMENSIONS = (
 # The pinned capability fixture suite (#561): capability_suite.emit.suite_digest(), a SHA-256
 # over capability_suite/fixtures/ and the package's top-level modules. Never hand-bumped:
 # tests/test_capability_suite.py fails when it differs from the recomputed digest.
-PINNED_FIXTURE_SUITE_VERSION = "1e6cfcc8b6ec735e177eb85347e32f2c6d318e1cf2206d395c85e2a5be7ce2a8"
+PINNED_FIXTURE_SUITE_VERSION = "2441a251aad3710c1ceda1ee7eec3b71ff4a9d2b85835bbbabb99a7ba647cb23"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -475,11 +475,14 @@ def registry_config_sha256(entry) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def observed_harness_version():
-    """The installed Claude CLI version (`claude --version`), or None if it cannot be read."""
+def observed_harness_version(env=None):
+    """The installed Claude CLI version (`claude --version`), or None if it cannot be read.
+    `env`, when given, replaces the subprocess's inherited environment (the capability
+    harness's scrubbed_env(), so the check never sees the caller's credentials or HOME)."""
     try:
+        kwargs = {} if env is None else {"env": env}
         out = subprocess.run(["claude", "--version"], capture_output=True, text=True,
-                             timeout=10, check=True).stdout
+                             timeout=10, check=True, **kwargs).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     m = re.search(r"\d+\.\d+\.\d+", out)

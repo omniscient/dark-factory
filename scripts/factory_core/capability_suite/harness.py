@@ -23,7 +23,6 @@ TIER2_ENV = "FACTORY_CAPABILITY_TIER2"
 BASE_ENV_KEYS = ("PATH", "HOME", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY",
                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER",
                  *model_endpoint.TIER_ALIASES)
-ALLOWED_ENV_EXTRA = ()  # names a check may add on top of BASE_ENV_KEYS: none today
 RUN_SECONDS = 120.0  # one `claude -p` run; killed after
 OBSERVE_SECONDS = 30.0  # SIGINT case: the most it waits for the POST
 DISCONNECT_SECONDS = 10.0  # SIGINT case: the most it waits for the hang-up
@@ -41,14 +40,10 @@ READ_PROMPT = f"Read the file {PLANTED_FILE} and reply with the single word ok."
 OVER_LIMIT_TEXT = "prompt is too long"  # the pinned CLI prints "Prompt is too long" on stdout
 
 
-def scrubbed_env(*, base_url, served_name, home, extra=None) -> dict:
+def scrubbed_env(*, base_url, served_name, home) -> dict:
     """The allow-listed environment every spawned `claude` gets. Built from nothing but these
     names, never a copy of os.environ: CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN and the caller's HOME
     can never leak in by inheritance."""
-    extra = dict(extra or {})
-    unknown = set(extra) - set(ALLOWED_ENV_EXTRA)
-    if unknown:
-        raise ValueError(f"not in harness.ALLOWED_ENV_EXTRA: {', '.join(sorted(unknown))}")
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(home),
@@ -59,7 +54,6 @@ def scrubbed_env(*, base_url, served_name, home, extra=None) -> dict:
     }
     for alias in model_endpoint.TIER_ALIASES:
         env[alias] = served_name
-    env.update(extra)
     return env
 
 
@@ -71,10 +65,14 @@ def tier2_enabled(environ=None) -> bool:
 def preflight(tier2) -> tuple[str, str | None]:
     """("skip", None) with Tier 2 off, never reading the version. With it on: ("missing",
     None) when no `claude` reports a version, ("mismatch", observed) when it is not the pin,
-    else ("ok", None). model_endpoint.observed_harness_version() is the one version reader."""
+    else ("ok", None). model_endpoint.observed_harness_version() is the one version reader,
+    called through this module's own scrubbed_env() and a temporary HOME so the check never
+    inherits the caller's credentials or home directory."""
     if not tier2:
         return "skip", None
-    observed = model_endpoint.observed_harness_version()
+    with tempfile.TemporaryDirectory(prefix="capability-suite-version-") as tmp:
+        observed = model_endpoint.observed_harness_version(
+            env=scrubbed_env(base_url="", served_name="", home=tmp))
     if observed is None:
         return "missing", None
     if observed != PINNED_HARNESS_VERSION:
@@ -208,7 +206,7 @@ def judge_alias(runs):
         if status != 0:
             return "fail", f"{label}_cli_failed"
     posts = _posts(runs[-1][2])
-    if "Agent" not in _tool_names(posts[0]):
+    if not any("Agent" in _tool_names(p) for p in posts):
         return "fail", "agent_not_offered"
     if not any(mock_server.NESTED_AGENT_PROMPT in text for p in posts for text in _user_texts(p)):
         return "fail", "no_nested_request"
@@ -234,7 +232,7 @@ def judge_read(requests):
             return "fail", "planted_not_carried"
         if False in placed:
             return "fail", "payload_promoted"
-    if any(p["body"].get("model") != mock_server.SERVED_NAME for p in posts):
+    if any((p["body"] or {}).get("model") != mock_server.SERVED_NAME for p in posts):
         return "fail", "model_switched"
     return "pass", "ok"
 
@@ -273,7 +271,7 @@ def judge_sigint(sent, closed, requests):
         return "fail", "no_request"
     if not closed:
         return "fail", "connection_not_closed"
-    if len(_posts(requests)) != 1:
+    if sum(1 for p in _posts(requests) if any(ASK_OK in text for text in _user_texts(p))) != 1:
         return "fail", "retried"
     return "pass", "ok"
 

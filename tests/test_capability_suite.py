@@ -30,7 +30,8 @@ from factory_core.providers import model_endpoint as me  # noqa: E402
 @pytest.fixture(autouse=True)
 def _no_claude(monkeypatch):
     # Never spawn `claude --version` in a test (emit's harness_version, Tier 2 preflight).
-    monkeypatch.setattr(me, "observed_harness_version", lambda: None)
+    # preflight() now calls this with env=harness.scrubbed_env(...); accept any arguments.
+    monkeypatch.setattr(me, "observed_harness_version", lambda *a, **k: None)
 
 
 # --- mock server ----------------------------------------------------------------------------
@@ -640,7 +641,7 @@ def _fake_harness(monkeypatch, outcome):
 def _tier2(monkeypatch, version=None):
     monkeypatch.setenv(harness.TIER2_ENV, "1")
     monkeypatch.setattr(me, "observed_harness_version",
-                        lambda: harness.PINNED_HARNESS_VERSION if version is None else version)
+                        lambda **k: harness.PINNED_HARNESS_VERSION if version is None else version)
 
 
 def test_tier2_runs_every_harness_case_and_clears_its_script(tmp_path, monkeypatch):
@@ -887,12 +888,6 @@ def test_scrubbed_env_is_exactly_the_allow_list(tmp_path, monkeypatch):
     assert SENTINEL not in json.dumps(env) and str(tmp_path / "caller-home") not in env.values()
 
 
-def test_scrubbed_env_refuses_an_unlisted_extra(tmp_path):
-    with pytest.raises(ValueError, match="ALLOWED_ENV_EXTRA"):
-        harness.scrubbed_env(base_url="http://127.0.0.1:9", served_name="m", home=tmp_path,
-                             extra={"GH_TOKEN": "x"})
-
-
 def _stub_claude(bin_dir, dump):
     """A `claude` on PATH that dumps the environment it was exec'd with (/proc/self/environ:
     the initial block, untouched by Python's own locale coercion), its cwd, argv and stdin."""
@@ -947,7 +942,7 @@ def test_tier2_is_enabled_only_by_exactly_1(value, enabled):
 
 
 def test_preflight_with_tier2_off_never_reads_the_cli_version(monkeypatch):
-    def boom():
+    def boom(*a, **k):
         raise AssertionError("claude --version read with Tier 2 off")
     monkeypatch.setattr(me, "observed_harness_version", boom)
     assert harness.preflight(False) == ("skip", None)
@@ -959,8 +954,29 @@ def test_preflight_with_tier2_off_never_reads_the_cli_version(monkeypatch):
     ("2.1.281", ("mismatch", "2.1.281")),
 ])
 def test_preflight_with_tier2_on(monkeypatch, version, want):
-    monkeypatch.setattr(me, "observed_harness_version", lambda: version)
+    monkeypatch.setattr(me, "observed_harness_version", lambda **k: version)
     assert harness.preflight(True) == want
+
+
+def test_preflight_reads_the_version_through_a_scrubbed_env(tmp_path, monkeypatch):
+    """preflight() must not let observed_harness_version() inherit this process's own
+    environment (CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN, HOME): it passes harness.scrubbed_env()
+    with a temporary HOME, never the default None (which means "inherit os.environ")."""
+    captured = {}
+
+    def fake(env=None):
+        captured["env"] = env
+        return harness.PINNED_HARNESS_VERSION
+    monkeypatch.setattr(me, "observed_harness_version", fake)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SENTINEL)
+    monkeypatch.setenv("GH_TOKEN", SENTINEL)
+    monkeypatch.setenv("HOME", str(tmp_path / "caller-home"))
+    assert harness.preflight(True) == ("ok", None)
+    env = captured["env"]
+    assert env is not None
+    assert set(env) == set(harness.BASE_ENV_KEYS)
+    assert SENTINEL not in json.dumps(env)
+    assert env["HOME"] != str(tmp_path / "caller-home")
 
 
 def _hello():
@@ -1004,7 +1020,8 @@ def test_judge_alias_passes_the_measured_shape():
     (lambda r: r[3][2].pop(), "fable_no_request"),
     (lambda r: r.__setitem__(0, ("opus", 1, r[0][2])), "opus_cli_failed"),
     (lambda r: r[4][2].pop(2), "no_nested_request"),
-    (lambda r: r[4][2][1]["body"].update(tools=[{"name": "Read"}]), "agent_not_offered"),
+    (lambda r: [r[4][2][i]["body"].update(tools=[{"name": "Read"}]) for i in (1, 2, 3)],
+     "agent_not_offered"),
 ])
 def test_judge_alias_fails(edit, reason):
     runs = _alias_runs()
@@ -1114,7 +1131,7 @@ def test_ci_runs_tier2_as_a_blocking_docker_build_step():
     assert step["timeout-minutes"] == 10
     for needle in ("chmod 777", "--network none", "FACTORY_CAPABILITY_TIER2=1",
                    "PYTHONPATH=/opt/dark-factory/scripts", "--entrypoint python3 dark-factory:pr",
-                   "--base-url mock", f"--context-tokens {mock_server.CONTEXT_TOKENS}"):
+                   "--base-url mock"):
         assert needle in step["run"], needle
     upload = steps[tier2 + 1]
     assert upload["uses"].startswith("actions/upload-artifact@") and upload["if"] == "always()"

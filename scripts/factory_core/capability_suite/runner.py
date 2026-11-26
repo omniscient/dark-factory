@@ -463,19 +463,22 @@ async def _harness_probe(case, mock_app, mock):
 # --- run ------------------------------------------------------------------------------------
 
 async def run_cases(cases, *, endpoint, mock, context_tokens, mock_app=None,
-                    tier2_mode="skip") -> Summary:
+                    tier2_mode="skip", mock_mode=True) -> Summary:
     """Run every case in order. A control always runs against the mock and its declared
     window; a probe or observation targeting the endpoint uses `endpoint`. A harness case runs
-    only in tier2_mode "ok" (harness.preflight); otherwise it adds one not_tested value to its
-    dimension and nothing to probes or not_run."""
+    only in tier2_mode "ok" (harness.preflight) AND `mock_mode`: the harness always spawns the
+    CLI against the mock, never the real `endpoint`, so in endpoint mode it adds one
+    not_tested value to its dimension (and harness_pending) instead of a harness-verified one."""
     summary = Summary()
     async with aiohttp.ClientSession() as session:
         for case in cases:
             name = f"{case['dimension']}/{case['case']}"
-            if case["driver"] == "harness" and tier2_mode != "ok":
+            if case["driver"] == "harness" and (tier2_mode != "ok" or not mock_mode):
                 summary.probe_values.setdefault(case["dimension"], []).append("not_tested")
                 summary.harness_pending.append(case["dimension"])
-                summary.lines.append(f"{name} [{case['kind']}] {_SKIPPED[tier2_mode]}")
+                reason = (_SKIPPED[tier2_mode] if tier2_mode != "ok"
+                         else "skipped: harness cases only exercise the mock, not --base-url")
+                summary.lines.append(f"{name} [{case['kind']}] {reason}")
                 continue
             if case["driver"] == "harness":
                 outcome = await _harness_probe(case, mock_app, mock)
@@ -543,11 +546,11 @@ async def _run(cases, *, base_url, served_name, credential, context_tokens, tier
     mock_runner, mock_url = await mock_server.start()
     try:
         mock = Target(mock_url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
-        endpoint = (mock if base_url == "mock"
-                    else Target(base_url.rstrip("/"), served_name, credential))
+        mock_mode = base_url == "mock"
+        endpoint = mock if mock_mode else Target(base_url.rstrip("/"), served_name, credential)
         summary = await run_cases(cases, endpoint=endpoint, mock=mock,
                                   context_tokens=context_tokens, mock_app=mock_runner.app,
-                                  tier2_mode=tier2_mode)
+                                  tier2_mode=tier2_mode, mock_mode=mock_mode)
         return summary, endpoint.base_url
     finally:
         await mock_runner.cleanup()
