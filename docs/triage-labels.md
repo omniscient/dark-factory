@@ -7,7 +7,7 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 | `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
 | `needs-info`               | `needs-info`         | Waiting on reporter for more information |
 | `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
-| `ready-for-human`          | `ready-for-human`    | Requires human implementation. The scheduler skips the ticket at every stage (refine, plan, dispatch, retry, rescue, orphan sweep, grace advance), and epic autopilot will not advance it |
+| `ready-for-human`          | `ready-for-human`    | Requires human implementation. The scheduler skips the ticket at every stage (refine, plan, dispatch, retry, rescue, orphan sweep, grace advance), and epic autopilot will not advance it. Also applied by the scheduler when it refuses an automated merge or advance because this instance's model endpoint is not confirmed cloud-hosted (#585); to clear it, merge the PR (or pass the spec/plan gate) by hand, then remove the label |
 | `wontfix`                  | `wontfix`            | Will not be actioned                     |
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
@@ -59,7 +59,7 @@ Every label the scheduler, gates or phase agents apply or branch on. `scripts/bo
 |-------|-----------|------------------|
 | `needs-discussion` | Refine, plan, conformance and code-review commands when they block; `scripts/blast_gate_check.sh --hold` on a blast-radius hold (`blast-gate`, the `push-and-pr` re-check, `close-preview`); the circuit breaker when it trips | **Halts all automation for the ticket.** In the scheduler's skip list for every stage, and in the refine/plan skip lists. Remove it to resume — except after a blast-radius hold, where removing it by hand only re-holds: the operator's `approve-blast.sh` records a signed approval and lifts it (#551) |
 | `ready-for-agent` | Humans (triage); epic autopilot on an epic's open children | Opt-in gate for auto-refinement of Backlog items |
-| `ready-for-human` | Humans | Scheduler parks the ticket at every stage, including refine and plan; epic autopilot will not advance it |
+| `ready-for-human` | Humans; the scheduler when it refuses an automated merge or grace advance on a non-cloud model endpoint (#585) | Scheduler parks the ticket at every stage, including refine and plan; epic autopilot will not advance it. Removing it while the instance is still non-cloud is refused again on the next poll that reaches the guard (see `docs/scheduler.md`, End gate) |
 | `epic` | Humans | Scheduler never dispatches the epic itself; epic autopilot works on its children |
 | `spec-pending-review`, `plan-pending-review` | The run DAG, after the spec/plan artifact is pushed | Gate labels; see Workflow flags |
 | `direct-to-pr` | Humans; epic autopilot | Straight-through flow; see Workflow flags |

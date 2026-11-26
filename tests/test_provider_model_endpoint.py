@@ -1211,3 +1211,87 @@ def test_hosting_exception_is_cloud_and_exits_zero(tmp_path, monkeypatch, capsys
     _select_staged(monkeypatch, tmp_path / "staged", "local-test")
     out, err = _hosting(monkeypatch, capsys)
     assert out == "hosting=cloud\n" and "OSError" in err
+
+
+# --- #585: model-endpoints hosting-check (scheduler.sh's non-cloud endpoint guard) ---------
+
+def _hosting_check(monkeypatch, capsys, endpoint_id):
+    from factory_core.providers import cli
+    monkeypatch.setattr(sys, "argv", ["providers-cli", "model-endpoints", "hosting-check",
+                                      "--endpoint-id", endpoint_id])
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as e:
+        code = e.code
+    return code, capsys.readouterr()
+
+
+def test_hosting_check_cloud_entry_prints_exactly_hosting_cloud(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD, LOCAL]))
+    code, out = _hosting_check(monkeypatch, capsys, "cloud-test")
+    assert code == 0
+    assert out.out == "hosting=cloud\n"
+
+
+def test_hosting_check_local_entry_exits_1_with_local_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD, LOCAL]))
+    code, out = _hosting_check(monkeypatch, capsys, "local-test")
+    assert code == 1
+    assert out.out.startswith("hosting=local ")
+    assert "hosting=cloud" not in out.out
+
+
+def test_hosting_check_unknown_id_exits_1_unknown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD]))
+    code, out = _hosting_check(monkeypatch, capsys, "nope")
+    assert code == 1
+    assert out.out.startswith("hosting=unknown ")
+    assert "Unknown FACTORY_MODEL_ENDPOINT 'nope'" in out.out
+    assert "hosting=cloud" not in out.out
+
+
+def test_hosting_check_missing_registry_exits_1_unknown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", tmp_path / "absent")
+    code, out = _hosting_check(monkeypatch, capsys, "cloud-test")
+    assert code == 1
+    assert out.out.startswith("hosting=unknown ")
+    assert "not found" in out.out
+    assert "hosting=cloud" not in out.out
+
+
+def test_hosting_check_invalid_registry_exits_1_unknown(tmp_path, monkeypatch, capsys):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / me.REGISTRY_FILE).write_text("schema_version: 1.0\nendpoints: []\n", encoding="utf-8")
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", src)
+    code, out = _hosting_check(monkeypatch, capsys, "cloud-test")
+    assert code == 1
+    assert out.out.startswith("hosting=unknown ")
+    assert "hosting=cloud" not in out.out
+
+
+def test_hosting_check_unreadable_registry_exits_1_unknown(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [CLOUD]))
+
+    def _unreadable(path):
+        raise me.RegistryError([f"{path}: unreadable (Permission denied)"])
+
+    monkeypatch.setattr(me, "_read_file", _unreadable)
+    code, out = _hosting_check(monkeypatch, capsys, "cloud-test")
+    assert code == 1
+    assert out.out.startswith("hosting=unknown ")
+    assert "unreadable" in out.out
+    assert "hosting=cloud" not in out.out
+
+
+def test_hosting_check_reads_the_source_mount_never_the_staged_copy(tmp_path, monkeypatch, capsys):
+    # The staged copy lives on the run-writable state volume: a cloud entry there must never
+    # answer for a local entry on the scheduler's read-only mount (#585 owner decision 2).
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR",
+                        _write_registry(tmp_path / "src", [_entry(LOCAL, id="sel")]))
+    staged = _write_registry(tmp_path / "staged", [_entry(CLOUD, id="sel")])
+    monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(staged))
+    code, out = _hosting_check(monkeypatch, capsys, "sel")
+    assert code == 1
+    assert out.out.startswith("hosting=local ")
