@@ -975,17 +975,18 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     no-op-ing the edit. On a board with more than 200 items a lookup-based move may still
     be a no-op while the caller logs it as done.
 
-21. **`post_or_update_comment` creates a comment without `--repo`.** Still true on
-    `64cd44a`: `scripts/factory_core/board.py` (`:139`) calls
-    `gh issue comment <n> --body-file …` with no `--repo` (its lookup and PATCH calls do
-    name the repo), while the scheduler's own comments note that it runs outside a git
-    checkout and must pass `--repo` (`scheduler.sh:685-687`). This is the path used by the
+21. **Resolved by #621: `post_or_update_comment` creates its comment with `--repo`.**
+    `scripts/factory_core/board.py` (`:158-159`) now calls
+    `gh issue comment <n> --repo <owner>/<repo> --body-file …`. From the scheduler's
+    `/workspace`, which is not a git checkout, `gh` cannot infer the repo, and a bare
+    `gh issue …` call fails with "not a git repository" (`scheduler.sh:685-687`). Its
+    lookup and PATCH calls already named the repo. This is the path used by the
     blocked-rescue comment when no earlier rescue comment exists, and by
     `tracker comment`, which `GitHubTracker.upsert_comment` routes to it
-    (`providers/tracker/github.py:172-173`). [PR #525](https://github.com/omniscient/dark-factory/pull/525)
-    did not touch it: the new `tracker add-comment` passes `--repo`, but the upsert path
-    was left as it was. Whether `gh` resolves the repo some other way in the scheduler
-    container was not determined.
+    (`providers/tracker/github.py:218`). The same change makes the marker lookup read
+    every comment page (`gh api …/comments?per_page=100 --paginate`, matched in
+    Python). It also stops a failed lookup from creating a duplicate: one failed lookup
+    is retried, and a second failure skips the post with a stderr warning.
 
 22. **Minor comment drift.** `config/config.yaml:5` says polling pauses when remaining
     is "<" the floor; the code uses `-le` (`scheduler.sh:82`). The comment above
