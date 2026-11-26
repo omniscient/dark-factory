@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 from . import identity
 
@@ -123,6 +124,8 @@ def post_or_update_comment(issue_num: int, marker: str, body: str) -> None:
     # which is the duplicate this guards against (#621).
     comments = None
     for _attempt in (1, 2):  # one retry: most callers are one-shot and cannot retry themselves
+        if _attempt == 2:
+            time.sleep(1)  # give a transient error (HTTP 502, secondary rate limit) a chance to clear
         r = subprocess.run(
             ["gh", "api", f"repos/{OWNER}/{REPO}/issues/{issue_num}/comments?per_page=100",
              "--paginate"],

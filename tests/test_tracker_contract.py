@@ -84,6 +84,8 @@ class _GitHubFixtureController:
             key = cmd[2].split("/issues/")[1].split("/")[0]
             return self._ok(stdout=json.dumps(self.comments.get(key, [])))
         if cmd[:2] == ["gh", "api"] and "--jq" in cmd and str(cmd[2]).endswith("/comments"):
+            # GitHubTracker.find_comment still does a plain (non-paginated) --jq lookup
+            # on this exact URL shape; board.post_or_update_comment no longer does (#621).
             key = cmd[2].split("/issues/")[1].split("/")[0]
             marker = cmd[cmd.index("--jq") + 1].split('contains("')[1].split('")')[0]
             # the real --jq is `[...] | last | .id`: the NEWEST matching comment
