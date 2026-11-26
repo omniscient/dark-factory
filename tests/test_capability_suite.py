@@ -344,3 +344,192 @@ def test_a_pending_dimension_reports_a_shipped_probe_failure():
     results = runner.dimension_results(values)
     assert results["context_length"] == "fail" and results["streaming"] == "pass"
     assert results["timeout_cancellation"] == "not_tested"
+
+
+# --- CLI: python3 -m factory_core.capability_suite run ---------------------------------------
+
+SENTINEL = "sk-capability-suite-test-sentinel"
+
+
+def _run(tmp_path, *argv, fixtures_dir=None):
+    out = tmp_path / "out" / "result.json"
+    code = runner.main(["run", *argv, "--out", str(out)],
+                       fixtures_dir=fixtures_dir or runner.FIXTURES_DIR)
+    result = json.loads(out.read_text()) if out.exists() else None
+    return code, result, out
+
+
+def _usage_error(*argv):
+    with pytest.raises(SystemExit) as e:
+        runner.main(["run", *argv])
+    return e.value.code
+
+
+@contextmanager
+def _endpoint_mock():
+    """A second mock on its own loop and thread, standing in for a real endpoint."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    mock_runner, url = asyncio.run_coroutine_threadsafe(mock_server.start(), loop).result(10)
+    try:
+        yield url
+    finally:
+        asyncio.run_coroutine_threadsafe(mock_runner.cleanup(), loop).result(10)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(10)
+
+
+def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
+    code, result, _ = _run(tmp_path, "--base-url", "mock")
+    assert code == 0
+    body = result["certification_result"]
+    assert list(body["results"]) == list(me.ACTOR_REQUIRED_DIMENSIONS)
+    assert body["results"] == {
+        "protocol_compatibility": "not_tested", "tool_call_fidelity": "not_tested",
+        "streaming": "pass", "context_length": "not_tested", "role_isolation": "pass",
+        "timeout_cancellation": "not_tested",
+    }
+    assert body["harness_pending"] == list(runner.HARNESS_PENDING)
+    assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
+    assert len(body["controls"]) == 16 and all(c["ok"] for c in body["controls"])
+
+
+def test_module_entry_point_runs(tmp_path):
+    out = tmp_path / "result.json"
+    # An empty PATH: the child can never spawn `claude --version` (harness_version is null).
+    env = dict(os.environ, PYTHONPATH=str(Path(runner.__file__).resolve().parents[2]),
+               PATH=str(tmp_path / "no-bin"))
+    proc = subprocess.run([sys.executable, "-m", "factory_core.capability_suite", "run",
+                           "--base-url", "mock", "--out", str(out)],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(out.read_text())
+    assert set(result) == {"certification_result"}
+    assert result["certification_result"]["harness_version"] is None
+
+
+def test_a_changed_control_fault_exits_3(tmp_path):
+    fixtures = _copy_fixtures(tmp_path)
+    path = fixtures / "protocol_compatibility" / "malformed_json_body" / "case.yaml"
+    path.write_text(path.read_text().replace("fault: malformed_json", "fault: wrong_model"))
+    code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
+    assert code == 3
+    bad = [c for c in result["certification_result"]["controls"] if not c["ok"]]
+    assert bad == [{"dimension": "protocol_compatibility", "case": "malformed_json_body",
+                    "kind": "control", "expected": "fail:malformed_json",
+                    "observed": "fail:model_mismatch", "ok": False}]
+
+
+def test_a_malformed_tree_exits_3_and_writes_nothing(tmp_path):
+    fixtures = _copy_fixtures(tmp_path)
+    shutil.rmtree(fixtures / "streaming")
+    code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
+    assert code == 3 and result is None
+
+
+def test_a_harness_case_in_the_tree_exits_4(tmp_path):
+    fixtures = _copy_fixtures(tmp_path)
+    case_dir = fixtures / "streaming" / "via_cli"
+    case_dir.mkdir()
+    (case_dir / "case.yaml").write_text(
+        "case: via_cli\ndimension: streaming\ndriver: harness\nkind: probe\ntarget: mock\n")
+    code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
+    assert code == 4 and result["certification_result"]["results"]["streaming"] == "not_tested"
+
+
+def test_a_failing_probe_in_mock_mode_exits_5(tmp_path):
+    # A window larger than the mock declares: the mock answers the sized request with a 400.
+    code, result, _ = _run(tmp_path, "--base-url", "mock", "--context-tokens", "20000")
+    assert code == 5
+    assert result["certification_result"]["results"]["context_length"] == "fail"
+
+
+def test_endpoint_mode_writes_no_url_or_credential(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    with _endpoint_mock() as url:
+        code, result, out = _run(tmp_path, "--base-url", url, "--served-name",
+                                 mock_server.SERVED_NAME, "--secret-env", "CAPSUITE_TEST_KEY",
+                                 "--context-tokens", "4096")
+    captured = capsys.readouterr()
+    host_port = url.split("//", 1)[1]
+    assert code == 0
+    body = result["certification_result"]
+    assert body["target_kind"] == "endpoint" and body["base_url_scope"] == "same-host"
+    assert body["results"]["streaming"] == "pass"
+    for blob in (out.read_text(), captured.out, captured.err):
+        assert SENTINEL not in blob and host_port not in blob
+
+
+def test_endpoint_mode_without_context_tokens_exits_4(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    with _endpoint_mock() as url:
+        code, result, _ = _run(tmp_path, "--base-url", url, "--served-name",
+                               mock_server.SERVED_NAME, "--secret-env", "CAPSUITE_TEST_KEY")
+    assert code == 4
+    assert result["certification_result"]["results"]["context_length"] == "not_tested"
+
+
+def test_endpoint_mode_findings_are_not_errors(tmp_path, monkeypatch):
+    # The endpoint answers as a different model: every endpoint probe fails, the exit stays 0.
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    with _endpoint_mock() as url:
+        code, result, _ = _run(tmp_path, "--base-url", url, "--served-name", "some-other-model",
+                               "--secret-env", "CAPSUITE_TEST_KEY", "--context-tokens", "4096")
+    assert code == 0 and result["certification_result"]["results"]["streaming"] == "fail"
+
+
+@pytest.mark.parametrize("argv", [
+    ["--base-url", "ftp://192.0.2.10"],
+    ["--base-url", "http://192.0.2.10:8080", "--secret-env", "CAPSUITE_TEST_KEY"],
+    ["--base-url", "http://192.0.2.10:8080", "--served-name", "m"],
+    ["--base-url", "http://192.0.2.10:8080", "--served-name", "m", "--secret-env", "lower"],
+    ["--base-url", "http://192.0.2.10:8080", "--served-name", "m",
+     "--secret-env", "CAPSUITE_UNSET_KEY"],
+    ["--base-url", "mock", "--context-tokens", "0"],
+])
+def test_usage_errors_exit_2_and_write_nothing(tmp_path, monkeypatch, argv):
+    monkeypatch.delenv("CAPSUITE_UNSET_KEY", raising=False)
+    out = tmp_path / "result.json"
+    assert _usage_error(*argv, "--out", str(out)) == 2
+    assert not out.exists()
+
+
+def test_a_malformed_base_url_is_a_usage_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    for url in ("http://[bad", "http://:8080", "http://192.0.2.10:notaport"):
+        assert _usage_error("--base-url", url, "--served-name", "m", "--secret-env",
+                            "CAPSUITE_TEST_KEY", "--out", str(tmp_path / "r.json")) == 2
+    assert "http(s):// URL with a host" in capsys.readouterr().err
+
+
+def test_out_under_model_registry_is_refused(tmp_path):
+    out = tmp_path / "model-registry" / "capability-evidence" / "local-a.yaml"
+    assert _usage_error("--base-url", "mock", "--out", str(out)) == 2
+    assert not out.parent.exists()
+
+
+def test_an_unset_secret_env_names_the_variable_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", "")
+    _usage_error("--base-url", "http://192.0.2.10:8080", "--served-name", "m",
+                 "--secret-env", "CAPSUITE_TEST_KEY", "--out", str(tmp_path / "r.json"))
+    assert "CAPSUITE_TEST_KEY is not set" in capsys.readouterr().err
+
+
+def test_emitted_result_is_rejected_as_evidence(tmp_path):
+    code, _, out = _run(tmp_path, "--base-url", "mock")
+    assert code == 0
+    evidence_dir = tmp_path / "capability-evidence"
+    evidence_dir.mkdir()
+    shutil.copy(out, evidence_dir / "local-a.yaml")
+    with pytest.raises(me.RegistryError, match="exactly one capability_evidence mapping"):
+        me.load_evidence(evidence_dir, "local-a")
+
+
+def test_part_a_result_qualifies_no_route(tmp_path):
+    _, result, _ = _run(tmp_path, "--base-url", "mock")
+    record = {"endpoint_id": "local-a", "qualified_roles": ["actor"],
+              "results": result["certification_result"]["results"]}
+    assert me.role_problems(record, "actor") == [
+        f"capability evidence for 'local-a': {d} is not_tested, not pass"
+        for d in runner.HARNESS_PENDING]

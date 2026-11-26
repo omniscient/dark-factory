@@ -486,3 +486,98 @@ def dimension_results(probe_values) -> dict:
             values.append("not_tested")
         results[dim] = min(values, key=WORST_FIRST.index) if values else "not_tested"
     return results
+
+
+def exit_code(summary, mock_mode) -> int:
+    if any(not c["ok"] for c in summary.controls):
+        return 3
+    if summary.not_run:
+        return 4
+    if mock_mode and any(value != "pass" for _, value in summary.probes):
+        return 5
+    return 0
+
+
+async def _run(cases, *, base_url, served_name, credential, context_tokens):
+    mock_runner, mock_url = await mock_server.start()
+    try:
+        mock = Target(mock_url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+        endpoint = (mock if base_url == "mock"
+                    else Target(base_url.rstrip("/"), served_name, credential))
+        summary = await run_cases(cases, endpoint=endpoint, mock=mock,
+                                  context_tokens=context_tokens)
+        return summary, endpoint.base_url
+    finally:
+        await mock_runner.cleanup()
+
+
+_SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _is_http_url(value) -> bool:
+    try:
+        parts = urlsplit(value)
+        parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python3 -m factory_core.capability_suite")
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run", help="run the pinned fixture suite and write a "
+                                     "certification_result")
+    run.add_argument("--base-url", required=True,
+                     help="'mock' for the in-process mock, or the endpoint's http(s):// URL")
+    run.add_argument("--out", required=True, help="where to write the certification_result")
+    run.add_argument("--served-name", help="the endpoint's served model name (endpoint mode)")
+    run.add_argument("--secret-env", help="name of the env var holding the endpoint credential "
+                                          "(endpoint mode)")
+    run.add_argument("--context-tokens", type=int,
+                     help="the window the context_length probe is sized to (endpoint mode: no "
+                          "default, the probe does not run without it)")
+    return parser
+
+
+def main(argv=None, *, fixtures_dir=FIXTURES_DIR) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    mock_mode = args.base_url == "mock"
+    if not mock_mode and not _is_http_url(args.base_url):
+        parser.error("--base-url must be 'mock' or an http(s):// URL with a host")
+    if "model-registry" in Path(args.out).resolve().parts:
+        parser.error("--out must not be under a model-registry directory: a certification_result "
+                     "is never a capability-evidence record")
+    if args.context_tokens is not None and args.context_tokens <= 0:
+        parser.error("--context-tokens must be a positive integer")
+    credential = mock_server.DUMMY_CREDENTIAL
+    if not mock_mode:
+        if not args.served_name:
+            parser.error("--served-name is required with an endpoint --base-url")
+        if not args.secret_env or not _SECRET_NAME_RE.match(args.secret_env):
+            parser.error("--secret-env must name an environment variable (e.g. LOCAL_MODEL_KEY)")
+        credential = os.environ.get(args.secret_env, "")
+        if not credential:
+            parser.error(f"{args.secret_env} is not set")  # the name, never a value
+    context_tokens = args.context_tokens
+    if mock_mode and context_tokens is None:
+        context_tokens = mock_server.CONTEXT_TOKENS
+    try:
+        cases = load_cases(fixtures_dir)
+    except CaseError as e:
+        print(f"capability suite: fixture tree is invalid: {e}", file=sys.stderr)
+        return 3
+    summary, base_url = asyncio.run(_run(
+        cases, base_url=args.base_url, served_name=args.served_name or mock_server.SERVED_NAME,
+        credential=credential, context_tokens=context_tokens))
+    result = emit.build_result(
+        target_kind="mock" if mock_mode else "endpoint", base_url=base_url,
+        results=dimension_results(summary.probe_values), harness_pending=HARNESS_PENDING,
+        controls=summary.controls)
+    emit.write_result(args.out, result)
+    for line in summary.lines:
+        print(line)
+    code = exit_code(summary, mock_mode)
+    print(f"capability suite: wrote {args.out} (exit {code})")
+    return code
