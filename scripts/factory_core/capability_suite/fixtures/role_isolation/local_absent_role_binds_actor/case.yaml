@@ -1,0 +1,9 @@
+case: local_absent_role_binds_actor
+dimension: role_isolation
+description: A local dispatch with no declared role binds actor.
+driver: function
+kind: probe
+target: mock
+check: bind_dispatch_role
+args: {hosting_location: local}
+want: [actor, default_actor]

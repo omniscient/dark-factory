@@ -1,0 +1,10 @@
+case: malformed_json_body
+dimension: protocol_compatibility
+description: A 2xx non-streaming body that is not a JSON object is classified as fail.
+driver: http
+kind: control
+target: mock
+check: round_trip
+fault: malformed_json
+expect: fail
+expect_reason: malformed_json

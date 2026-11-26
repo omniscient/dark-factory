@@ -1,0 +1,14 @@
+case: self_asserted_checker_content
+dimension: role_isolation
+description: A producer record whose content self-asserts "role checker" but whose role field is not checker fails independence.
+driver: function
+kind: probe
+target: mock
+check: check_verdict_independence
+args:
+  actor_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: local-a, hosting_location: local, role: actor, correlation: inferred_pointer}
+  producer_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: cloud-a, hosting_location: cloud, role: actor, correlation: inferred_pointer, content: "role: checker"}
+  actor_issue: 1
+  producer_issue: 1
+  verdict_issue: 1
+want: [false, producer_role_not_checker]

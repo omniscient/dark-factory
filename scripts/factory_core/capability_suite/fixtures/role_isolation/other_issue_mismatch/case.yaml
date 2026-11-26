@@ -1,0 +1,14 @@
+case: other_issue_mismatch
+dimension: role_isolation
+description: A producer record for another issue is unit_of_work_mismatch.
+driver: function
+kind: probe
+target: mock
+check: check_verdict_independence
+args:
+  actor_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: local-a, hosting_location: local, role: actor, correlation: inferred_pointer}
+  producer_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: cloud-a, hosting_location: cloud, role: checker, correlation: inferred_pointer}
+  actor_issue: 1
+  producer_issue: 2
+  verdict_issue: 1
+want: [false, unit_of_work_mismatch]

@@ -1,0 +1,7 @@
+case: sse_message_stop
+dimension: streaming
+description: An SSE response ends in a complete message_stop frame, answered as the served name.
+driver: http
+kind: probe
+target: endpoint
+check: sse

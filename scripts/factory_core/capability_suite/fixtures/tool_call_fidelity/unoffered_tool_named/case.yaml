@@ -1,0 +1,10 @@
+case: unoffered_tool_named
+dimension: tool_call_fidelity
+description: A tool_use naming a tool that was not offered is classified as fail.
+driver: http
+kind: control
+target: mock
+check: tool_round_trip
+fault: unoffered_tool
+expect: fail
+expect_reason: tool_not_offered

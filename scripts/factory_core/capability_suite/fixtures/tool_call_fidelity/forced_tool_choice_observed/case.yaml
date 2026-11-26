@@ -1,0 +1,7 @@
+case: forced_tool_choice_observed
+dimension: tool_call_fidelity
+description: Records whether a forced tool_choice is honoured. Observation only, feeds no dimension.
+driver: http
+kind: observation
+target: endpoint
+check: forced_tool_choice

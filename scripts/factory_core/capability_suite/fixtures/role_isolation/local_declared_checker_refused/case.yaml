@@ -1,0 +1,9 @@
+case: local_declared_checker_refused
+dimension: role_isolation
+description: A local dispatch that declares checker is refused, never bound.
+driver: function
+kind: probe
+target: mock
+check: bind_dispatch_role
+args: {hosting_location: local, declared_role: checker}
+want: [null, nested_checker_refused]

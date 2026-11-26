@@ -1,0 +1,9 @@
+case: connection_refused
+dimension: timeout_cancellation
+description: A refused connection (local outage) is classified endpoint_unreachable after exactly one attempt.
+driver: http
+kind: control
+target: mock
+check: unreachable
+expect: fail
+expect_reason: endpoint_unreachable

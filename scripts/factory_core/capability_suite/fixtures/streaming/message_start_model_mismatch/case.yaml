@@ -1,0 +1,10 @@
+case: message_start_model_mismatch
+dimension: streaming
+description: A message_start naming a model other than the served name is classified as fail.
+driver: http
+kind: control
+target: mock
+check: sse
+fault: wrong_model
+expect: fail
+expect_reason: model_mismatch

@@ -1,0 +1,10 @@
+case: over_limit_error
+dimension: context_length
+description: An over-limit 400 with an error body is a clean classified error, never a pass.
+driver: http
+kind: control
+target: mock
+check: context_window
+fault: over_limit
+expect: fail
+expect_reason: error_response

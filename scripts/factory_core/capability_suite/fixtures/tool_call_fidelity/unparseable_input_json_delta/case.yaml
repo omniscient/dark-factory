@@ -1,0 +1,10 @@
+case: unparseable_input_json_delta
+dimension: tool_call_fidelity
+description: A tool_use whose input_json_delta fragments do not parse is classified as fail.
+driver: http
+kind: control
+target: mock
+check: tool_round_trip
+fault: bad_input_json
+expect: fail
+expect_reason: tool_input_unparseable

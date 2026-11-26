@@ -1,0 +1,14 @@
+case: local_producer_not_independent
+dimension: role_isolation
+description: A verdict produced by a local dispatch never satisfies independence.
+driver: function
+kind: probe
+target: mock
+check: check_verdict_independence
+args:
+  actor_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: local-a, hosting_location: local, role: actor, correlation: inferred_pointer}
+  producer_dispatch: {schema_version: "1.0", outcome: ok, endpoint_id: local-b, hosting_location: local, role: checker, correlation: inferred_pointer}
+  actor_issue: 1
+  producer_issue: 1
+  verdict_issue: 1
+want: [false, producer_not_cloud]

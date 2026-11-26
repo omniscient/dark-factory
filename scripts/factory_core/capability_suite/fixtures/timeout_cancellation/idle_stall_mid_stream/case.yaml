@@ -1,0 +1,11 @@
+case: idle_stall_mid_stream
+dimension: timeout_cancellation
+description: A stream that goes idle after message_start is classified timeout_idle.
+driver: http
+kind: control
+target: mock
+check: sse
+fault: stall_mid_stream
+timeouts: {idle_seconds: 0.3}
+expect: fail
+expect_reason: timeout_idle

@@ -563,6 +563,19 @@ copying it, with its own tests. #587 must also decide whether a capability-evide
 may carry an empty `invalidated_by`: one is accepted today, and then only
 `fixture_suite_version` is compared.
 
+A record's `fixture_suite_version` is compared with
+`model_endpoint.PINNED_FIXTURE_SUITE_VERSION`, the SHA-256 digest of the capability suite in
+`scripts/factory_core/capability_suite/` (#561). A pytest fails when the committed pin differs
+from the recomputed digest, so any edit to the suite's fixtures or modules must re-pin in the
+same change, and evidence recorded against an older suite then resolves `stale`. The suite is
+operator-run and nothing calls it:
+`python3 -m factory_core.capability_suite run --base-url <mock|http(s)://...> --out <path>`
+(endpoint mode also takes `--served-name`, `--secret-env <NAME>` and `--context-tokens`). It
+writes a `certification_result`, never a capability-evidence record: `load_evidence()` rejects
+it and `--out` under a `model-registry` directory is refused. Part A stores `not_tested` for the
+four dimensions whose `claude -p` probes are still pending (`runner.HARNESS_PENDING`), so its
+result alone qualifies no route.
+
 Inspect the effective configuration without printing secret values:
 `python3 /opt/dark-factory/scripts/factory_core/providers/cli.py model-endpoints show --from-source`
 in the scheduler container (the read-only mount), or `model-endpoints show` in a run container
