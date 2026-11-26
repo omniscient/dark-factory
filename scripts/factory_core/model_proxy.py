@@ -76,24 +76,29 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def read_current_run() -> dict:
+def read_current_run(path=None) -> dict:
     """Best-effort correlation read — never raises, defaults to unknown.
 
     `stage` is written by entrypoint.sh from INTENT (see Task 7): exact for
     single-phase intents (refine/plan/deconflict/close/fix-main/recheck), "unknown"
     for multi-phase intents (fix/continue) where no investigated Archon data source
     exposes per-node timing — see the plan's Architecture "Stage attribution" note.
+    `declared_role` is the dispatching harness's FACTORY_DISPATCH_ROLE, present only when
+    set (#559) — pointer-grade, consulted only when an endpoint is selected. `path` defaults
+    to CURRENT_RUN_PATH; create_app() passes a per-app one.
     """
     try:
-        data = json.loads(CURRENT_RUN_PATH.read_text(encoding="utf-8"))
+        data = json.loads((CURRENT_RUN_PATH if path is None else path).read_text(encoding="utf-8"))
         return {
             "run_id": data.get("run_id") or "unknown",
             "issue_number": int(data.get("issue_number") or 0),
             "intent": data.get("intent") or "unknown",
             "stage": data.get("stage") or "unknown",
+            "declared_role": data.get("role"),
         }
     except Exception:
-        return {"run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown"}
+        return {"run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown",
+                "declared_role": None}
 
 
 def _correlation_state(run: dict) -> str:
@@ -310,9 +315,16 @@ def _decode_scan(scan: bytes, encoding: str) -> bytes:
     if encoding in ("gzip", "deflate"):
         try:
             return gzip.decompress(scan) if encoding == "gzip" else zlib.decompress(scan)
-        except (OSError, zlib.error):
+        except (OSError, EOFError, zlib.error):  # EOFError: a truncated/partial gzip member
             pass  # ledger falls back to zero-usage rather than failing the request
     return scan
+
+
+# The streamed early model check re-parses the buffer on every chunk until it finds the model
+# field. message_start is the stream's first event, so past this many buffered bytes it stops
+# (a model-less or undecodable stream would otherwise cost O(n^2)); the end-of-stream check
+# still runs.
+_EARLY_MODEL_SCAN_BYTES = 16 * 1024
 
 
 async def _write_downstream(response: web.StreamResponse, chunk: bytes) -> None:
@@ -332,19 +344,28 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     except json.JSONDecodeError:
         pass
 
-    correlation = read_current_run()
+    correlation = read_current_run(request.app["current_run_path"])
     dest = request.app["local_destination"]
     local = dest is not None and dest["hosting_location"] == "local"
     ma = None
+    role = role_reason = None
+    role_refused = False
     if dest is not None:
-        # Lazy, as in main(): the default cloud path never loads the adapter (#558).
+        # Lazy, as in main(): the default cloud path never loads the adapter (#558) or the
+        # role binding (#559), so a pointer's declared role is never consulted there.
         from factory_core.providers import model_adapter as ma
-    # Request/Result ledger columns (#558). role is the §4.2 contract constant on every local
-    # row — refused rows included (spec Req. 13); request_id exists once a request is signed.
+        from factory_core.providers import role_isolation
+        role, role_reason = role_isolation.bind_dispatch_role(
+            dest["hosting_location"], correlation["declared_role"])
+        role_refused = role_reason in role_isolation.REFUSALS
+    # Request/Result ledger columns (#558). role is the bound dispatch role (#559): actor on
+    # every local row, adapter-refused rows included; the declared role (or None) on a selected
+    # cloud entry; None on a role refusal and on the default path. request_id exists once a
+    # request is signed.
     columns = {
         "endpoint_id": dest["endpoint_id"] if dest else None,
         "hosting_location": dest["hosting_location"] if dest else "cloud",
-        "role": ma.LOCAL_ROLE if local else None,
+        "role": role,
         "request_id": None,
         "correlation": _correlation_state(correlation),
         "payload_decision": dict(dest["payload_decision"]) if dest else None,
@@ -364,6 +385,17 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
             failure_class=failure_class, **columns,
         )
 
+    if role_refused:
+        # #559: a declared role this destination may not carry — refused before any outbound
+        # call, on a local and a selected cloud entry alike; never coerced to another role.
+        message = (f"dispatch role refused on {dest['hosting_location']} endpoint "
+                   f"'{dest['endpoint_id']}': {role_reason}")
+        await _persist_ledger(_row(403, ma.DESTINATION_POLICY_DENIAL))
+        return web.json_response(
+            _error_body(ma.REFUSAL_TYPE, message, ma.DESTINATION_POLICY_DENIAL,
+                        dest["endpoint_id"]),
+            status=403)
+
     if local:
         # Every refusal happens here, before any outbound call (spec Req. 9, 10, 4).
         try:
@@ -375,7 +407,7 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 _error_body(ma.REFUSAL_TYPE, refusal.message, refusal.failure_class,
                             dest["endpoint_id"]),
                 status=refusal.status)
-        header_value, envelope = ma.build_correlation(dest, correlation)
+        header_value, envelope = ma.build_correlation(dest, correlation, role)
         fwd_headers[ma.CORRELATION_HEADER] = header_value
         columns["role"], columns["request_id"] = envelope["role"], envelope["request_id"]
         bounds = ma.resolve_timeout(dest)
@@ -430,8 +462,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                         usage_scan.extend(chunk)
                         _await_next_chunk()
                     deadline.reschedule(None)
-                    ma.check_json_body(upstream_resp.status,
-                                       _decode_scan(bytes(usage_scan), encoding))
+                    scan = _decode_scan(bytes(usage_scan), encoding)
+                    ma.check_json_body(upstream_resp.status, scan)
+                    # #559: refused before prepare(), so the client gets a real error body.
+                    ma.check_response_model(dest, scan, streamed=False)
                 response = web.StreamResponse(
                     status=upstream_resp.status, headers=upstream_resp.headers
                 )
@@ -439,15 +473,29 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
                 if local and not is_streamed:
                     await _write_downstream(response, bytes(usage_scan))
                 else:
+                    model_confirmed = False
                     async for chunk in upstream_resp.content.iter_any():
                         _got_chunk()
+                        if (local and not model_confirmed
+                                and len(usage_scan) < _EARLY_MODEL_SCAN_BYTES):
+                            # #559: check as soon as the message_start frame is buffered —
+                            # before this chunk (which carries it) is forwarded — so a
+                            # fallback/swapped model is refused right away, not after
+                            # message_stop has already reached the client looking complete.
+                            candidate = _decode_scan(bytes(usage_scan) + chunk, encoding)
+                            model_confirmed = ma.check_response_model(
+                                dest, candidate, streamed=True)
                         await _write_downstream(response, chunk)
                         usage_scan.extend(chunk)
                         _await_next_chunk()
                     deadline.reschedule(None)
                     if local:
-                        ma.check_sse_complete(upstream_resp.status,
-                                              _decode_scan(bytes(usage_scan), encoding))
+                        scan = _decode_scan(bytes(usage_scan), encoding)
+                        ma.check_sse_complete(upstream_resp.status, scan)
+                        if not model_confirmed:
+                            # message_start never arrived (or decoding never caught up,
+                            # e.g. a gzip stream): fall back to the full-body check.
+                            ma.check_response_model(dest, scan, streamed=True)
                 await response.write_eof()
     except handled as exc:
         prepared = response is not None and response.prepared
@@ -519,11 +567,13 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     return response
 
 
-def create_app(destination=None) -> web.Application:
+def create_app(destination=None, current_run_path=None) -> web.Application:
     app = web.Application()
     app["client_session"] = None
     # The endpoint resolved once at startup (#558); None on the cloud-default path.
     app["local_destination"] = destination
+    # This app's correlation pointer (#559); None reads the module-level CURRENT_RUN_PATH.
+    app["current_run_path"] = current_run_path
     app.router.add_route("*", "/{tail:.*}", handle_proxy)
 
     async def _startup(app):

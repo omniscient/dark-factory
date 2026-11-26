@@ -80,7 +80,8 @@ time: leaving it set after the proxy is disabled breaks runs.
 ## Known limitations
 
 - **Correlation is best-effort and single-run-accurate.** `entrypoint.sh` writes
-  `/var/lib/dark-factory/current-run.json` (`run_id`/`issue_number`/`intent`/`stage`) once
+  `/var/lib/dark-factory/current-run.json` (`run_id`/`issue_number`/`intent`/`stage`, plus
+  `role` when `FACTORY_DISPATCH_ROLE` is set) once
   per dispatch; the proxy re-reads it per-request. Under the default `FACTORY_WIP_LIMIT=1`
   this is exact. Under concurrent dispatches (`FACTORY_WIP_LIMIT>1`), a request may be
   attributed to whichever run most recently wrote the pointer file — Archon has no
@@ -144,7 +145,21 @@ registry afterwards. Any problem exits non-zero before the server binds. For a
   - deferred tools: any `tools` entry carrying `defer_loading`;
   - structured output: `output_config` or `output_format` present.
 - **Model identity.** A `model` other than the entry's `model_identity.served_name`, including
-  any cloud model ID, is refused `403` `destination_policy_denial`. It is never remapped.
+  any cloud model ID, is refused `403` `destination_policy_denial`. It is never remapped. The
+  response is checked too (#559): a JSON body's `model`, or a stream's `message_start`
+  `message.model`, that names a different model (a backend fallback or a swapped model) is
+  refused `502` `protocol_incompatibility` — before the response starts for a non-streaming
+  body, by aborting the stream for a streamed one. An absent `model` field passes.
+- **Dispatch role (#559).** The role comes from the `role` field `entrypoint.sh` writes into
+  `current-run.json` from `FACTORY_DISPATCH_ROLE`, never from the model or an inbound
+  `X-Factory-Correlation` header. A local entry records `actor`, whether the role is declared
+  or absent. A declared `checker` or `monitor` is refused `403` `destination_policy_denial`
+  (`nested_checker_refused`) before any outbound call: a local dispatch never hosts an
+  independent checker. This refusal is how nested checkers are disabled. Any role outside
+  `actor`/`checker`/`monitor` is refused (`role_invalid`) on every selected entry, cloud
+  included. A selected cloud entry records the declared role, or `null` when none is
+  declared, so selecting an endpoint never makes a dispatch a checker by itself. With
+  `FACTORY_MODEL_ENDPOINT` unset, the role is never read.
 - **Responses.** A non-streaming 2xx body that is not a JSON object is refused `502`
   `protocol_incompatibility`. A streamed response that ends without a complete `message_stop`
   frame is aborted. Every failure after the response has started streaming aborts the

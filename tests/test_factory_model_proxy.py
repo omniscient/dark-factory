@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import model_proxy as mp
 from factory_core.providers import model_adapter as ma  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
+from factory_core import run_record as rr  # noqa: E402
+from factory_core.providers import role_isolation as ri  # noqa: E402
 
 SENTINEL = "sk-sentinel-local-gateway-token"
 SERVED = "qwen2.5-coder-32b"
@@ -1118,3 +1120,552 @@ def test_rollout_doc_lists_exactly_the_supported_and_refused_local_modes():
                    *(f"`{f}`" for f in ma.STRUCTURED_OUTPUT_FIELDS), "served_name",
                    "uncertified", "/v1/chat/completions", *ma.FAILURE_CLASSES):
         assert needle in section, needle
+
+
+# --- #559: harness-declared dispatch role -------------------------------------------------
+
+ISSUE = 559
+
+
+def _pointer(path, run_id, *, issue=ISSUE, role=None):
+    """A current-run.json as entrypoint.sh writes it; "role" only when the harness set one."""
+    data = {"run_id": run_id, "issue_number": issue, "intent": "fix", "stage": "unknown",
+            "started_at": "2026-11-25T00:00:00Z"}
+    if role is not None:
+        data["role"] = role
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _cloud_destination():
+    """A selected cloud registry entry (non-null endpoint_id) — what a checker must select."""
+    return ma.destination_from_entry(copy.deepcopy(CLOUD_ENTRY))
+
+
+async def _post_cloud(client, headers=None):
+    resp = await client.post("/v1/messages", json={"model": "claude-opus-5-5", "messages": []},
+                             headers=headers or {})
+    return resp.status, await resp.json()
+
+
+def _cloud_scenario(local_env, monkeypatch, destination, send, *, current_run_path=None):
+    """send(client) against a proxy with a cloud entry selected (or None: the default path);
+    returns (send's result, cloud-upstream calls)."""
+    calls = []
+
+    async def scenario():
+        upstream = await _make_upstream(_recording(_ok_json, calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app(destination,
+                                                     current_run_path=current_run_path)))
+        await client.start_server()
+        try:
+            result = await send(client)
+            await _wait_for(lambda: len(_rows(local_env)) >= 1)
+        finally:
+            await client.close()
+            await upstream.close()
+        return result
+
+    return _run(scenario()), calls
+
+
+def test_read_current_run_carries_the_declared_role_from_a_given_path(tmp_path):
+    assert mp.read_current_run(_pointer(tmp_path / "a.json", "run-a", role="checker")) == {
+        "run_id": "run-a", "issue_number": ISSUE, "intent": "fix", "stage": "unknown",
+        "declared_role": "checker"}
+    assert mp.read_current_run(_pointer(tmp_path / "b.json", "run-b"))["declared_role"] is None
+    assert mp.read_current_run(tmp_path / "missing.json") == {
+        "run_id": "unknown", "issue_number": 0, "intent": "unknown", "stage": "unknown",
+        "declared_role": None}
+
+
+def test_read_current_run_defaults_to_the_module_pointer(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", _pointer(tmp_path / "c.json", "run-c"))
+    assert mp.read_current_run()["run_id"] == "run-c"
+
+
+def test_create_app_takes_a_per_app_pointer_path(tmp_path):
+    assert mp.create_app()["current_run_path"] is None
+    assert mp.create_app(current_run_path=tmp_path / "p.json")["current_run_path"] == (
+        tmp_path / "p.json")
+
+
+@pytest.mark.parametrize("declared,reason", [
+    ("checker", "nested_checker_refused"),
+    ("monitor", "nested_checker_refused"),
+    ("verifier", "role_invalid"),
+    ("invalid", "role_invalid"),  # what entrypoint.sh writes for a non-token value
+])
+def test_local_destination_refuses_a_non_actor_role_before_any_outbound_call(
+        local_env, monkeypatch, declared, reason):
+    _pointer(local_env / "current-run.json", "run-w", role=declared)
+    (status, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, _ok_json,
+                                                         _post_json)
+    assert status == 403 and calls == [] and cloud_calls == []
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    assert body["error"]["endpoint_id"] == "local-test" and reason in body["error"]["message"]
+    row = _rows(local_env)[0]
+    assert row["failure_class"] == ma.DESTINATION_POLICY_DENIAL and row["status"] == 403
+    # Never silently coerced to actor; nothing was signed.
+    assert row["role"] is None and row["request_id"] is None
+
+
+@pytest.mark.parametrize("declared", [None, "actor"])
+def test_local_destination_records_actor_declared_or_defaulted(local_env, monkeypatch, declared):
+    _pointer(local_env / "current-run.json", "run-w", role=declared)
+    (status, _), calls, _ = _local_scenario(local_env, monkeypatch, _ok_json, _post_json)
+    assert status == 200 and len(calls) == 1
+    envelope = json.loads(calls[0]["headers"]["x-factory-correlation"])
+    row = _rows(local_env)[0]
+    assert row["role"] == envelope["role"] == "actor"
+    assert row["request_id"] == envelope["request_id"]
+
+
+@pytest.mark.parametrize("declared", ["verifier", "", "orchestrator", "invalid"])
+def test_selected_cloud_entry_refuses_an_invalid_role_too(local_env, monkeypatch, declared):
+    ptr = _pointer(local_env / "checker-run.json", "run-c", role=declared)
+    (status, body), calls = _cloud_scenario(local_env, monkeypatch, _cloud_destination(),
+                                            _post_cloud, current_run_path=ptr)
+    assert status == 403 and calls == []
+    assert body["error"]["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+    assert body["error"]["endpoint_id"] == "cloud-test"
+    row = _rows(local_env)[0]
+    assert row["role"] is None and row["failure_class"] == ma.DESTINATION_POLICY_DENIAL
+
+
+def test_selected_cloud_entry_records_a_declared_checker(local_env, monkeypatch):
+    ptr = _pointer(local_env / "checker-run.json", "run-c", role="checker")
+    (status, _), calls = _cloud_scenario(local_env, monkeypatch, _cloud_destination(),
+                                         _post_cloud, current_run_path=ptr)
+    assert status == 200 and len(calls) == 1
+    row = _rows(local_env)[0]
+    assert (row["role"], row["endpoint_id"], row["hosting_location"]) == (
+        "checker", "cloud-test", "cloud")
+
+
+def test_selection_alone_grants_no_role_and_an_inbound_claim_is_ignored(local_env, monkeypatch):
+    # Spec req. 6/7: an endpoint selected instance-wide, no declared role, and a model-side
+    # X-Factory-Correlation claiming checker -> the cloud row records no role at all.
+    ptr = _pointer(local_env / "checker-run.json", "run-c")
+    (status, _), calls = _cloud_scenario(
+        local_env, monkeypatch, _cloud_destination(),
+        lambda c: _post_cloud(c, headers={"X-Factory-Correlation": '{"role":"checker"}'}),
+        current_run_path=ptr)
+    assert status == 200 and len(calls) == 1
+    assert _rows(local_env)[0]["role"] is None
+
+
+def test_default_path_never_consults_the_declared_role(local_env, monkeypatch):
+    # FACTORY_MODEL_ENDPOINT unset: byte-identical to today, even with a role in the pointer.
+    # Drop both the sys.modules entry and the package attribute: with only the former, a
+    # lazy `from factory_core.providers import role_isolation` would reuse the attribute
+    # without re-registering, and the final assertion could never fail.
+    import factory_core.providers as providers_pkg
+    monkeypatch.delitem(sys.modules, "factory_core.providers.role_isolation", raising=False)
+    monkeypatch.delattr(providers_pkg, "role_isolation", raising=False)
+    _pointer(local_env / "current-run.json", "run-d", role="checker")
+    (status, _), calls = _cloud_scenario(
+        local_env, monkeypatch, None,
+        lambda c: _post_cloud(c, headers={"X-Factory-Correlation": "client-value"}))
+    assert status == 200 and len(calls) == 1
+    assert calls[0]["headers"]["x-factory-correlation"] == "client-value"
+    row = _rows(local_env)[0]
+    assert (row["role"], row["endpoint_id"], row["hosting_location"], row["request_id"]) == (
+        None, None, "cloud", None)
+    assert "factory_core.providers.role_isolation" not in sys.modules
+
+
+async def _redirect_elsewhere(request):
+    if request.path == "/elsewhere":
+        return web.json_response({"usage": {}})
+    raise web.HTTPFound("/elsewhere")
+
+
+def _answering_as(model):
+    async def handler(request):
+        return web.json_response({"type": "message", "model": model,
+                                  "usage": {"input_tokens": 1, "output_tokens": 1}})
+    return handler
+
+
+@pytest.mark.parametrize("model,handler,status,failure_class,upstream_calls", [
+    # Request side — pins #558's check_model_identity (model_adapter.py) through the proxy.
+    pytest.param("claude-opus-5-5", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0,
+                 id="literal-cloud-model-id"),
+    pytest.param("opus", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0, id="alias"),
+    pytest.param("qwen2.5-coder-7b", _ok_json, 403, ma.DESTINATION_POLICY_DENIAL, 0,
+                 id="alias-mismatch-other-local-model"),
+    # Transport — pins #558's check_response_status: a redirect is refused, never followed.
+    pytest.param(SERVED, _redirect_elsewhere, 502, ma.PROTOCOL_INCOMPATIBILITY, 1,
+                 id="redirect"),
+    # Response side — new in #559: what the endpoint actually served is checked.
+    pytest.param(SERVED, _answering_as("claude-opus-5-5"), 502, ma.PROTOCOL_INCOMPATIBILITY, 1,
+                 id="upstream-model-mismatch-backend-fallback"),
+    pytest.param(SERVED, _answering_as("qwen2.5-coder-7b"), 502, ma.PROTOCOL_INCOMPATIBILITY,
+                 1, id="upstream-model-mismatch-swapped-model"),
+])
+def test_model_identity_policy_model_is_the_model_actually_invoked(
+        local_env, monkeypatch, model, handler, status, failure_class, upstream_calls):
+    async def send(client):
+        resp = await client.post("/v1/messages", json={"model": model, "messages": []})
+        return resp.status, await resp.json()
+
+    (got, body), calls, cloud_calls = _local_scenario(local_env, monkeypatch, handler, send)
+    assert got == status and cloud_calls == [] and len(calls) == upstream_calls
+    assert body["error"]["type"] == ma.REFUSAL_TYPE
+    assert body["error"]["failure_class"] == failure_class
+    row = _rows(local_env)[0]
+    assert row["failure_class"] == failure_class and row["model"] == model
+
+
+def test_upstream_answering_as_the_served_model_passes(local_env, monkeypatch):
+    (status, body), calls, _ = _local_scenario(local_env, monkeypatch, _answering_as(SERVED),
+                                               _post_json)
+    assert status == 200 and body["model"] == SERVED and len(calls) == 1
+    assert _rows(local_env)[0]["failure_class"] is None
+
+
+SSE_WRONG_MODEL = SSE_OK.replace(b'"message":{"usage"',
+                                 b'"message":{"model":"claude-opus-5-5","usage"')
+
+
+async def _sse_wrong_model(request):
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(SSE_WRONG_MODEL)
+    await resp.write_eof()
+    return resp
+
+
+def test_streamed_model_mismatch_is_aborted_and_fails_the_run(local_env, monkeypatch):
+    # The proxy checks the model as soon as message_start is buffered — here, in the single
+    # upstream chunk that carries it — so the mismatch is caught before that chunk is
+    # forwarded. response.prepare() already ran, so there is no clean JSON error body; the
+    # proxy withholds the clean EOF (like check_sse_complete) and records the class, which
+    # makes the run's model_dispatch outcome "failed".
+    assert SSE_WRONG_MODEL != SSE_OK
+    _pointer(local_env / "current-run.json", "run-s")
+    _local_scenario(local_env, monkeypatch, _sse_wrong_model,
+                    lambda c: _expect_truncated(c, stream=True))
+    rows, _ = rr._read_ledger_rows("run-s", local_env / "ledger.jsonl")
+    assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+    assert rr._compute_model_dispatch(rows)["result"]["outcome"] == "failed"
+
+
+async def _sse_wrong_model_then_sentinel(request):
+    # message_start (wrong model) arrives in its own write/chunk; message_stop with a
+    # sentinel payload arrives in a second one. If the check ran only after the whole
+    # stream (the pre-fix behavior), the sentinel would already be downstream by the time
+    # the mismatch is noticed.
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(b'event: message_start\ndata: {"type":"message_start","message":'
+                     b'{"model":"claude-opus-5-5","usage":{"input_tokens":7}}}\n\n')
+    await resp.write(b'event: message_stop\ndata: {"type":"message_stop","sentinel":'
+                     b'"SHOULD_NEVER_REACH_CLIENT"}\n\n')
+    await resp.write_eof()
+    return resp
+
+
+def test_streamed_model_mismatch_is_refused_before_the_rest_of_the_stream_is_forwarded(
+        local_env, monkeypatch):
+    # #559 advisory: the check must run as soon as message_start is buffered, not after
+    # message_stop — proven here by a sentinel in the second chunk that must never arrive.
+    _pointer(local_env / "current-run.json", "run-sentinel")
+
+    async def capture_truncated(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        received = bytearray()
+        with pytest.raises(_TRUNCATED):
+            async for chunk in resp.content.iter_any():
+                received.extend(chunk)
+        return bytes(received)
+
+    received, _, _ = _local_scenario(local_env, monkeypatch, _sse_wrong_model_then_sentinel,
+                                     capture_truncated)
+    assert b"SHOULD_NEVER_REACH_CLIENT" not in received
+    assert received == b""  # the mismatching chunk itself was never forwarded either
+    rows, _ = rr._read_ledger_rows("run-sentinel", local_env / "ledger.jsonl")
+    assert rows[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+def _sse_in_chunks(chunks, **headers):
+    """An upstream that writes each of `chunks` as its own network chunk."""
+    async def handler(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", **headers})
+        await resp.prepare(request)
+        for chunk in chunks:
+            await resp.write(chunk)
+            await asyncio.sleep(0.005)  # let the proxy read it before the next one is written
+        await resp.write_eof()
+        return resp
+    return handler
+
+
+def _gzip_halves(payload):
+    import gzip as _gzip
+    compressed = _gzip.compress(payload)
+    return [compressed[:len(compressed) // 2], compressed[len(compressed) // 2:]]
+
+
+def test_gzip_stream_split_across_chunks_is_forwarded_and_ledgered(local_env, monkeypatch):
+    # Operator review of PR #617: the early model check decodes a partial buffer, and
+    # gzip.decompress raises EOFError on a truncated member — which _decode_scan did not catch,
+    # so a gzip event stream arriving in more than one chunk crashed the handler with no row.
+    halves = _gzip_halves(SSE_OK)
+
+    async def send(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        return resp.status, await resp.read()
+
+    (status, body), _, _ = _local_scenario(
+        local_env, monkeypatch, _sse_in_chunks(halves, **{"Content-Encoding": "gzip"}), send)
+    assert status == 200 and body == SSE_OK  # clean EOF (the test client decodes the gzip)
+    row = _rows(local_env)[0]
+    assert row["failure_class"] is None and row["gen_ai.usage.input_tokens"] == 7
+
+
+def test_gzip_stream_model_mismatch_is_still_refused_at_end_of_stream(local_env, monkeypatch):
+    # A partial gzip buffer cannot be decoded, so the early check cannot see the model; the
+    # full-body check after the last chunk must still refuse it (no clean EOF, ledgered).
+    halves = _gzip_halves(SSE_WRONG_MODEL)
+    _local_scenario(local_env, monkeypatch,
+                    _sse_in_chunks(halves, **{"Content-Encoding": "gzip"}),
+                    lambda c: _expect_truncated(c, stream=True))
+    assert _rows(local_env)[0]["failure_class"] == ma.PROTOCOL_INCOMPATIBILITY
+
+
+def test_early_model_check_stops_rescanning_past_its_byte_bound(local_env, monkeypatch):
+    # Operator review of PR #617: a stream whose message_start carries no model field (SSE_OK
+    # has none) was re-parsed from byte 0 on every chunk — quadratic in stream length. Past
+    # _EARLY_MODEL_SCAN_BYTES the proxy stops and relies on the end-of-stream check.
+    monkeypatch.setattr(mp, "_EARLY_MODEL_SCAN_BYTES", 2048)
+    frames = SSE_OK.split(b"\n\n")
+    delta = b'event: ping\ndata: {"type":"ping","pad":"' + b"x" * 980 + b'"}'
+    chunks = [f + b"\n\n" for f in [frames[0]] + [delta] * 30 + frames[1:3]]
+    sizes = []
+    real = ma.check_response_model
+
+    def counting(dest, data, streamed):
+        sizes.append(len(data))
+        return real(dest, data, streamed)
+
+    monkeypatch.setattr(ma, "check_response_model", counting)
+
+    async def send(client):
+        resp = await client.post("/v1/messages",
+                                 json={"model": SERVED, "messages": [], "stream": True})
+        return resp.status, await resp.read()
+
+    (status, body), _, _ = _local_scenario(local_env, monkeypatch, _sse_in_chunks(chunks), send)
+    assert status == 200 and body == b"".join(chunks)
+    # At most one early check straddles the bound, plus the one end-of-stream check.
+    assert len([s for s in sizes if s > 2048 + 1024]) <= 2, sizes
+    assert sizes[-1] == len(body)  # the end-of-stream check still sees the whole stream
+
+
+CLOUD_SENTINEL ="sk-ant-sentinel-cloud-checker-key"
+
+
+def test_ac1_local_worker_and_cloud_checker_dispatches_are_isolated_and_attributed(
+        local_env, monkeypatch):
+    """#559 acceptance criterion 1. Two real create_app() instances run concurrently in one
+    process: a local worker against a fake local upstream, and a cloud checker that selected a
+    cloud registry entry against a fake cloud upstream. Each has its own current-run.json.
+    Both dispatch records are built from ledger rows by run_record's production aggregation.
+
+    Scope note (spec): one process and one OS environment, so this proves header, ledger and
+    artifact non-leakage plus the worker proxy's startup refusal to hold a cloud credential.
+    Separate-process isolation is structural (one dispatched container, one endpoint config)
+    and no in-process test can simulate it.
+    """
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    artifacts = local_env / "artifacts"
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", artifacts)
+    worker_ptr = _pointer(local_env / "worker-run.json", "run-worker")  # no role: actor
+    checker_ptr = _pointer(local_env / "checker-run.json", "run-checker", role="checker")
+    local_calls, cloud_calls = [], []
+
+    async def scenario():
+        local_up = await _make_upstream(_recording(_ok_json, local_calls))
+        cloud_up = await _make_upstream(_recording(_ok_json, cloud_calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(cloud_up))
+        worker = TestClient(TestServer(mp.create_app(_local_destination(_url(local_up)),
+                                                     current_run_path=worker_ptr)))
+        checker = TestClient(TestServer(mp.create_app(_cloud_destination(),
+                                                      current_run_path=checker_ptr)))
+        await worker.start_server()
+        await checker.start_server()
+        try:
+            results = await asyncio.gather(
+                _post_json(worker),
+                _post_cloud(checker, headers={"x-api-key": CLOUD_SENTINEL}))
+            await _wait_for(lambda: len(_rows(local_env)) >= 2 and artifacts.exists()
+                            and len(list(artifacts.rglob("*.json"))) >= 2)
+        finally:
+            for c in (worker, checker):
+                await c.close()
+            for s in (local_up, cloud_up):
+                await s.close()
+        return results
+
+    (w_status, _), (c_status, _) = _run(scenario())
+    assert w_status == 200 and c_status == 200
+    assert len(local_calls) == 1 and len(cloud_calls) == 1
+
+    ledger = local_env / "ledger.jsonl"
+    worker_rows, _ = rr._read_ledger_rows("run-worker", ledger)
+    checker_rows, _ = rr._read_ledger_rows("run-checker", ledger)
+    assert len(worker_rows) == 1 and len(checker_rows) == 1
+    w, c = worker_rows[0], checker_rows[0]
+
+    # Exact role / request / endpoint attribution, per request.
+    envelope = json.loads(local_calls[0]["headers"]["x-factory-correlation"])
+    assert (w["role"], w["endpoint_id"], w["hosting_location"], w["issue_number"]) == (
+        "actor", "local-test", "local", ISSUE)
+    assert w["request_id"] and w["request_id"] == envelope["request_id"]
+    assert envelope["role"] == "actor" and envelope["run_id"] == "run-worker"
+    assert (c["role"], c["endpoint_id"], c["hosting_location"], c["issue_number"]) == (
+        "checker", "cloud-test", "cloud", ISSUE)
+    assert c["request_id"] is None  # the cloud path signs nothing, so it mints none (#558)
+    assert w["correlation"] == c["correlation"] == "inferred_pointer"
+
+    # The independence proof over the real, ledger-derived dispatch records.
+    worker_result = rr._compute_model_dispatch(worker_rows)["result"]
+    checker_result = rr._compute_model_dispatch(checker_rows)["result"]
+    assert ri.check_verdict_independence(
+        worker_result, checker_result, actor_issue=w["issue_number"],
+        producer_issue=c["issue_number"], verdict_issue=ISSUE) == (True, "independent")
+    # An unrelated (other-issue) successful cloud run is never the proof.
+    assert ri.check_verdict_independence(
+        worker_result, checker_result, actor_issue=ISSUE, producer_issue=ISSUE + 1,
+        verdict_issue=ISSUE) == (False, "unit_of_work_mismatch")
+
+    # No cross-role credential leakage: forwarded headers, ledger rows, raw captures.
+    assert local_calls[0]["headers"]["x-api-key"] == SENTINEL
+    assert cloud_calls[0]["headers"]["x-api-key"] == CLOUD_SENTINEL
+    assert CLOUD_SENTINEL not in json.dumps(local_calls[0]["headers"])
+    assert SENTINEL not in json.dumps(cloud_calls[0]["headers"])
+    ledger_text = ledger.read_text()
+    assert SENTINEL not in ledger_text and CLOUD_SENTINEL not in ledger_text
+    captured = [p.read_text() for p in artifacts.rglob("*.json")]
+    assert {p.parent.name for p in artifacts.rglob("*.json")} == {"run-worker", "run-checker"}
+    for text in captured:
+        assert SENTINEL not in text and CLOUD_SENTINEL not in text
+
+    # Process environment: the worker-side proxy holds no cloud credential, and refuses to
+    # start if handed the checker's (startup check, contract §4.3) without echoing it.
+    assert CLOUD_SENTINEL not in os.environ.values()
+    with pytest.raises(ma.DestinationError) as exc:
+        ma.destination_from_entry(  # LOCAL_ENTRY's base_url is never dialled: startup only
+            copy.deepcopy(LOCAL_ENTRY),
+            environ={"LOCAL_GATEWAY_TOKEN": SENTINEL, "ANTHROPIC_API_KEY": CLOUD_SENTINEL})
+    assert "ANTHROPIC_API_KEY" in str(exc.value) and CLOUD_SENTINEL not in str(exc.value)
+
+
+async def _malformed_worker_json(request):
+    return web.Response(body=b'{"type":"message","usage":{"input_tok',
+                        content_type="application/json")
+
+
+async def _malformed_worker_stream(request):
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    await resp.prepare(request)
+    await resp.write(b'event: content_block_delta\ndata: {"type":"content_bl')
+    await resp.write_eof()  # a clean upstream EOF after a partial frame
+    return resp
+
+
+def _worker_dispatch(local_env, monkeypatch, handler, *, stream=False, base_url=None):
+    """One real local-worker request (run-worker, issue 559); its model_dispatch result."""
+    _pointer(local_env / "current-run.json", "run-worker")
+
+    async def scenario():
+        upstream = await _make_upstream(handler)
+        client = await _local_client(base_url or _url(upstream))
+        try:
+            try:
+                resp = await client.post("/v1/messages",
+                                         json={"model": SERVED, "stream": stream, "messages": []})
+                await resp.read()
+            except _TRUNCATED:
+                pass  # an aborted stream is the client's view of a refused one
+            await _wait_for(lambda: len(_rows(local_env)) >= 1)
+        finally:
+            await client.close()
+            await upstream.close()
+
+    _run(scenario())
+    rows, _ = rr._read_ledger_rows("run-worker", local_env / "ledger.jsonl")
+    return rr._compute_model_dispatch(rows)["result"]
+
+
+def _checker_dispatch(local_env, monkeypatch, destination, *, role="checker", pointer=True):
+    """One real checker request; (its row's issue_number, its model_dispatch result)."""
+    path = local_env / "checker-run.json"
+    if pointer:
+        _pointer(path, "run-checker", role=role)
+    before = len(_rows(local_env))
+
+    async def scenario():
+        upstream = await _make_upstream(_ok_json)
+        monkeypatch.setattr(mp, "UPSTREAM", _url(upstream))
+        client = TestClient(TestServer(mp.create_app(destination, current_run_path=path)))
+        await client.start_server()
+        try:
+            await _post_cloud(client)
+            await _wait_for(lambda: len(_rows(local_env)) > before)
+        finally:
+            await client.close()
+            await upstream.close()
+
+    _run(scenario())
+    rows, _ = rr._read_ledger_rows("run-checker" if pointer else "unknown",
+                                   local_env / "ledger.jsonl")
+    return rows[0]["issue_number"], rr._compute_model_dispatch(rows)["result"]
+
+
+@pytest.mark.parametrize("worker_kwargs,failure_class", [
+    pytest.param({"handler": _ok_json, "base_url": "http://127.0.0.1:1"},
+                 ma.ENDPOINT_UNREACHABLE, id="local-endpoint-failure"),
+    pytest.param({"handler": _malformed_worker_json}, ma.PROTOCOL_INCOMPATIBILITY,
+                 id="malformed-worker-output-json"),
+    pytest.param({"handler": _malformed_worker_stream, "stream": True},
+                 ma.PROTOCOL_INCOMPATIBILITY, id="malformed-worker-output-stream"),
+    pytest.param({"handler": _answering_as("claude-opus-5-5")}, ma.PROTOCOL_INCOMPATIBILITY,
+                 id="worker-answered-as-another-model"),
+])
+def test_ac5_failed_or_malformed_worker_output_never_proves_independence(
+        local_env, monkeypatch, worker_kwargs, failure_class):
+    worker = _worker_dispatch(local_env, monkeypatch, **worker_kwargs)
+    assert worker["outcome"] == "failed" and failure_class in worker["failure_classes_seen"]
+    issue, checker = _checker_dispatch(local_env, monkeypatch, _cloud_destination())
+    assert checker["outcome"] == "ok" and checker["role"] == "checker"
+    assert ri.check_verdict_independence(
+        worker, checker, actor_issue=ISSUE, producer_issue=issue, verdict_issue=ISSUE) == (
+        False, "dispatch_outcome_not_ok")
+
+
+@pytest.mark.parametrize("destination,kwargs,reason", [
+    # A default cloud run (no endpoint selected) records endpoint_id None and role None.
+    pytest.param(None, {}, "producer_endpoint_missing", id="missing-checker-endpoint"),
+    # No pointer: correlation "unknown", issue 0 — never the proof (Invariant 3, §4.4).
+    pytest.param("cloud", {"pointer": False}, "unit_of_work_mismatch", id="no-pointer"),
+    # Endpoint selected but no declared role: selection alone never makes a checker.
+    pytest.param("cloud", {"role": None}, "producer_role_not_checker", id="undeclared-role"),
+])
+def test_ac5_a_checker_dispatch_without_a_provable_identity_is_void(
+        local_env, monkeypatch, destination, kwargs, reason):
+    worker = _worker_dispatch(local_env, monkeypatch, _ok_json)
+    assert worker["outcome"] == "ok" and worker["role"] == "actor"
+    dest = _cloud_destination() if destination == "cloud" else None
+    issue, checker = _checker_dispatch(local_env, monkeypatch, dest, **kwargs)
+    if kwargs.get("pointer") is False:
+        assert checker["correlation"] == "unknown"
+    assert ri.check_verdict_independence(
+        worker, checker, actor_issue=ISSUE, producer_issue=issue, verdict_issue=ISSUE) == (
+        False, reason)

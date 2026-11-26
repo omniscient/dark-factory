@@ -157,8 +157,25 @@ case "${INTENT:-unknown}" in
 esac
 CURRENT_RUN_DIR="${CURRENT_RUN_DIR:-/var/lib/dark-factory}"
 mkdir -p "$CURRENT_RUN_DIR" 2>/dev/null || true
-printf '{"run_id":"%s","issue_number":%s,"intent":"%s","stage":"%s","started_at":"%s"}\n' \
-  "$RUN_ID" "${ISSUE_NUM:-0}" "${INTENT:-unknown}" "$RUN_STAGE" "$RUN_STARTED_AT" \
+# #559: the dispatching harness's declared role, folded in only when set, so a pointer
+# without one is byte-identical. Pointer-grade (this container can write the file): the
+# proxy uses it only to narrow what a selected endpoint may do, never to grant authority.
+# ADVISORY, NOT A SECURITY BOUNDARY: this same container is free to rewrite
+# current-run.json after this point (e.g. a cloud dispatch could self-declare role=checker
+# before #611 reads it back for role_isolation.check_verdict_independence). Any caller that
+# wires that proof into an automated merge/close gate must first source the producer's role
+# from a carrier this container cannot write, or keep the decision gated on human sign-off.
+ROLE_FIELD=""
+if [ -n "${FACTORY_DISPATCH_ROLE:-}" ]; then
+  # Only a bare lowercase token is folded in; anything else becomes "invalid", which the
+  # proxy refuses (role_invalid) — it can never add or override another pointer field.
+  case "$FACTORY_DISPATCH_ROLE" in
+    *[!a-z_]*) ROLE_FIELD=',"role":"invalid"' ;;
+    *) ROLE_FIELD=",\"role\":\"${FACTORY_DISPATCH_ROLE}\"" ;;
+  esac
+fi
+printf '{"run_id":"%s","issue_number":%s,"intent":"%s","stage":"%s","started_at":"%s"%s}\n' \
+  "$RUN_ID" "${ISSUE_NUM:-0}" "${INTENT:-unknown}" "$RUN_STAGE" "$RUN_STARTED_AT" "$ROLE_FIELD" \
   > "$CURRENT_RUN_DIR/current-run.json" 2>/dev/null || true
 
 # --- Concurrency guard: cap factory containers at FACTORY_WIP_LIMIT ---

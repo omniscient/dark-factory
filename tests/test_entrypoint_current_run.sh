@@ -44,6 +44,14 @@ assert_true() {
 stage_of() {
   python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('stage','missing'))" 2>/dev/null
 }
+keys_of() {
+  python3 -c "import json; print(','.join(sorted(json.load(open('$CURRENT_RUN_DIR/current-run.json')))))" 2>/dev/null
+}
+role_of() {
+  python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('role','missing'))" 2>/dev/null
+}
+BASE_KEYS="intent,issue_number,run_id,stage,started_at"
+unset FACTORY_DISPATCH_ROLE
 
 echo "=== #208: entrypoint writes current-run.json ==="
 
@@ -81,6 +89,54 @@ set +e; set +u; set +o pipefail
 
 STAGE_FIELD=$(stage_of)
 assert_true "multi-phase intent 'fix' -> stage='unknown'" "[ '$STAGE_FIELD' = 'unknown' ]"
+
+# --- #559: FACTORY_DISPATCH_ROLE folds into current-run.json only when non-empty ---
+KEYS_FIELD=$(keys_of)
+assert_true "#559 FACTORY_DISPATCH_ROLE unset -> pointer key set unchanged (no role)" "[ '$KEYS_FIELD' = '$BASE_KEYS' ]"
+
+set -uo pipefail
+ARTIFACTS_DIR=$(mktemp -d /tmp/208-artifacts-XXXXXX)
+export ARTIFACTS_DIR
+FACTORY_DISPATCH_ROLE="" ENTRYPOINT_SOURCE_ONLY=1 ARGUMENTS="Plan issue #559" \
+  source "$SCRIPT_DIR/../entrypoint.sh" "Plan issue #559"
+trap - ERR
+set +e; set +u; set +o pipefail
+KEYS_FIELD=$(keys_of)
+assert_true "#559 FACTORY_DISPATCH_ROLE empty -> pointer key set unchanged (no role)" "[ '$KEYS_FIELD' = '$BASE_KEYS' ]"
+rm -rf "$ARTIFACTS_DIR"
+
+set -uo pipefail
+ARTIFACTS_DIR=$(mktemp -d /tmp/208-artifacts-XXXXXX)
+export ARTIFACTS_DIR
+FACTORY_DISPATCH_ROLE="checker" ENTRYPOINT_SOURCE_ONLY=1 ARGUMENTS="Plan issue #559" \
+  source "$SCRIPT_DIR/../entrypoint.sh" "Plan issue #559"
+trap - ERR
+set +e; set +u; set +o pipefail
+ROLE_FIELD_VALUE=$(role_of)
+KEYS_FIELD=$(keys_of)
+ISSUE_FIELD=$(python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('issue_number','missing'))" 2>/dev/null)
+assert_true "#559 FACTORY_DISPATCH_ROLE=checker -> role='checker'" "[ '$ROLE_FIELD_VALUE' = 'checker' ]"
+assert_true "#559 role pointer still parses with every base key" "[ '$KEYS_FIELD' = 'intent,issue_number,role,run_id,stage,started_at' ]"
+assert_true "#559 role pointer keeps issue_number" "[ '$ISSUE_FIELD' = '559' ]"
+rm -rf "$ARTIFACTS_DIR"
+
+# A value that is not a bare lowercase token is recorded as "invalid": it can never add or
+# override another pointer field (here it tries to replace issue_number).
+set -uo pipefail
+ARTIFACTS_DIR=$(mktemp -d /tmp/208-artifacts-XXXXXX)
+export ARTIFACTS_DIR
+FACTORY_DISPATCH_ROLE='actor","issue_number":1,"x":"' ENTRYPOINT_SOURCE_ONLY=1 ARGUMENTS="Plan issue #559" \
+  source "$SCRIPT_DIR/../entrypoint.sh" "Plan issue #559"
+trap - ERR
+set +e; set +u; set +o pipefail
+ROLE_FIELD_VALUE=$(role_of)
+KEYS_FIELD=$(keys_of)
+ISSUE_FIELD=$(python3 -c "import json; print(json.load(open('$CURRENT_RUN_DIR/current-run.json')).get('issue_number','missing'))" 2>/dev/null)
+assert_true "#559 non-token FACTORY_DISPATCH_ROLE -> role='invalid'" "[ '$ROLE_FIELD_VALUE' = 'invalid' ]"
+assert_true "#559 non-token role adds no pointer field" "[ '$KEYS_FIELD' = 'intent,issue_number,role,run_id,stage,started_at' ]"
+assert_true "#559 non-token role cannot override issue_number" "[ '$ISSUE_FIELD' = '559' ]"
+unset FACTORY_DISPATCH_ROLE
+rm -rf "$ARTIFACTS_DIR"
 
 # --- #196: FACTORY_SIDE_EFFECT_LEVEL is computed from the BAKED config/scripts only (F1) ---
 # The function under test takes FACTORY_CONFIG_PATH / FACTORY_SCRIPTS_DIR overrides (defaults
