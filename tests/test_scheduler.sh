@@ -2470,6 +2470,315 @@ assert_eq "AB9b: both Close sites route through dispatch_close" \
 
 
 # ==========================================
+# AC: Non-cloud endpoint guard — no auto-merge / grace-advance (#585)
+# ==========================================
+# cloud_endpoint_confirmed + refuse_local_routing gate dispatch_close (end-gate APPROVED and
+# classifier MERGE) and both grace timers. The resolver (`model-endpoints hosting-check`) is
+# stubbed: AC_HC_OUT/AC_HC_RC are its stdout/exit; it always writes a stderr sentinel that
+# must never reach a comment. tracker comment --body-file is copied to AC_LAST_BODY.
+# scheduler.sh's `set -e` is live here: a refusal step that can fail unguarded ends the run.
+echo ""
+echo "--- AC: non-cloud endpoint guard (#585) ---"
+echo '{}' > "$STATE_FILE"; > "$STUB_LOG"
+MAIN_IS_RED=false; SESSION_WINDOW_PAUSED=false; CI_BLOCKED=""; REFINE_RUNNING=0
+_AC_DIR=$(mktemp -d /tmp/sched-test-ac-XXXXXX)
+AC_LAST_BODY="$_AC_DIR/last-body.md"
+AC_HC_OUT=""; AC_HC_RC=1; AC_LABEL_RC=0; AC_REVIEW="APPROVED"; AC_COMMENTS='[]'
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *"providers/cli.py model-endpoints hosting-check"*)
+      [ -n "$AC_HC_OUT" ] && printf '%s\n' "$AC_HC_OUT"
+      echo "resolver-stderr-SENTINEL" >&2
+      return "$AC_HC_RC" ;;
+    *"providers/cli.py tracker label"*"--add"*) return "$AC_LABEL_RC" ;;
+    *"providers/cli.py tracker comment"*)
+      local _prev="" _a
+      for _a in "$@"; do
+        [ "$_prev" = "--body-file" ] && cp "$_a" "$AC_LAST_BODY"
+        _prev="$_a"
+      done
+      return 0 ;;
+    *"providers/cli.py tracker get-comments"*) printf '%s\n' "$AC_COMMENTS"; return 0 ;;
+    *"providers/cli.py codehost reviews"*) printf '%s\n' "$AC_REVIEW"; return 0 ;;
+    *providers/cli.py*) return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+evaluate_stop()     { echo "evaluate_stop $*" >> "$STUB_LOG"; echo "stopped=false reason=none"; }
+trip_to_blocked()   { echo "trip_to_blocked $*" >> "$STUB_LOG"; }
+dispatch()          { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+get_new_comments()  { echo '[{"id":"IC_585","author":{"login":"human"},"body":"merge it"}]'; }
+classify_comments() { echo "classify_comments $1" >> "$STUB_LOG"; echo "MERGE"; }
+get_pr_for_issue()  { echo "99"; }
+is_issue_running()  { return 1; }
+has_new_comment_after_report() { echo "no"; }
+elapsed_minutes_since_marker() { echo "99"; }
+export -f python3 evaluate_stop trip_to_blocked dispatch get_new_comments classify_comments \
+  get_pr_for_issue is_issue_running has_new_comment_after_report elapsed_minutes_since_marker
+
+_AC_SPEC_ITEM='{"content":{"number":803,"title":"t"},"labels":["direct-to-pr","spec-pending-review"],"status":"Backlog"}'
+_AC_PLAN_ITEM='{"content":{"number":804,"title":"t"},"labels":["direct-to-pr","plan-pending-review"],"status":"Refined"}'
+_ac_issue() { case "$1" in approved) echo 801 ;; merge) echo 802 ;; spec) echo 803 ;; plan) echo 804 ;; esac; }
+# One poll of one guarded path. approved/merge go through stage_review_triage exactly as the
+# poll loop does; spec/plan call the advance check exactly as stage_refine/stage_plan do.
+_ac_path() {
+  local _extra="${2:-}"
+  DISPATCHED=""
+  case "$1" in
+    approved) IN_REVIEW="[{\"content\":{\"number\":801,\"title\":\"t\"},\"labels\":[\"direct-to-pr\"${_extra}],\"status\":\"In review\"}]"
+              stage_review_triage ;;
+    merge)    IN_REVIEW="[{\"content\":{\"number\":802,\"title\":\"t\"},\"labels\":[\"x\"${_extra}],\"status\":\"In review\"}]"
+              stage_review_triage ;;
+    spec)     spec_advance_check 803 "$(echo "$_AC_SPEC_ITEM" | jq -c ".labels += [${_extra#,}]")" ;;
+    plan)     plan_advance_check 804 "$(echo "$_AC_PLAN_ITEM" | jq -c ".labels += [${_extra#,}]")" ;;
+  esac
+}
+_ac_assert_refused() {  # <tag> <issue> <token>
+  local tag="$1" n="$2" tok="$3"
+  assert_eq "$tag: no dispatch" "0" "$(grep -c '^dispatch ' "$STUB_LOG" || true)"
+  assert_eq "$tag: DISPATCHED stays empty" "" "$DISPATCHED"
+  assert_eq "$tag: evaluate_stop not consulted" "0" "$(grep -c '^evaluate_stop' "$STUB_LOG" || true)"
+  assert_eq "$tag: no trip_to_blocked" "0" "$(grep -c '^trip_to_blocked' "$STUB_LOG" || true)"
+  assert_eq "$tag: no set_board_status" "0" "$(grep -c '^set_board_status' "$STUB_LOG" || true)"
+  assert_eq "$tag: no label removed" "0" "$(grep -c -- '--remove' "$STUB_LOG" || true)"
+  assert_eq "$tag: ready-for-human added once" \
+    "1" "$(grep -c -- "tracker label --id $n --add ready-for-human" "$STUB_LOG" || true)"
+  assert_eq "$tag: one marker upsert" \
+    "1" "$(grep -cF -- "tracker comment --id $n --marker <!-- df-local-routing-refusal -->" "$STUB_LOG" || true)"
+  assert_eq "$tag: no append-only comment" "0" "$(grep -c 'tracker add-comment' "$STUB_LOG" || true)"
+  assert_eq "$tag: body carries the fixed token" "1" "$(grep -cF "(\`${tok}\`)" "$AC_LAST_BODY" || true)"
+  assert_eq "$tag: body carries the scheduler footer" \
+    "1" "$(grep -cxF "*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*" "$AC_LAST_BODY" || true)"
+  assert_eq "$tag: body carries the factory footer" \
+    "1" "$(grep -cxF "*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*" "$AC_LAST_BODY" || true)"
+  assert_eq "$tag: body carries the marker" \
+    "1" "$(grep -cxF '<!-- df-local-routing-refusal -->' "$AC_LAST_BODY" || true)"
+  assert_eq "$tag: no resolver text in the body" \
+    "0" "$(grep -cE 'reason=|SENTINEL|lan-qwen|nope|Traceback' "$AC_LAST_BODY" || true)"
+}
+_ac_assert_proceeded() {  # <tag> <path>
+  local tag="$1" p="$2" n
+  n=$(_ac_issue "$p")
+  case "$p" in
+    approved|merge)
+      assert_eq "$tag: Close dispatched" "1" "$(grep -c "^dispatch Close issue #${n}\$" "$STUB_LOG" || true)"
+      assert_eq "$tag: close counter consulted" "1" "$(grep -c "^evaluate_stop ${n} close" "$STUB_LOG" || true)" ;;
+    spec)
+      assert_eq "$tag: gate label removed" "1" "$(grep -c -- '--remove spec-pending-review' "$STUB_LOG" || true)"
+      assert_eq "$tag: moved to Refined" "1" "$(grep -cE "^set_board_status 803 ${FACTORY_STATUS_REFINED}( |\$)" "$STUB_LOG" || true)" ;;
+    plan)
+      assert_eq "$tag: gate label removed" "1" "$(grep -c -- '--remove plan-pending-review' "$STUB_LOG" || true)"
+      assert_eq "$tag: moved to Ready" "1" "$(grep -cE "^set_board_status 804 ${FACTORY_STATUS_READY}( |\$)" "$STUB_LOG" || true)" ;;
+  esac
+  assert_eq "$tag: no ready-for-human" "0" "$(grep -c -- '--add ready-for-human' "$STUB_LOG" || true)"
+  assert_eq "$tag: no refusal comment" "0" "$(grep -c 'df-local-routing-refusal' "$STUB_LOG" || true)"
+}
+
+# AC1/AC2: every non-cloud resolver outcome refuses on all four paths, with the full
+# refusal assertion set. Fields: name|stdout|exit|expected token.
+export FACTORY_MODEL_ENDPOINT=lan-qwen
+_AC_CASES=(
+  "local|hosting=local reason=endpoint 'lan-qwen' hosting_location=local|1|hosting=local"
+  "unknown-id|hosting=unknown reason=Unknown FACTORY_MODEL_ENDPOINT 'nope' — no such id|1|hosting=unresolved"
+  "unreadable-registry|hosting=unknown reason=/etc/dark-factory/model-registry/model-endpoints.yaml: unreadable (Permission denied)|1|hosting=unresolved"
+  "invalid-registry|hosting=unknown reason=model-endpoints.yaml: schema_version must be a quoted string|1|hosting=unresolved"
+  "crash-no-output||1|hosting=unresolved"
+  "cloud-text-but-exit-1|hosting=cloud|1|hosting=unresolved"
+  "exit-0-unexpected-output|hosting=cloudy|0|hosting=unresolved"
+  "exit-0-empty-output||0|hosting=unresolved"
+)
+for _c in "${_AC_CASES[@]}"; do
+  IFS='|' read -r _c_name _c_out _c_rc _c_tok <<< "$_c"
+  AC_HC_OUT="$_c_out"; AC_HC_RC="$_c_rc"
+  for _p in approved merge spec plan; do
+    > "$STUB_LOG"; rm -f "$AC_LAST_BODY"
+    _ac_path "$_p" 2>/dev/null
+    _ac_assert_refused "AC1 ${_c_name}/${_p}" "$(_ac_issue "$_p")" "$_c_tok"
+  done
+done
+
+# AC3: a second poll with the same refused state changes no counter (real evaluate_stop /
+# reset_retry against $STATE_FILE) and makes the same single marker upsert — an in-place
+# update, never a second comment.
+AC_HC_OUT="hosting=local reason=x"; AC_HC_RC=1
+eval "$_AB_REAL_EVALUATE_STOP"; export -f evaluate_stop
+echo '{}' > "$STATE_FILE"
+increment_retry "801:close"; increment_retry "803:refine"; increment_retry "804:plan"
+cp "$STATE_FILE" "$_AC_DIR/state-before.json"
+for _p in approved merge spec plan; do
+  > "$STUB_LOG"
+  _ac_path "$_p" 2>/dev/null; _ac_path "$_p" 2>/dev/null
+  _n=$(_ac_issue "$_p")
+  assert_eq "AC3 ${_p}: two polls → two upserts of the one marker comment" \
+    "2" "$(grep -cF -- "tracker comment --id $_n --marker <!-- df-local-routing-refusal -->" "$STUB_LOG" || true)"
+  assert_eq "AC3 ${_p}: two polls → no append-only comment" "0" "$(grep -c 'tracker add-comment' "$STUB_LOG" || true)"
+  assert_eq "AC3 ${_p}: two polls → no dispatch" "0" "$(grep -c '^dispatch ' "$STUB_LOG" || true)"
+done
+assert_eq "AC3: STATE_FILE byte-identical after repeated refusals" \
+  "same" "$(cmp -s "$_AC_DIR/state-before.json" "$STATE_FILE" && echo same || echo changed)"
+evaluate_stop() { echo "evaluate_stop $*" >> "$STUB_LOG"; echo "stopped=false reason=none"; }
+export -f evaluate_stop
+
+# AC3b: once ready-for-human is on the item, no path reaches the guard at all.
+for _p in approved merge spec plan; do
+  > "$STUB_LOG"
+  _ac_path "$_p" ',"ready-for-human"' 2>/dev/null
+  assert_eq "AC3b ${_p}: ready-for-human → resolver not called" \
+    "0" "$(grep -c 'hosting-check' "$STUB_LOG" || true)"
+  assert_eq "AC3b ${_p}: ready-for-human → no refusal comment" \
+    "0" "$(grep -c 'df-local-routing-refusal' "$STUB_LOG" || true)"
+done
+# AC4: the refusal is not human feedback — real has_new_comment_after_report and
+# get_new_comments against a comment list whose last entry is the refusal body.
+> "$STUB_LOG"; rm -f "$AC_LAST_BODY"
+_ac_path spec 2>/dev/null
+_AC_REFUSAL_BODY=$(cat "$AC_LAST_BODY" 2>/dev/null || true)
+_AC_REPORT="## Refinement Pipeline — Spec Generated
+
+---
+*Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline*"
+_AC_REAL_GNC=$(sed -n '/^get_new_comments() {/,/^}/p' "$SCHED")
+_AC_LIB="$SCRIPT_DIR/../scripts/scheduler_lib.sh"
+_AC_BOT_RE=$(python3 "$FACTORY_CORE_CLI" markers-regex)
+AC_COMMENTS=$(jq -cn --arg r "$_AC_REPORT" --arg f "$_AC_REFUSAL_BODY" \
+  '[{body:$r, createdAt:"2026-01-01T00:00:00Z"}, {body:$f, createdAt:"2026-01-01T01:00:00Z"}]')
+assert_eq "AC4a: refusal after the report is not feedback (has_new_comment_after_report)" "no" \
+  "$(source "$_AC_LIB"; BOT_RE="$_AC_BOT_RE"; has_new_comment_after_report 803 "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")"
+AC_COMMENTS=$(jq -cn --arg f "$_AC_REFUSAL_BODY" \
+  '[{body:"merge it", createdAt:"2026-01-01T00:00:00Z"}, {body:$f, createdAt:"2026-01-01T01:00:00Z"}]')
+assert_eq "AC4b: nothing after the refusal is new input (get_new_comments)" "[]" \
+  "$(eval "$_AC_REAL_GNC"; get_new_comments 802 | jq -c .)"
+
+# AC5: a human removed ready-for-human while the instance is still non-cloud. Real comment
+# readers (scheduler_lib.sh re-sourced) see [report, refusal]: no counter reset, no gate
+# label removal, no Refine/Plan dispatch — the advance is refused again and the same marker
+# comment is updated.
+source "$_AC_LIB"; BOT_RE="$_AC_BOT_RE"
+AC_COMMENTS=$(jq -cn --arg r "$_AC_REPORT" --arg f "$_AC_REFUSAL_BODY" \
+  '[{body:$r, createdAt:"2026-01-01T00:00:00Z"}, {body:$f, createdAt:"2026-01-01T01:00:00Z"}]')
+echo '{}' > "$STATE_FILE"; increment_retry "803:refine"; increment_retry "804:plan"
+cp "$STATE_FILE" "$_AC_DIR/state-before.json"
+for _p in spec plan; do
+  > "$STUB_LOG"
+  _ac_path "$_p" 2>/dev/null
+  _n=$(_ac_issue "$_p")
+  assert_eq "AC5 ${_p}: no gate label removed" "0" "$(grep -c -- '--remove' "$STUB_LOG" || true)"
+  assert_eq "AC5 ${_p}: no Refine/Plan dispatch" "0" "$(grep -cE '^dispatch (Refine|Plan) issue' "$STUB_LOG" || true)"
+  assert_eq "AC5 ${_p}: refused again (ready-for-human re-applied)" \
+    "1" "$(grep -c -- "tracker label --id $_n --add ready-for-human" "$STUB_LOG" || true)"
+  assert_eq "AC5 ${_p}: same marker comment updated" \
+    "1" "$(grep -cF -- "tracker comment --id $_n --marker <!-- df-local-routing-refusal -->" "$STUB_LOG" || true)"
+done
+assert_eq "AC5: no retry counter reset" \
+  "same" "$(cmp -s "$_AC_DIR/state-before.json" "$STATE_FILE" && echo same || echo changed)"
+# Control: a real human comment after the refusal still re-runs refinement.
+AC_COMMENTS=$(jq -cn --arg r "$_AC_REPORT" --arg f "$_AC_REFUSAL_BODY" \
+  '[{body:$r, createdAt:"2026-01-01T00:00:00Z"}, {body:$f, createdAt:"2026-01-01T01:00:00Z"}, {body:"please tighten scope", createdAt:"2026-01-01T02:00:00Z"}]')
+> "$STUB_LOG"
+_ac_path spec 2>/dev/null
+assert_eq "AC5 control: human comment after the refusal → Refine dispatched" \
+  "1" "$(grep -c '^dispatch Refine issue #803$' "$STUB_LOG" || true)"
+has_new_comment_after_report() { echo "no"; }
+elapsed_minutes_since_marker() { echo "99"; }
+export -f has_new_comment_after_report elapsed_minutes_since_marker
+AC_COMMENTS='[]'; echo '{}' > "$STATE_FILE"
+
+# AC6: a failing label call still posts the marker comment and never fails the caller. Plain
+# calls on purpose: under the live `set -e` an unguarded failure aborts the suite here. The
+# next poll (label still missing) is the same single upsert, as in AC3/AC5.
+AC_LABEL_RC=1
+for _p in approved merge spec plan; do
+  _n=$(_ac_issue "$_p")
+  > "$STUB_LOG"; rm -f "$AC_LAST_BODY"
+  _ac_path "$_p" 2>/dev/null
+  assert_eq "AC6 ${_p}: failed label call → marker comment still posted" \
+    "1" "$(grep -cF -- "tracker comment --id $_n --marker <!-- df-local-routing-refusal -->" "$STUB_LOG" || true)"
+  assert_eq "AC6 ${_p}: failed label call → no dispatch / board move" \
+    "0" "$(grep -cE '^(dispatch|set_board_status) ' "$STUB_LOG" || true)"
+  > "$STUB_LOG"
+  _ac_path "$_p" 2>/dev/null
+  assert_eq "AC6 ${_p}: next poll → the same single marker upsert" \
+    "1" "$(grep -cF -- "tracker comment --id $_n --marker <!-- df-local-routing-refusal -->" "$STUB_LOG" || true)"
+  assert_eq "AC6 ${_p}: next poll → no append-only comment" "0" "$(grep -c 'tracker add-comment' "$STUB_LOG" || true)"
+done
+AC_LABEL_RC=0
+# AC6b: a failed mktemp returns without posting and without ending the scheduler (set -e).
+mktemp() { return 1; }
+for _p in spec plan; do
+  > "$STUB_LOG"
+  _ac_path "$_p" 2>/dev/null
+  assert_eq "AC6b ${_p}: mktemp failure → no comment call" \
+    "0" "$(grep -c 'tracker comment' "$STUB_LOG" || true)"
+  assert_eq "AC6b ${_p}: mktemp failure → no advance" "0" "$(grep -c '^set_board_status' "$STUB_LOG" || true)"
+done
+unset -f mktemp
+# AC7: a confirmed cloud endpoint behaves exactly like the unset case.
+AC_HC_OUT="hosting=cloud"; AC_HC_RC=0
+for _p in approved merge spec plan; do
+  > "$STUB_LOG"
+  _ac_path "$_p" 2>/dev/null
+  _ac_assert_proceeded "AC7 cloud/${_p}" "$_p"
+  assert_eq "AC7 cloud/${_p}: resolver called once" "1" "$(grep -c 'model-endpoints hosting-check --endpoint-id lan-qwen' "$STUB_LOG" || true)"
+done
+
+# AC8: endpoint unset or empty → byte-identical to today: zero resolver calls, and no ledger
+# or run-record path is passed to any CLI call (AC9c locks the helpers statically), whether
+# the request ledger is present, absent or holds legacy (pre-#558, no hosting_location) rows.
+export MODEL_PROXY_LEDGER_PATH="$SCHEDULER_STATE_DIR/request-ledger.jsonl"
+AC_HC_OUT="hosting=local reason=x"; AC_HC_RC=1   # would refuse if it were ever consulted
+for _endpoint in unset empty; do
+  if [ "$_endpoint" = unset ]; then unset FACTORY_MODEL_ENDPOINT; else export FACTORY_MODEL_ENDPOINT=""; fi
+  for _ledger in present absent legacy; do
+    case "$_ledger" in
+      present) printf '%s\n' '{"run_id":"r1","issue_number":801,"hosting_location":"local","payload_class":"local_only"}' > "$MODEL_PROXY_LEDGER_PATH" ;;
+      absent)  rm -f "$MODEL_PROXY_LEDGER_PATH" ;;
+      legacy)  printf '%s\n' '{"run_id":"r0","issue_number":801}' > "$MODEL_PROXY_LEDGER_PATH" ;;
+    esac
+    for _p in approved merge spec plan; do
+      > "$STUB_LOG"
+      _ac_path "$_p" 2>/dev/null
+      _ac_assert_proceeded "AC8 ${_endpoint}/${_ledger}/${_p}" "$_p"
+      assert_eq "AC8 ${_endpoint}/${_ledger}/${_p}: zero resolver calls" "0" "$(grep -c 'hosting-check' "$STUB_LOG" || true)"
+      assert_eq "AC8 ${_endpoint}/${_ledger}/${_p}: no ledger/run-record path passed to any CLI call" \
+        "0" "$(grep -cE 'request-ledger|run-record|run_record|current-run|runs\.jsonl' "$STUB_LOG" || true)"
+    done
+  done
+done
+rm -f "$MODEL_PROXY_LEDGER_PATH"; unset MODEL_PROXY_LEDGER_PATH FACTORY_MODEL_ENDPOINT
+
+# AC9: static drift locks — three guarded call sites, and the guard helpers name no
+# run-writable store (owner decision 2).
+assert_eq "AC9a: cloud_endpoint_confirmed guards exactly three call sites" \
+  "3" "$(grep -cE '^[[:space:]]+if ! cloud_endpoint_confirmed; then$' "$SCHED")"
+assert_eq "AC9b: both guard helpers are defined" \
+  "function function" "$(type -t cloud_endpoint_confirmed || true) $(type -t refuse_local_routing || true)"
+assert_eq "AC9c: guard helpers reference no run-writable store" \
+  "0" "$(declare -f cloud_endpoint_confirmed refuse_local_routing | grep -cE 'ledger|run-record|run_record|current-run|runs\.jsonl' || true)"
+assert_eq "AC9d: the resolver reads the scheduler's mount, not the staged copy" \
+  "1" "$(grep -c 'model_endpoint.SOURCE_REGISTRY_DIR, args.endpoint_id' "$SCRIPT_DIR/../scripts/factory_core/providers/cli.py" || true)"
+
+# Restore stubs to section defaults
+reset_python3_stub
+python3() {
+  echo "python3 $*" >> "$STUB_LOG"
+  case "$*" in
+    *providers/cli.py*) [ -n "$PROVIDERS_CLI_OUTPUT" ] && printf '%s\n' "$PROVIDERS_CLI_OUTPUT"; return 0 ;;
+    *) "$_REAL_PY3" "$@" ;;
+  esac
+}
+eval "$_AB_REAL_EVALUATE_STOP"; eval "$_AB_REAL_TRIP_TO_BLOCKED"
+get_pr_for_issue() { echo ""; }
+dispatch() { echo "dispatch $*" >> "$STUB_LOG"; return 0; }
+has_new_comment_after_report() { echo "no"; }
+elapsed_minutes_since_marker() { echo ""; }
+export -f python3 evaluate_stop trip_to_blocked get_pr_for_issue dispatch \
+  has_new_comment_after_report elapsed_minutes_since_marker
+rm -rf "$_AC_DIR"
+> "$STUB_LOG"; echo '{}' > "$STATE_FILE"
+
+
+# ==========================================
 # Cleanup
 # ==========================================
 rm -f "$STATE_FILE" "$STUB_LOG"
