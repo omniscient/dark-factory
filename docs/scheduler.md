@@ -132,7 +132,7 @@ Fixed cost, every poll:
 | `tracker get-rate-budget` → `gh api rate_limit --jq .resources.graphql` | REST | `check_rate_limit`, `scheduler.sh:76-91`; `providers/tracker/github.py` `get_rate_budget()` |
 | Board fetch: `providers/cli.py tracker board-items`, which runs `gh api graphql` with `items(first: 100)` per page, following `endCursor` until `hasNextPage` is false. One call per 100 board items. Each item carries status name, issue number, title, the first 10 labels and the item's ProjectV2 id (the `id` selection, #607 — the scheduler's board moves use it to skip the item-list lookup). The query also selects `rateLimit { cost remaining resetAt }`, and each page call appends one line to the GraphQL cost log under `SCHEDULER_STATE_DIR` (written only when that variable is set; fail-soft; #607) | GraphQL | `fetch_board_items`, `scheduler.sh:712-716`; `providers/tracker/github.py` `list_board_items()` (`:268`) and the query template (`:28`); `factory_core/cost_log.py` (`log_call`, `:21`) |
 | `tracker get-rate-budget` again, for the `graphql=` field of the summary line | REST | `scheduler.sh:1770-1771` |
-| Only when the poll dispatched nothing: `providers/cli.py tracker list-items --label ready-for-agent --limit 200`, which runs `gh issue list --repo <slug> --state open --label ready-for-agent --limit 200 --json number` | `gh` subcommand | `off_board_ready_issues`, `scheduler.sh:724-740`, `:1765`; `providers/tracker/github.py` `list_items()` (`:270`) |
+| Only when the poll dispatched nothing: `providers/cli.py tracker list-items --label ready-for-agent --limit 200`, which runs `gh issue list --repo <slug> --state open --label ready-for-agent --limit 200 --json number` | `gh` subcommand | `off_board_ready_issues`, `scheduler.sh:724-740`, `:1765`; `providers/tracker/github.py` `list_items()` (`:315`) |
 
 A failed board fetch logs `error=gh_api_failed` and skips the whole poll
 (`scheduler.sh:1678`). Since [PR #525](https://github.com/omniscient/dark-factory/pull/525)
@@ -167,7 +167,7 @@ written as `gh api graphql` are provably GraphQL from the code.
 
 Plain comments posted by the scheduler (the "Starting…" comments, the CI-gate, orphan and
 ceiling comments, the feedback re-run comments) use `tracker add-comment`
-(`providers/tracker/github.py` `add_comment()`, `:181`), which runs
+(`providers/tracker/github.py` `add_comment()`, `:220`), which runs
 `gh issue comment <n> --repo <slug> --body …`. Still direct `gh`, outside the provider
 layer: board moves (`set_board_status` → `factory_core/cli.py board-move` →
 `board.py`, `gh project item-edit` — the `item-list` lookup is skipped when the
@@ -327,7 +327,7 @@ Consequences that follow directly from this:
 
 - `deploy/instance.env` configures the scheduler. Apart from the identity block and the
   provider pass-through list, nothing in it reaches a run
-  (`deploy/instance.env.example:9-10`, `:133-138`).
+  (`deploy/instance.env.example:9-10`, `:127-132`).
 - Values the scheduler takes from `config.yaml` via `read_config` stay in the scheduler
   process. A feature whose run-side half reads an env var must also have that var in
   `.archon/.env`. `config/config.yaml:120-122` says this about `MAIN_RED_AUTOFIX_ENABLED`,
@@ -972,7 +972,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     be a no-op while the caller logs it as done.
 
 21. **`post_or_update_comment` creates a comment without `--repo`.** Still true on
-    `64cd44a`: `scripts/factory_core/board.py` (`:130`) calls
+    `64cd44a`: `scripts/factory_core/board.py` (`:139`) calls
     `gh issue comment <n> --body-file …` with no `--repo` (its lookup and PATCH calls do
     name the repo), while the scheduler's own comments note that it runs outside a git
     checkout and must pass `--repo` (`scheduler.sh:685-687`). This is the path used by the
