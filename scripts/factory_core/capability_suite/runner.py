@@ -565,16 +565,21 @@ def main(argv=None, *, fixtures_dir=FIXTURES_DIR) -> int:
         context_tokens = mock_server.CONTEXT_TOKENS
     try:
         cases = load_cases(fixtures_dir)
-    except CaseError as e:
+        suite_version = emit.suite_digest(fixtures_dir=fixtures_dir)
+    except (CaseError, model_endpoint.RegistryError) as e:
         print(f"capability suite: fixture tree is invalid: {e}", file=sys.stderr)
         return 3
+    if suite_version != model_endpoint.PINNED_FIXTURE_SUITE_VERSION:
+        print("capability suite: WARNING: this suite's digest differs from "
+              "model_endpoint.PINNED_FIXTURE_SUITE_VERSION. The result records the digest that "
+              "ran; evidence written from it resolves stale.", file=sys.stderr)
     summary, base_url = asyncio.run(_run(
         cases, base_url=args.base_url, served_name=args.served_name or mock_server.SERVED_NAME,
         credential=credential, context_tokens=context_tokens))
     result = emit.build_result(
         target_kind="mock" if mock_mode else "endpoint", base_url=base_url,
         results=dimension_results(summary.probe_values), harness_pending=HARNESS_PENDING,
-        controls=summary.controls)
+        controls=summary.controls, fixture_suite_version=suite_version)
     emit.write_result(args.out, result)
     for line in summary.lines:
         print(line)

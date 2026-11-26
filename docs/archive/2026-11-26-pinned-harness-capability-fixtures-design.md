@@ -332,7 +332,7 @@ the mock exhibits it.
 ```text
 certification_result:
   schema_version: "1.0"
-  fixture_suite_version: <PINNED_FIXTURE_SUITE_VERSION>
+  fixture_suite_version: <emit.suite_digest() of the suite that ran; equals PINNED_FIXTURE_SUITE_VERSION for an unmodified suite>
   harness_version: <model_endpoint.observed_harness_version(), or null>
   target_kind: mock | endpoint
   base_url_scope: <model_endpoint.base_url_scope(url): same-host | lan | remote>

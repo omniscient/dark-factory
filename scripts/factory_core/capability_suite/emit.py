@@ -18,22 +18,29 @@ TARGET_KINDS = ("mock", "endpoint")
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 
-def suite_digest(package_dir=PACKAGE_DIR) -> str:
+def suite_digest(package_dir=PACKAGE_DIR, fixtures_dir=None) -> str:
     """SHA-256 over fixtures/ and every top-level module: PINNED_FIXTURE_SUITE_VERSION.
 
     The glob is not recursive, so __pycache__/ is never read; fixtures/ holds no Python.
+    fixtures_dir is the tree a run actually loaded when it is not package_dir's own.
     """
     package_dir = Path(package_dir)
+    fixtures = package_dir / "fixtures" if fixtures_dir is None else Path(fixtures_dir)
     digest = hashlib.sha256()
-    digest.update(model_endpoint.tree_sha256(package_dir / "fixtures").encode())
+    digest.update(model_endpoint.tree_sha256(fixtures).encode())
     for path in sorted(package_dir.glob("*.py")):  # every module: a new one is never unhashed
         digest.update(path.name.encode() + b"\0")
         digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode() + b"\n")
     return digest.hexdigest()
 
 
-def build_result(*, target_kind, base_url, results, harness_pending, controls, now=None) -> dict:
-    """The certification_result mapping. Only base_url's scope is recorded, never the URL."""
+def build_result(*, target_kind, base_url, results, harness_pending, controls,
+                 fixture_suite_version, now=None) -> dict:
+    """The certification_result mapping. Only base_url's scope is recorded, never the URL.
+
+    fixture_suite_version is the digest of the suite that ran (suite_digest()), never the
+    committed pin taken on trust: a modified suite must not claim the pinned version.
+    """
     if target_kind not in TARGET_KINDS:
         raise ValueError(f"target_kind must be one of {', '.join(TARGET_KINDS)}")
     if (tuple(results) != model_endpoint.ACTOR_REQUIRED_DIMENSIONS
@@ -42,7 +49,7 @@ def build_result(*, target_kind, base_url, results, harness_pending, controls, n
                          "value")
     return {RESULT_KEY: {
         "schema_version": SCHEMA_VERSION,
-        "fixture_suite_version": model_endpoint.PINNED_FIXTURE_SUITE_VERSION,
+        "fixture_suite_version": fixture_suite_version,
         "harness_version": model_endpoint.observed_harness_version(),
         "target_kind": target_kind,
         "base_url_scope": model_endpoint.base_url_scope(base_url),

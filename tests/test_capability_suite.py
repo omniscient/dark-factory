@@ -135,7 +135,8 @@ def test_mock_scripted_faults(fault, path, body, check):
 def _result(**kw):
     args = dict(target_kind="endpoint", base_url="http://192.0.2.10:8080",
                 results={d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}, harness_pending=(),
-                controls=[], now=datetime(2026, 11, 26, tzinfo=timezone.utc))
+                controls=[], fixture_suite_version="f" * 64,
+                now=datetime(2026, 11, 26, tzinfo=timezone.utc))
     args.update(kw)
     return emit.build_result(**args)
 
@@ -143,7 +144,7 @@ def _result(**kw):
 def test_result_records_the_scope_never_the_url():
     body = _result()["certification_result"]
     assert body["base_url_scope"] == "lan" and "192.0.2.10" not in json.dumps(body)
-    assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
+    assert body["fixture_suite_version"] == "f" * 64
     assert body["generated_at"] == "2026-11-26T00:00:00+00:00"
 
 
@@ -391,6 +392,7 @@ def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
         "timeout_cancellation": "not_tested",
     }
     assert body["harness_pending"] == list(runner.HARNESS_PENDING)
+    assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
     assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
     assert len(body["controls"]) == 16 and all(c["ok"] for c in body["controls"])
 
@@ -419,6 +421,17 @@ def test_a_changed_control_fault_exits_3(tmp_path):
     assert bad == [{"dimension": "protocol_compatibility", "case": "malformed_json_body",
                     "kind": "control", "expected": "fail:malformed_json",
                     "observed": "fail:model_mismatch", "ok": False}]
+
+
+def test_a_modified_tree_records_its_own_digest_not_the_pin(tmp_path, capsys):
+    fixtures = _copy_fixtures(tmp_path)
+    path = fixtures / "streaming" / "sse_message_stop" / "case.yaml"
+    path.write_text(path.read_text() + "# edited\n")
+    code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
+    version = result["certification_result"]["fixture_suite_version"]
+    assert code == 0 and version == emit.suite_digest(fixtures_dir=fixtures)
+    assert version != me.PINNED_FIXTURE_SUITE_VERSION
+    assert "differs from model_endpoint.PINNED_FIXTURE_SUITE_VERSION" in capsys.readouterr().err
 
 
 def test_a_malformed_tree_exits_3_and_writes_nothing(tmp_path):
