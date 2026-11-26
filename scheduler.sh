@@ -364,6 +364,71 @@ end_gate_check() {
   esac
 }
 
+# --- Non-cloud endpoint guard (#585) ---
+# hybrid-execution-contract Invariant 7: work is never auto-merged or auto-advanced while
+# this instance's own model endpoint isn't confirmed cloud-hosted. Scheduler-side and
+# instance-wide: reads $FACTORY_MODEL_ENDPOINT and the read-only registry mount only, never
+# a run-writable file (request ledger, run records, current-run.json, runs.jsonl). Unset
+# endpoint short-circuits before any subprocess. Only exit 0 with stdout exactly
+# `hosting=cloud` passes; the resolver's stderr and reason= text are discarded.
+cloud_endpoint_confirmed() {
+  if [ -z "${FACTORY_MODEL_ENDPOINT:-}" ]; then
+    return 0
+  fi
+  local out="" rc=0
+  out=$(python3 "$FACTORY_PROVIDERS_CLI" model-endpoints hosting-check \
+       --endpoint-id "$FACTORY_MODEL_ENDPOINT" 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$out" = "hosting=cloud" ]; then
+    return 0
+  fi
+  case "$out" in
+    "hosting=local "*) LOCAL_ROUTING_REFUSAL_REASON="hosting=local" ;;
+    *) LOCAL_ROUTING_REFUSAL_REASON="hosting=unresolved" ;;
+  esac
+  echo "[$(date -u +%FT%TZ)] local_routing_gate=refuse ${LOCAL_ROUTING_REFUSAL_REASON} rc=${rc}" >&2
+  return 1
+}
+
+# Refusal poster for the three guarded call sites: ready-for-human, then one marker-deduped
+# comment (tracker comment --marker upserts — a later refusal PATCHes the same comment).
+# Both identity footers are load-bearing: has_new_comment_after_report and get_new_comments
+# tell factory comments from human feedback by footer only. Every step is best-effort and
+# never fails the caller (the grace call sites are not inside an `if`, so an unguarded
+# failure would end the scheduler under `set -e`); none lets the merge/advance proceed.
+# The body is fixed text plus one fixed token — no worker-controlled value.
+refuse_local_routing() {
+  local issue_num="$1" action="$2"  # action: merge | spec-advance | plan-advance
+  local reason="${LOCAL_ROUTING_REFUSAL_REASON:-hosting=unresolved}"
+  echo "[$(date -u +%FT%TZ)] local_routing_gate=refuse issue=#${issue_num} action=${action} ${reason}"
+  python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" --add ready-for-human || true
+  local f_sched f_fact
+  f_sched=$(python3 "$FACTORY_CORE_CLI" marker scheduler 2>/dev/null) \
+    || f_sched="*Posted by ${FACTORY_PRODUCT_NAME} Backlog Scheduler*"
+  f_fact=$(python3 "$FACTORY_CORE_CLI" marker factory 2>/dev/null) \
+    || f_fact="*Posted by ${FACTORY_PRODUCT_NAME} Dark Factory*"
+  local body
+  body=$(cat <<EOF
+## Scheduler — automated ${action} refused
+
+This instance's selected model endpoint is not confirmed cloud-hosted
+(\`${reason}\`). Per \`docs/hybrid-execution-contract.md\` Invariant 7,
+work is never auto-merged or auto-advanced while that's true — a human must take this action
+directly.
+
+---
+${f_sched}
+${f_fact}
+<!-- df-local-routing-refusal -->
+EOF
+)
+  local tmpfile
+  tmpfile=$(mktemp /tmp/local-routing-refusal-XXXXXX.md) || return 0
+  echo "$body" > "$tmpfile" || { rm -f "$tmpfile"; return 0; }
+  python3 "$FACTORY_PROVIDERS_CLI" tracker comment --id "$issue_num" \
+    --marker "<!-- df-local-routing-refusal -->" --body-file "$tmpfile" 2>/dev/null || true
+  rm -f "$tmpfile"
+}
+
 # --- Close dispatch: running-issue guard + close-phase circuit breaker (#414) ---
 # The only place `Close issue #N` is dispatched — stage_review_triage's MERGE case and
 # end_gate_check's APPROVED case both call it, so the two paths share one guard and one
@@ -376,6 +441,11 @@ end_gate_check() {
 dispatch_close() {
   local issue_num="$1"
   is_issue_running "$issue_num" && return 1
+  # #585: before evaluate_stop, so a refusal never consumes the N:close counter.
+  if ! cloud_endpoint_confirmed; then
+    refuse_local_routing "$issue_num" "merge"
+    return 1
+  fi
   local eval_result
   eval_result=$(evaluate_stop "$issue_num" "close" "$MAX_RETRIES")
   case "$eval_result" in
