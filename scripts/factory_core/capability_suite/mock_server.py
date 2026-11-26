@@ -21,7 +21,7 @@ FAULT_HEADER = "X-Capability-Fault"
 FAULTS = (
     "malformed_json", "wrong_model", "count_tokens_404", "ignore_tool_choice",
     "bad_input_json", "unoffered_tool", "cut_stream", "max_tokens_stop", "truncate_input",
-    "over_limit", "stall_first_byte", "stall_mid_stream",
+    "over_limit", "stall_first_byte", "stall_mid_stream", "cache_hit",
 )
 # Longer than any control's timeout; a stalled handler is cancelled when the client hangs up.
 STALL_SECONDS = 3.0
@@ -222,8 +222,13 @@ async def _answer(request, body):
         "content": content,
         "stop_reason": "max_tokens" if fault == "max_tokens_stop" else stop_reason,
         "stop_sequence": None,
-        "usage": {"input_tokens": TRUNCATED_INPUT_TOKENS if fault == "truncate_input" else words,
-                  "output_tokens": 1},
+        # cache_hit (#628): the endpoint accepted the whole prompt, but reports only a
+        # small non-cached input_tokens with the rest under cache_read_input_tokens —
+        # the shape a prefix-caching endpoint produces on every run after the first.
+        "usage": {"input_tokens": TRUNCATED_INPUT_TOKENS if fault in ("truncate_input", "cache_hit") else words,
+                   **({"cache_read_input_tokens": max(0, words - TRUNCATED_INPUT_TOKENS)}
+                      if fault == "cache_hit" else {}),
+                   "output_tokens": 1},
     }
     if script is not None and script.name == "stall":
         return await _stall(request, message, request.app[OBSERVED])

@@ -1,0 +1,10 @@
+case: cache_hit
+dimension: context_length
+description: A response whose usage reports most of the prompt under cache_read_input_tokens (a prefix-cache hit, #628) is a complete acceptance — total input tokens pass — not a silent input truncation.
+driver: http
+kind: control
+target: mock
+check: context_window
+fault: cache_hit
+expect: pass
+expect_reason: ok
