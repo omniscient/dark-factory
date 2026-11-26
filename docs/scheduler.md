@@ -976,7 +976,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     be a no-op while the caller logs it as done.
 
 21. **Resolved by #621: `post_or_update_comment` creates its comment with `--repo`.**
-    `scripts/factory_core/board.py` (`:158-159`) now calls
+    `scripts/factory_core/board.py` (`:161-162`) now calls
     `gh issue comment <n> --repo <owner>/<repo> --body-file …`. From the scheduler's
     `/workspace`, which is not a git checkout, `gh` cannot infer the repo, and a bare
     `gh issue …` call fails with "not a git repository" (`scheduler.sh:685-687`). Its
@@ -986,7 +986,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     (`providers/tracker/github.py:218`). The same change makes the marker lookup read
     every comment page (`gh api …/comments?per_page=100 --paginate`, matched in
     Python). It also stops a failed lookup from creating a duplicate: one failed lookup
-    is retried, and a second failure skips the post with a stderr warning.
+    is retried after a 1s pause, and a second failure skips the post with a stderr warning.
 
 22. **Minor comment drift.** `config/config.yaml:5` says polling pauses when remaining
     is "<" the floor; the code uses `-le` (`scheduler.sh:82`). The comment above
