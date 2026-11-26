@@ -21,7 +21,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from factory_core.capability_suite import mock_server  # noqa: E402
+from factory_core.capability_suite import emit, mock_server  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
 
 
@@ -128,3 +128,45 @@ def test_mock_counts_tokens():
 def test_mock_scripted_faults(fault, path, body, check):
     assert fault in mock_server.FAULTS
     assert check(*_mock(path, body, fault))
+
+
+# --- certification_result -------------------------------------------------------------------
+
+def _result(**kw):
+    args = dict(target_kind="endpoint", base_url="http://192.0.2.10:8080",
+                results={d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}, harness_pending=(),
+                controls=[], now=datetime(2026, 11, 26, tzinfo=timezone.utc))
+    args.update(kw)
+    return emit.build_result(**args)
+
+
+def test_result_records_the_scope_never_the_url():
+    body = _result()["certification_result"]
+    assert body["base_url_scope"] == "lan" and "192.0.2.10" not in json.dumps(body)
+    assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
+    assert body["generated_at"] == "2026-11-26T00:00:00+00:00"
+
+
+def test_result_carries_no_evidence_record_field():
+    result = _result()
+    assert set(result) == {"certification_result"}
+    assert not {"endpoint_id", "certified_by", "certified_at", "expires_at",
+                "invalidated_by", "qualified_roles"} & set(result["certification_result"])
+
+
+@pytest.mark.parametrize("kw", [
+    {"target_kind": "rig"},
+    {"results": {"streaming": "pass"}},
+    {"results": {d: "unknown" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
+    {"results": {d: "stale" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
+])
+def test_result_rejects_values_outside_the_vocabulary(kw):
+    with pytest.raises(ValueError):
+        _result(**kw)
+
+
+def test_written_result_is_rejected_as_evidence(tmp_path):
+    evidence_dir = tmp_path / "capability-evidence"
+    emit.write_result(evidence_dir / "local-a.yaml", _result())
+    with pytest.raises(me.RegistryError, match="exactly one capability_evidence mapping"):
+        me.load_evidence(evidence_dir, "local-a")
