@@ -78,6 +78,11 @@ class _GitHubFixtureController:
             if cmd[3] in self.items:
                 self.items[cmd[3]]["status"] = "done"
             return self._ok()
+        if cmd[:2] == ["gh", "api"] and "--paginate" in cmd and "/comments?" in str(cmd[2]):
+            # board.post_or_update_comment: the paginated lookup returns the whole merged
+            # array; the marker match and newest-pick happen in Python (#621)
+            key = cmd[2].split("/issues/")[1].split("/")[0]
+            return self._ok(stdout=json.dumps(self.comments.get(key, [])))
         if cmd[:2] == ["gh", "api"] and "--jq" in cmd and str(cmd[2]).endswith("/comments"):
             key = cmd[2].split("/issues/")[1].split("/")[0]
             marker = cmd[cmd.index("--jq") + 1].split('contains("')[1].split('")')[0]

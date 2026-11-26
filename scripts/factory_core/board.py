@@ -117,12 +117,31 @@ def add_to_board(issue_num: int, issue_url: str) -> bool:
 
 
 def post_or_update_comment(issue_num: int, marker: str, body: str) -> None:
-    r = subprocess.run(
-        ["gh", "api", f"repos/{OWNER}/{REPO}/issues/{issue_num}/comments",
-         "--jq", f'[.[] | select(.body | contains("{marker}"))] | last | .id // empty'],
-        capture_output=True, text=True,
-    )
-    comment_id = r.stdout.strip() if r.returncode == 0 else ""
+    # --paginate with no --jq: gh merges the array pages into one list, and the newest
+    # match is taken over that whole list (a --jq filter would run once per page).
+    # A failed lookup is retried once, then the post is skipped -- never "create",
+    # which is the duplicate this guards against (#621).
+    comments = None
+    for _attempt in (1, 2):  # one retry: most callers are one-shot and cannot retry themselves
+        r = subprocess.run(
+            ["gh", "api", f"repos/{OWNER}/{REPO}/issues/{issue_num}/comments?per_page=100",
+             "--paginate"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            continue
+        try:
+            parsed = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            comments = parsed
+            break
+    if comments is None:
+        print(f"board: comment lookup failed twice for #{issue_num}; skipping post", file=sys.stderr)
+        return
+    matches = [c for c in comments if isinstance(c, dict) and marker in (c.get("body") or "")]
+    comment_id = str(matches[-1]["id"]) if matches else ""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fh:
         fh.write(body)
         tmp = fh.name
@@ -136,7 +155,8 @@ def post_or_update_comment(issue_num: int, marker: str, body: str) -> None:
             )
         else:
             subprocess.run(
-                ["gh", "issue", "comment", str(issue_num), "--body-file", tmp],
+                ["gh", "issue", "comment", str(issue_num),
+                 "--repo", f"{OWNER}/{REPO}", "--body-file", tmp],
                 capture_output=True,
             )
     finally:
