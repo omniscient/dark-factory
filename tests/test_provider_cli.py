@@ -481,7 +481,7 @@ def test_model_endpoints_show_from_source_needs_no_digest(monkeypatch, capsys):
     monkeypatch.delenv("FACTORY_MODEL_REGISTRY_SHA256", raising=False)
     monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show", "--from-source"])
     cli_mod.main()
-    assert len(json.loads(capsys.readouterr().out)["endpoints"]) == 4
+    assert len(json.loads(capsys.readouterr().out)["endpoints"]) == 5
 
 
 def test_model_endpoints_show_invalid_registry_exits_1_with_field_errors(tmp_path, monkeypatch, capsys):
@@ -599,7 +599,8 @@ def test_model_endpoints_show_uses_only_the_first_read_of_the_staged_registry(tm
     monkeypatch.setattr(sys, "argv", ["cli.py", "model-endpoints", "show"])
     cli_mod.main()
     ids = [e["id"] for e in json.loads(capsys.readouterr().out)["endpoints"]]
-    assert ids == ["local-same-host", "local-lan", "local-remote", "cloud-anthropic"]
+    assert ids == ["local-same-host", "local-lan", "local-remote", "cloud-anthropic",
+                   "lan-ollama-qwen3-coder"]
     assert len(reads) == 1
 
 

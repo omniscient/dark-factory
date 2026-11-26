@@ -1042,6 +1042,51 @@ def test_local_slow_but_complete_stream_finishes_within_total(local_env, monkeyp
     assert body == SSE_OK and _rows(local_env)[0]["failure_class"] is None
 
 
+# --- #560: the LAN Ollama profile's timeouts at scaled bounds -----------------------------
+
+def _lan_profile_timeouts(scale=20):
+    """The fixture lan-ollama-qwen3-coder entry's timeouts divided by scale: the four ratios
+    hold, and no test waits anywhere near the registered 30-second time-to-first-token bound."""
+    fixture = Path(__file__).resolve().parent / "fixtures" / "model_registry" / me.REGISTRY_FILE
+    entry = next(e for e in me.load_registry(fixture) if e["id"] == "lan-ollama-qwen3-coder")
+    assert entry["timeouts"] == {"connect_seconds": 10, "time_to_first_token_seconds": 30,
+                                 "idle_seconds": 60, "total_seconds": 1800}
+    return {k: v / scale for k, v in entry["timeouts"].items()}
+
+
+def test_lan_profile_cold_start_inside_ttft_succeeds(local_env, monkeypatch):
+    # 0.5s scaled is 10s: comfortably inside the unmeasured post-reboot estimate and the 30s
+    # bound, with over 1s of slack against the scaled 1.5s TTFT to avoid flaking under load.
+    async def cold_start(request):
+        await asyncio.sleep(0.5)
+        return web.json_response({"type": "message", "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    (status, _), calls, cloud_calls = _local_scenario(
+        local_env, monkeypatch, cold_start, _post_json, timeouts=_lan_profile_timeouts())
+    assert status == 200 and len(calls) == 1 and cloud_calls == []
+    assert _rows(local_env)[0]["failure_class"] is None
+
+
+def test_lan_profile_cold_start_past_ttft_is_its_own_class(local_env, monkeypatch):
+    (status, body), calls, cloud_calls = _local_scenario(
+        local_env, monkeypatch, _silent, _post_json, timeouts=_lan_profile_timeouts())
+    assert status == 504 and body["error"]["failure_class"] == ma.TIMEOUT_TIME_TO_FIRST_TOKEN
+    assert len(calls) == 1 and cloud_calls == []
+
+
+def test_lan_profile_queue_full_503_is_not_retried_or_sent_to_cloud(local_env, monkeypatch):
+    # A stand-in for the runtime refusing a request because its own queue is full.
+    async def queue_full(request):
+        return web.json_response({"type": "error", "error": {"type": "overloaded_error",
+                                                              "message": "server busy"}}, status=503)
+
+    (status, body), calls, cloud_calls = _local_scenario(
+        local_env, monkeypatch, queue_full, _post_json, timeouts=_lan_profile_timeouts())
+    assert status == 503 and body["error"]["type"] == "overloaded_error"
+    assert len(calls) == 1 and cloud_calls == []
+    assert _rows(local_env)[0]["failure_class"] == ma.ENDPOINT_UNREACHABLE
+
+
 def _spy_on_handler(monkeypatch):
     outcomes = []
     real = mp.handle_proxy
