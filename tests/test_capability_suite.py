@@ -345,7 +345,7 @@ def test_dimension_directories_are_exactly_the_actor_required_dimensions():
 def test_fixtures_hold_only_case_yaml_files():
     files = [p for p in runner.FIXTURES_DIR.rglob("*") if p.is_file()]
     assert files and all(p.name == "case.yaml" for p in files)
-    assert len(files) == len(runner.load_cases()) == 30
+    assert len(files) == len(runner.load_cases()) == 31
 
 
 def test_harness_pending_is_empty():
@@ -385,6 +385,7 @@ def test_every_mapped_control_and_observation_exists():
         "context_length/max_tokens_truncated",
         "context_length/silent_input_truncation",
         "context_length/over_limit_error",
+        "context_length/cache_hit",
         "timeout_cancellation/connection_refused",
         "timeout_cancellation/stall_before_first_byte",
         "timeout_cancellation/idle_stall_mid_stream",
@@ -440,7 +441,7 @@ def test_a_missing_dimension_directory_is_rejected(tmp_path):
 
 def test_every_control_matches_its_expect():
     controls = [c for c in _summary().controls if c["kind"] == "control"]
-    assert len(controls) == 14
+    assert len(controls) == 15
     assert all(c["ok"] and c["observed"] == c["expected"] for c in controls), controls
 
 
@@ -515,6 +516,15 @@ def test_exit_code_priority():
     assert runner.exit_code(S(probes=[("x", "pass")]), True, "ok") == 0
 
 
+def test_cache_hit_usage_is_not_input_truncation():
+    """A prefix-cache hit reports a small input_tokens with the rest under
+    cache_read_input_tokens: the control passes (#628), while the same small
+    input_tokens with no cache field (truncate_input) still fails."""
+    by_case = {c["case"]: c for c in _summary().controls}
+    assert by_case["cache_hit"]["observed"] == "pass:ok" and by_case["cache_hit"]["ok"]
+    assert by_case["silent_input_truncation"]["observed"] == "fail:input_truncated"
+
+
 def test_the_context_probe_does_not_run_without_a_window():
     cases = [c for c in runner.load_cases() if c["case"] == "sized_request"]
     assert _summary(cases, context_tokens=None).not_run == ["context_length/sized_request"]
@@ -574,7 +584,7 @@ def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
     assert body["harness_pending"] == PART_A_PENDING
     assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
     assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
-    assert len(body["controls"]) == 16 and all(c["ok"] for c in body["controls"])
+    assert len(body["controls"]) == 17 and all(c["ok"] for c in body["controls"])
 
 
 def test_module_entry_point_runs(tmp_path):

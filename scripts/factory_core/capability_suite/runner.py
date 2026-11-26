@@ -395,8 +395,11 @@ async def check_forced_tool_choice(session, target, case, context_tokens):
 
 
 async def check_context_window(session, target, case, context_tokens):
-    """context_length: a request sized to the window, checked through usage.input_tokens
-    (never count_tokens). None when no window is known (the case does not run)."""
+    """context_length: a request sized to the window, checked through the total prompt tokens
+    the endpoint accepted — usage.input_tokens plus the cache_read/cache_creation input
+    tokens when present (Anthropic usage reports cached tokens separately, so a prefix-cache
+    hit must not read as truncation; #628). Never count_tokens. None when no window is known
+    (the case does not run)."""
     if context_tokens is None:
         return None
     words = max(1, context_tokens * 3 // 4)
@@ -410,8 +413,16 @@ async def check_context_window(session, target, case, context_tokens):
         return "fail", f.reason
     if message.get("stop_reason") == "max_tokens":
         return "fail", "truncated"
-    sent = (message.get("usage") or {}).get("input_tokens")
-    if type(sent) is not int or sent < words // 2:
+    usage = message.get("usage") or {}
+    sent = usage.get("input_tokens")
+    if type(sent) is not int:
+        return "fail", "input_truncated"
+    total = sent
+    for field in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        extra = usage.get(field)
+        if type(extra) is int:
+            total += extra
+    if total < words // 2:
         return "fail", "input_truncated"
     return "pass", "ok"
 
