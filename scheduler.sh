@@ -277,11 +277,15 @@ ${FOOTER}" 2>/dev/null || true
     local elapsed
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$SPEC_GRACE_MINUTES" ]; then
-      echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
-      python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-        --remove "spec-pending-review" || true
-      # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
-      set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" "$(echo "$item" | jq -r '.item_id // empty')" || true
+      if ! cloud_endpoint_confirmed; then
+        refuse_local_routing "$issue_num" "spec-advance"
+      else
+        echo "[$(date -u +%FT%TZ)] spec_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${SPEC_GRACE_MINUTES}m action=advance_to_refined"
+        python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+          --remove "spec-pending-review" || true
+        # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+        set_board_status "$issue_num" "$FACTORY_STATUS_REFINED" "$(echo "$item" | jq -r '.item_id // empty')" || true
+      fi
     else
       echo "[$(date -u +%FT%TZ)] spec_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${SPEC_GRACE_MINUTES}m action=waiting"
     fi
@@ -319,11 +323,15 @@ ${FOOTER}" 2>/dev/null || true
     local elapsed
     elapsed=$(elapsed_minutes_since_marker "$issue_num" "Posted by ${FACTORY_PRODUCT_NAME} Refinement Pipeline")
     if [ -n "$elapsed" ] && [ "$elapsed" -ge "$PLAN_GRACE_MINUTES" ]; then
-      echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
-      python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
-        --remove "plan-pending-review" || true
-      # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
-      set_board_status "$issue_num" "$FACTORY_STATUS_READY" "$(echo "$item" | jq -r '.item_id // empty')" || true
+      if ! cloud_endpoint_confirmed; then
+        refuse_local_routing "$issue_num" "plan-advance"
+      else
+        echo "[$(date -u +%FT%TZ)] plan_auto_advance issue=#${issue_num} elapsed=${elapsed}m grace=${PLAN_GRACE_MINUTES}m action=advance_to_ready"
+        python3 "$FACTORY_PROVIDERS_CLI" tracker label --id "$issue_num" \
+          --remove "plan-pending-review" || true
+        # #607: item_id from the in-loop snapshot → board-move skips the item-list lookup
+        set_board_status "$issue_num" "$FACTORY_STATUS_READY" "$(echo "$item" | jq -r '.item_id // empty')" || true
+      fi
     else
       echo "[$(date -u +%FT%TZ)] plan_grace_window issue=#${issue_num} elapsed=${elapsed:-unknown}m grace=${PLAN_GRACE_MINUTES}m action=waiting"
     fi
