@@ -376,3 +376,116 @@ def test_report_out_path_inside_git_tree_raises(tmp_path):
         run.report(out="repo/report.md")
     with pytest.raises(chv.CompareError, match=r"\.md or \.json"):
         run.report(out="report.txt")
+
+
+def test_end_to_end_rules_only_run_reports(tmp_path):
+    arms = tmp_path / "arms.yaml"
+    arms.write_text(yaml.safe_dump({"arms": [{"arm_id": "rules", "arm_kind": "rules_only"}]}))
+    out_dir = tmp_path / "out"
+    shadow_runner.main(["--fixtures", str(EXAMPLE_FIXTURES), "--arms", str(arms),
+                        "--out-dir", str(out_dir), "--repetitions", "2", "--seed", "1"])
+    report_path = tmp_path / "report.json"
+    chv.main(["--results-dir", str(out_dir), "--fixtures", str(EXAMPLE_FIXTURES),
+              "--labels", str(EXAMPLE_LABELS), "--out", str(report_path),
+              "--preregistration", str(EXAMPLE_PRE)])
+    report = json.loads(report_path.read_text())
+    rules = report["cells"]["synthetic/dev"]["rules"]
+    assert rules["assigned"] == 16
+    assert rules["class_counts"]["accepted"] == 14
+    assert rules["class_counts"]["policy_fail_safe"] == 2
+    assert rules["false_skips"] == 0
+    assert report["example_banner"] == chv.EXAMPLE_BANNER
+    assert report["criteria"] == {}  # no local arm: nothing to check
+
+
+# 31
+def test_committed_examples_validate_and_digests_match():
+    fixtures = schema.load_fixtures(EXAMPLE_FIXTURES)
+    ids = {f["fixture_id"] for f in fixtures["fixtures"]}
+    assert ids == {f"ex-0{i}" for i in range(1, 9)}
+    schema.load_labels(EXAMPLE_LABELS, ids)
+    schema.load_arms(BENCH / "hosting_arms.example.yaml")
+    pre = schema.load_preregistration(EXAMPLE_PRE)
+    assert pre["status"] == "example"
+    assert pre["fixture_set_digest"] == schema.sha256_file(EXAMPLE_FIXTURES)
+    assert pre["oracle_label_digest"] == schema.sha256_file(EXAMPLE_LABELS)
+    rubric = schema.load_rubric()
+    assert pre["rubric_sha"] == rubric["rubric_sha"]
+    for f in fixtures["fixtures"]:
+        schema.render_prompt(rubric["prompt"], f)
+
+
+NEW_FILES = [*(BENCH / m for m in NEW_MODULES), BENCH / "hosting_arms.example.yaml", EXAMPLE_PRE,
+             BENCH / "hosting_shadow.md",
+             *sorted((BENCH / "fixtures" / "preview_classifier").rglob("*.*")),
+             REPO / "tests" / "test_bench_shadow_runner.py",
+             REPO / "tests" / "test_bench_hosting_compare.py"]
+
+
+# 32
+def test_committed_tree_has_only_placeholder_endpoint_identity():
+    for path in NEW_FILES:
+        for literal in re.findall(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])",
+                                  path.read_text()):
+            ip = ipaddress.ip_address(literal)
+            assert ip == ipaddress.ip_address("127.0.0.1") or ip in ipaddress.ip_network(
+                "192.0.2.0/24"), (path, literal)
+    _, arm = schema.load_arms(BENCH / "hosting_arms.example.yaml")
+    assert arm["endpoint_id"] == "example-local"
+    assert arm["model_identity"] == {"served_name": "example-model",
+                                     "digest_or_revision": "example-digest",
+                                     "quantisation": "example-quant"}
+    assert arm["hardware"] == "example-hardware"
+
+
+# 33
+def test_nothing_in_production_references_the_shadow_runner():
+    names = [m.removesuffix(".py") for m in NEW_MODULES]
+    targets = [REPO / "scheduler.sh", REPO / "entrypoint.sh"]
+    for root in ("workflows", "commands", "scripts"):
+        targets += [p for p in (REPO / root).rglob("*")
+                    if p.is_file() and "__pycache__" not in p.parts]
+    for path in targets:
+        text = path.read_text(errors="ignore")
+        for name in names:
+            assert name not in text, (path, name)
+
+
+# 34
+def test_yaml_files_reject_unknown_keys(tmp_path):
+    def write(name, text):
+        path = tmp_path / name
+        path.write_text(text)
+        return path
+
+    labels_text = EXAMPLE_LABELS.read_text()
+    arms_text = (BENCH / "hosting_arms.example.yaml").read_text()
+    ids = {f"ex-0{i}" for i in range(1, 9)}
+    formats = {
+        "fixtures": (EXAMPLE_FIXTURES.read_text(), schema.load_fixtures,
+                     "preview_enabled: true", "preview_enabled: true\nextra: 1"),
+        "labels": (labels_text, lambda p: schema.load_labels(p, ids),
+                   "    labeled_by: example-not-an-oracle\n",
+                   "    labeled_by: example-not-an-oracle\n    extra: 1\n"),
+        "arms": (arms_text, schema.load_arms, "hardware: example-hardware",
+                 "hardware: example-hardware\n    extra: 1"),
+        "preregistration": (EXAMPLE_PRE.read_text(), schema.load_preregistration,
+                            "  seed: 1", "  seed: 1\n  extra: 1"),
+    }
+    for kind, (text, load, old, new) in formats.items():
+        load(write(f"{kind}-ok.yaml", text))
+        with pytest.raises(schema.ShadowSchemaError, match="unknown key"):
+            load(write(f"{kind}-extra.yaml", text.replace(old, new, 1)))
+        with pytest.raises(schema.ShadowSchemaError):
+            load(write(f"{kind}-tag.yaml", "!!python/object:os.system {}\n" + text))
+    with pytest.raises(schema.ShadowSchemaError, match="no fixture"):
+        schema.load_labels(write("unknown.yaml", labels_text.replace("  ex-08:", "  ex-99:")),
+                           ids)
+    with pytest.raises(schema.ShadowSchemaError, match="duplicate"):
+        schema.load_labels(write("dup.yaml", labels_text + "  ex-01:\n    oracle_label: true\n"),
+                           ids)
+    secret_url = "http://user:hunter2@192.0.2.10:8080"
+    bad = write("bad-url.yaml", arms_text.replace("http://192.0.2.10:8080", secret_url))
+    with pytest.raises(schema.ShadowSchemaError) as e:
+        schema.load_arms(bad)
+    assert secret_url not in str(e.value) and "hunter2" not in str(e.value)

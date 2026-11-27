@@ -1,0 +1,22 @@
+# Preregistration EXAMPLE for bench/compare_hosting_variants.py (#563).
+# status: example — digests of the examples/ files and illustrative thresholds only. The
+# operator follow-up commits a status: registered file, with real values, before any
+# held-out scoring. No gate_* script, config key, scheduler or workflow reads this file.
+preview_classifier_preregistration:
+  schema_version: "1.0"
+  status: example
+  registered_by: example-not-a-registration
+  registered_at: "2026-11-27T00:00:00+00:00"
+  fixture_set_digest: dd7618d9d119c3833e400582be802db66e7e2b538a6c959fe25e1143f3b654ad
+  oracle_label_digest: 43a1b6fa250b8d3c0c0a9ba1da8781eea77e2765864797f2a57803ada51bc027
+  rubric_sha: b064faa621282a66ee6bf2e7774aea04309db62de48ae2f017a7fa596b7b2c5a
+  repetitions: 2
+  seed: 1
+  criteria:
+    max_false_skips_held_out: 0
+    max_false_skip_rate: 0.0
+    min_schema_validity_rate: 0.95
+    min_coverage: 0.9
+    p95_duration_ms_slo: 30000
+    min_false_preview_rate_reduction_vs_rules_only: 0.1
+  invalid_run_handling: "all rows retained; schema_invalid and infrastructure_invalid count in every denominator; no row is dropped or rerun"
