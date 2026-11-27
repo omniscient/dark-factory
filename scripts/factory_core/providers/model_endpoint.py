@@ -96,6 +96,21 @@ _NO_LOCAL_DISPATCH = (
 # local endpoint never hosts a checker, contract §4.2). scheduler_preflight() ignores this.
 LOCAL_ELIGIBLE_INTENTS = ("classify-preview-helper",)
 
+# Alternate cloud-auth switches and credentials Claude Code honours without ANTHROPIC_BASE_URL
+# (#594, #633). Mirrors, never imports, providers/model.py's _AWS_ALT_AUTH_SIGNALS /
+# _GCP_ALT_AUTH_SIGNALS: credential-presence signals only, not the platform-identity ones
+# (AWS_EXECUTION_ENV, K_SERVICE, GAE_APPLICATION, FUNCTION_TARGET, KUBERNETES_SERVICE_HOST).
+# CLAUDE_CODE_USE_GATEWAY and AWS_BEARER_TOKEN_BEDROCK, each set alone, were measured with the
+# pinned CLI 2.1.282 not to divert a request, so they are not listed.
+LOCAL_CREDENTIAL_ENV_SIGNALS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "AWS_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_SESSION_TOKEN", "GOOGLE_CLOUD_PROJECT",
+)
+
 
 class RegistryError(Exception):
     """Invalid registry, evidence or staged tree. .problems is the list of messages."""
@@ -633,6 +648,11 @@ def _local_problems(entry, files, registry_path, intent=None):
         problems.append(f"endpoint '{eid}' is local but cloud model credential(s) are set in this "
                         f"container: {', '.join(present)} — a local-routed container holds none "
                         "(contract §4.3)")
+    signals = sorted(n for n in LOCAL_CREDENTIAL_ENV_SIGNALS if os.environ.get(n))
+    if signals:
+        problems.append(f"endpoint '{eid}' is local but an alternate cloud credential signal is set "
+                        f"in this container: {', '.join(signals)} — a local-routed container "
+                        "holds none (contract §4.3)")
     if os.environ.get("ANTHROPIC_BASE_URL") != entry["base_url"]:
         problems.append(f"endpoint '{eid}': ANTHROPIC_BASE_URL must equal the entry's base_url "
                         "(contract §4.11 decision 1)")

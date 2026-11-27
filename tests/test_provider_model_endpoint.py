@@ -44,9 +44,25 @@ CLOUD = {
 }
 
 
+# #633: the local credential-env guard's thirteen names, pinned literally; the platform-identity
+# and measured non-diverting names it must not list.
+GUARD_SIGNALS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "AWS_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_SESSION_TOKEN", "GOOGLE_CLOUD_PROJECT",
+)
+PLATFORM_IDENTITY_VARS = ("AWS_EXECUTION_ENV", "K_SERVICE", "GAE_APPLICATION", "FUNCTION_TARGET",
+                          "KUBERNETES_SERVICE_HOST")
+NON_DIVERTING_VARS = ("CLAUDE_CODE_USE_GATEWAY", "AWS_BEARER_TOKEN_BEDROCK")
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in (*me.CLOUD_CREDENTIALS, *me.TIER_ALIASES, "ANTHROPIC_BASE_URL",
+    for name in (*me.CLOUD_CREDENTIALS, *me.TIER_ALIASES, *GUARD_SIGNALS, *PLATFORM_IDENTITY_VARS,
+                 *NON_DIVERTING_VARS, "ANTHROPIC_BASE_URL",
                  "LOCAL_GATEWAY_TOKEN", "REMOTE_GATEWAY_TOKEN", "FACTORY_MODEL_ENDPOINT",
                  "FACTORY_MODEL_REGISTRY_SHA256", "FACTORY_MODEL_REGISTRY_PATH"):
         monkeypatch.delenv(name, raising=False)
@@ -1388,3 +1404,39 @@ def test_intent_not_read_from_environment_or_pointer(base_env, tmp_path, monkeyp
     assert providers.preflight()[-1] == NO_LOCAL
     out, err = _hosting(monkeypatch, capsys)
     assert out == "hosting=cloud\n" and NO_LOCAL in err
+
+
+def test_guard_signals_are_the_thirteen_names_owned_by_model_endpoint():
+    import ast
+    assert me.LOCAL_CREDENTIAL_ENV_SIGNALS == GUARD_SIGNALS
+    tree = ast.parse(Path(me.__file__).read_text(encoding="utf-8"))
+    # model_endpoint already imports _missing from providers/model.py; the signal tuples
+    # themselves must never come from there.
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
+    assert not any("ALT_AUTH" in name for name in imported)
+    assert not hasattr(me, "_AWS_ALT_AUTH_SIGNALS") and not hasattr(me, "_GCP_ALT_AUTH_SIGNALS")
+
+
+@pytest.mark.parametrize("name", GUARD_SIGNALS)
+def test_local_selection_fails_on_alternate_credential_signal(tmp_path, monkeypatch, pinned_suite,
+                                                              name):
+    reg = _valid_local(tmp_path, monkeypatch)
+    monkeypatch.setenv(name, "1")
+    expected = (f"endpoint 'local-test' is local but an alternate cloud credential signal is set "
+                f"in this container: {name} — a local-routed container holds none "
+                "(contract §4.3)")
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([expected], "local")
+    assert me.load_verified_entry(reg, "local-test", intent=HELPER) == ([expected], None)
+
+
+@pytest.mark.parametrize("name", [*PLATFORM_IDENTITY_VARS, *NON_DIVERTING_VARS])
+def test_platform_identity_variable_does_not_fail_local_selection(tmp_path, monkeypatch,
+                                                                  pinned_suite, name):
+    reg = _valid_local(tmp_path, monkeypatch)
+    monkeypatch.setenv(name, "1")
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
+
+
+def test_measured_non_diverting_names_are_not_guard_signals():
+    assert not set(NON_DIVERTING_VARS) & set(me.LOCAL_CREDENTIAL_ENV_SIGNALS)
+    assert not set(PLATFORM_IDENTITY_VARS) & set(me.LOCAL_CREDENTIAL_ENV_SIGNALS)
