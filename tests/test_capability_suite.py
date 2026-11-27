@@ -423,6 +423,7 @@ def test_committed_fixtures_name_no_rig_address():
     (lambda c: c.update(target="endpoint"), "always targets the mock"),
     (lambda c: c.pop("expect_reason"), "needs expect"),
     (lambda c: c.update(fault="nope"), "fault is for controls"),
+    (lambda c: c.update(variant="no_sigint"), "variant is for harness controls"),
 ])
 def test_malformed_case_is_rejected(tmp_path, edit, message):
     fixtures = _copy_fixtures(tmp_path)
@@ -498,8 +499,20 @@ def test_a_skipped_harness_case_is_not_tested_and_never_a_failure(mode):
 
 @pytest.mark.parametrize("edit, message", [
     (lambda c: c.update(check="nope"), "check must be one of"),
-    (lambda c: c.update(target="endpoint"), "a harness case is a mock-target probe"),
-    (lambda c: c.update(kind="observation"), "a harness case is a mock-target probe"),
+    (lambda c: c.update(target="endpoint"), "a mock-driven harness check is a mock-target probe"),
+    (lambda c: c.update(kind="observation"),
+     "a mock-driven harness check is a mock-target probe"),
+    (lambda c: c.update(check="cli_sigint_endpoint"),
+     "a relay harness check is an endpoint-target probe or a control"),
+    (lambda c: c.update(check="cli_sigint_endpoint", kind="observation", target="endpoint"),
+     "a relay harness check is an endpoint-target probe or a control"),
+    (lambda c: c.update(check="cli_over_limit_not_tested", target="endpoint"),
+     "a fixed harness observation is an observation"),
+    (lambda c: c.update(check="cli_sigint_endpoint", target="endpoint", variant="no_sigint"),
+     "variant is for harness controls"),
+    (lambda c: c.update(check="cli_sigint_endpoint", kind="control", expect="fail",
+                        expect_reason="connection_not_closed", variant="nope"),
+     "variant is for harness controls"),
 ])
 def test_a_malformed_harness_case_is_rejected(tmp_path, edit, message):
     case = dict(HARNESS_CASE)
@@ -1127,8 +1140,9 @@ def test_the_padded_prompts_straddle_the_mock_window():
 
 
 def test_every_harness_check_is_a_coroutine_function():
-    for check in (harness.check_alias_resolution, harness.check_tool_round_trip,
-                  harness.check_context_window, harness.check_sigint):
+    checks = [*runner.HARNESS_CHECKS.values(), *runner.HARNESS_RELAY_CHECKS.values()]
+    assert len(checks) == 8
+    for check in checks:
         assert inspect.iscoroutinefunction(check)  # asyncio's is deprecated in 3.14
 
 
@@ -1748,3 +1762,55 @@ def test_the_sigint_check_snapshots_before_reaping_and_counts_after(tmp_path, mo
             credential=mock_server.DUMMY_CREDENTIAL, context_tokens=64, mock_app=mock_app,
             variant=variant)
     assert _on_relay(go) == outcome
+
+
+@needs_proc
+def test_a_cli_request_for_another_host_fails_the_case(tmp_path, monkeypatch):
+    _logging_claude(tmp_path / "bin", tmp_path / "spawns.jsonl", fetch="http://192.0.2.1/")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    case = {"dimension": "context_length", "case": "cli_padded_prompt_endpoint",
+            "driver": "harness", "kind": "probe", "target": "endpoint",
+            "check": "cli_context_window_endpoint"}
+
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            mock = runner.Target(url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            return await runner._harness_probe(case, "context_length/x", mock_app=mock_runner.app,
+                                               mock=mock, endpoint=mock, mock_mode=False,
+                                               context_tokens=64)
+        finally:
+            await mock_runner.cleanup()
+    assert asyncio.run(go()) == (("fail", "other_host_contacted"), "endpoint")
+
+
+def _probe_case(check="cli_context_window_endpoint"):
+    return {"dimension": "context_length", "case": "x", "driver": "harness", "kind": "probe",
+            "target": "endpoint", "check": check}
+
+
+@pytest.mark.parametrize("behaviour, outcome", [
+    ("other_host", ("fail", "other_host_contacted")),
+    ("slow", ("fail", "timeout_total")),
+])
+def test_harness_probe_overrides(monkeypatch, behaviour, outcome):
+    monkeypatch.setattr(harness, "ENDPOINT_CASE_SECONDS", 0.3)
+
+    async def fake(relay_app, relay_url, **_):
+        if behaviour == "other_host":
+            relay_app[relay.RELAYED].other_host.append("CONNECT api.example.invalid:443 HTTP/1.1")
+            return "pass", "ok"
+        await asyncio.sleep(5)
+    monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, "cli_context_window_endpoint", fake)
+
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            mock = runner.Target(url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            return await runner._harness_probe(_probe_case(), "context_length/x",
+                                               mock_app=mock_runner.app, mock=mock,
+                                               endpoint=mock, mock_mode=False,
+                                               context_tokens=64)
+        finally:
+            await mock_runner.cleanup()
+    assert asyncio.run(go()) == (outcome, "endpoint")

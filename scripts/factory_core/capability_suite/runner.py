@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import aiohttp
 import yaml
 
-from factory_core.capability_suite import emit, harness, mock_server
+from factory_core.capability_suite import emit, harness, mock_server, relay
 from factory_core.providers import model_adapter, model_endpoint, role_isolation
 
 FIXTURES_DIR = emit.PACKAGE_DIR / "fixtures"
@@ -41,7 +41,7 @@ DEFAULT_TIMEOUTS = {"connect_seconds": 10.0, "time_to_first_token_seconds": 300.
 ANTHROPIC_VERSION = "2023-06-01"
 NOT_FOUND_STATUSES = (404, 405, 501)
 _CASE_KEYS = {"case", "dimension", "description", "driver", "kind", "target", "check", "fault",
-              "timeouts", "expect", "expect_reason", "args", "want"}
+              "timeouts", "expect", "expect_reason", "args", "want", "variant"}
 
 WEATHER_TOOL = {
     "name": "get_weather",
@@ -77,10 +77,10 @@ class Summary:
     controls: list = field(default_factory=list)  # result-ready control/observation records
     not_run: list = field(default_factory=list)  # dimension/case of every shipped case not run
     harness_pending: list = field(default_factory=list)  # dimension of every harness case not run
+    harness_probes: list = field(default_factory=list)  # result-ready executed harness probes
+    harness_probe_sources: dict = field(default_factory=dict)  # dimension -> {source} (#631)
     lines: list = field(default_factory=list)
 
-
-# --- fixture tree ---------------------------------------------------------------------------
 
 def _validate(case, where):
     unknown = set(case) - _CASE_KEYS
@@ -89,16 +89,29 @@ def _validate(case, where):
     for key, allowed in (("driver", DRIVERS), ("kind", KINDS), ("target", TARGETS)):
         if case.get(key) not in allowed:
             raise CaseError(f"{where}: {key} must be one of {', '.join(allowed)}")
-    checks = {"function": FUNCTION_CHECKS, "harness": HARNESS_CHECKS}.get(case["driver"],
-                                                                          HTTP_CHECKS)
+    checks = {"function": FUNCTION_CHECKS,
+              "harness": {**HARNESS_CHECKS, **HARNESS_RELAY_CHECKS, **harness.FIXED_OBSERVATIONS},
+              }.get(case["driver"], HTTP_CHECKS)
     if case.get("check") not in checks:
         raise CaseError(f"{where}: check must be one of {', '.join(sorted(checks))}")
     if case["driver"] == "function" and (case["kind"] != "probe" or case["target"] != "mock"
                                          or not isinstance(case.get("args"), dict)
                                          or not isinstance(case.get("want"), list)):
         raise CaseError(f"{where}: a function case is a mock-target probe with args and want")
-    if case["driver"] == "harness" and (case["kind"] != "probe" or case["target"] != "mock"):
-        raise CaseError(f"{where}: a harness case is a mock-target probe")
+    if case["driver"] == "harness":
+        check, kind, target = case["check"], case["kind"], case["target"]
+        if check in HARNESS_CHECKS and (kind != "probe" or target != "mock"):
+            raise CaseError(f"{where}: a mock-driven harness check is a mock-target probe")
+        if check in HARNESS_RELAY_CHECKS and not (kind == "control"
+                                                  or (kind == "probe" and target == "endpoint")):
+            raise CaseError(f"{where}: a relay harness check is an endpoint-target probe or a "
+                            "control")
+        if check in harness.FIXED_OBSERVATIONS and kind != "observation":
+            raise CaseError(f"{where}: a fixed harness observation is an observation")
+    if "variant" in case and (case["driver"] != "harness" or case["kind"] != "control"
+                              or case["variant"] not in harness.VARIANTS):
+        raise CaseError(f"{where}: variant is for harness controls and must be one of "
+                        "harness.VARIANTS")
     if case["kind"] == "control":
         if case["target"] != "mock":
             raise CaseError(f"{where}: a control always targets the mock")
@@ -442,11 +455,21 @@ FUNCTION_CHECKS = {
 }
 # check name -> harness.check_*(mock app, mock base URL): spawns the pinned `claude -p`, so a
 # harness case runs only when harness.preflight() is "ok" (Tier 2 on, pinned CLI present).
+# These always drive the CLI against the mock: in endpoint mode they are `mechanism` records.
 HARNESS_CHECKS = {
     "cli_alias_resolution": harness.check_alias_resolution,
     "cli_tool_round_trip": harness.check_tool_round_trip,
     "cli_context_window": harness.check_context_window,
     "cli_sigint": harness.check_sigint,
+}
+# check name -> harness.check_*_endpoint(relay app, relay URL, *, ...) (#631): the CLI talks to
+# a recording relay whose one upstream is the endpoint (an endpoint-target probe in endpoint
+# mode) or the mock (mock mode, and every control). Same Tier 2 gate.
+HARNESS_RELAY_CHECKS = {
+    "cli_alias_resolution_endpoint": harness.check_alias_resolution_endpoint,
+    "cli_tool_round_trip_endpoint": harness.check_tool_round_trip_endpoint,
+    "cli_context_window_endpoint": harness.check_context_window_endpoint,
+    "cli_sigint_endpoint": harness.check_sigint_endpoint,
 }
 _SKIPPED = {"skip": f"skipped: {harness.TIER2_ENV} is not 1",
             "missing": "skipped: no claude binary"}
@@ -457,42 +480,72 @@ def _function_probe(case):
     return ("pass", "ok") if got == case["want"] else ("fail", f"unexpected_{got[1]}")
 
 
-async def _harness_probe(case, mock_app, mock):
-    """One harness case against the mock; None (not run: exit 4) when the CLI cannot be spawned
-    or the check hits any other internal fault (spec Requirement 9). The script a check arms is
-    always cleared, so the http cases after it get part A's replies."""
+async def _harness_probe(case, name, *, mock_app, mock, endpoint, mock_mode, context_tokens):
+    """(outcome, source) for one harness case. source is "mock" when the CLI's traffic went to
+    the mock, "endpoint" when it went (through the relay) to the endpoint. outcome is None (not
+    run: exit 4) when the CLI cannot be spawned or the check hits any other internal fault; for
+    an endpoint-upstream case only the exception's type is printed (its text can carry the
+    endpoint address). The script a check arms is always cleared, so the http cases after it
+    get part A's replies."""
+    check = case["check"]
+    use_mock = case["target"] == "mock" or mock_mode
+    source = "mock" if use_mock else "endpoint"
     try:
-        return await HARNESS_CHECKS[case["check"]](mock_app, mock.base_url)
-    except Exception as exc:  # a suite fault, never a finding about the CLI
-        print(f"capability suite: harness case {case['dimension']}/{case['case']} did not run: "
-              f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        return None
+        if check in harness.FIXED_OBSERVATIONS:
+            return ("not_tested", harness.FIXED_OBSERVATIONS[check]), source
+        if check in HARNESS_CHECKS:
+            return await HARNESS_CHECKS[check](mock_app, mock.base_url), "mock"
+        upstream = mock if use_mock else endpoint
+        window = mock_server.CONTEXT_TOKENS if use_mock else context_tokens
+        async with relay.started(upstream.base_url, timeouts=DEFAULT_TIMEOUTS,
+                                 fault=case.get("fault")) as (app, url):
+            try:
+                outcome = await asyncio.wait_for(
+                    HARNESS_RELAY_CHECKS[check](
+                        app, url, served_name=upstream.served_name,
+                        credential=upstream.credential, context_tokens=window,
+                        mock_app=mock_app if use_mock else None, variant=case.get("variant")),
+                    harness.ENDPOINT_CASE_SECONDS)
+            except TimeoutError:  # no check lets its own TimeoutError escape: this is the bound
+                outcome = ("fail", "timeout_total")
+            if app[relay.RELAYED].other_host:
+                outcome = ("fail", "other_host_contacted")
+            return outcome, source
+    except Exception as exc:  # a suite fault, never a finding
+        detail = f": {exc}" if source == "mock" else ""
+        print(f"capability suite: harness case {name} did not run: {type(exc).__name__}{detail}",
+              file=sys.stderr)
+        return None, source
     finally:
         mock_server.arm(mock_app)
 
-
-# --- run ------------------------------------------------------------------------------------
 
 async def run_cases(cases, *, endpoint, mock, context_tokens, mock_app=None,
                     tier2_mode="skip", mock_mode=True) -> Summary:
     """Run every case in order. A control always runs against the mock and its declared
     window; a probe or observation targeting the endpoint uses `endpoint`. A harness case runs
-    only in tier2_mode "ok" (harness.preflight) AND `mock_mode`: the harness always spawns the
-    CLI against the mock, never the real `endpoint`, so in endpoint mode it adds one
-    not_tested value to its dimension (and harness_pending) instead of a harness-verified one."""
+    only in tier2_mode "ok" (harness.preflight); otherwise it adds one not_tested value (a
+    probe) and its dimension to harness_pending. With Tier 2 on, an endpoint-target harness
+    probe drives the CLI through the relay to `endpoint` (to the mock in mock mode), and in
+    endpoint mode a mock-target harness probe (HARNESS_CHECKS) still runs against the mock but
+    is recorded as a `mechanism` control record, never a dimension value (#631)."""
     summary = Summary()
     async with aiohttp.ClientSession() as session:
         for case in cases:
             name = f"{case['dimension']}/{case['case']}"
-            if case["driver"] == "harness" and (tier2_mode != "ok" or not mock_mode):
-                summary.probe_values.setdefault(case["dimension"], []).append("not_tested")
-                summary.harness_pending.append(case["dimension"])
-                reason = (_SKIPPED[tier2_mode] if tier2_mode != "ok"
-                         else "skipped: harness cases only exercise the mock, not --base-url")
-                summary.lines.append(f"{name} [{case['kind']}] {reason}")
-                continue
+            source, mechanism = None, False
             if case["driver"] == "harness":
-                outcome = await _harness_probe(case, mock_app, mock)
+                if tier2_mode != "ok":
+                    if case["kind"] == "probe":
+                        summary.probe_values.setdefault(case["dimension"], []).append(
+                            "not_tested")
+                    summary.harness_pending.append(case["dimension"])
+                    summary.lines.append(f"{name} [{case['kind']}] {_SKIPPED[tier2_mode]}")
+                    continue
+                outcome, source = await _harness_probe(
+                    case, name, mock_app=mock_app, mock=mock, endpoint=endpoint,
+                    mock_mode=mock_mode, context_tokens=context_tokens)
+                mechanism = case["check"] in HARNESS_CHECKS and not mock_mode
             elif case["driver"] == "function":
                 outcome = _function_probe(case)
             elif case["kind"] == "control" or case["target"] == "mock":
@@ -502,27 +555,48 @@ async def run_cases(cases, *, endpoint, mock, context_tokens, mock_app=None,
                 outcome = await HTTP_CHECKS[case["check"]](session, endpoint, case,
                                                            context_tokens)
             if outcome is None:
-                if case["driver"] == "harness":
+                # A mock mechanism case that did not run says nothing about the endpoint.
+                if case["driver"] == "harness" and not mechanism:
                     summary.harness_pending.append(case["dimension"])
                 summary.not_run.append(name)
                 summary.lines.append(f"{name} [{case['kind']}] not run")
-                if case["kind"] == "probe":
+                if case["kind"] == "probe" and not mechanism:
                     summary.probe_values.setdefault(case["dimension"], []).append("not_tested")
                 continue
             value, reason = outcome
             observed = f"{value}:{reason}"
+            if source is not None and value in ("pass", "fail") and (
+                    mechanism or case["kind"] == "probe"):
+                summary.harness_probe_sources.setdefault(case["dimension"], set()).add(source)
+            if mechanism:
+                summary.lines.append(f"{name} [mechanism] {observed}")
+                summary.controls.append({
+                    "dimension": case["dimension"], "case": case["case"], "kind": "mechanism",
+                    "expected": "pass:ok", "observed": observed, "ok": observed == "pass:ok",
+                    "source": "mock",
+                })
+                continue
             summary.lines.append(f"{name} [{case['kind']}] {observed}")
             if case["kind"] == "probe":
                 summary.probe_values.setdefault(case["dimension"], []).append(value)
                 summary.probes.append((name, value))
+                if case["driver"] == "harness":
+                    summary.harness_probes.append({"dimension": case["dimension"],
+                                                   "case": case["case"], "observed": observed,
+                                                   "source": source})
+                    if value == "not_tested":
+                        summary.harness_pending.append(case["dimension"])
                 continue
             expected = (f"{case['expect']}:{case['expect_reason']}"
                         if case["kind"] == "control" else None)
-            summary.controls.append({
+            record = {
                 "dimension": case["dimension"], "case": case["case"], "kind": case["kind"],
                 "expected": expected, "observed": observed,
                 "ok": expected is None or observed == expected,
-            })
+            }
+            if source is not None:
+                record["source"] = source
+            summary.controls.append(record)
     return summary
 
 
@@ -538,10 +612,21 @@ def dimension_results(probe_values) -> dict:
     return results
 
 
+def harness_sources(summary) -> dict:
+    """Each ACTOR_REQUIRED_DIMENSIONS key -> where its harness verdicts (pass or fail) were
+    driven: "mock", "endpoint", "both" (an endpoint verdict plus a mock mechanism record) or
+    None (no harness verdict)."""
+    labels = {}
+    for dim in model_endpoint.ACTOR_REQUIRED_DIMENSIONS:
+        seen = summary.harness_probe_sources.get(dim, set())
+        labels[dim] = "both" if seen == {"mock", "endpoint"} else next(iter(seen), None)
+    return labels
+
+
 def exit_code(summary, mock_mode, tier2_mode="skip") -> int:
-    """3 control mismatch > 6 Tier 2 on, no claude binary > 4 a shipped case did not run > 5
-    mock mode, an executed probe is not pass > 0. (7, a CLI version mismatch, returns from
-    main() before any case runs.)"""
+    """3 control mismatch, or a mock `mechanism` record that is not pass:ok (#631) > 6 Tier 2
+    on, no claude binary > 4 a shipped case did not run > 5 mock mode, an executed probe is not
+    pass > 0. (7, a CLI version mismatch, returns from main() before any case runs.)"""
     if any(not c["ok"] for c in summary.controls):
         return 3
     if tier2_mode == "missing":
