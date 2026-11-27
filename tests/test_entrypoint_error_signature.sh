@@ -52,6 +52,10 @@ SOURCE_TIME_RUN_ID="$RUN_ID"
 
 trap - ERR
 set +e; set +u; set +o pipefail
+# #645: on_failure keeps the run's session transcripts from $HOME/.claude/projects. This
+# harness is not about that (tests/test_entrypoint_cost_capture_log_thread.sh is) and must
+# never copy the machine's own transcripts, so the copy is a no-op here.
+_keep_run_transcripts() { :; }
 
 CLONE_DIR="$(dirname "$REPO_ROOT")"
 ISSUE_NUM=33

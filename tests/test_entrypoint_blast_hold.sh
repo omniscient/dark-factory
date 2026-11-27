@@ -51,6 +51,10 @@ ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
 
 trap - ERR
 set +e; set +u; set +o pipefail
+# #645: on_failure keeps the run's session transcripts from $HOME/.claude/projects. This
+# harness is not about that (tests/test_entrypoint_cost_capture_log_thread.sh is) and must
+# never copy the machine's own transcripts, so the copy is a no-op here.
+_keep_run_transcripts() { :; }
 
 # Same TARGET-PATH layout trick as tests/test_entrypoint_session_window.sh.
 CLONE_DIR="$(dirname "$REPO_ROOT")"
