@@ -229,18 +229,37 @@ class GitHubTracker(Tracker):
         return r.returncode == 0
 
     def find_comment(self, id: str, marker: str) -> dict | None:
-        # Same two gh api calls as the entrypoint cost-report upsert: list endpoint with the
-        # marker --jq (newest match), then the single-comment endpoint for its body. Note
-        # the single-comment endpoint omits the issue number (/issues/comments/{id}); the
-        # /issues/{n}/comments/{id} form 404s.
-        r = subprocess.run(
-            ["gh", "api", f"repos/{identity.SLUG}/issues/{id}/comments",
-             "--jq", f'[.[] | select(.body | contains("{marker}"))] | last | .id // empty'],
-            capture_output=True, text=True,
-        )
-        comment_id = r.stdout.strip() if r.returncode == 0 else ""
-        if not comment_id:
+        # Same two gh api calls as the entrypoint cost-report upsert: the list endpoint
+        # (paginated — no --jq: with --paginate the filter would run once per page, so the
+        # marker match and newest-pick happen in Python over the merged array; #629, the
+        # same defect #621 fixed in board.py) and the single-comment endpoint for the body.
+        # Note the single-comment endpoint omits the issue number (/issues/comments/{id});
+        # the /issues/{n}/comments/{id} form 404s.
+        comments = None
+        for _attempt in (1, 2):  # retry once, then give up: per the provider contract a
+            r = subprocess.run(                           # failed lookup is "no such comment"
+                ["gh", "api", f"repos/{identity.SLUG}/issues/{id}/comments?per_page=100",
+                 "--paginate"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                try:
+                    parsed = json.loads(r.stdout)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, list):  # non-list JSON counts as a failed lookup
+                    comments = parsed
+            if comments is not None:
+                break
+        if comments is None:
+            sys.stderr.write(f"tracker: find_comment for issue {id}: comment lookup failed "
+                             f"twice; skipping\n")
             return None
+        matches = [c for c in comments if isinstance(c, dict)
+                   and marker in (c.get("body") or "")]
+        if not matches:
+            return None
+        comment_id = str(matches[-1]["id"])
         b = subprocess.run(
             ["gh", "api", f"repos/{identity.SLUG}/issues/comments/{comment_id}",
              "--jq", ".body"],

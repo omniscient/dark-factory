@@ -79,19 +79,11 @@ class _GitHubFixtureController:
                 self.items[cmd[3]]["status"] = "done"
             return self._ok()
         if cmd[:2] == ["gh", "api"] and "--paginate" in cmd and "/comments?" in str(cmd[2]):
-            # board.post_or_update_comment: the paginated lookup returns the whole merged
-            # array; the marker match and newest-pick happen in Python (#621)
+            # The paginated marker lookup (board.post_or_update_comment #621,
+            # GitHubTracker.find_comment #629): returns the whole merged array; the
+            # marker match and newest-pick happen in Python.
             key = cmd[2].split("/issues/")[1].split("/")[0]
             return self._ok(stdout=json.dumps(self.comments.get(key, [])))
-        if cmd[:2] == ["gh", "api"] and "--jq" in cmd and str(cmd[2]).endswith("/comments"):
-            # GitHubTracker.find_comment still does a plain (non-paginated) --jq lookup
-            # on this exact URL shape; board.post_or_update_comment no longer does (#621).
-            key = cmd[2].split("/issues/")[1].split("/")[0]
-            marker = cmd[cmd.index("--jq") + 1].split('contains("')[1].split('")')[0]
-            # the real --jq is `[...] | last | .id`: the NEWEST matching comment
-            matches = [c for c in self.comments.get(key, []) if marker in c["body"]]
-            match = matches[-1] if matches else None
-            return self._ok(stdout=str(match["id"]) if match else "")
         if cmd[:2] == ["gh", "api"] and "--method" in cmd and "PATCH" in cmd:
             comment_id = int(str(cmd[2]).rsplit("/", 1)[1])
             body_path = cmd[cmd.index("-F") + 1].split("body=@")[1]
