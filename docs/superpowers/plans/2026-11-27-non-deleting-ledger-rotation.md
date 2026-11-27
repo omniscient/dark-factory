@@ -26,13 +26,34 @@
 - **Do not add row-type filtering to the reader.** `preview_helper`'s `test_forged_ledger_rows_never_raise` relies on `row.get(...)` raising for a non-dict row (for example `[1, 2]`), so `keep(row)` stays unguarded.
 - Run tests with `PYTHONPATH=scripts python -m pytest <file> -v`.
 
+## Review amendments (2026-11-27, plan review by execution)
+
+The plan was executed task by task on the #645 plan end state (`7fe6ca7`) and its anchors
+were also applied on plain `origin/main` (`d459e67`): every edit lands in both. Three changes
+came out of that, all applied to the text below:
+
+- **A1 (Task 2, a test that could not pass).** `test_oversized_gz_is_abandoned` counted the
+  word "abandoned" in stderr. The log line prints the generation's path, pytest's `tmp_path`
+  contains the test's own name, and the count was 2. It now counts the log prefix.
+- **A2 (Task 2, R3 with the default threshold).** The decompressed-bytes bound alone lets one
+  line fill it: a 5 MB forged `.gz` holding one 1 GiB line cost the reader 444 MiB of memory
+  with the default 100 MiB threshold, a sparse 190 MiB plain generation 424 MiB, and the live
+  file (no cap) grows with its size. `_ledger_lines` gets `MAX_LEDGER_LINE_BYTES` (1 MiB); a
+  file with a longer line is abandoned. After: 47 MiB peak (the interpreter's own baseline) for each of the three.
+- **A3 (Task 7, the spec's Goal for the poll).** `log_call` opened the live cost log with a
+  plain `open(..., "a")`: a FIFO planted at `graphql-costs.jsonl` blocked the scheduler's
+  board fetch for good and a link there was written through, before and after the plan as
+  written. The live file is now opened `O_NOFOLLOW | O_NONBLOCK` and must be regular. This is
+  one step past W7's letter (which names only the lock file) and is the same rule for the
+  same reason; drop A3 if the operator wants the spec's letter only.
+
 ## File Structure
 
 | File | Change | Rules |
 |---|---|---|
 | `scripts/factory_core/rotation.py` | **new**: generation names and listing, `open_regular`, bounded `locked`, `rotate_locked`, `store_size`, `compress_and_recover` (compress, swap, recovery pass) | W1–W8, W10; R1's pattern |
 | `scripts/factory_core/model_proxy.py` | `BACKUP_COUNT` removed; `_ledger_locked()`; `append_ledger` rotates through `rotation` and returns the rotated generation; `compress_ledger_generation`; `_persist_ledger` submits compression as its own executor task | W1–W6, W8–W10 |
-| `scripts/factory_core/cost_log.py` | sidecar lock with 1 s bounded wait; numbered rotation; inline compression after the lock is released | W1–W8, W10 |
+| `scripts/factory_core/cost_log.py` | sidecar lock with 1 s bounded wait; numbered rotation; inline compression after the lock is released; the live file is opened `O_NOFOLLOW \| O_NONBLOCK` and must be regular (`_append_line`) | W1–W8, W10; the spec's Goal |
 | `scripts/factory_core/run_record.py` | `_iter_ledger_paths(ledger_path, since_epoch=None)`; `_open_ledger_snapshot`, `_ledger_lines`, `_read_ledger`; `_read_ledger_rows(..., since_epoch=None)`; `_started_epoch`; `cmd_assemble`, `_compute_harness_economics`, `_build_issue_economics` wired | R1–R6 |
 | `scripts/factory_core/preview_helper.py` | `LEDGER_SCAN_WINDOW_SECONDS`; `ledger_files_ok(ledger_path, since_epoch=None)` also checks the lock file; `_read_ledger_rows_bounded(..., since_epoch=None)`; `record_outcome` passes `since_epoch` | R7 |
 | `tests/test_run_record.py` | reader tests (criterion 3, R3–R6) | |
@@ -48,7 +69,7 @@ Test-name map (the spec's names are binding):
 |---|---|---|
 | Criterion 3 / R1, R2 | `test_temporary_file_is_not_a_generation`, `test_plain_preferred_when_both_forms_exist` (run_record) | 1 |
 | Criterion 3 / R1, R2 | `test_reader_finds_rows_in_live_plain_and_gz`, `test_generations_older_than_the_run_are_not_opened` (run_record) | 2 |
-| R3 | `test_oversized_gz_is_abandoned` (run_record) | 2 |
+| R3 | `test_oversized_gz_is_abandoned`, `test_a_line_over_the_cap_abandons_the_file` (run_record) | 2 |
 | R4 | `test_append_is_not_blocked_while_a_reader_reads` (run_record) | 2 |
 | R4 | `test_concurrent_read_is_consistent` (run_record) | 6 |
 | R5 | `test_reader_does_not_create_the_lock_file`, `test_reader_proceeds_when_the_lock_is_held` (run_record) | 2 |
@@ -61,6 +82,7 @@ Test-name map (the spec's names are binding):
 | W5 | `test_stalled_generation_is_compressed_by_the_next_rotation`, `test_recovery_compresses_at_most_two_generations_per_rotation`, `test_stale_temporary_file_is_removed_by_the_recovery_pass` (model_proxy) | 5 |
 | W6 | `test_planted_fifo_under_a_generation_name_never_blocks` (model_proxy) | 5 |
 | W7 | `test_log_call_returns_within_two_seconds_when_the_lock_is_held`, `test_log_call_with_a_fifo_as_lock_file_appends_and_returns` (cost_log); `test_log_call_fails_soft_on_unwritable_dir` (*guard*) | 7 |
+| Goal (the poll never waits on a planted file) | `test_log_call_never_waits_on_or_writes_through_a_planted_live_file` (cost_log) | 7 |
 | W8 | `test_old_numbered_generations_are_kept_compressed_and_read` (model_proxy; cost_log) | 6; 7 |
 | W9 | `test_backup_count_variable_is_ignored` (model_proxy) | 5 |
 | W10 | `test_rotation_logs_the_store_size` (model_proxy) | 4 |
@@ -397,7 +419,38 @@ def test_oversized_gz_is_abandoned(tmp_path, monkeypatch, capsys):
     assert available is True
     assert sorted(r["gen_ai.usage.input_tokens"] for r in rows) == [1, 2]  # the forged one adds nothing
     assert peak < 5 * 1024 * 1024
-    assert capsys.readouterr().err.count("abandoned") == 1
+    assert capsys.readouterr().err.count("factory-rotation: abandoned ") == 1
+
+
+@pytest.mark.parametrize("where", ["gz", "plain", "live"])
+def test_a_line_over_the_cap_abandons_the_file(tmp_path, monkeypatch, capsys, where):
+    # R3 with the DEFAULT threshold: the decompressed-bytes bound alone is 200 MiB, and one
+    # line may fill it. The line cap keeps the reader's memory flat whatever the threshold.
+    import tracemalloc
+    monkeypatch.setattr(rr, "MAX_LEDGER_LINE_BYTES", 64 * 1024)
+    ledger = tmp_path / "request-ledger.jsonl"
+    good = (json.dumps(_ledger_row("run-1", in_tok=1)) + "\n").encode()
+    long_line = good + b"0" * (8 * 1024 * 1024)  # one valid row, then 8 MiB with no newline
+    if where == "live":
+        ledger.write_bytes(long_line)
+        _write_generation(tmp_path, "request-ledger.jsonl.1", [_ledger_row("run-1", in_tok=2)])
+    else:
+        ledger.write_bytes(good)
+        name = "request-ledger.jsonl.1" + (".gz" if where == "gz" else "")
+        (tmp_path / name).write_bytes(gzip.compress(long_line) if where == "gz" else long_line)
+        _write_generation(tmp_path, "request-ledger.jsonl.2", [_ledger_row("run-1", in_tok=2)])
+    capsys.readouterr()
+    tracemalloc.start()
+    try:
+        rows, available = rr._read_ledger_rows("run-1", ledger)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert available is True
+    # The file with the long line is read whole or not at all; the other file still counts.
+    assert [r["gen_ai.usage.input_tokens"] for r in rows] == ([2] if where == "live" else [1, 2])
+    assert peak < 2 * 1024 * 1024
+    assert capsys.readouterr().err.count("factory-rotation: abandoned ") == 1
 
 
 def test_append_is_not_blocked_while_a_reader_reads(tmp_path, monkeypatch):
@@ -455,9 +508,9 @@ def test_reader_proceeds_when_the_lock_is_held(tmp_path):
 - [ ] **Step 2: Run — verify they fail**
 
 ```bash
-PYTHONPATH=scripts python -m pytest tests/test_run_record.py -k "reader_finds_rows or older_than_the_run or oversized_gz or not_blocked_while_a_reader or does_not_create_the_lock or proceeds_when_the_lock" -v
+PYTHONPATH=scripts python -m pytest tests/test_run_record.py -k "reader_finds_rows or older_than_the_run or oversized_gz or line_over_the_cap or not_blocked_while_a_reader or does_not_create_the_lock or proceeds_when_the_lock" -v
 ```
-Expected: FAIL. The current reader `read_text`s a `.gz` (`UnicodeDecodeError`), has no `since_epoch` parameter (`TypeError`), and has no `_ledger_lines` (`AttributeError`). The two R5 tests may pass already; that is fine.
+Expected: FAIL. The current reader `read_text`s a `.gz` (`UnicodeDecodeError`), has no `since_epoch` parameter (`TypeError`), and has no `_ledger_lines` (`AttributeError`). The two R5 tests may pass already; that is fine. (Observed on the #645 end state: four fail, the two R5 tests pass; with the line-cap test added, its three cases fail too.)
 
 - [ ] **Step 3: Implement.** In `scripts/factory_core/run_record.py`, add `import gzip` and `import zlib` to the stdlib imports (keep alphabetical order). Then replace the whole `_read_ledger_rows` function with the code below.
 
@@ -465,6 +518,9 @@ The live file gets W6's opening rule (`O_NOFOLLOW | O_NONBLOCK`, regular file re
 
 ```python
 READ_LOCK_WAIT_SECONDS = 2.0
+# The longest ledger line the reader will hold (#652 R3). model_proxy's rows are a few
+# kilobytes; a file with a longer line is abandoned, like an archive over its bound.
+MAX_LEDGER_LINE_BYTES = 1024 * 1024
 
 
 class _AbandonedGeneration(Exception):
@@ -514,28 +570,37 @@ def _ledger_lines(path, fd, size_limit, is_gz):
     file only up to size_limit. A .gz is decompressed as a stream, never loaded whole, and
     abandoned once more than _generation_bound() decompressed bytes have been read (R3), so
     a forged archive cannot exhaust memory."""
+    def capped(line):
+        # A row is a few kilobytes. A "line" that fills the cap without ending is not a row:
+        # reading on would hold up to the whole file in memory (one 1 GiB line in a 5 MB
+        # forged .gz cost 444 MiB with the default threshold before this cap).
+        if len(line) > MAX_LEDGER_LINE_BYTES:
+            raise _AbandonedGeneration(f"a line over {MAX_LEDGER_LINE_BYTES} bytes")
+        return line
+
     with os.fdopen(fd, "rb", closefd=False) as raw:
         if not is_gz:
             remaining = size_limit
             while remaining is None or remaining > 0:
-                line = raw.readline() if remaining is None else raw.readline(remaining)
+                step = MAX_LEDGER_LINE_BYTES + 1
+                line = raw.readline(step if remaining is None else min(step, remaining))
                 if not line:
                     return
                 if remaining is not None:
                     remaining -= len(line)
-                yield line
+                yield capped(line)
             return
         bound = _generation_bound()
         budget = bound
         with gzip.GzipFile(fileobj=raw, mode="rb") as stream:
             while True:
-                line = stream.readline(budget + 1)
+                line = stream.readline(min(budget, MAX_LEDGER_LINE_BYTES) + 1)
                 if not line:
                     return
                 budget -= len(line)
                 if budget < 0:
                     raise _AbandonedGeneration(f"over {bound} decompressed bytes")
-                yield line
+                yield capped(line)
 
 
 def _read_ledger(ledger_path, since_epoch, keep) -> tuple:
@@ -1760,6 +1825,29 @@ def test_old_numbered_generations_are_kept_compressed_and_read(tmp_path, monkeyp
         cost_log.LOG_NAME + ".1.gz", cost_log.LOG_NAME + ".2.gz"}
     contexts = [json.loads(line)["context"] for line in _store_lines(tmp_path)]
     assert "legacy" in contexts and "new" in contexts
+
+
+@pytest.mark.parametrize("planted", ["fifo", "link", "directory"])
+def test_log_call_never_waits_on_or_writes_through_a_planted_live_file(tmp_path, monkeypatch, deadline, planted):
+    # log_call runs in the scheduler's poll. A FIFO at the live name blocked a plain open()
+    # for good; a link there was written through.
+    monkeypatch.setenv("SCHEDULER_STATE_DIR", str(tmp_path))
+    log = tmp_path / cost_log.LOG_NAME
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL")
+    if planted == "fifo":
+        os.mkfifo(log)
+    elif planted == "link":
+        log.symlink_to(victim)
+    else:
+        log.mkdir()
+    started = time.monotonic()
+    cost_log.log_call("planted", RATE)  # returns, raises nothing
+    assert time.monotonic() - started < 2
+    assert victim.read_text() == "ORIGINAL"
+    log.rmdir() if planted == "directory" else log.unlink()
+    cost_log.log_call("after", RATE)  # the next call, on a clean name, writes again
+    assert json.loads(log.read_text().splitlines()[-1])["context"] == "after"
 ```
 
 - [ ] **Step 2: Run — verify they fail**
@@ -1767,7 +1855,7 @@ def test_old_numbered_generations_are_kept_compressed_and_read(tmp_path, monkeyp
 ```bash
 PYTHONPATH=scripts python -m pytest tests/test_cost_log.py -v
 ```
-Expected: the rewritten rotation test and the new tests FAIL (`.1` plain, overwritten, no lock). The six tests that are not rewritten PASS.
+Expected: the rewritten rotation test and the new tests FAIL (`.1` plain, overwritten, no lock), except the `directory` case of `test_log_call_never_waits_on_or_writes_through_a_planted_live_file`, which passes already. The six tests that are not rewritten PASS.
 
 - [ ] **Step 3: Implement.** Replace the whole of `scripts/factory_core/cost_log.py` with:
 
@@ -1787,6 +1875,7 @@ scheduler.sh / entrypoint.sh via DARK_FACTORY_COST_SOURCE.
 """
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1798,6 +1887,21 @@ ROTATE_BYTES = 1_000_000  # ~1 MiB: rotate to the next numbered generation (#652
 # mounts this directory. A lock held by any process may cost the call at most this long,
 # never the poll (#652 W7).
 LOCK_WAIT_SECONDS = 1.0
+
+
+def _append_line(path: Path, text: str) -> None:
+    """Append to the live file without ever waiting on it or writing through it (#652): the
+    name is opened O_NOFOLLOW | O_NONBLOCK and must be a regular file. A FIFO planted there
+    (open would block until a reader came), a link or a directory loses this line and
+    raises OSError, which log_call swallows; the poll goes on."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | os.O_CLOEXEC, 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 def log_call(context: str, rate_limit: dict | None) -> None:
@@ -1827,8 +1931,7 @@ def log_call(context: str, rate_limit: dict | None) -> None:
         with rotation.locked(lock_file, timeout=LOCK_WAIT_SECONDS) as held:
             if held:
                 created = rotation.rotate_locked(path, ROTATE_BYTES)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(line) + "\n")
+            _append_line(path, json.dumps(line) + "\n")
         if created is not None:
             # W3: inline (a 1 MiB generation, synchronous callers), after the lock is released.
             rotation.compress_and_recover(
@@ -2056,7 +2159,7 @@ The model-proxy request ledger `request-ledger.jsonl` (`scripts/factory_core/mod
 | `<name>.<N>.gz.tmp.<16 hex>` | a compression in progress; a leftover is removed by a rotation once it is an hour old |
 
 - **When:** the ledger rotates at `MODEL_PROXY_MAX_BYTES` (100 MiB), the cost log at about 1 MiB. The new generation takes one more than the highest number present, and numbers only grow.
-- **Growth is unbounded by design.** No generation is deleted or overwritten; `MODEL_PROXY_BACKUP_COUNT` is ignored. Each rotation logs one `factory-rotation:` line on the writer's stderr with the store's total size (the live file plus every generation).
+- **Growth is unbounded by design.** No generation is deleted or overwritten; `MODEL_PROXY_BACKUP_COUNT` is ignored. Each rotation logs one `factory-rotation:` line on the writer's stderr with the store's total size (the live file plus every generation). Nothing stops the store at a size: when the state volume is full, a ledger append fails with `ENOSPC` (that row is not recorded), a compression that cannot finish is logged and leaves its plain generation in place, and the cost log drops the line. Watch the size line and prune.
 - **Older generations** (`request-ledger.jsonl.1`–`.3` and `graphql-costs.jsonl.1`, left by the rotation before #652) keep their names and are compressed by later rotations. Among themselves their numbers do not mean "higher is newer".
 - **Readers:** `run-record assemble`, `backfill-economics`, `issue-economics` and the preview helper read the live file and every generation, plain or `.gz`. Per-run reads skip generations last modified before the run started. `scripts/reconcile_cost_reports.py` still reads only the live ledger.
 - **Pruning is a manual operator action** and the only way the store shrinks. Delete whole `<name>.<N>.gz` files, oldest first by modification time (`ls -ltr`). Never delete the live file, the `.lock` file, or a plain `<name>.<N>` that is not yet compressed. Rows in a deleted generation are gone from every report above.
@@ -2154,7 +2257,7 @@ gh issue create --repo "$FACTORY_REPO_SLUG" --label documentation \
 ```
 If a label does not exist in the repo, drop that `--label` flag.
 
-- [ ] **Step 8: Record what remains unverified in the PR body** (the spec's "Not verified" list, updated with this plan's tests). These are now covered by tests: W8 (`test_old_numbered_generations_are_kept_compressed_and_read`), W9, W10, R3's memory bound (`test_oversized_gz_is_abandoned`, a `tracemalloc` peak), R6's wiring, R7, W5's one-hour clean-up, and the random-temp-name rule (`test_two_compressors_of_one_generation_never_share_a_temporary_file`). Still accepted and not tested: a run container that hard-links the live ledger to the next number triggers W2 early (no row lost); a process holding `graphql-costs.jsonl.lock` for good stops cost-log rotation and costs each `log_call` one second. Also state the expected `HUMAN_REQUIRED` blast-radius hold (`run_record.py`, `model_proxy.py` hotspots).
+- [ ] **Step 8: Record what remains unverified in the PR body** (the spec's "Not verified" list, updated with this plan's tests). These are now covered by tests: W8 (`test_old_numbered_generations_are_kept_compressed_and_read`), W9, W10, R3's memory bound (`test_oversized_gz_is_abandoned`, a `tracemalloc` peak), R6's wiring, R7, W5's one-hour clean-up, and the random-temp-name rule (`test_two_compressors_of_one_generation_never_share_a_temporary_file`). Still accepted and not tested: a run container that hard-links the live ledger to the next number triggers W2 early (no row lost); a process holding `graphql-costs.jsonl.lock` for good stops cost-log rotation and costs each `log_call` one second. Also state the expected `HUMAN_REQUIRED` blast-radius hold (`run_record.py`, `model_proxy.py` hotspots). Unchanged by this ticket and measured the same before and after it (plan review, factory image): a FIFO planted at the live `request-ledger.jsonl` or at `request-ledger.jsonl.lock` blocks `append_ledger` in its executor thread, a link at the live ledger is written through, and a held ledger lock blocks `append_ledger` (#634's unbounded wait). File one follow-up for those three if none exists; do not fix them here.
 
 ---
 
