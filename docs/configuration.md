@@ -487,6 +487,9 @@ containers (`run-compose.yml:31-47`).
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:215` | `.archon/.env` |
 | `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:77` | `.archon/.env` |
+| `SHADOW_BASE_URL` | set by the launcher only | `bench/_shadow_worker.py` (the one local arm's endpoint, from the arms file's `base_url`) | never set by hand; the worker's environment is exactly `PATH`, `HOME`, `SHADOW_BASE_URL` and the arm's `secret_env` (#563) |
+| (arm `secret_env`, e.g. `SHADOW_LOCAL_API_KEY`) | none | `bench/shadow_runner.py` (copied into the worker under the same name), `bench/_shadow_worker.py` (sent as `x-api-key`) | the operator's shell; a keyless server takes a dummy value (`bench/hosting_shadow.md`) |
+| `GH_TOKEN`, `GITHUB_TOKEN`, `model_endpoint.CLOUD_CREDENTIALS` names | must be unset | `bench/shadow_runner.py` presence check: the launcher refuses to start if any is set (no override) | the operator's shell (#563) |
 
 (The config-derived switches such as `EPIC_AUTOPILOT_ENABLED` are in the Layer 1 tables.)
 

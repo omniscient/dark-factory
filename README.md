@@ -301,6 +301,11 @@ location (the dark-factory checkout), which is the normal local development
 workflow.  Passing `--tasks FILE` overrides the manifest path so you can supply
 a target-specific suite alongside `BENCH_TARGET_DIR`.
 
+The hosting shadow comparator (`bench/shadow_runner.py`, `bench/compare_hosting_variants.py`)
+is a separate, non-authoritative instrument that replays only the preview classifier's
+prompt against labelled fixtures; it never runs the workflow. See
+[`bench/hosting_shadow.md`](bench/hosting_shadow.md).
+
 ---
 
 ## Weekly dispatch-ceiling revisit
@@ -380,6 +385,7 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [`docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md`](docs/superpowers/specs/2026-07-13-roll-out-dark-factory-claude-skills-design.md) — Claude Skills rollout-status runbook: per-scenario advisory state and rollback steps
 - [`config/config.yaml`](config/config.yaml) — all policy knobs with inline documentation
 - [`bench/baseline.md`](bench/baseline.md) — replay benchmark task manifest and scoring formula
+- [`bench/hosting_shadow.md`](bench/hosting_shadow.md) — hosting shadow comparator (#563): isolated rules-only/local replay of the preview classifier; non-authoritative, no cloud arm
 - [`docs/adapter-authoring-guide.md`](docs/adapter-authoring-guide.md) — how to write a tracker, code-host, or model-endpoint adapter
 - [`docs/hybrid-execution-contract.md`](docs/hybrid-execution-contract.md) — hybrid cloud + local model execution contract (#556): decision report, not yet implemented
 - [`docs/local-inference-deployment-runbook.md`](docs/local-inference-deployment-runbook.md) — operator runbook for registering and checking a candidate local inference endpoint (#560); routes nothing until #587
