@@ -45,8 +45,9 @@ LEDGER_PATH = pathlib.Path(
 # LEDGER_PATH (the helper mounts scheduler_state but sets no MODEL_PROXY_LEDGER_PATH of its
 # own), so rotation and append must be serialized across processes, not just within one. A
 # lock file that is never itself rotated/renamed lets append_ledger() hold one lock across
-# both steps below, instead of flocking LEDGER_PATH only for the append.
-LEDGER_LOCK_PATH = LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
+# both steps below, instead of flocking LEDGER_PATH only for the append. The lock path is
+# derived from LEDGER_PATH at call time (_ledger_lock_path), so it always sits beside the
+# ledger actually being written.
 CURRENT_RUN_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_CURRENT_RUN_PATH")
     or f"{os.environ.get('CURRENT_RUN_DIR', '/var/lib/dark-factory')}/current-run.json"
@@ -178,12 +179,16 @@ def _rotate_if_needed(path: pathlib.Path) -> None:
     path.rename(path.with_suffix(path.suffix + ".1"))
 
 
+def _ledger_lock_path() -> pathlib.Path:
+    return LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
+
+
 def append_ledger(row: dict) -> None:
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Rotate-and-append under one lock (#634): locking LEDGER_PATH itself only covered the
     # write, so two processes could both pass the rotate check at once and clobber/misplace
     # rows. The lock file is never rotated/renamed, so it stays a stable mutex for both steps.
-    with open(LEDGER_LOCK_PATH, "a", encoding="utf-8") as lock_fh:
+    with open(_ledger_lock_path(), "a", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
             _rotate_if_needed(LEDGER_PATH)

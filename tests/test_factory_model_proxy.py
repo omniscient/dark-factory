@@ -139,6 +139,16 @@ def test_append_ledger_writes_line(tmp_path, monkeypatch):
     assert json.loads(lines[0]) == {"a": 1}
 
 
+def test_append_ledger_lock_follows_the_ledger_path(tmp_path, monkeypatch):
+    # The sidecar lock must sit beside whatever LEDGER_PATH is at call time, not the
+    # import-time default — otherwise a relocated ledger still opens a lock under
+    # /var/lib/dark-factory (absent in CI, a live state dir elsewhere).
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    mp.append_ledger({"a": 1})
+    assert (tmp_path / "request-ledger.jsonl.lock").exists()
+
+
 def test_append_ledger_rotates_at_max_bytes(tmp_path, monkeypatch):
     path = tmp_path / "request-ledger.jsonl"
     monkeypatch.setattr(mp, "LEDGER_PATH", path)
