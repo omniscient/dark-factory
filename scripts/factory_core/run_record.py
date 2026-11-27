@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from . import model_proxy
+from . import session_usage
 from . import verdict as _verdict
 
 SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
@@ -262,30 +263,59 @@ def _node_cost(n: dict):
     return 0
 
 
+# The Claude Agent SDK's ModelUsage keys (#645) -> a node's `models` entry keys.
+_ARCHON_MODEL_USAGE_KEYS = (
+    ("inputTokens", "input_tokens"),
+    ("outputTokens", "output_tokens"),
+    ("cacheReadInputTokens", "cache_read_input_tokens"),
+    ("cacheCreationInputTokens", "cache_creation_input_tokens"),
+    ("costUSD", "cost_usd"),
+)
+
+
+def _archon_models(model_usage) -> list:
+    """One `models` entry per modelUsage key, the model ID unmodified (#645 requirement 6).
+    A value that is not an object (the placeholder 1 in older fixtures) yields the ID alone."""
+    if not isinstance(model_usage, dict):
+        return []
+    out = []
+    for model_id in sorted(k for k in model_usage if isinstance(k, str) and k):
+        usage = model_usage[model_id]
+        entry = {"model": model_id}
+        if isinstance(usage, dict):
+            for src, dst in _ARCHON_MODEL_USAGE_KEYS:
+                value = usage.get(src)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    entry[dst] = value
+        out.append(entry)
+    return out
+
+
+def _models_field(models) -> str:
+    """A node's `model` string: the full ID, several sorted and joined with ",", or ""."""
+    return ",".join(sorted({m["model"] for m in models or [] if m.get("model")}))
+
+
 def _nodes_from_run_obj(run_obj: dict) -> list:
     """Map a run object's nodes to OTel field names."""
     nodes = []
     for n in run_obj.get("nodes") or []:
-        model_usage = n.get("modelUsage") or n.get("model_usage") or {}
-        raw_model = next(iter(model_usage.keys()), "")
-        if raw_model.startswith("claude-"):
-            raw_model = raw_model[len("claude-"):]
-        if "-20" in raw_model:
-            raw_model = raw_model[: raw_model.index("-20")]
-        nodes.append(
-            {
-                "node_id": n.get("nodeId") or n.get("node_id", ""),
-                "model": raw_model,
-                "gen_ai.usage.input_tokens": (
-                    n.get("inputTokens") or n.get("input_tokens") or 0
-                ),
-                "gen_ai.usage.output_tokens": (
-                    n.get("outputTokens") or n.get("output_tokens") or 0
-                ),
-                "cost_usd": _node_cost(n),
-                "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
-            }
-        )
+        models = _archon_models(n.get("modelUsage") or n.get("model_usage") or {})
+        node = {
+            "node_id": n.get("nodeId") or n.get("node_id", ""),
+            "model": _models_field(models),
+            "gen_ai.usage.input_tokens": (
+                n.get("inputTokens") or n.get("input_tokens") or 0
+            ),
+            "gen_ai.usage.output_tokens": (
+                n.get("outputTokens") or n.get("output_tokens") or 0
+            ),
+            "cost_usd": _node_cost(n),
+            "duration_ms": n.get("durationMs") or n.get("duration_ms") or 0,
+        }
+        if models:
+            node["models"] = models   # the Archon fallback (#645); usage_source set later
+        nodes.append(node)
     return nodes
 
 
@@ -570,6 +600,130 @@ def _capture_totals(nodes: list, *, capture_ok: bool, clone_dir, archon_log_file
         "missing_nodes": missing,
     })
     return nodes, totals
+
+
+# --- Model, cache-token and cost capture (#645) -------------------------------------
+_USAGE_CACHE_KEYS = ("cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _called_model(node: dict, node_types: "dict | None", windows: dict) -> bool:
+    """Whether a node called a model: a command:/prompt: node that ran (a log window, a
+    reported usage, or a missing-capture mark). With no workflow YAML, any reported usage."""
+    reported = bool(
+        node.get("gen_ai.usage.input_tokens") or node.get("gen_ai.usage.output_tokens")
+        or node.get("cost_usd") or node.get("models")
+    )
+    if node_types is None:
+        return reported
+    node_id = node.get("node_id")
+    return node_types.get(node_id) in _AI_NODE_TYPES and (
+        reported or node_id in windows or node.get("cost_capture") == "missing"
+    )
+
+
+def _archon_reconciled(models: list, cost) -> bool:
+    costs = [m["cost_usd"] for m in models if isinstance(m.get("cost_usd"), (int, float))]
+    return (bool(costs) and isinstance(cost, (int, float))
+            and abs(sum(costs) - cost) <= session_usage.ARCHON_COST_EPSILON)
+
+
+def _with_usage_keys(node: dict, called: bool, figures: "dict | None", hosting) -> dict:
+    """A node with #645's additive keys. Pre-existing keys keep their values; `model`
+    becomes the full ID(s) of `models`. figures: session_usage's result for the node."""
+    node = dict(node)
+    if not called:
+        node.pop("models", None)
+        node["model"] = ""
+        node["usage_source"] = "none"
+        return node
+    if figures:
+        models, source = [dict(m) for m in figures["models"]], figures["usage_source"]
+    elif node.get("models"):
+        models, source = [dict(m) for m in node["models"]], "archon"
+    else:
+        models, source = [], "none"
+    local = hosting == "local"
+    if local:
+        # Contract §4.10: a local-routed node's cost is unknown, never a Claude-priced figure.
+        for m in models:
+            m.pop("cost_usd", None)
+    node["model"] = _models_field(models)
+    if models:
+        node["models"] = models
+    else:
+        node.pop("models", None)
+    for key in _USAGE_CACHE_KEYS:
+        values = [m[key] for m in models if isinstance(m.get(key), int)]
+        if values:
+            node[f"gen_ai.usage.{key}"] = sum(values)
+    node["usage_source"] = source
+    if source == "archon":
+        node["usage_reconciled"] = _archon_reconciled(models, node.get("cost_usd"))
+    elif source != "none":
+        node["usage_reconciled"] = figures["usage_reconciled"]
+    if source == "cli_cost_state" and not local:
+        node["cost_usd_session_delta"] = figures["cost_usd_session_delta"]
+    node["hosting_location"] = "local" if local else "cloud"
+    return node
+
+
+def _apply_session_usage(nodes: list, totals: dict, *, transcripts_dir, started_at,
+                         archon_log_file, clone_dir, hosting) -> "tuple[list, dict, dict]":
+    """#645: per-node model/cache/cost-delta keys, the new totals, and the run-level
+    unattributed sessions and harness version. Without transcripts_dir only the Archon
+    modelUsage fallback can fill a node."""
+    maps = _load_workflow_node_maps(clone_dir)
+    node_types = maps[0] if maps else None
+    all_windows: dict = {}
+    transcripts = None
+    try:   # never lose the record over the log or the transcripts
+        all_windows = session_usage.read_node_windows(
+            archon_log_file, [n.get("node_id") for n in nodes])
+        if transcripts_dir:
+            transcripts = session_usage.load_transcripts(transcripts_dir, started_at)
+    except Exception as exc:
+        print(f"run-record: session usage not read ({type(exc).__name__})", file=sys.stderr)
+    called = {n.get("node_id") for n in nodes if _called_model(n, node_types, all_windows)}
+    windows = {k: v for k, v in all_windows.items() if k in called}
+    attributed: dict = {"nodes": {}, "unattributed_sessions": []}
+    harness_version = transcripts["harness_version"] if transcripts else None
+    if transcripts:
+        try:
+            attributed = session_usage.attribute(
+                transcripts, windows,
+                {n.get("node_id"): (n.get("gen_ai.usage.input_tokens"),
+                                    n.get("gen_ai.usage.output_tokens"))
+                 for n in nodes if n.get("node_id") in called},
+                {n.get("node_id"): n.get("cost_usd") for n in nodes if n.get("node_id") in called},
+            )
+        except Exception as exc:
+            print(f"run-record: session transcripts not attributed ({type(exc).__name__})",
+                  file=sys.stderr)
+    nodes = [
+        _with_usage_keys(n, n.get("node_id") in called,
+                         attributed["nodes"].get(n.get("node_id")), hosting)
+        for n in nodes
+    ]
+    totals = dict(totals)
+    for key in _USAGE_CACHE_KEYS:
+        values = [n[f"gen_ai.usage.{key}"] for n in nodes if f"gen_ai.usage.{key}" in n]
+        if values:
+            totals[f"gen_ai.usage.{key}"] = sum(values)
+    totals["cost_usd_deduplicated"] = None if totals.get("cost_usd") is None else round(sum(
+        n["cost_usd_session_delta"] if "cost_usd_session_delta" in n else (n.get("cost_usd") or 0)
+        for n in nodes
+    ), 10)
+    # Fail closed: complete only when every model-calling node has its session delta or is
+    # known to be the first file of its chain (so its Archon cost is not cumulative). A node
+    # with no transcript figures could be a resumed one whose cost is still overstated.
+    totals["cost_usd_deduplicated_complete"] = all(
+        "cost_usd_session_delta" in n
+        or attributed["nodes"].get(n.get("node_id"), {}).get("first_of_chain") is True
+        for n in nodes if n.get("node_id") in called
+    )
+    run_keys = {"unattributed_sessions": attributed["unattributed_sessions"],
+                "harness_version": harness_version}
+    return nodes, totals, run_keys
 
 
 def _parse_artifact_stage(name: str, content: str) -> "dict | None":
@@ -1104,6 +1258,17 @@ def cmd_assemble(args) -> None:
         nodes = [dict(n, cost_usd=None) for n in nodes]
         totals = dict(totals, cost_usd=None, known_cost_usd=None, cost_capture="not_applicable")
 
+    model_dispatch = _compute_model_dispatch(ledger_rows)
+    # #645: additive model/cache/cost-delta capture; no pre-existing value changes.
+    nodes, totals, usage_run = _apply_session_usage(
+        nodes, totals,
+        transcripts_dir=getattr(args, "transcripts_dir", None),
+        started_at=args.started_at,
+        archon_log_file=getattr(args, "archon_log_file", None),
+        clone_dir=getattr(args, "clone_dir", None) or ".",
+        hosting=model_dispatch["result"]["hosting_location"],
+    )
+
     from . import adapter
     try:
         loops = adapter.get(args.clone_dir, "loops") or []
@@ -1150,6 +1315,10 @@ def cmd_assemble(args) -> None:
         "loops": loops,
         "archon_cost_capture": archon_cost_capture,
         "totals": totals,
+        "unattributed_sessions": usage_run["unattributed_sessions"],
+        "factory_instance": os.environ.get("FACTORY_INSTANCE", ""),
+        "target_repo": os.environ.get("FACTORY_REPO_SLUG", ""),
+        "harness": {"name": "claude-code", "version": usage_run["harness_version"]},
     }
     if artifact_check is not None:
         run_record["artifact_check"] = artifact_check  # replayed by backfill-economics
@@ -1168,7 +1337,7 @@ def cmd_assemble(args) -> None:
         ledger=(ledger_rows, ledger_available),
     )
     # Request/Result contracts (#558): additive, computed independently like harness_economics.
-    run_record["model_dispatch"] = _compute_model_dispatch(ledger_rows)
+    run_record["model_dispatch"] = model_dispatch
 
     trace_path = artifacts_dir / "memory-trace.json"
     if trace_path.exists():
@@ -1376,6 +1545,8 @@ def main() -> None:
     a.add_argument("--clone-dir", default=os.environ.get("CLONE_DIR", "."))
     a.add_argument("--side-effect-level", type=int, default=None)
     a.add_argument("--side-effect-profile", default=None)
+    a.add_argument("--transcripts-dir", default=None,
+                   help="Claude Code session transcripts root, for per-node usage (#645)")
 
     ie = sub.add_parser("issue-economics", help="Read-only cross-run rollup for an issue")
     ie.add_argument("--issue", type=int, required=True)

@@ -277,7 +277,9 @@ def test_parse_archon_cost_basic(tmp_path):
     assert nodes[0]["gen_ai.usage.output_tokens"] == 52000
     assert nodes[0]["cost_usd"] == pytest.approx(0.34)
     assert nodes[0]["duration_ms"] == 300000
-    assert nodes[0]["model"] == "sonnet-4-6"
+    # #645: IDs are never shortened; the placeholder value still parses (ID alone).
+    assert nodes[0]["model"] == "claude-sonnet-4-6-20251101"
+    assert nodes[0]["models"] == [{"model": "claude-sonnet-4-6-20251101"}]
 
 
 def test_parse_archon_cost_missing_file(tmp_path):
@@ -3145,3 +3147,319 @@ def test_assemble_reads_the_ledger_once(tmp_path, monkeypatch):
     monkeypatch.setattr(rr, "_read_ledger_rows", lambda run_id, path: reads.append(run_id) or real(run_id, path))
     _assemble_with_ledger(tmp_path, monkeypatch, [_dispatch_row()], [])
     assert reads == ["abc123"]
+
+
+# ---------------------------------------------------------------------------
+# #645: model, cache-token and cost capture
+# ---------------------------------------------------------------------------
+
+_USAGE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "session_usage"
+_U_T0 = 1_795_806_798_000
+_OPUS, _HAIKU, _SONNET = "claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-sonnet-5"
+_PRE_645_NODE_KEYS = ("node_id", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens",
+                      "cost_usd", "duration_ms", "cost_capture")
+_NEW_645_NODE_KEYS = ("models", "gen_ai.usage.cache_read_input_tokens",
+                      "gen_ai.usage.cache_creation_input_tokens", "usage_source",
+                      "usage_reconciled", "cost_usd_session_delta", "hosting_location")
+_NEW_645_RUN_KEYS = ("unattributed_sessions", "factory_instance", "target_repo", "harness")
+_NEW_645_TOTALS_KEYS = ("gen_ai.usage.cache_read_input_tokens",
+                        "gen_ai.usage.cache_creation_input_tokens",
+                        "cost_usd_deduplicated", "cost_usd_deduplicated_complete")
+
+_USAGE_WORKFLOW = """\
+name: archon-dark-factory
+nodes:
+  - id: parse-intent
+    prompt: classify the request
+  - id: fetch-issue
+    bash: echo fetch
+  - id: conformance
+    command: dark-factory-conformance
+  - id: code-review
+    command: dark-factory-code-review
+  - id: revise-advisory
+    command: dark-factory-revise-advisory
+"""
+
+
+def _u_iso(ms):
+    from factory_core import session_usage
+    return session_usage.ms_to_iso(ms)
+
+
+def _u_assistant(mid, ms, model, tin, tout, cr=0, cc=0):
+    return {"type": "assistant", "timestamp": _u_iso(ms), "isSidechain": False,
+            "version": "2.1.282",
+            "message": {"id": mid, "model": model,
+                        "usage": {"input_tokens": tin, "output_tokens": tout,
+                                  "cache_read_input_tokens": cr,
+                                  "cache_creation_input_tokens": cc}}}
+
+
+def _u_user(text, ms):
+    return {"type": "user", "timestamp": _u_iso(ms), "isSidechain": False,
+            "message": {"role": "user", "content": text}}
+
+
+def _u_mu(tin, tout, cr, cc, cost):
+    return {"inputTokens": tin, "outputTokens": tout, "cacheReadInputTokens": cr,
+            "cacheCreationInputTokens": cc, "costUSD": cost}
+
+
+def _u_cs(start, total, usage):
+    return {"type": "cost-state", "startTime": start, "totalCostUSD": total, "modelUsage": usage}
+
+
+def _u_write(path, lines):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+
+def _u_log_line(ms, msg, node=None, **kw):
+    line = {"level": 30, "time": ms, "pid": 1, "hostname": "scrubbed",
+            "module": "workflow.dag-executor", "msg": msg}
+    if node:
+        line["nodeId"] = node
+    line.update(kw)
+    return json.dumps(line)
+
+
+def _u_log():
+    t = _U_T0
+    lines = [
+        _u_log_line(t, "dag_workflow_starting"),
+        _u_log_line(t + 1, "dag_node_started", "parse-intent", provider="claude"),
+        _u_log_line(t + 900, "dag_node_completed", "parse-intent", durationMs=899),
+        _u_log_line(t + 901, "dag_node_started", "fetch-issue", type="bash"),
+        _u_log_line(t + 950, "dag_node_completed", "fetch-issue", durationMs=49),
+        _u_log_line(t + 1000, "dag_node_started", "conformance", provider="claude"),
+        _u_log_line(t + 1999, "dag_node_completed", "conformance"),
+        _u_log_line(t + 2000, "dag_node_started", "code-review", provider="claude"),
+        _u_log_line(t + 2999, "dag_node_completed", "code-review"),
+        _u_log_line(t + 4000, "dag_node_started", "revise-advisory", provider="claude"),
+        _u_log_line(t + 4999, "dag_node_completed", "revise-advisory"),
+        _u_log_line(t + 5000, "dag_workflow_finished"),
+    ]
+    return "Running workflow: archon-dark-factory\n[parse-intent] Started\n" + "\n".join(lines) + "\n"
+
+
+_U_COST = {"runId": "wf645", "nodes": [
+    _cost_node("parse-intent", 20, 294, 0.0096, 899),
+    _cost_node("fetch-issue", ms=49),
+    _cost_node("conformance", 20, 200, 1.0, 999),
+    _cost_node("code-review", 20, 200, 2.1, 999),
+    _cost_node("revise-advisory", 20, 200, 3.1, 999),
+]}
+
+
+def _u_transcripts(root, *, last_cost_state=False):
+    """parse-intent's session, Archon's title session, and one session resumed across
+    conformance -> code-review -> revise-advisory (each file repeats the earlier ones)."""
+    t = _U_T0
+    proj = root / "-workspace-target"
+    _u_write(proj / "p.jsonl", [
+        _u_user("Parse this command", t + 40),
+        _u_assistant("p1", t + 100, _HAIKU, 20, 294),
+        _u_cs(t + 2, 0.0096, {_HAIKU: _u_mu(1040, 307, 15408, 2750, 0.0096)}),
+    ])
+    _u_write(proj / "q.jsonl", [
+        _u_user("Generate a concise conversation title for this request", t + 50),
+        _u_assistant("q1", t + 60, _SONNET, 2, 10),
+        _u_cs(t + 3, 0.0143, {_SONNET: _u_mu(2, 10, 0, 0, 0.0133),
+                              _HAIKU: _u_mu(966, 13, 0, 0, 0.001)}),
+    ])
+    msgs = [_u_assistant(f"c{i}", t + ms, _OPUS, 10, 100, 500, 25)
+            for i, ms in enumerate((1100, 1200, 2100, 2200, 4100, 4200), start=1)]
+    start = t + 1000
+    _u_write(proj / "a.jsonl", [_u_user("conformance", t + 1001)] + msgs[:2] + [
+        _u_cs(start, 1.0, {_OPUS: _u_mu(20, 200, 1000, 50, 0.9), _HAIKU: _u_mu(5, 5, 0, 0, 0.1)})])
+    _u_write(proj / "b.jsonl", msgs[:4] + [
+        _u_cs(start, 2.1, {_OPUS: _u_mu(40, 400, 3000, 80, 2.0), _HAIKU: _u_mu(5, 5, 0, 0, 0.1)})])
+    _u_write(proj / "c.jsonl", msgs[:6] + ([
+        _u_cs(start, 3.1, {_OPUS: _u_mu(60, 600, 4000, 130, 3.0), _HAIKU: _u_mu(5, 5, 0, 0, 0.1)})]
+        if last_cost_state else []))
+    return root
+
+
+def _u_assemble(tmp_path, monkeypatch, *, transcripts=None, name="run"):
+    root = tmp_path / name
+    clone = _clone_with_workflow(root, _USAGE_WORKFLOW)
+    monkeypatch.setattr(rr, "_check_needs_discussion", lambda issue: (False, True))
+    rec = _assemble_with_capture(root, monkeypatch, _U_COST, log_text=_u_log(), clone=clone)
+    if transcripts is None:
+        return rec
+    args = _AssembleArgs(root, root / "run-record.json")
+    args.intent = "fix"
+    args.archon_cost_json = str(root / "cost.json")
+    args.archon_cost_exit_code = 0
+    args.archon_log_file = str(root / "archon-run.log")
+    args.clone_dir = str(clone)
+    args.transcripts_dir = str(transcripts)
+    rr.cmd_assemble(args)
+    return json.loads((root / "run-record.json").read_text())
+
+
+def test_nodes_from_run_obj_real_sdk_model_usage_two_models():
+    obj = json.loads((_USAGE_FIXTURES / "archon-cost-sdk-model-usage.json").read_text())
+    node = rr._nodes_from_run_obj(obj)[0]
+    assert node["model"] == "claude-opus-5-5,claude-sonnet-5"   # full IDs, sorted, joined
+    assert node["models"] == [
+        {"model": "claude-opus-5-5", "input_tokens": 12, "output_tokens": 4100,
+         "cache_read_input_tokens": 610000, "cache_creation_input_tokens": 30500,
+         "cost_usd": 1.019869},
+        {"model": "claude-sonnet-5", "input_tokens": 90, "output_tokens": 22298,
+         "cache_read_input_tokens": 4283508, "cache_creation_input_tokens": 121337,
+         "cost_usd": 1.5652096},
+    ]
+    assert node["gen_ai.usage.input_tokens"] == 90   # Archon's node-level numbers unchanged
+
+
+def test_nodes_from_run_obj_null_model_usage_is_empty():
+    node = rr._nodes_from_run_obj({"nodes": [{"nodeId": "x", "modelUsage": None}]})[0]
+    assert node["model"] == "" and "models" not in node
+
+
+def test_archon_fallback_sets_usage_source_and_reconciles_on_cost():
+    obj = json.loads((_USAGE_FIXTURES / "archon-cost-sdk-model-usage.json").read_text())
+    node = rr._with_usage_keys(rr._nodes_from_run_obj(obj)[0], True, None, None)
+    assert node["usage_source"] == "archon"
+    assert node["usage_reconciled"] is True   # 1.019869 + 1.5652096 == 2.5850786
+    assert node["gen_ai.usage.cache_read_input_tokens"] == 4893508
+    assert node["hosting_location"] == "cloud"
+
+
+def test_node_with_no_figures_gets_none_and_no_numeric_key():
+    node = rr._with_usage_keys({"node_id": "implement", "model": "", "cost_usd": 1.0},
+                               True, None, None)
+    assert node["usage_source"] == "none" and node["model"] == ""
+    for key in ("models", "gen_ai.usage.cache_read_input_tokens",
+                "gen_ai.usage.cache_creation_input_tokens", "usage_reconciled",
+                "cost_usd_session_delta"):
+        assert key not in node
+
+
+def test_local_node_never_carries_a_claude_priced_cost():
+    figures = {"usage_source": "cli_cost_state", "usage_reconciled": False,
+               "cost_usd_session_delta": 1.0,
+               "models": [{"model": _OPUS, "input_tokens": 1, "output_tokens": 2,
+                           "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4,
+                           "cost_usd": 1.0}]}
+    node = rr._with_usage_keys({"node_id": "implement", "cost_usd": None}, True, figures, "local")
+    assert node["hosting_location"] == "local"
+    assert "cost_usd_session_delta" not in node
+    assert all("cost_usd" not in m for m in node["models"])
+
+
+def test_assemble_records_model_cache_and_session_delta(tmp_path, monkeypatch):
+    monkeypatch.setenv("FACTORY_INSTANCE", "dark-factory-self")
+    monkeypatch.setenv("FACTORY_REPO_SLUG", "omniscient/dark-factory")
+    rec = _u_assemble(tmp_path, monkeypatch, transcripts=_u_transcripts(tmp_path / "tx"))
+    by = _by_id(rec)
+    assert by["parse-intent"]["model"] == _HAIKU
+    assert by["parse-intent"]["usage_source"] == "cli_cost_state"
+    assert by["parse-intent"]["usage_reconciled"] is True
+    assert by["parse-intent"]["gen_ai.usage.cache_read_input_tokens"] == 15408
+    assert by["conformance"]["model"] == f"{_HAIKU},{_OPUS}"
+    assert by["conformance"]["cost_usd_session_delta"] == pytest.approx(1.0)
+    assert by["code-review"]["model"] == _OPUS
+    assert by["code-review"]["cost_usd"] == pytest.approx(2.1)            # Archon's, unchanged
+    assert by["code-review"]["cost_usd_session_delta"] == pytest.approx(1.1)
+    assert by["revise-advisory"]["usage_source"] == "transcript_messages"
+    assert "cost_usd_session_delta" not in by["revise-advisory"]
+    assert by["fetch-issue"]["model"] == "" and by["fetch-issue"]["usage_source"] == "none"
+    assert not any(k in by["fetch-issue"] for k in _NEW_645_NODE_KEYS if k != "usage_source")
+    assert all(n["hosting_location"] == "cloud" for n in rec["nodes"] if n["node_id"] != "fetch-issue")
+    assert rec["totals"]["gen_ai.usage.cache_read_input_tokens"] == 15408 + 1000 + 2000 + 1000
+    assert rec["totals"]["gen_ai.usage.cache_creation_input_tokens"] == 2750 + 50 + 30 + 50
+    assert [s["first_prompt"] for s in rec["unattributed_sessions"]] == [
+        "Generate a concise conversation title for this request"]
+    assert rec["unattributed_sessions"][0]["window_node"] == "parse-intent"
+    assert rec["unattributed_sessions"][0]["cost_usd"] == pytest.approx(0.0143)
+    assert rec["factory_instance"] == "dark-factory-self"
+    assert rec["target_repo"] == "omniscient/dark-factory"
+    assert rec["harness"] == {"name": "claude-code", "version": "2.1.282"}
+    assert all(isinstance(n["model"], str) for n in rec["nodes"])
+
+
+@pytest.mark.parametrize("last_cost_state,dedup,complete", [
+    (False, 0.0096 + 1.0 + 1.1 + 3.1, False),   # revise-advisory falls back to Archon's 3.1
+    (True, 0.0096 + 1.0 + 1.1 + 1.0, True),
+], ids=["last-file-killed", "every-delta"])
+def test_assemble_deduplicated_total(tmp_path, monkeypatch, last_cost_state, dedup, complete):
+    rec = _u_assemble(tmp_path, monkeypatch,
+                      transcripts=_u_transcripts(tmp_path / "tx", last_cost_state=last_cost_state))
+    assert rec["totals"]["cost_usd"] == pytest.approx(6.2096)   # unchanged meaning
+    assert rec["totals"]["cost_usd_deduplicated"] == pytest.approx(dedup)
+    assert rec["totals"]["cost_usd_deduplicated_complete"] is complete
+
+
+def test_assemble_existing_values_unchanged_by_transcripts(tmp_path, monkeypatch):
+    plain = _u_assemble(tmp_path, monkeypatch, name="plain")
+    rich = _u_assemble(tmp_path, monkeypatch, transcripts=_u_transcripts(tmp_path / "tx"),
+                       name="rich")
+    for key in ("cost_usd", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens",
+                "known_cost_usd", "cost_capture"):
+        assert json.dumps(plain["totals"][key]) == json.dumps(rich["totals"][key]), key
+    for a, b in zip(plain["nodes"], rich["nodes"]):
+        for key in _PRE_645_NODE_KEYS:
+            assert json.dumps(a.get(key)) == json.dumps(b.get(key)), (a["node_id"], key)
+    assert plain["unattributed_sessions"] == []
+    assert plain["totals"]["cost_usd_deduplicated_complete"] is False
+    assert plain["harness"] == {"name": "claude-code", "version": None}
+    assert {n["usage_source"] for n in plain["nodes"]} == {"none"}
+
+
+def test_assemble_without_log_or_transcripts_still_writes_new_keys(tmp_path, monkeypatch):
+    root = tmp_path / "bare"
+    rec = _assemble_with_capture(root, monkeypatch, _U_COST,
+                                 clone=_clone_with_workflow(root, _USAGE_WORKFLOW))
+    assert all(k in rec for k in _NEW_645_RUN_KEYS)
+    assert all(k in rec["totals"] for k in ("cost_usd_deduplicated",
+                                            "cost_usd_deduplicated_complete"))
+    assert "gen_ai.usage.cache_read_input_tokens" not in rec["totals"]   # unknown, never 0
+    # No transcript figures: a resumed node's cumulative cost may still be in the total.
+    assert rec["totals"]["cost_usd_deduplicated_complete"] is False
+
+
+def _strip_645(record):
+    rec = json.loads(json.dumps(record))
+    for key in _NEW_645_RUN_KEYS:
+        rec.pop(key, None)
+    for key in _NEW_645_TOTALS_KEYS:
+        rec["totals"].pop(key, None)
+    for node in rec["nodes"]:
+        for key in _NEW_645_NODE_KEYS:
+            node.pop(key, None)
+    return rec
+
+
+def test_new_record_shape_renders_like_before_in_every_reader(tmp_path, monkeypatch, capsys):
+    import importlib.util
+    import reconcile_cost_reports
+    from factory_core import cost_report
+    rec = _u_assemble(tmp_path, monkeypatch, transcripts=_u_transcripts(tmp_path / "tx"))
+    old = _strip_645(rec)
+    assert all(isinstance(n["model"], str) for n in rec["nodes"])
+    assert cost_report.check_renderable(rec) is None
+    assert (cost_report.render(rec, "", "2026-11-27 18:48 UTC", "fix")
+            == cost_report.render(old, "", "2026-11-27 18:48 UTC", "fix"))
+
+    spec = importlib.util.spec_from_file_location(
+        "run_summary", _REPO_ROOT / ".claude" / "skills" / "operator" / "scripts" / "run_summary.py")
+    run_summary = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_summary)
+    outputs = []
+    for record in (rec, old):
+        monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(record) + "\n"))
+        run_summary.records()
+        outputs.append(capsys.readouterr().out)
+    assert outputs[0] == outputs[1] and outputs[0]
+
+    reports = []
+    for i, record in enumerate((rec, old)):
+        state = tmp_path / f"state{i}"
+        (state / "run-records").mkdir(parents=True)
+        (state / "run-records" / "abc123.json").write_text(json.dumps(record))
+        reports.append(reconcile_cost_reports.build_reconciliation_report(state_dir=state))
+    assert reports[0] == reports[1]
+    assert reports[0]["recoverable"][0]["cost_usd"] == pytest.approx(6.2096)
