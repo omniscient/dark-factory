@@ -1,0 +1,10 @@
+case: cli_tool_round_trip_endpoint_control
+dimension: tool_call_fidelity
+description: The seeded file holds no planted line, so the endpoint tool judge fails planted_not_carried.
+driver: harness
+kind: control
+target: mock
+check: cli_tool_round_trip_endpoint
+variant: unplanted_file
+expect: fail
+expect_reason: planted_not_carried

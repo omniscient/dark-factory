@@ -1,0 +1,10 @@
+case: cli_sigint_endpoint_control
+dimension: timeout_cancellation
+description: No SIGINT is sent during the mock's stalled stream, so the endpoint SIGINT judge fails connection_not_closed.
+driver: harness
+kind: control
+target: mock
+check: cli_sigint_endpoint
+variant: no_sigint
+expect: fail
+expect_reason: connection_not_closed

@@ -377,7 +377,7 @@ def test_dimension_directories_are_exactly_the_actor_required_dimensions():
 def test_fixtures_hold_only_case_yaml_files():
     files = [p for p in runner.FIXTURES_DIR.rglob("*") if p.is_file()]
     assert files and all(p.name == "case.yaml" for p in files)
-    assert len(files) == len(runner.load_cases()) == 31
+    assert len(files) == len(runner.load_cases()) == 41
 
 
 def test_harness_pending_is_empty():
@@ -388,17 +388,54 @@ def test_worst_first_orders_exactly_the_result_values():
     assert sorted(runner.WORST_FIRST) == sorted(me.RESULT_VALUES)
 
 
+def _harness_cases():
+    return {n: c for n, c in _cases_by_name().items() if c["driver"] == "harness"}
+
+
 def test_each_formerly_pending_dimension_ships_one_harness_case():
-    cases = [c for c in runner.load_cases() if c["driver"] == "harness"]
-    assert {f"{c['dimension']}/{c['case']}": c["check"] for c in cases} == {
+    cases = {n: c for n, c in _harness_cases().items() if c["check"] in runner.HARNESS_CHECKS}
+    assert {n: c["check"] for n, c in cases.items()} == {
         "protocol_compatibility/cli_alias_and_nested_agent_resolution": "cli_alias_resolution",
         "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance": "cli_tool_round_trip",
         "context_length/cli_padded_prompt_and_over_limit": "cli_context_window",
         "timeout_cancellation/cli_sigint_closes_connection": "cli_sigint",
     }
-    assert all(c["kind"] == "probe" and c["target"] == "mock" for c in cases)
-    assert sorted(c["dimension"] for c in cases) == sorted(PART_A_PENDING)
-    assert set(runner.HARNESS_CHECKS) == {c["check"] for c in cases}
+    assert all(c["kind"] == "probe" and c["target"] == "mock" for c in cases.values())
+    assert sorted(c["dimension"] for c in cases.values()) == sorted(PART_A_PENDING)
+    assert set(runner.HARNESS_CHECKS) == {c["check"] for c in cases.values()}
+
+
+def test_each_formerly_pending_dimension_ships_an_endpoint_harness_probe_and_control():
+    cases = _harness_cases()
+    probes = {n: c["check"] for n, c in cases.items()
+              if c["check"] in runner.HARNESS_RELAY_CHECKS and c["kind"] == "probe"}
+    assert probes == {
+        "protocol_compatibility/cli_alias_resolution_endpoint": "cli_alias_resolution_endpoint",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint": "cli_tool_round_trip_endpoint",
+        "context_length/cli_padded_prompt_endpoint": "cli_context_window_endpoint",
+        "timeout_cancellation/cli_sigint_endpoint": "cli_sigint_endpoint",
+    }
+    assert all(cases[n]["target"] == "endpoint" for n in probes)
+    assert sorted(cases[n]["dimension"] for n in probes) == sorted(PART_A_PENDING)
+    assert set(runner.HARNESS_RELAY_CHECKS) == set(probes.values())
+    controls = {n: (c["check"], c.get("fault"), c.get("variant"),
+                    f"{c['expect']}:{c['expect_reason']}")
+                for n, c in cases.items() if c["kind"] == "control"}
+    assert controls == {
+        "protocol_compatibility/cli_alias_resolution_endpoint_control": (
+            "cli_alias_resolution_endpoint", "wrong_model", None,
+            "fail:opus_response_model_mismatch"),
+        "tool_call_fidelity/cli_tool_round_trip_endpoint_control": (
+            "cli_tool_round_trip_endpoint", None, "unplanted_file", "fail:planted_not_carried"),
+        "context_length/cli_padded_prompt_endpoint_control": (
+            "cli_context_window_endpoint", "over_limit", None, "fail:not_answered_200"),
+        "timeout_cancellation/cli_sigint_endpoint_control": (
+            "cli_sigint_endpoint", None, "no_sigint", "fail:connection_not_closed"),
+    }
+    assert {n: c["check"] for n, c in cases.items() if c["kind"] == "observation"} == {
+        "protocol_compatibility/cli_nested_agent_endpoint_scope": "cli_nested_agent_not_tested",
+        "context_length/cli_over_limit_endpoint_scope": "cli_over_limit_not_tested",
+    }
 
 
 def test_every_mapped_control_and_observation_exists():
@@ -421,9 +458,15 @@ def test_every_mapped_control_and_observation_exists():
         "timeout_cancellation/connection_refused",
         "timeout_cancellation/stall_before_first_byte",
         "timeout_cancellation/idle_stall_mid_stream",
+        "protocol_compatibility/cli_alias_resolution_endpoint_control",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint_control",
+        "context_length/cli_padded_prompt_endpoint_control",
+        "timeout_cancellation/cli_sigint_endpoint_control",
     }
     assert observations == {"protocol_compatibility/count_tokens_observed",
-                            "tool_call_fidelity/forced_tool_choice_observed"}
+                            "tool_call_fidelity/forced_tool_choice_observed",
+                            "protocol_compatibility/cli_nested_agent_endpoint_scope",
+                            "context_length/cli_over_limit_endpoint_scope"}
     probes = {n for n, c in cases.items() if c["kind"] == "probe"}
     assert {n for n in probes if not n.startswith("role_isolation/")} == {
         "protocol_compatibility/non_streaming_round_trip", "tool_call_fidelity/tool_use_round_trip",
@@ -431,7 +474,11 @@ def test_every_mapped_control_and_observation_exists():
         "protocol_compatibility/cli_alias_and_nested_agent_resolution",
         "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance",
         "context_length/cli_padded_prompt_and_over_limit",
-        "timeout_cancellation/cli_sigint_closes_connection"}
+        "timeout_cancellation/cli_sigint_closes_connection",
+        "protocol_compatibility/cli_alias_resolution_endpoint",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint",
+        "context_length/cli_padded_prompt_endpoint",
+        "timeout_cancellation/cli_sigint_endpoint"}
 
 
 def test_role_isolation_cases_are_function_probes():
@@ -679,9 +726,16 @@ def test_a_malformed_tree_exits_3_and_writes_nothing(tmp_path):
 
 
 def _fake_harness(monkeypatch, outcome):
-    """Every HARNESS_CHECKS entry -> a fake that arms a script (which the runner must clear
-    again) and returns `outcome`, or raises it if it is an exception. Returns the base URLs."""
-    calls = []
+    """Every HARNESS_CHECKS and HARNESS_RELAY_CHECKS entry -> a fake that arms a script (which
+    the runner must clear again) and returns `outcome`, or raises it if it is an exception. A
+    relay check run for a control returns that control's own expect, so a faked run is never
+    exit 3. The real runner._harness_probe still routes every case. Returns the base URLs."""
+    calls, current = [], {}
+    original = runner._harness_probe
+
+    async def tracking(case, name, **kw):
+        current["case"] = case
+        return await original(case, name, **kw)
 
     async def fake(app, base_url):
         calls.append(base_url)
@@ -690,8 +744,22 @@ def _fake_harness(monkeypatch, outcome):
             raise outcome
         return outcome
 
+    async def fake_relay(relay_app, relay_url, *, mock_app, **_):
+        calls.append(relay_url)
+        if mock_app is not None:
+            mock_server.arm(mock_app, mock_server.Script("text"))
+        case = current["case"]
+        if case["kind"] == "control":
+            return case["expect"], case["expect_reason"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
     for name in runner.HARNESS_CHECKS:
         monkeypatch.setitem(runner.HARNESS_CHECKS, name, fake)
+    for name in runner.HARNESS_RELAY_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, name, fake_relay)
     return calls
 
 
@@ -706,13 +774,16 @@ def test_tier2_runs_every_harness_case_and_clears_its_script(tmp_path, monkeypat
     calls = _fake_harness(monkeypatch, ("pass", "ok"))
     fixtures = _with_harness_case(tmp_path)
     code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
-    harness_cases = [c for c in runner.load_cases(fixtures) if c["driver"] == "harness"]
+    # The two fixed observations call no check.
+    harness_cases = [c for c in runner.load_cases(fixtures) if c["driver"] == "harness"
+                     and c["check"] not in harness.FIXED_OBSERVATIONS]
     # Exit 0 also proves the script was cleared: a left-armed `text` script would turn part A's
     # tool_call_fidelity controls and probe (which run after streaming/via_cli) red.
     assert code == 0 and len(calls) == len(harness_cases)
     assert all(url.startswith("http://127.0.0.1:") for url in calls)
     body = result["certification_result"]
     assert body["results"]["streaming"] == "pass" and "streaming" not in body["harness_pending"]
+    assert body["harness_sources"]["streaming"] == "mock"
 
 
 @pytest.mark.parametrize("fault", [FileNotFoundError("claude"), KeyError("messages")])
@@ -759,9 +830,16 @@ def test_tier2_with_passing_harness_checks_passes_all_six_dimensions(tmp_path, m
     calls = _fake_harness(monkeypatch, ("pass", "ok"))
     code, result, _ = _run(tmp_path, "--base-url", "mock")
     body = result["certification_result"]
-    assert code == 0 and len(calls) == 4
+    assert code == 0 and len(calls) == 12  # 4 mock-driven, 4 endpoint probes, 4 controls
     assert body["results"] == {d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}
     assert body["harness_pending"] == []
+    assert body["harness_sources"] == {d: "mock" if d in PART_A_PENDING else None
+                                       for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert len(body["harness_probes"]) == 8
+    assert all(p["observed"] == "pass:ok" and p["source"] == "mock"
+               for p in body["harness_probes"])
+    harness_records = [c for c in body["controls"] if "source" in c]
+    assert len(harness_records) == 6 and all(c["source"] == "mock" for c in harness_records)
 
 
 def test_tier2_without_a_claude_binary_reports_the_four_dimensions(tmp_path, monkeypatch):
@@ -1846,3 +1924,226 @@ def test_harness_probe_overrides(monkeypatch, behaviour, outcome):
         finally:
             await mock_runner.cleanup()
     assert asyncio.run(go()) == (outcome, "endpoint")
+
+
+# --- endpoint mode with Tier 2 on (#631) ----------------------------------------------------
+
+def _endpoint_summary(monkeypatch, relay_fake, cases=None, legacy=("pass", "ok"),
+                      mock_mode=False):
+    """run_cases over the shipped tree (or `cases`) with Tier 2 "ok": HARNESS_CHECKS faked to
+    return `legacy`, HARNESS_RELAY_CHECKS faked by `relay_fake`. In endpoint mode a second mock
+    stands in for the endpoint, under its own served name and credential."""
+    async def fake_legacy(app, base_url):
+        if isinstance(legacy, BaseException):
+            raise legacy
+        return legacy
+    for name in runner.HARNESS_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_CHECKS, name, fake_legacy)
+    for name in runner.HARNESS_RELAY_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, name, relay_fake)
+
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        end_runner, end_url = await mock_server.start()
+        try:
+            mock = runner.Target(mock_url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            endpoint = mock if mock_mode else runner.Target(end_url, SERVED, SENTINEL)
+            summary = await runner.run_cases(
+                runner.load_cases() if cases is None else cases, endpoint=endpoint, mock=mock,
+                context_tokens=4096, mock_app=mock_runner.app, tier2_mode="ok",
+                mock_mode=mock_mode)
+            return summary, mock_url, end_url
+        finally:
+            await mock_runner.cleanup()
+            await end_runner.cleanup()
+    return asyncio.run(go())
+
+
+def _relay_cases():
+    return [c for c in runner.load_cases() if c["driver"] == "harness"]
+
+
+def _routing_fake(seen, outcome=("pass", "ok")):
+    """A relay check that sends one request through the relay and records where it went."""
+    async def fake(relay_app, relay_url, *, served_name, credential, context_tokens, mock_app,
+                   variant):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(relay_url + "/v1/messages", json=ASK) as resp:
+                await resp.read()
+        seen.append({"dialled": relay_app[relay.RELAYED].dialled[0], "served_name": served_name,
+                     "credential": credential, "context_tokens": context_tokens,
+                     "mock_app": mock_app is not None, "variant": variant})
+        return outcome
+    return fake
+
+
+def test_endpoint_mode_routes_probes_to_the_endpoint_and_controls_to_the_mock(monkeypatch):
+    seen = []
+    cases = [c for c in _relay_cases() if c["check"] in runner.HARNESS_RELAY_CHECKS]
+    summary, mock_url, end_url = _endpoint_summary(monkeypatch, _routing_fake(seen), cases)
+    mock_host, end_host = mock_url.split("//")[1], end_url.split("//")[1]
+    by_kind = {(c["kind"], c["check"]): s for c, s in zip(cases, seen)}
+    for (kind, _check), s in by_kind.items():
+        if kind == "probe":
+            assert (s["dialled"], s["served_name"], s["credential"], s["context_tokens"],
+                    s["mock_app"]) == (end_host, SERVED, SENTINEL, 4096, False)
+        else:
+            assert (s["dialled"], s["served_name"], s["credential"], s["context_tokens"],
+                    s["mock_app"]) == (mock_host, mock_server.SERVED_NAME,
+                                       mock_server.DUMMY_CREDENTIAL, mock_server.CONTEXT_TOKENS,
+                                       True)
+    assert {s["variant"] for s in seen} == {None, "unplanted_file", "no_sigint"}
+    assert [p["source"] for p in summary.harness_probes] == ["endpoint"] * 4
+    # the fakes' pass:ok for controls is a mismatch: controls really ran, in endpoint mode
+    assert [(c["kind"], c["source"], c["ok"]) for c in summary.controls] == [
+        ("control", "mock", False)] * 4
+
+
+def test_mock_mode_routes_every_relay_case_to_the_mock(monkeypatch):
+    seen = []
+    cases = [c for c in _relay_cases() if c["check"] in runner.HARNESS_RELAY_CHECKS]
+    summary, mock_url, _ = _endpoint_summary(monkeypatch, _routing_fake(seen), cases,
+                                             mock_mode=True)
+    assert {s["dialled"] for s in seen} == {mock_url.split("//")[1]}
+    assert all(s["mock_app"] for s in seen)
+    assert [p["source"] for p in summary.harness_probes] == ["mock"] * 4
+
+
+def _expecting_fake(outcome):
+    """(tracking runner._harness_probe, relay fake). The fake returns `outcome` for a probe
+    (raising it if it is an exception) and a control's own expect for a control, read from the
+    case the tracking wrapper last routed."""
+    current = {}
+    original = runner._harness_probe
+
+    async def tracking(case, name, **kw):
+        current["case"] = case
+        return await original(case, name, **kw)
+
+    async def fake(relay_app, relay_url, **_):
+        case = current["case"]
+        if case["kind"] == "control":
+            return case["expect"], case["expect_reason"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    return tracking, fake
+
+
+def test_endpoint_mode_records_mock_driven_cases_as_mechanism(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases())
+    mechanism = [c for c in summary.controls if c["kind"] == "mechanism"]
+    assert [(c["case"], c["observed"], c["ok"], c["source"]) for c in mechanism] == [
+        (c["case"], "pass:ok", True, "mock") for c in _relay_cases()
+        if c["check"] in runner.HARNESS_CHECKS]
+    assert {name for name, _ in summary.probes} == {
+        f"{c['dimension']}/{c['case']}" for c in _relay_cases()
+        if c["check"] in runner.HARNESS_RELAY_CHECKS and c["kind"] == "probe"}
+    fixed = [c for c in summary.controls if c["kind"] == "observation"]
+    assert sorted(c["observed"] for c in fixed) == [
+        "not_tested:nested_agent_not_judged_on_endpoint",
+        "not_tested:over_limit_not_judged_on_endpoint"]
+    assert all(c["source"] == "endpoint" and c["ok"] for c in fixed)
+    assert summary.harness_pending == [] and runner.exit_code(summary, False, "ok") == 0
+    assert runner.harness_sources(summary) == {
+        d: "both" if d in PART_A_PENDING else None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def test_a_failing_mechanism_record_exits_3(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases(),
+                                      legacy=("fail", "connection_not_closed"))
+    assert runner.exit_code(summary, False, "ok") == 3
+    assert runner.dimension_results(summary.probe_values)["timeout_cancellation"] == "pass"
+
+
+def test_a_mechanism_case_that_does_not_run_exits_4_without_pending(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases(),
+                                      legacy=FileNotFoundError("claude"))
+    assert len(summary.not_run) == 4 and summary.harness_pending == []
+    assert runner.exit_code(summary, False, "ok") == 4
+    assert runner.dimension_results(summary.probe_values)["context_length"] == "pass"
+
+
+def test_an_endpoint_case_fault_prints_its_type_only(monkeypatch, capsys):
+    async def raises(relay_app, relay_url, *, mock_app, **_):
+        raise RuntimeError("mock detail" if mock_app is not None
+                           else "detail http://192.0.2.7:8080")
+    cases = [c for c in _relay_cases() if c["check"] == "cli_sigint_endpoint"]
+    summary, _, _ = _endpoint_summary(monkeypatch, raises, cases)
+    err = capsys.readouterr().err
+    assert "cli_sigint_endpoint did not run: RuntimeError\n" in err
+    assert "192.0.2.7" not in err
+    assert "cli_sigint_endpoint_control did not run: RuntimeError: mock detail" in err
+    assert len(summary.not_run) == 2
+
+
+def test_a_not_tested_endpoint_probe_is_pending(monkeypatch):
+    tracking, fake = _expecting_fake(("not_tested", "stream_finished_before_sigint"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases())
+    assert sorted(set(summary.harness_pending)) == sorted(PART_A_PENDING)
+    assert all(p["observed"] == "not_tested:stream_finished_before_sigint"
+               for p in summary.harness_probes)
+    assert runner.harness_sources(summary) == {
+        d: "mock" if d in PART_A_PENDING else None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def _endpoint_run(tmp_path, monkeypatch, *, tier2=True, version=None):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    if tier2:
+        _tier2(monkeypatch, version)
+    with _endpoint_mock() as url:
+        code, result, out = _run(tmp_path, "--base-url", url, "--served-name",
+                                 mock_server.SERVED_NAME, "--secret-env", "CAPSUITE_TEST_KEY",
+                                 "--context-tokens", "4096")
+    return code, result, out, url
+
+
+def test_endpoint_mode_with_tier2_on_certifies_all_six_and_marks_both(tmp_path, monkeypatch):
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _, _ = _endpoint_run(tmp_path, monkeypatch)
+    body = result["certification_result"]
+    assert code == 0 and len(calls) == 12
+    assert body["results"] == {d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert body["harness_pending"] == []
+    assert body["harness_sources"] == {d: "both" if d in PART_A_PENDING else None
+                                       for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert sorted((p["dimension"], p["observed"], p["source"]) for p in body["harness_probes"]) == [
+        (d, "pass:ok", "endpoint") for d in sorted(PART_A_PENDING)]
+    assert len([c for c in body["controls"] if c["kind"] == "mechanism"]) == 4
+
+
+def test_endpoint_mode_with_tier2_on_writes_no_url_or_credential(tmp_path, monkeypatch, capsys):
+    _fake_harness(monkeypatch, ("pass", "ok"))
+    code, _, out, url = _endpoint_run(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    assert code == 0
+    for blob in (out.read_text(), captured.out, captured.err):
+        assert SENTINEL not in blob and url.split("//", 1)[1] not in blob
+
+
+@pytest.mark.parametrize("mode, want", [("off", 0), ("missing", 6)])
+def test_endpoint_mode_without_tier2_or_cli_is_unchanged(tmp_path, monkeypatch, mode, want):
+    if mode == "missing":
+        monkeypatch.setenv(harness.TIER2_ENV, "1")  # observed_harness_version is None (autouse)
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _, _ = _endpoint_run(tmp_path, monkeypatch, tier2=False)
+    body = result["certification_result"]
+    assert code == want and calls == []
+    assert body["harness_pending"] == PART_A_PENDING
+    assert all(body["results"][d] == "not_tested" for d in PART_A_PENDING)
+    assert body["harness_probes"] == []
+    assert body["harness_sources"] == {d: None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def test_endpoint_mode_with_a_cli_version_mismatch_exits_7_and_writes_nothing(tmp_path,
+                                                                              monkeypatch):
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, out, _ = _endpoint_run(tmp_path, monkeypatch, version="0.0.1")
+    assert code == 7 and result is None and not out.parent.exists() and calls == []

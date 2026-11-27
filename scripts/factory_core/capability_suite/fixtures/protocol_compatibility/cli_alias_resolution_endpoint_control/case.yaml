@@ -1,0 +1,10 @@
+case: cli_alias_resolution_endpoint_control
+dimension: protocol_compatibility
+description: The relay injects wrong_model into the mock, so an answer naming another model fails the endpoint alias judge.
+driver: harness
+kind: control
+target: mock
+check: cli_alias_resolution_endpoint
+fault: wrong_model
+expect: fail
+expect_reason: opus_response_model_mismatch

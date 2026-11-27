@@ -1,0 +1,7 @@
+case: cli_tool_round_trip_endpoint
+dimension: tool_call_fidelity
+description: Offered only Read, the model reads the seeded file; the CLI returns its tool_result and both planted lines reach the endpoint only inside it, with no model switch.
+driver: harness
+kind: probe
+target: endpoint
+check: cli_tool_round_trip_endpoint
