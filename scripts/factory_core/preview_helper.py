@@ -24,6 +24,7 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +48,10 @@ DAY_KEY_RE = re.compile(r"preview_helper:day:([0-9]{4}-[0-9]{2}-[0-9]{2})")
 # The proxy rotates its ledger at model_proxy.MAX_LEDGER_BYTES (100 MiB by default) before an
 # append, so a live file or a backup is at most that plus one row.
 MAX_LEDGER_FILE_BYTES = 128 * 1024 * 1024
+# Bound on the shared ledger reader (which opens plainly, no O_NONBLOCK): a gated container
+# that replaces a ledger file with a FIFO between ledger_files_ok()'s check and this read
+# would otherwise block record-outcome forever (#642).
+LEDGER_READ_TIMEOUT_SECONDS = 5
 ARTIFACT_NAMES = ("input.json", "result.json", "current-run.json")
 CATEGORIES = ("code", "docs", "config", "tests", "ci", "mixed")
 # What the entry script may report; record-outcome accepts nothing else from result.json.
@@ -377,7 +382,7 @@ def read_inflight(path, now, max_total):
                 and type(issue) is int and issue > 0
                 and isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha)
                 and type(started) is int and 0 < started <= now
-                and type(total) is int and 0 <= total <= max_total):
+                and type(total) is int and 0 < total <= max_total):
             return None
         return run_id, issue, sha, started, total
     except Exception:  # noqa: BLE001
@@ -566,13 +571,37 @@ def ledger_files_ok(ledger_path):
     return True
 
 
+def _read_ledger_rows_bounded(run_id, ledger_path, timeout_seconds=LEDGER_READ_TIMEOUT_SECONDS):
+    """run_record._read_ledger_rows (unchanged, shared with the main harness), run in a thread
+    and bounded: a path that passed ledger_files_ok() can still be swapped for a FIFO before
+    the shared reader's plain open() reaches it, which would otherwise block forever (#642).
+    A timeout reads as no rows / unavailable, same as the ledger not being there at all."""
+    from factory_core import run_record
+    outcome = {}
+
+    def _target():
+        try:
+            outcome["value"] = run_record._read_ledger_rows(run_id, ledger_path)
+        except Exception as exc:  # noqa: BLE001 — re-raised on the caller's thread below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        return [], False
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 def record_outcome(*, run_id, issue, head_sha, result_file, ledger_path, forced_class=None):
     """Append the helper's one runs.jsonl row and return it."""
     from factory_core import run_record
     result_state, result = read_result(result_file)
     try:
         if ledger_files_ok(ledger_path):
-            rows, available = run_record._read_ledger_rows(run_id, Path(ledger_path))
+            rows, available = _read_ledger_rows_bounded(run_id, Path(ledger_path))
         else:
             rows, available = [], False  # not read at all: ledger_unavailable
         model_rows = [r for r in rows if not _is_cli_preflight(r)]
