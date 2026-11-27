@@ -9,7 +9,7 @@ cloud/local cost or quality comparison and supports no savings claim.
 Design: `docs/superpowers/specs/2026-11-27-shadow-hosting-economics-comparator-design.md`.
 Fixture formats and labelling rules: `bench/fixtures/preview_classifier/README.md`.
 
-**Operator follow-up issue:** #FOLLOWUP_ISSUE_NUMBER — label the real fixture set, commit the
+**Operator follow-up issue:** #638 — label the real fixture set, commit the
 `registered` preregistration, run against the endpoint #562 certifies, publish the report and
 the offline/shadow GO/NO-GO evidence, and record the task-clustered uncertainty #564 needs.
 
