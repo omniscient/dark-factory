@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -619,3 +620,199 @@ def test_model_endpoints_show_staged_copy_without_registry_file_exits_1(tmp_path
         cli_mod.main()
     assert exc.value.code == 1
     assert "model endpoint registry not found" in capsys.readouterr().err
+
+
+# --- #642: model-endpoints endpoint-preflight ------------------------------------------------
+
+HELPER_INTENT = "classify-preview-helper"
+HELPER_PROXY_URL = "http://preview-helper-proxy:8787"
+HELPER_SECRET_NAME = "FACTORY_HELPER_MODEL_SECRET"
+HELPER_LOCAL_ENTRY = {
+    "id": "local-helper",
+    "hosting_location": "local",
+    "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["local_only"],
+    "model_identity": {"served_name": "helper-served-fixture",
+                       "digest_or_revision": "sha256:" + "cd" * 32},
+    "base_url": "http://192.0.2.10:8080",
+    "secret_reference": HELPER_SECRET_NAME,
+    "timeouts": {"connect_seconds": 10, "time_to_first_token_seconds": 60,
+                 "idle_seconds": 60, "total_seconds": 300},
+}
+HELPER_CLOUD_ENTRY = {
+    "id": "cloud-a",
+    "hosting_location": "cloud",
+    "protocol": "anthropic-messages",
+    "accepts_payload_classes": ["cloud_ok"],
+    "model_identity": {"served_name": "claude-opus-5-5", "digest_or_revision": "claude-opus-5-5"},
+    "secret_reference": "ANTHROPIC_API_KEY",
+}
+# Everything a helper container must not hold, plus the selection variables each test sets.
+_HELPER_SCRUBBED = ("ANTHROPIC_BASE_URL", HELPER_SECRET_NAME, "GH_TOKEN", "GITHUB_TOKEN",
+                    "GITLAB_TOKEN", "GITLAB_BASE_URL", "JIRA_TOKEN", "JIRA_BASE_URL",
+                    "FACTORY_TRACKER", "FACTORY_CODEHOST", "FACTORY_MODEL_PROVIDER",
+                    "FACTORY_MODEL_ENDPOINT", "FACTORY_MODEL_REGISTRY_SHA256",
+                    "FACTORY_MODEL_REGISTRY_PATH")
+
+
+def _helper_evidence(me, entry):
+    """A capability-evidence record that resolves `tested` for entry under a 2.1.282 CLI."""
+    return {
+        "schema_version": "1.0",
+        "endpoint_id": entry["id"],
+        "model_identity": dict(entry["model_identity"], quantisation="q4_k_m"),
+        "runtime_stack": {"name": "rt", "version": "1.0.0", "chat_template": "t",
+                          "context_settings": {}},
+        "harness_version": "2.1.282",
+        "fixture_suite_version": me.PINNED_FIXTURE_SUITE_VERSION,
+        "results": {dim: "pass" for dim in me.ACTOR_REQUIRED_DIMENSIONS},
+        "qualified_roles": ["actor"],
+        "certified_by": "operator",
+        "certified_at": "2026-11-01T00:00:00+00:00",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "invalidated_by": ["model_digest", "harness_version", "fixture_suite_version",
+                           "registry_config"],
+        "registry_config": me.registry_config_sha256(entry),
+    }
+
+
+@pytest.fixture
+def helper_registry(tmp_path, monkeypatch):
+    """A staged registry holding one `tested` local entry, and the helper container's
+    environment: the proxy's address, the served name on every alias, no secret, and no
+    tracker, code-host or cloud variable. Returns stage(endpoints=..., evidence=...)."""
+    import yaml
+    from factory_core.providers import model_endpoint as me
+    for name in (*me.CLOUD_CREDENTIALS, *me.LOCAL_CREDENTIAL_ENV_SIGNALS, *me.TIER_ALIASES,
+                 *_HELPER_SCRUBBED):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(me, "observed_harness_version", lambda *a, **k: "2.1.282")
+
+    def stage(endpoints=(HELPER_LOCAL_ENTRY,), evidence="tested"):
+        root = tmp_path / "staged"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir()
+        (root / me.REGISTRY_FILE).write_text(
+            yaml.safe_dump({"schema_version": "1.0", "endpoints": list(endpoints)},
+                           sort_keys=False), encoding="utf-8")
+        if evidence != "absent":
+            record = _helper_evidence(me, HELPER_LOCAL_ENTRY)
+            if evidence == "declared":
+                del record["certified_by"]
+            elif evidence == "stale":
+                record["expires_at"] = "2020-01-01T00:00:00+00:00"
+            (root / me.EVIDENCE_DIR).mkdir()
+            (root / me.EVIDENCE_DIR / "local-helper.yaml").write_text(
+                yaml.safe_dump({"capability_evidence": record}), encoding="utf-8")
+        monkeypatch.setenv("FACTORY_MODEL_REGISTRY_PATH", str(root))
+        monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(root))
+        return root
+
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-helper")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", HELPER_PROXY_URL)
+    for alias in me.TIER_ALIASES:
+        monkeypatch.setenv(alias, HELPER_LOCAL_ENTRY["model_identity"]["served_name"])
+    stage()
+    return stage
+
+
+def _cli(monkeypatch, capsys, *argv):
+    """Run `cli.py <argv>`; returns (exit code, stdout, stderr)."""
+    import factory_core.providers.cli as cli_mod
+    monkeypatch.setattr(sys, "argv", ["cli.py", *argv])
+    code = 0
+    try:
+        cli_mod.main()
+    except SystemExit as e:
+        code = e.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def _break_rule(monkeypatch, stage, rule):
+    from factory_core.providers import model_endpoint as me
+    if rule == "wrong_digest":
+        monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64)
+    elif rule == "entry_base_url":
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", HELPER_LOCAL_ENTRY["base_url"])
+    elif rule == "local_secret_present":
+        monkeypatch.setenv(HELPER_SECRET_NAME, "sk-sentinel-helper")
+    elif rule == "cloud_credential":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-sentinel-cloud")
+    elif rule == "guard_signal":
+        monkeypatch.setenv("AWS_PROFILE", "fixture")
+    elif rule == "alias_differs":
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "other-model")
+    elif rule == "evidence_unknown":
+        monkeypatch.setattr(me, "observed_harness_version", lambda *a, **k: None)
+    elif rule.startswith("evidence_"):
+        stage(evidence=rule.split("_", 1)[1])
+    elif rule == "unknown_endpoint":
+        monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "not-registered")
+
+
+ENDPOINT_RULES = ("valid", "wrong_digest", "entry_base_url", "local_secret_present",
+                  "cloud_credential", "guard_signal", "alias_differs", "evidence_absent",
+                  "evidence_declared", "evidence_stale", "evidence_unknown", "unknown_endpoint",
+                  "intent_fix")
+
+
+@pytest.mark.parametrize("rule", ENDPOINT_RULES)
+def test_endpoint_preflight_matches_the_run_side_check(helper_registry, monkeypatch, capsys, rule):
+    # One case per rule: the verb's problem list is exactly the run-side endpoint check's
+    # (model_endpoint.preflight with the same intent, the call providers._endpoint_preflight
+    # makes on the run side), and nothing is skipped or softened.
+    from factory_core.providers import model_endpoint as me
+    _break_rule(monkeypatch, helper_registry, rule)
+    intent = "fix" if rule == "intent_fix" else HELPER_INTENT
+    code, out, err = _cli(monkeypatch, capsys, "model-endpoints", "endpoint-preflight",
+                          "--intent", intent)
+    problems, hosting = me.preflight(me.staged_registry_dir(),
+                                     os.environ["FACTORY_MODEL_ENDPOINT"], intent=intent)
+    assert err.splitlines() == [f"ERROR: {p}" for p in problems]
+    assert "sk-sentinel" not in out + err
+    if rule == "valid":
+        assert (code, out, problems, hosting) == (0, "endpoint-preflight: OK hosting=local\n",
+                                                  [], "local")
+    else:
+        assert code == 1 and out == "" and problems
+
+
+def test_endpoint_preflight_refuses_a_cloud_entry(helper_registry, monkeypatch, capsys):
+    from factory_core.providers import model_endpoint as me
+    helper_registry(endpoints=(HELPER_CLOUD_ENTRY, HELPER_LOCAL_ENTRY))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-a")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-sentinel-cloud")
+    # The run-side check passes a cloud entry with its credential; the verb never does.
+    assert me.preflight(me.staged_registry_dir(), "cloud-a", intent=HELPER_INTENT) == ([], "cloud")
+    assert _cli(monkeypatch, capsys, "model-endpoints", "endpoint-preflight",
+                "--intent", HELPER_INTENT) == (
+        1, "", "ERROR: endpoint 'cloud-a' is hosting_location=cloud — endpoint-preflight "
+               "passes a local entry only\n")
+
+
+def test_endpoint_preflight_requires_intent(helper_registry, monkeypatch, capsys):
+    code, out, err = _cli(monkeypatch, capsys, "model-endpoints", "endpoint-preflight")
+    assert code == 2 and out == "" and "--intent" in err
+
+
+def test_endpoint_preflight_needs_no_tracker_or_codehost_env(helper_registry, monkeypatch, capsys):
+    import factory_core.providers.cli as cli_mod
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("endpoint-preflight must not reach the tracker/code-host preflight")
+
+    for name in ("preflight", "get_tracker", "get_codehost"):
+        monkeypatch.setattr(cli_mod, name, forbidden)
+    for name in ("GH_TOKEN", "GITLAB_TOKEN", "JIRA_TOKEN", "FACTORY_TRACKER", "FACTORY_CODEHOST"):
+        assert name not in os.environ
+    assert _cli(monkeypatch, capsys, "model-endpoints", "endpoint-preflight",
+                "--intent", HELPER_INTENT) == (0, "endpoint-preflight: OK hosting=local\n", "")
+
+
+def test_endpoint_preflight_refuses_without_a_selected_endpoint(helper_registry, monkeypatch, capsys):
+    monkeypatch.delenv("FACTORY_MODEL_ENDPOINT")
+    assert _cli(monkeypatch, capsys, "model-endpoints", "endpoint-preflight",
+                "--intent", HELPER_INTENT) == (
+        1, "", "ERROR: FACTORY_MODEL_ENDPOINT is not set — endpoint-preflight checks one "
+               "selected entry\n")

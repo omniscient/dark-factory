@@ -146,7 +146,9 @@ holds no secret, and its preflight requires both. Ledger rows go to the shared
 `request-ledger.jsonl` in the usual shape, correlated from
 `/var/lib/dark-factory/preview-helper/current-run.json`. An interpolated `docker compose config`
 with this profile prints the secret: never run or log one. While the proxy runs, any container
-on `dark-factory-net` can reach it by name; #587 adds the helper's internal network.
+on `dark-factory-net` can reach it by name. It is also on `preview-helper-net` (#642), an
+`internal: true` network whose only other member is the `preview-helper` container, which
+has no other network and so no route out.
 
 When `FACTORY_MODEL_ENDPOINT` is set, the proxy verifies the staged registry once at startup.
 It recomputes the SHA-256 against `FACTORY_MODEL_REGISTRY_SHA256` and never re-reads the

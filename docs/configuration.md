@@ -469,7 +469,7 @@ effective.
 | `FACTORY_PRODUCT_NAME` | `MarketHawk` | also read at `scripts/comment_digest.py`, `scripts/ceiling_revisit.py`, `entrypoint.sh:31` |
 | `FACTORY_CLONE_DIR` | `/workspace/${FACTORY_REPO}` | clone path in the run container (`entrypoint.sh:30`) |
 | `FACTORY_RUN_PREFIX` | `${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-` | WIP guard greps `docker ps` for this (`scheduler.sh:124`, `entrypoint.sh:200`) |
-| `FACTORY_INSTANCE` | `dark-factory` | compose project and state volume name (`deploy/docker-compose.yml`, `run-compose.yml:18,114`); must also be in `instance.env` |
+| `FACTORY_INSTANCE` | `dark-factory` | compose project and state volume name (`deploy/docker-compose.yml`, `run-compose.yml:18,190`); must also be in `instance.env` |
 | `FACTORY_IMAGE`, `IMAGE_TAG`, `IMAGE_REF` | `ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}` | `identity.sh:23`, `deploy/docker-compose.yml`; `IMAGE_REF` pins a digest |
 | `PROJECT_DIR` | parent of `deploy/` | host path bind-mounted at `/workspace/project` (read-only) |
 
@@ -520,7 +520,7 @@ containers (`run-compose.yml:31-47`).
 | `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:53,513`; env-only by design | `.archon/.env` |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` | `1200` | `main_red_fixer.py:291` | `.archon/.env` |
 | `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:1001`; set via `run-compose.yml:56-57` | `instance.env` |
-| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:141` | `instance.env` |
+| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:186` | `instance.env` |
 | `RUN_ID`, `RUN_STARTED_AT`, `ISSUE_NUM`, `INTENT` | per run | `entrypoint.sh` internal | not operator-settable |
 
 ### Model endpoint registry (#557)
@@ -639,6 +639,31 @@ staged copy and digest as `model-endpoints show` and passes the run's `--intent`
 `load_verified_entry()`. So it prints `hosting=local` only for a verified local entry and the
 `classify-preview-helper` intent, which nothing dispatches until #587 (#586, #633;
 [run-lifecycle.md](run-lifecycle.md) section 6.F).
+
+**The helper container (#642, inert).** `run-compose.yml`'s `preview-helper` service, under its
+own `preview-helper` profile, is the container #587's dispatcher will start for each
+`classify-preview-helper` dispatch. Nothing in this repository starts it, and nothing dispatches
+it until #587: `entrypoint.sh` still answers that command string "not available". Its
+`entrypoint:` is `scripts/preview_helper_entry.sh`, not `entrypoint.sh`: no tracker or code-host
+preflight, no clone, no `git`, `gh` or `docker`. Its environment is exactly nine keys and holds
+no credential of any kind: `PYTHONPATH`, `ANTHROPIC_BASE_URL` (`http://preview-helper-proxy:8787`),
+the four `ANTHROPIC_DEFAULT_*_MODEL` aliases (interpolated from the scheduler-side
+`PREVIEW_HELPER_ENDPOINT_SERVED_NAME`), `FACTORY_MODEL_ENDPOINT` (from `PREVIEW_HELPER_ENDPOINT`),
+`FACTORY_MODEL_REGISTRY_SHA256` and `CURRENT_RUN_DIR=/var/lib/dark-factory/preview-helper`. It
+is on the internal network `preview-helper-net` only, which `preview-helper-proxy` also joins. It
+does not mount the state volume's root: two `volume.subpath` mounts give it the staged registry
+(`model-registry/`, read-only) and its artifact directory (`preview-helper/`, read-write), and
+both must exist before a start (Docker Engine 26 or later). The script runs the endpoint checks,
+reads four fields of `input.json` (changed-file names, diff stat, title, labels), makes one
+model call with no tools, and writes `result.json`, whose failure class is one of
+`preflight_refused`, `missing_input`, `input_too_large`, `local_timeout_total`,
+`model_call_failed` and `schema_invalid`. Its endpoint check is
+`model-endpoints endpoint-preflight --intent <intent>` on the baked CLI: the run-side endpoint
+check of `preflight` alone, with nothing skipped, no tracker or code-host variable needed, and
+only a local entry passing. `scripts/factory_core/preview_helper.py` holds the deterministic
+halves on both sides (prompt, answer, result, and the scheduler-side verbs #587 will call). The
+`docker-build` CI job checks the pinned CLI's request shape through the real helper proxy with
+`tests/tier2_preview_helper_cli.sh`.
 
 **Back to default cloud:** remove `FACTORY_MODEL_ENDPOINT` from `instance.env` (and
 `FACTORY_MODEL_REGISTRY_DIR` from the interpolation env), then recreate the scheduler with

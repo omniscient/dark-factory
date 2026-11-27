@@ -330,6 +330,26 @@ def _model_endpoints_hosting_check(args):
     sys.exit(1)
 
 
+def _model_endpoints_endpoint_preflight(args):
+    # #642: the run-side endpoint check alone, for a container that holds no tracker or
+    # code-host variable. It is model_endpoint.preflight() — the exact call the run side of
+    # `preflight` makes when an endpoint is selected — with nothing skipped, and one rule more:
+    # only a local entry passes (a cloud entry would otherwise skip the cloud credential check
+    # that `preflight` adds for it).
+    from factory_core.providers import model_endpoint
+    endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT", "")
+    if not endpoint_id:
+        _fail(["FACTORY_MODEL_ENDPOINT is not set — endpoint-preflight checks one selected entry"])
+    problems, hosting = model_endpoint.preflight(
+        model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent)
+    if not problems and hosting != "local":
+        problems = [f"endpoint '{endpoint_id}' is hosting_location={hosting} — "
+                    "endpoint-preflight passes a local entry only"]
+    if problems:
+        _fail(problems)
+    print("endpoint-preflight: OK hosting=local")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="providers-cli")
     top = parser.add_subparsers(dest="provider", required=True)
@@ -520,6 +540,12 @@ def main():
                           help="scheduler-side hosting of an endpoint id (#585); exit 0 only for cloud")
     mhc.add_argument("--endpoint-id", required=True)
     mhc.set_defaults(func=_model_endpoints_hosting_check)
+
+    mep = msub.add_parser("endpoint-preflight",
+                          help="the run-side endpoint check alone, local entries only (#642)")
+    mep.add_argument("--intent", required=True,
+                     help="the dispatch intent the selected entry must be eligible for")
+    mep.set_defaults(func=_model_endpoints_endpoint_preflight)
 
     parsed = parser.parse_args()
     parsed.func(parsed)
