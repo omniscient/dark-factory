@@ -1399,3 +1399,105 @@ def test_the_proxy_sink_records_and_refuses_every_connection():
     status, relayed, _ = _through_relay(_sse_upstream(STREAM_OK), client)
     assert status == 403 and relayed.other_host == ["GET http://192.0.2.1/x HTTP/1.1"]
     assert relayed.dialled == []
+
+
+# --- endpoint-driven harness spawns and judges (#631) ---------------------------------------
+
+def _logging_claude(bin_dir, log, sleep=0, fetch=None):
+    """A `claude` on PATH that appends {env, cwd, argv} (env from /proc/self/environ) to `log`
+    as one JSON line, optionally fetches `fetch` honouring HTTP_PROXY, then sleeps `sleep`."""
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, time, urllib.request\n"
+        "raw = open('/proc/self/environ', 'rb').read().split(b'\\0')\n"
+        "env = dict(item.decode().split('=', 1) for item in raw if item)\n"
+        f"with open({str(log)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'env': env, 'cwd': os.getcwd(), 'argv': sys.argv[1:]}) + '\\n')\n"
+        f"if {fetch!r}:\n"
+        "    try:\n"
+        f"        urllib.request.urlopen({fetch!r}, timeout=5)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        f"time.sleep({sleep})\n")
+    stub.chmod(0o755)
+
+
+def _spawns(log):
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def _on_relay(coro_fn, fault=None):
+    """coro_fn(relay app, relay url, mock app) with a fresh mock as the relay's upstream."""
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        try:
+            async with relay.started(mock_url, timeouts=runner.DEFAULT_TIMEOUTS,
+                                     fault=fault) as (app, url):
+                return await coro_fn(app, url, mock_runner.app)
+        finally:
+            await mock_runner.cleanup()
+    return asyncio.run(go())
+
+
+needs_proc = pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                                reason="reads the child's initial environment from /proc")
+
+
+@needs_proc
+def test_an_endpoint_spawn_gets_only_the_relay_environment(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log)
+    caller_home = tmp_path / "caller-home"
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-oauth-must-not-leak")
+    monkeypatch.setenv("GH_TOKEN", "gh-must-not-leak")
+    monkeypatch.setenv("HOME", str(caller_home))
+
+    async def go(app, url, _mock_app):
+        with harness.workdir() as root:
+            status, _ = await harness.run_relayed(app, url, root, "a prompt", "--tools", "",
+                                                  served_name="local-model-a",
+                                                  credential=SENTINEL, seconds=30)
+            return status, root, url, app[relay.RELAYED].sink_url
+    status, root, url, sink = _on_relay(go)
+    [seen] = _spawns(log)
+    env = seen["env"]
+    assert status == 0 and set(env) == set(harness.RELAY_ENV_KEYS)
+    assert env["ANTHROPIC_API_KEY"] == SENTINEL and env["ANTHROPIC_BASE_URL"] == url
+    assert all(env[alias] == "local-model-a" for alias in me.TIER_ALIASES)
+    assert env["HTTP_PROXY"] == env["HTTPS_PROXY"] == sink and env["NO_PROXY"] == "127.0.0.1"
+    assert env["HOME"] == str(root / "home") != str(caller_home)
+    assert "sk-oauth-must-not-leak" not in json.dumps(seen)
+    assert "gh-must-not-leak" not in json.dumps(seen)
+    assert seen["argv"] == ["-p", "a prompt", "--tools", ""]
+
+
+def test_scrubbed_env_adds_exactly_the_proxy_keys_and_the_given_credential(tmp_path):
+    env = harness.scrubbed_env(base_url="http://127.0.0.1:9", served_name="local-model-a",
+                               home=tmp_path, credential=SENTINEL, proxy="http://127.0.0.1:8")
+    assert set(env) == set(harness.RELAY_ENV_KEYS)
+    assert env["ANTHROPIC_API_KEY"] == SENTINEL
+    assert (env["HTTP_PROXY"], env["HTTPS_PROXY"], env["NO_PROXY"]) == (
+        "http://127.0.0.1:8", "http://127.0.0.1:8", "127.0.0.1")
+    assert harness.RELAY_ENV_KEYS == harness.BASE_ENV_KEYS + ("HTTP_PROXY", "HTTPS_PROXY",
+                                                              "NO_PROXY")
+
+
+def test_spawn_seconds_allows_a_real_endpoint_its_first_byte_bound():
+    assert harness.spawn_seconds(None) == harness.ENDPOINT_RUN_SECONDS == 900.0
+    assert harness.spawn_seconds(object()) == harness.RUN_SECONDS
+    assert harness.ENDPOINT_RUN_SECONDS > runner.DEFAULT_TIMEOUTS["time_to_first_token_seconds"]
+    assert harness.FIRST_CHUNK_SECONDS > runner.DEFAULT_TIMEOUTS["time_to_first_token_seconds"]
+
+
+def test_the_longest_padded_prompt_fits_one_argv_string():
+    assert len(harness.padded_prompt(harness.MAX_ARG_WORDS).encode()) < 131072
+
+
+def test_the_fixed_observations_name_their_reason():
+    assert harness.FIXED_OBSERVATIONS == {
+        "cli_over_limit_not_tested": "over_limit_not_judged_on_endpoint",
+        "cli_nested_agent_not_tested": "nested_agent_not_judged_on_endpoint"}
+    assert harness.VARIANTS == ("unplanted_file", "no_sigint")
