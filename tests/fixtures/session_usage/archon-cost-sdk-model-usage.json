@@ -1,0 +1,34 @@
+{
+  "run_id": "wf-sdk",
+  "nodes": [
+    {
+      "nodeId": "conformance",
+      "inputTokens": 90,
+      "outputTokens": 22298,
+      "costUsd": 2.5850786,
+      "durationMs": 300000,
+      "modelUsage": {
+        "claude-sonnet-5": {
+          "inputTokens": 90,
+          "outputTokens": 22298,
+          "cacheReadInputTokens": 4283508,
+          "cacheCreationInputTokens": 121337,
+          "webSearchRequests": 0,
+          "costUSD": 1.5652096,
+          "contextWindow": 200000,
+          "maxOutputTokens": 64000
+        },
+        "claude-opus-5-5": {
+          "inputTokens": 12,
+          "outputTokens": 4100,
+          "cacheReadInputTokens": 610000,
+          "cacheCreationInputTokens": 30500,
+          "webSearchRequests": 0,
+          "costUSD": 1.019869,
+          "contextWindow": 200000,
+          "maxOutputTokens": 64000
+        }
+      }
+    }
+  ]
+}
