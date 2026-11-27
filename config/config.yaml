@@ -141,6 +141,16 @@ deps_audit:
   ci_wait_minutes: 20         # bounded wait for the deps PR's CI (container default; env DEPS_AUDIT_CI_WAIT_MINUTES)
   auto_merge: false           # merge the deps PR on green only when true (container default; env DEPS_AUDIT_AUTO_MERGE); direct-to-pr on the tracking issue also allows it
 
+preview_helper_dispatch:
+  # Preview-helper shadow lane (#587): the scheduler starts #642's token-free, tool-free
+  # preview-helper container on a local endpoint to re-classify a pushed changeset. Shadow
+  # only: nothing reads its result. Ships OFF, and this key is documentation only (no code
+  # reads it). The scheduler dispatches only when PREVIEW_HELPER_DISPATCH_ENABLED=true AND
+  # PREVIEW_HELPER_ENDPOINT is set in ITS OWN environment (deploy/instance.env, human-only);
+  # PREVIEW_HELPER_DAILY_MAX (default 20) caps dispatches per UTC day. Activation is #564's
+  # canary only: docs/configuration.md, "Model endpoint registry".
+  enabled: false
+
 side_effect:
   # Side-effect level each factory phase runs at (#196). 1..5; 6 is never valid here
   # (adapter.py/handoff.py reject 6 outright — see side_effect.py). All phases start at

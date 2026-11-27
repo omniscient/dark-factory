@@ -45,26 +45,26 @@ Source files: `scheduler.sh`, `scripts/scheduler_lib.sh` (pure label/size predic
 
 The order below is the order the code executes. Steps 1 to 4 are top-level statements
 that run before the function definitions; steps 5 onward run after the
-`SCHEDULER_SOURCE_ONLY` guard (`scheduler.sh:1597`), which lets tests source the file
+`SCHEDULER_SOURCE_ONLY` guard (`scheduler.sh:1604`), which lets tests source the file
 without starting the loop.
 
 | # | Step | What happens | Source |
 |---|------|--------------|--------|
-| 1 | Source helpers | `scripts/identity.sh` (exports `FACTORY_*` identity, defaults are MarketHawk's), `scripts/scheduler_lib.sh`, `scripts/provider_env.sh` | `scheduler.sh:20-22`, `scripts/identity.sh` |
-| 2 | Provider preflight | `providers/cli.py preflight --side scheduler`. Under `set -e` a non-zero exit stops the scheduler. It checks that `FACTORY_TRACKER` / `FACTORY_CODEHOST` / `FACTORY_MODEL_PROVIDER` name known providers and that each one's required env is set: `GH_TOKEN` for the GitHub tracker and code host, and `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for the `anthropic` model provider. When `FACTORY_MODEL_ENDPOINT` is set (#557) it also validates the read-only registry mount's schema and the selected id, and refuses a local selection; see [configuration.md](configuration.md) "Model endpoint registry" | `scheduler.sh:51`, `providers/__init__.py` `preflight()`, `providers/model.py` |
-| 3 | Provision the run env file | Copies `/workspace/project/.archon/.env` to `/opt/dark-factory/.archon/.env`, the path `run-compose.yml`'s `env_file` resolves to. If the source is missing it only warns; every later dispatch then fails env-file resolution. The copy is made once, at boot | `scheduler.sh:59-65`, `run-compose.yml` (`env_file`) |
-| 4 | State directory | `mkdir -p $SCHEDULER_STATE_DIR` (default `/var/lib/dark-factory`) and create `scheduler-state.json` as `{}` if absent | `scheduler.sh:10-17`, `:68-73` |
-| 5 | Config resolution | `read_config` runs `factory_core.effective_config` in scheduler mode: the first existing file of `/workspace/project/config/config.yaml`, `/opt/dark-factory/config/config.yaml`, `/opt/refinement-skills/config.yaml` (`SCHEDULER_CANDIDATES`), whole-file, no merge, never a clone, written to `$SCHEDULER_STATE_DIR/run-config.{json,env}`. No file found, or a missing or empty `run-config.env`, is fatal (`FATAL: cannot read config.yaml`, exit 1). Each knob is then set by `apply_run_config_env` (below) | `scheduler.sh:41-48`, `scripts/factory_core/effective_config.py:33-37`, `scheduler.sh:1602` |
-| 6 | ERR trap | Logs `SCHED_UNHANDLED_ERR line=… exit=…` for any unhandled failing command. The process still exits (`set -e`); compose restarts it (`restart: unless-stopped`) | `scheduler.sh:1609-1613`, `deploy/docker-compose.yml` |
-| 7 | WIP limits | `tracker get-status-limits`, once, cached until restart. See [WIP limits](#wip-limits) | `scheduler.sh:1616-1619` |
-| 8 | Image check | `docker image inspect $FACTORY_IMAGE`; if absent, `docker pull`; if the pull fails, print instructions, sleep 60 s and exit 1 | `scheduler.sh:1625-1640` |
-| 9 | Stale preview warning | Warns when more than `STALE_PREVIEW_WARN_COUNT` (env only, default 3) containers named `mh-preview-*` exist. Never blocks | `scheduler.sh:1643-1653` |
-| 10 | Adapter validation warning | If `/workspace/project/.factory/adapter.yaml` exists, runs `python3 -m factory_core.adapter --validate` and logs `WARNING: ADAPTER INVALID …` on failure. Warn-only: the mounted checkout may be stale, and the run container's own check is the enforcement point | `scheduler.sh:1658-1665` |
-| 11 | Loop start | Logs `Backlog scheduler started (poll every ${POLL_INTERVAL}s)` | `scheduler.sh:1668` |
+| 1 | Source helpers | `scripts/identity.sh` (exports `FACTORY_*` identity, defaults are MarketHawk's), `scripts/scheduler_lib.sh`, `scripts/provider_env.sh`, `scripts/preview_helper_dispatch.sh` (the #587 helper lane; defines functions only) | `scheduler.sh:20-23`, `scripts/identity.sh` |
+| 2 | Provider preflight | `providers/cli.py preflight --side scheduler`. Under `set -e` a non-zero exit stops the scheduler. It checks that `FACTORY_TRACKER` / `FACTORY_CODEHOST` / `FACTORY_MODEL_PROVIDER` name known providers and that each one's required env is set: `GH_TOKEN` for the GitHub tracker and code host, and `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` for the `anthropic` model provider. When `FACTORY_MODEL_ENDPOINT` is set (#557) it also validates the read-only registry mount's schema and the selected id, and refuses a local selection; see [configuration.md](configuration.md) "Model endpoint registry" | `scheduler.sh:52`, `providers/__init__.py` `preflight()`, `providers/model.py` |
+| 3 | Provision the run env file | Copies `/workspace/project/.archon/.env` to `/opt/dark-factory/.archon/.env`, the path `run-compose.yml`'s `env_file` resolves to. If the source is missing it only warns; every later dispatch then fails env-file resolution. The copy is made once, at boot | `scheduler.sh:60-66`, `run-compose.yml` (`env_file`) |
+| 4 | State directory | `mkdir -p $SCHEDULER_STATE_DIR` (default `/var/lib/dark-factory`) and create `scheduler-state.json` as `{}` if absent | `scheduler.sh:10-17`, `:69-74` |
+| 5 | Config resolution | `read_config` runs `factory_core.effective_config` in scheduler mode: the first existing file of `/workspace/project/config/config.yaml`, `/opt/dark-factory/config/config.yaml`, `/opt/refinement-skills/config.yaml` (`SCHEDULER_CANDIDATES`), whole-file, no merge, never a clone, written to `$SCHEDULER_STATE_DIR/run-config.{json,env}`. No file found, or a missing or empty `run-config.env`, is fatal (`FATAL: cannot read config.yaml`, exit 1). Each knob is then set by `apply_run_config_env` (below) | `scheduler.sh:42-49`, `scripts/factory_core/effective_config.py:33-37`, `scheduler.sh:1609` |
+| 6 | ERR trap | Logs `SCHED_UNHANDLED_ERR line=… exit=…` for any unhandled failing command. The process still exits (`set -e`); compose restarts it (`restart: unless-stopped`) | `scheduler.sh:1616-1620`, `deploy/docker-compose.yml` |
+| 7 | WIP limits | `tracker get-status-limits`, once, cached until restart. See [WIP limits](#wip-limits) | `scheduler.sh:1623-1626` |
+| 8 | Image check | `docker image inspect $FACTORY_IMAGE`; if absent, `docker pull`; if the pull fails, print instructions, sleep 60 s and exit 1 | `scheduler.sh:1632-1647` |
+| 9 | Stale preview warning | Warns when more than `STALE_PREVIEW_WARN_COUNT` (env only, default 3) containers named `mh-preview-*` exist. Never blocks | `scheduler.sh:1650-1660` |
+| 10 | Adapter validation warning | If `/workspace/project/.factory/adapter.yaml` exists, runs `python3 -m factory_core.adapter --validate` and logs `WARNING: ADAPTER INVALID …` on failure. Warn-only: the mounted checkout may be stale, and the run container's own check is the enforcement point | `scheduler.sh:1665-1672` |
+| 11 | Loop start | Logs `Backlog scheduler started (poll every ${POLL_INTERVAL}s)` | `scheduler.sh:1675` |
 
 ### `apply_run_config_env`: config value versus environment
 
-`read_config` (`scheduler.sh:41-48`) has `factory_core.effective_config`
+`read_config` (`scheduler.sh:42-49`) has `factory_core.effective_config`
 write the resolved file's whitelisted knobs to `$SCHEDULER_STATE_DIR/run-config.env`,
 one `VAR=value` line each (a bare `VAR` for a missing or null key). Then
 `apply_run_config_env <file> scheduler` (`scripts/run_config_env.sh`) walks the file. It
@@ -85,9 +85,9 @@ bash-consumed knob is one row there. Their meanings and defaults belong to
 [configuration.md](configuration.md).
 
 Not read from `config.yaml` at all: `REFINE_MAX_RETRIES` (env only, default 3,
-`scheduler.sh:28-30`), `SCHEDULER_STATE_DIR`, `STALE_PREVIEW_WARN_COUNT`,
+`scheduler.sh:29-31`), `SCHEDULER_STATE_DIR`, `STALE_PREVIEW_WARN_COUNT`,
 `FACTORY_MODEL_PROXY_ENABLED`, and the skip-label lists, which are constants in the
-script (`scheduler.sh:9`, `:29`).
+script (`scheduler.sh:9`, `:30`).
 
 `read_config` exports into the scheduler's own process. That reaches the things the
 scheduler runs in-process (for example `epic-autopilot --once`, which reads
@@ -98,7 +98,7 @@ not reach run containers; see [Dispatch](#dispatch).
 
 ```mermaid
 flowchart TD
-    A[poll start: DISPATCHED = empty, compute BOT_RE] --> B[check_rate_limit]
+    A[poll start: DISPATCHED = empty, preview_helper_finalize, compute BOT_RE] --> B[check_rate_limit]
     B --> C{fetch_board_items ok?}
     C -- no --> Z1[log error=gh_api_failed, sleep, next poll]
     C -- yes --> D[split items by status, count, count_refine_running]
@@ -118,10 +118,11 @@ flowchart TD
     O --> P[stage_plan: Refined]
     P --> Q[stage_refine: Backlog]
     Q --> R[stage_epic_autopilot: only if nothing dispatched]
-    R --> S[summary log line, sleep POLL_INTERVAL]
+    R --> R2[preview_helper_check: only if not paused and nothing dispatched]
+    R2 --> S[summary log line, sleep POLL_INTERVAL]
 ```
 
-The loop body is `scheduler.sh:1670-1790`.
+The loop body is `scheduler.sh:1677-1808`.
 
 ### What is fetched each poll
 
@@ -129,13 +130,13 @@ Fixed cost, every poll:
 
 | Call | API | Source |
 |------|-----|--------|
-| `tracker get-rate-budget` → `gh api rate_limit --jq .resources.graphql` | REST | `check_rate_limit`, `scheduler.sh:76-91`; `providers/tracker/github.py` `get_rate_budget()` |
-| Board fetch: `providers/cli.py tracker board-items`, which runs `gh api graphql` with `items(first: 100)` per page, following `endCursor` until `hasNextPage` is false. One call per 100 board items. Each item carries status name, issue number, title, the first 10 labels and the item's ProjectV2 id (the `id` selection, #607 — the scheduler's board moves use it to skip the item-list lookup). The query also selects `rateLimit { cost remaining resetAt }`, and each page call appends one line to the GraphQL cost log under `SCHEDULER_STATE_DIR` (written only when that variable is set; fail-soft; #607) | GraphQL | `fetch_board_items`, `scheduler.sh:712-716`; `providers/tracker/github.py` `list_board_items()` (`:268`) and the query template (`:28`); `factory_core/cost_log.py` (`log_call`, `:21`) |
-| `tracker get-rate-budget` again, for the `graphql=` field of the summary line | REST | `scheduler.sh:1770-1771` |
-| Only when the poll dispatched nothing: `providers/cli.py tracker list-items --label ready-for-agent --limit 200`, which runs `gh issue list --repo <slug> --state open --label ready-for-agent --limit 200 --json number` | `gh` subcommand | `off_board_ready_issues`, `scheduler.sh:724-740`, `:1765`; `providers/tracker/github.py` `list_items()` (`:315`) |
+| `tracker get-rate-budget` → `gh api rate_limit --jq .resources.graphql` | REST | `check_rate_limit`, `scheduler.sh:77-92`; `providers/tracker/github.py` `get_rate_budget()` |
+| Board fetch: `providers/cli.py tracker board-items`, which runs `gh api graphql` with `items(first: 100)` per page, following `endCursor` until `hasNextPage` is false. One call per 100 board items. Each item carries status name, issue number, title, the first 10 labels and the item's ProjectV2 id (the `id` selection, #607 — the scheduler's board moves use it to skip the item-list lookup). The query also selects `rateLimit { cost remaining resetAt }`, and each page call appends one line to the GraphQL cost log under `SCHEDULER_STATE_DIR` (written only when that variable is set; fail-soft; #607) | GraphQL | `fetch_board_items`, `scheduler.sh:719-723`; `providers/tracker/github.py` `list_board_items()` (`:268`) and the query template (`:28`); `factory_core/cost_log.py` (`log_call`, `:21`) |
+| `tracker get-rate-budget` again, for the `graphql=` field of the summary line | REST | `scheduler.sh:1788-1789` |
+| Only when the poll dispatched nothing: `providers/cli.py tracker list-items --label ready-for-agent --limit 200`, which runs `gh issue list --repo <slug> --state open --label ready-for-agent --limit 200 --json number` | `gh` subcommand | `off_board_ready_issues`, `scheduler.sh:731-747`, `:1777`; `providers/tracker/github.py` `list_items()` (`:315`) |
 
 A failed board fetch logs `error=gh_api_failed` and skips the whole poll
-(`scheduler.sh:1678`). Since [PR #525](https://github.com/omniscient/dark-factory/pull/525)
+(`scheduler.sh:1690`). Since [PR #525](https://github.com/omniscient/dark-factory/pull/525)
 `tracker board-items` exits 1 when a page body cannot be parsed as JSON (an empty body
 included) or when a page reports `hasNextPage` without a cursor, and that is what triggers
 the skip. The exit status of `gh` itself is not consulted: a parseable body without items,
@@ -155,7 +156,7 @@ or polls, except the comment-classifier verdict:
 | `stage_conflict_resolve` | `gh pr list`, then `gh pr view --json mergeable` |
 | `stage_review_triage` | With `direct-to-pr`: `gh pr list` + `gh pr view --json reviews`. Then `gh issue view --json comments`. With new comments and no cached verdict: one `claude -p --model haiku` call |
 | `stage_ready_implement` | `gh issue view --json body`; one batched `tracker states` call for all dependencies that are not on the board (#607; one aliased GraphQL query per 25-issue chunk) |
-| `stage_blocked_retry` | `git ls-remote` over smart HTTP (no API quota, per the comment at `scheduler.sh:635-655`); `gh pr list` only when no branch was found |
+| `stage_blocked_retry` | `git ls-remote` over smart HTTP (no API quota, per the comment at `scheduler.sh:642-662`); `gh pr list` only when no branch was found |
 | `stage_plan`, `stage_refine` | Gate-labelled items: `gh issue view --json comments`, twice when the grace timer is evaluated. On dispatch: a comment through `tracker add-comment` |
 | `stage_epic_autopilot` | One board GraphQL query for in-progress epics, one sub-issue GraphQL query per epic, one `gh issue view` per gated child, optionally a Contents API read and a `claude -p` review (`epic_autopilot.py`) |
 
@@ -183,7 +184,7 @@ The code does not hardcode an hourly limit. It reads GitHub's GraphQL bucket
 
 - before each poll, if `remaining <= RATE_LIMIT_FLOOR` (config default 200), sleeps until
   `reset + 5 s` and logs `rate_limit remaining=… sleeping=…s until_reset`
-  (`scheduler.sh:76-91`). A failed budget lookup is ignored (`|| return 0`);
+  (`scheduler.sh:77-92`). A failed budget lookup is ignored (`|| return 0`);
 - prints `graphql=<used>/<limit>` on the summary line (`graphql=?` if the lookup fails).
 
 The budget belongs to the token, so two instances that use the same `GH_TOKEN` draw
@@ -193,20 +194,20 @@ GraphQL bucket; REST and search limits are not checked.
 ## Stage inventory
 
 Stages run in this order every poll. "Guard" is the stage-level condition from
-`STAGE_GUARD` / `dispatch_stage` (`scheduler.sh:1551-1591`): `red_or_paused` skips the
+`STAGE_GUARD` / `dispatch_stage` (`scheduler.sh:1558-1598`): `red_or_paused` skips the
 stage when main is red or the session window is paused, `paused_only` skips it only
 during a session-window pause, `none` always runs. All per-item stages below the
 capacity guard stop at the first item once `DISPATCHED` is set (`[ -n "$DISPATCHED" ] && break`),
 so one poll normally starts one run.
 
 "Global skip" means `SKIP_LABELS` = `needs-discussion`, `epic`, `ready-for-human`
-(`scheduler.sh:9`, `has_skip_label` `:737-748`). "Refine skip" means
+(`scheduler.sh:9`, `has_skip_label` `:744-755`). "Refine skip" means
 `REFINE_SKIP_LABELS` = global skip plus `spec-pending-review`, `plan-pending-review`
-(`scheduler.sh:29`, `has_refine_skip_label` in `scheduler_lib.sh`).
+(`scheduler.sh:30`, `has_refine_skip_label` in `scheduler_lib.sh`).
 
 | Order | Stage function | Board status | Guard | Acts on an item when | What it does | Skips | Limits |
 |-------|----------------|--------------|-------|----------------------|--------------|-------|--------|
-| P0 | `stage_ci_gate` (`scheduler.sh:1101-1132`) | In review | None. Runs before the capacity guard, so even while the factory is full | An open PR exists for `feat/issue-N-` and at least one check has `bucket == "fail"` | Moves the ticket to Blocked, comments with the failing checks, adds it to `CI_BLOCKED`. No dispatch | Global skip | None; every red ticket is gated in the same poll |
+| P0 | `stage_ci_gate` (`scheduler.sh:1108-1139`) | In review | None. Runs before the capacity guard, so even while the factory is full | An open PR exists for `feat/issue-N-` and at least one check has `bucket == "fail"` | Moves the ticket to Blocked, comments with the failing checks, adds it to `CI_BLOCKED`. No dispatch | Global skip | None; every red ticket is gated in the same poll |
 | P0.6 | `stage_rescue_blocked` (`:1132-1149`, `rescue.py`) | Blocked | `BLOCKED_RESCUE_ENABLED` (default true). Runs before the capacity guard | No run container for the issue, and its PR has at least one check, none failing, none pending, and `mergeable == MERGEABLE` | Marks a draft PR ready, moves the ticket to In review, upserts a "Rescued from Blocked" comment, resets retry key `N`, adds it to `RESCUED`. Never merges. No dispatch | Global skip; `above-ceiling` label | None |
 | — | Capacity guard (`:1692-1697`) | — | — | Running containers whose name contains `FACTORY_RUN_PREFIX` ≥ `FACTORY_WIP_LIMIT` | Logs `skip=factory_at_capacity running=a/b`, sleeps, starts the next poll. Nothing below runs and no summary line is printed | — | `FACTORY_WIP_LIMIT` |
 | — | Session-window sentinel (`:1706-1721`) | — | — | `session-window-paused` exists and its epoch is in the future | Sets `SESSION_WINDOW_PAUSED=true`. An expired or corrupt sentinel is deleted | — | — |
@@ -220,15 +221,16 @@ so one poll normally starts one run.
 | P4 | `stage_plan` (`:1392-1453`) | Refined | `paused_only` | Not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `plan-pending-review` **and** `direct-to-pr` go to `plan_advance_check` instead | Comments "Starting plan generation" and dispatches `Plan issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:plan`, ceiling `REFINE_MAX_RETRIES` |
 | P5 | `stage_refine` (`:1456-1520`) | Backlog | `paused_only` | Carries `ready-for-agent` or `direct-to-pr`, not running, `REFINE_RUNNING < REFINE_WIP_LIMIT`, breaker checks pass. Items with `spec-pending-review` go to `spec_advance_check` instead | Comments "Starting brainstorming" and dispatches `Refine issue #N` | Refine skip | `REFINE_WIP_LIMIT` (stage stops); retry key `N:refine`, ceiling `REFINE_MAX_RETRIES` |
 | P6 | `stage_epic_autopilot` (`:1527-1533`) | (its own queries) | Own condition: nothing dispatched this poll, main green, not paused, `EPIC_AUTOPILOT_ENABLED=true` | See [Epic autopilot](#epic-autopilot) | Runs `cli.py epic-autopilot --once` in the scheduler process. May add `direct-to-pr` to one child or start one epic. Starts no container itself | Its own eligibility rules | Daily cap |
+| P7 | `preview_helper_check` (`scripts/preview_helper_dispatch.sh`) | (pending changesets on the state volume) | Not paused, nothing dispatched this poll; `PREVIEW_HELPER_DISPATCH_ENABLED=true` and `PREVIEW_HELPER_ENDPOINT` set; no helper in flight; no `preview-helper-proxy` of this project in any state | An unstamped valid `preview-pending/<N>-<sha>.json` | Starts the helper proxy and `Classify preview (helper) #N` in the `preview-helper` service. Shadow only; never touches the board, labels or an issue's breaker keys. `preview_helper_finalize` reaps it at the top of a later poll | — | One at a time; `preview_helper:stamp:<N>:<sha>`; `PREVIEW_HELPER_DAILY_MAX` (20); stops after two consecutive abstentions (`preview_helper:failures`) |
 
 Items are processed in the order the board query returns them; the scheduler applies no
-priority ordering of its own within a status (`get_items_by_status`, `scheduler.sh:742-747`).
+priority ordering of its own within a status (`get_items_by_status`, `scheduler.sh:749-754`).
 Status names are compared case-insensitively.
 
 ### Notes on individual stages
 
 **"Running" means a container, not a board status.** `is_issue_running`
-(`scheduler.sh:121-127`) greps the command column of `docker ps` for `#N`.
+(`scheduler.sh:122-128`) greps the command column of `docker ps` for `#N`.
 `count_refine_running` (`:250-252`) counts commands containing `Refine issue` or
 `Plan issue`. `count_factory_running` (`:129-131`) counts container names containing
 `FACTORY_RUN_PREFIX`.
@@ -245,7 +247,7 @@ Status names are compared case-insensitively.
 
 **Review triage** (`stage_review_triage`):
 
-- `end_gate_check` (`scheduler.sh:341-373`) applies only to `direct-to-pr` tickets with
+- `end_gate_check` (`scheduler.sh:342-374`) applies only to `direct-to-pr` tickets with
   an open PR. It reads the last review whose state is `APPROVED` or `CHANGES_REQUESTED`
   (`providers/codehost/github.py` `get_change_reviews()`). `APPROVED` dispatches
   `Close issue #N` through `dispatch_close` (`:449`), the same guard and `N:close` breaker
@@ -269,15 +271,15 @@ item only skips that item.
 **Blocked retry**: branch detection is a `git ls-remote --heads` for
 `refs/heads/feat/issue-N-*` with a 30 s timeout. Any probe error is treated as "no
 branch" and logged as `branch_probe_error` (`branch_exists_for_issue`,
-`scheduler.sh:656-681`); the PR lookup is then the fallback.
+`scheduler.sh:663-688`); the PR lookup is then the fallback.
 
 **Plan and refine** post their "Starting…" comment before calling `dispatch`, and append
 a note when the previous attempt was a delivery failure or a session-window pause
-(`delivery_skip_note`, `session_window_pause_note`, `scheduler.sh:601-622`).
+(`delivery_skip_note`, `session_window_pause_note`, `scheduler.sh:608-629`).
 
 ## Dispatch
 
-`dispatch "<command>"` (`scheduler.sh:474-503`) runs:
+`dispatch "<command>"` (`scheduler.sh:475-510`) runs:
 
 ```
 docker compose -f /opt/dark-factory/docker-compose.yml --profile factory \
@@ -288,6 +290,9 @@ docker compose -f /opt/dark-factory/docker-compose.yml --profile factory \
   (`Dockerfile`, `COPY run-compose.yml /opt/dark-factory/docker-compose.yml`).
 - `--profile factory-model-proxy` is added when `FACTORY_MODEL_PROXY_ENABLED=true` in the
   scheduler's environment.
+- `-e PREVIEW_HELPER_CHANGESET_FLAG=true` is added to `Fix issue #N` and `Continue issue #N`
+  only while the preview-helper lane is enabled (#587; see stage P7). It is the only flag the
+  lane adds to `dispatch()`.
 - `-d` detaches: the scheduler does not wait for the run. `dispatch` returns the
   `docker compose` exit code, so "success" means the container was started. A failure
   logs `dispatch_error command="…" exit=N`.
@@ -309,6 +314,7 @@ these:
 | `Recheck main` | `main_red_recheck_check` |
 | `Fix main` | `main_red_fixer_check` |
 | `Audit deps` | `deps_audit_check` |
+| `Classify preview (helper) #N` | `preview_helper_check` → `dispatch_preview_helper` (`scripts/preview_helper_dispatch.sh`), to the `preview-helper` service, not `dark-factory` |
 
 `entrypoint.sh:99-108` turns the first word into the run's intent. What each intent
 does is in [run-lifecycle.md](run-lifecycle.md).
@@ -319,7 +325,7 @@ Three sources, all visible in `run-compose.yml` and `scripts/provider_env.sh`:
 
 | Source | Carries | Notes |
 |--------|---------|-------|
-| `env_file: .archon/.env` → `/opt/dark-factory/.archon/.env` | Secrets (`GH_TOKEN`, Claude credentials) and any run-side settings | This is the copy of `<PROJECT_DIR>/.archon/.env` made at scheduler boot (`scheduler.sh:59-65`). It is `required: true`. |
+| `env_file: .archon/.env` → `/opt/dark-factory/.archon/.env` | Secrets (`GH_TOKEN`, Claude credentials) and any run-side settings | This is the copy of `<PROJECT_DIR>/.archon/.env` made at scheduler boot (`scheduler.sh:60-66`). It is `required: true`. |
 | `environment:` in `run-compose.yml`, interpolated from the **scheduler's** environment at dispatch | `DOCKER_HOST`, `SEQ_URL`, all `FACTORY_*` identity vars, `FACTORY_IMAGE`, `FACTORY_RUN_PREFIX`, the four `ANTHROPIC_DEFAULT_*_MODEL` pins, `BUILDKIT_HOST` / `BUILDKIT_PORT` | Identity comes from `deploy/instance.env` via the scheduler. Per the comment in `provider_env.sh`, an `environment:` entry beats `env_file`. |
 | `docker compose run -e NAME`, from `provider_env_flags` | Provider selection and provider env (`FACTORY_TRACKER`, `FACTORY_CODEHOST`, `FACTORY_MODEL_PROVIDER`, `FACTORY_MODEL_ENDPOINT`, Jira, GitLab, Bedrock, Vertex vars; full list in `PROVIDER_PASSTHROUGH_VARS`) | Forwarded only when set and non-empty in the scheduler's environment; then it overrides `.archon/.env`. `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` are deliberately not forwarded. When `FACTORY_MODEL_ENDPOINT` is set, `model_registry_env_flags` first stages the model endpoint registry onto the state volume and adds `-e FACTORY_MODEL_REGISTRY_SHA256` for that one run; a failed stage refuses the dispatch (`dispatch_error ... reason=model_registry_stage_failed`) (#557). |
 
@@ -342,15 +348,15 @@ Consequences that follow directly from this:
 
 | Limit | Where it comes from | Enforced by |
 |-------|---------------------|-------------|
-| `MAX_IN_PROGRESS`, `MAX_IN_REVIEW` | The board itself: the description of each Status option is searched for `limit: <n>`; no match, or a failed query, means 999. Read once at boot and logged as `WIP limits: in_progress=… in_review=… factory=…` | `providers/tracker/github.py` `get_status_limits()`; `scheduler.sh:1616-1619`; checked only in `stage_ready_implement` (`:1290-1291`) against the item counts from this poll's board snapshot |
-| `FACTORY_WIP_LIMIT` (config default 1) | `scheduler.factory_wip_limit` or env | The capacity guard, `scheduler.sh:1704-1709`. It counts every run container of this instance, whatever its intent |
+| `MAX_IN_PROGRESS`, `MAX_IN_REVIEW` | The board itself: the description of each Status option is searched for `limit: <n>`; no match, or a failed query, means 999. Read once at boot and logged as `WIP limits: in_progress=… in_review=… factory=…` | `providers/tracker/github.py` `get_status_limits()`; `scheduler.sh:1623-1626`; checked only in `stage_ready_implement` (`:1297-1298`) against the item counts from this poll's board snapshot |
+| `FACTORY_WIP_LIMIT` (config default 1) | `scheduler.factory_wip_limit` or env | The capacity guard, `scheduler.sh:1716-1721`. It counts every run container of this instance, whatever its intent |
 | `REFINE_WIP_LIMIT` (config default 2) | `refine.wip_limit` or env | `stage_plan`, `stage_refine` and the two advance checks, against the number of running `Refine issue` / `Plan issue` containers plus those dispatched this poll |
 
 Changing a board limit needs a scheduler restart, because the limits are cached at boot.
 
 ### Dependency gating
 
-`dependencies_met` (`scheduler.sh:829-887`) is called only by `stage_ready_implement`.
+`dependencies_met` (`scheduler.sh:836-894`) is called only by `stage_ready_implement`.
 It reads the issue body and `_scan_body_for_deps` (`:793-827`) collects issue numbers
 from:
 
@@ -387,7 +393,7 @@ matching `size: ?(xl|s|m|l)`.
 When `DISPATCH_CEILING_ENABLED` is true and a Ready item is above the ceiling,
 `stage_ready_implement` adds `ABOVE_CEILING_LABEL` (default `above-ceiling`), moves the
 ticket to Blocked and posts "Above Dispatch Ceiling" once; the label is what stops the
-comment repeating (`scheduler.sh:1310-1338`). While the label is present,
+comment repeating (`scheduler.sh:1317-1345`). While the label is present,
 `stage_rescue_blocked` and `stage_blocked_retry` leave the ticket alone.
 
 ### Retries and retry counters
@@ -398,7 +404,7 @@ issue number for the implement phase and `N:<phase>` otherwise (`breaker.py` `_m
 
 | Key | Counted when | Ceiling | Reset when |
 |-----|--------------|---------|------------|
-| `N` | Each `stage_blocked_retry` attempt (`evaluate_stop`, `scheduler.sh:1378`) | `MAX_RETRIES` | `Continue` dispatched from In review (`:364`, `:1275`); blocked rescue (`:1145`); breaker trip |
+| `N` | Each `stage_blocked_retry` attempt (`evaluate_stop`, `scheduler.sh:1385`) | `MAX_RETRIES` | `Continue` dispatched from In review (`:365`, `:1282`); blocked rescue (`:1152`); breaker trip |
 | `N:plan` | Each `stage_plan` attempt (`:1433`) | `REFINE_MAX_RETRIES` | Re-plan on feedback (`:302`); breaker trip |
 | `N:refine` | Each `stage_refine` attempt (`:1500`) | `REFINE_MAX_RETRIES` | Re-refine on feedback (`:261`); breaker trip |
 | `N:resolve` | Each `Deconflict` dispatch (`:1235`); the ceiling check itself is a `--peek` (`:1217`) | `MAX_RETRIES` | Breaker trip |
@@ -427,7 +433,7 @@ the named volume `<FACTORY_INSTANCE>-scheduler-state` mounted into both the sche
 |------|-----------|---------|---------|
 | `scheduler-state.json` | Scheduler via `breaker.py` (atomic tmp + rename) | Scheduler | Retry counters, failure signatures, comment-verdict cache |
 | `error-signatures/<N>.<phase>.sig` | Run container (`error_signature.py` `write_signature`) | Scheduler, which deletes it on read (`breaker.py` `record_failure_signature`) | Failure class of the last failed run |
-| `session-window-paused` | Run container (`session_window.py` `write_pause_sentinel`) | Scheduler (`scheduler.sh:1718-1733`) | Resume epoch for the session-window pause |
+| `session-window-paused` | Run container (`session_window.py` `write_pause_sentinel`) | Scheduler (`scheduler.sh:1730-1745`) | Resume epoch for the session-window pause |
 | `main-is-red` | Run container (`smoke_gate.sh` `_smoke_on_red`); removed by `_smoke_on_green` | Scheduler (`:1732`) | Main-red latch |
 | `main-is-red-issue` | Run container (`smoke_gate.sh`) | `main_red_fixer.py` | Regression ticket number |
 | `main-red-last-recheck` | Scheduler (`:167`) and `smoke_gate.sh` on red; removed on green | Scheduler `recheck_due` | Recheck throttle (file mtime) |
@@ -435,12 +441,15 @@ the named volume `<FACTORY_INSTANCE>-scheduler-state` mounted into both the sche
 | `main-red-fixer-state.json` | `main_red_fixer.py` in the `Fix main` run | Same | Attempts per regression ticket |
 | `deps-audit-last-run` | Scheduler (`deps_audit_check`) | Scheduler `deps_audit_due` | `Audit deps` throttle (file mtime) |
 | `deps-fixer-state.json` | `deps_fixer.py` in the `Audit deps` run | Same | Attempts per advisory-set hash |
+| `preview-pending/<N>-<sha>.json` | Implement run (`push-and-pr`, only with `PREVIEW_HELPER_CHANGESET_FLAG=true`) | Scheduler (`preview_helper.py next-candidate`, `sweep`) | Changeset the helper lane classifies; deleted when stamped or after 7 days |
+| `preview-helper-inflight.json` | Scheduler (`preview_helper.py write-inflight`) | Scheduler `preview_helper_finalize` | The one helper in flight: run id, issue, head SHA, start, limit. Never trusted |
+| `preview-helper/` (`input.json`, `current-run.json`, `result.json`) | Scheduler (first two), helper container (`result.json`) | Helper, `preview-helper-proxy` (pointer), scheduler | The helper's one writable directory; emptied after every dispatch |
 | `autopilot-state.json` | `epic_autopilot.py` in the scheduler process | Same | Daily advance count, cached verdicts |
 | `runs.jsonl` | Run containers (`entrypoint.sh`); scheduler appends a `stop_condition` row when `evaluate_stop` reports a stop (`breaker.py` `_append_stop_audit_row`) | Reporting | Run ledger |
 | `graphql-costs.jsonl` (rotates to `.1`) | Scheduler and run containers via `factory_core/cost_log.py` — **only when `SCHEDULER_STATE_DIR` is set in the child's environment** (unset in CI's pytest job, which asserts this dir stays empty) | Operator (manual tailing; no factory code reads it) | One JSONL line per measured GraphQL call (`board_items`, `issue_states`): `ts`, `source` (`scheduler` or a run id, via `DARK_FACTORY_COST_SOURCE`), `context`, `cost`, `remaining`, `reset_at`. Size rotation at ~1 MiB, one retained generation. Fail-soft by design (#607) |
 
 Because retry state is on the volume, counters survive a scheduler restart
-(`scheduler.sh:1604-1608`).
+(`scheduler.sh:1611-1615`).
 
 ## Safety mechanisms
 
@@ -461,7 +470,7 @@ What trips it (all in the four breaker-checked stages; review triage's `Close` d
    artifact; `error_signature.py` `classify`) is not
    charged to the normal counter; a shadow counter `<key>:delivery` is. When the shadow
    counter reaches the ceiling the normal counter is back-filled and the breaker trips
-   (`retry_or_skip_delivery_failure`, `scheduler.sh:579-595`; the conflict stage does the
+   (`retry_or_skip_delivery_failure`, `scheduler.sh:586-602`; the conflict stage does the
    same inline, `:1207-1215`, `:1231-1233`).
 
 What it does (`breaker.py` `trip_to_blocked`): moves the ticket to Blocked, adds the
@@ -482,11 +491,12 @@ writes `session-window-paused` containing a resume epoch, and a signature
 buffer, or a fallback number of minutes, never more than 5 h plus the buffer ahead
 (`compute_resume_epoch`).
 A run whose model endpoint resolved as verified-local (`DF_ENDPOINT_HOSTING=local`, #586;
-always `cloud` until #587) never writes the sentinel: it fails normally with the signature
+always `cloud` for a run container: the #587 helper runs in its own `preview-helper` service,
+not `entrypoint.sh`) never writes the sentinel: it fails normally with the signature
 `substantive:endpoint_unreachable:<exit code>`, so two in a row trip the breaker
 ([run-lifecycle.md](run-lifecycle.md) section 6.F).
 
-In the scheduler (`scheduler.sh:1718-1733`), while the epoch is in the future:
+In the scheduler (`scheduler.sh:1730-1745`), while the epoch is in the future:
 
 - `SESSION_WINDOW_PAUSED=true`, logged as `session_window_gate=active resume_at=<iso>`;
 - skipped: orphan sweep, conflict resolution, Ready, Blocked retry, plan, refine, the
@@ -505,7 +515,7 @@ The smoke gate inside `fix`, `continue`, `deconflict` and `recheck` runs writes
 `main-is-red` when `origin/main` fails its checks and removes it when main is green
 (`smoke_gate.sh`; details in [run-lifecycle.md](run-lifecycle.md)).
 
-While the file exists (`scheduler.sh:1743-1753`):
+While the file exists (`scheduler.sh:1755-1765`):
 
 - the scheduler logs `main_red_gate=active action=skip_implement_dispatch`;
 - conflict resolution, Ready and Blocked retry are skipped; review triage, plan and
@@ -558,7 +568,7 @@ stages of the same poll.
 
 ### Grace-timer auto-advance for the spec and plan gates
 
-Gate-labelled items are handled by `spec_advance_check` (`scheduler.sh:254-293`) and
+Gate-labelled items are handled by `spec_advance_check` (`scheduler.sh:255-294`) and
 `plan_advance_check` (`:295-339`). Both first return if the item has a global skip
 label. Then:
 
@@ -621,7 +631,7 @@ back to a cloud one (or to unset), work done while it was local is no longer blo
 this guard. Per-issue evidence is deliberately not used: the request ledger and run records
 sit on a volume run containers write, and unattributable correlation is recorded as
 `unknown` (Invariant 10, §4.4), so neither could prove that a ticket was never local-routed.
-The boot preflight (`scheduler.sh:51`) already stops the scheduler for a non-cloud
+The boot preflight (`scheduler.sh:52`) already stops the scheduler for a non-cloud
 selection, so in production the refusal is reached only when the registry changes or
 becomes unreadable after boot.
 
@@ -634,7 +644,7 @@ that reaches the guard, and the same marker comment is updated.
 
 Runs inside the scheduler process, at most once per poll, only when the poll dispatched
 nothing, main is green, there is no session-window pause and `EPIC_AUTOPILOT_ENABLED` is
-true (`scheduler.sh:1539-1545`). One pass (`epic_autopilot.py` `run_once`):
+true (`scheduler.sh:1546-1552`). One pass (`epic_autopilot.py` `run_once`):
 
 1. **Daily cap.** If today's (UTC) count has reached `EPIC_AUTOPILOT_DAILY_CAP`, stop
    with `daily_cap_reached`.
@@ -692,11 +702,11 @@ Only the first 10 labels of an issue are fetched (`providers/tracker/github.py:3
 | `needs-discussion` | Global skip: CI gate, rescue, orphan sweep, conflict, review triage, Ready, Blocked retry, plan, refine, and both advance checks. Applied by the breaker. Also drops an autopilot candidate | `scheduler.sh:9`, `breaker.py`, `epic_autopilot.py` `is_eligible` |
 | `epic` | Global skip, same stages. Autopilot works on an epic's children and may start a Ready epic | same |
 | `ready-for-human` | Global skip, same stages. Drops an autopilot candidate | same |
-| `spec-pending-review` | Backlog item is not refined again; it goes to `spec_advance_check` (feedback re-run; grace advance with `direct-to-pr`). Also in the refine skip list used by `stage_plan` | `scheduler.sh:29`, `:1461-1468` |
-| `plan-pending-review` | Refined item is not planned again. With `direct-to-pr` it goes to `plan_advance_check`; without it the scheduler does nothing with the item | `scheduler.sh:1409-1418` |
-| `ready-for-agent` | Opts a Backlog item into `stage_refine` | `scheduler.sh:1485`, `has_opt_in_refine_label` |
-| `direct-to-pr` (name from `DIRECT_TO_PR_LABEL`) | Also opts a Backlog item into refinement; enables grace advance at both gates; enables the review end gate | `scheduler.sh:276`, `:322`, `:344`, `:1473` |
-| `above-ceiling` (name from `ABOVE_CEILING_LABEL`) | Applied by `stage_ready_implement`. Stops the ceiling comment repeating, and makes rescue and Blocked retry skip the ticket | `scheduler.sh:1151`, `:1299`, `:1345` |
+| `spec-pending-review` | Backlog item is not refined again; it goes to `spec_advance_check` (feedback re-run; grace advance with `direct-to-pr`). Also in the refine skip list used by `stage_plan` | `scheduler.sh:30`, `:1468-1475` |
+| `plan-pending-review` | Refined item is not planned again. With `direct-to-pr` it goes to `plan_advance_check`; without it the scheduler does nothing with the item | `scheduler.sh:1416-1425` |
+| `ready-for-agent` | Opts a Backlog item into `stage_refine` | `scheduler.sh:1492`, `has_opt_in_refine_label` |
+| `direct-to-pr` (name from `DIRECT_TO_PR_LABEL`) | Also opts a Backlog item into refinement; enables grace advance at both gates; enables the review end gate | `scheduler.sh:277`, `:323`, `:345`, `:1480` |
+| `above-ceiling` (name from `ABOVE_CEILING_LABEL`) | Applied by `stage_ready_implement`. Stops the ceiling comment repeating, and makes rescue and Blocked retry skip the ticket | `scheduler.sh:1158`, `:1306`, `:1352` |
 | `size: S/M/L/XL` | Dispatch ceiling and plan grace advance (table above); autopilot size ceiling | `scheduler_lib.sh`, `epic_autopilot.py` `_size` |
 | `factory-regression` | Applied by the breaker; not read by the scheduler | `breaker.py` `trip_to_blocked` |
 | `no-autopilot` (name from `EPIC_AUTOPILOT_OPT_OUT_LABEL`) | Drops an autopilot candidate | `epic_autopilot.py` `is_eligible` |
@@ -730,7 +740,7 @@ followed by `probe=image_pulled` or a `FATAL` message, then
 `Backlog scheduler started (poll every Ns)`. Note that the preflight and provisioning
 lines are printed before the config lines because those steps run first.
 
-**The summary line**, one per completed poll (`scheduler.sh:1769-1787`). Example with
+**The summary line**, one per completed poll (`scheduler.sh:1787-1805`). Example with
 made-up values:
 
 ```
@@ -758,8 +768,8 @@ A poll that hits the capacity guard prints only
 
 | Line | Meaning | Source |
 |------|---------|--------|
-| `probe=image_check\|image_ok\|image_missing\|image_pulled image=…` | Boot image check. With `IMAGE_REF` set, the image shown is the pinned reference | `scheduler.sh:1625-1639` |
-| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `hold_unchanged` (a repeat HOLD whose comment was skipped), `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1541-1542` |
+| `probe=image_check\|image_ok\|image_missing\|image_pulled image=…` | Boot image check. With `IMAGE_REF` set, the image shown is the pinned reference | `scheduler.sh:1632-1646` |
+| `autopilot=<outcome> issue=#N` | Epic autopilot result: `advanced`, `hold`, `hold_unchanged` (a repeat HOLD whose comment was skipped), `epic_started`, `no_candidates`, `daily_cap_reached`. `issue=#None` when no ticket is involved. The scheduler prints the command's combined stdout and stderr, so warnings may precede it | `epic_autopilot.py` `main_once`, `scheduler.sh:1548-1549` |
 | `dispatch command="…"` / `dispatch_error command="…" exit=N` | A run was started / `docker compose run` failed | `:481`, `:488` |
 | `rate_limit remaining=… sleeping=…s until_reset` | Rate guard is sleeping | `:87` |
 | `ci_gate issue=#N pr=#P failing=K action=move_to_blocked` | CI gate | `:1102` |
@@ -833,7 +843,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 
 1. **Plan feedback is only acted on with `direct-to-pr`; spec feedback always is.**
    `stage_refine` sends every `spec-pending-review` item to `spec_advance_check`
-   (`scheduler.sh:1473-1480`). `stage_plan` sends an item to `plan_advance_check` only
+   (`scheduler.sh:1480-1487`). `stage_plan` sends an item to `plan_advance_check` only
    if it has both `plan-pending-review` and `direct-to-pr` (`:1397-1404`); otherwise
    `has_refine_skip_label` skips it (`:1406`). A human comment on a plan for a ticket
    without `direct-to-pr` therefore does not trigger a re-plan, although
@@ -853,7 +863,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
    dispatch.** `trip_to_blocked` always moves the ticket to Blocked (`breaker.py`) and
    its comment says removing the label resumes the scheduler. A Blocked ticket is
    picked up by `stage_blocked_retry`, which dispatches `Fix` or `Continue`
-   (`scheduler.sh:1391-1399`), not `Refine` / `Plan`. `entrypoint.sh` (the
+   (`scheduler.sh:1398-1406`), not `Refine` / `Plan`. `entrypoint.sh` (the
    refine/plan/deconflict failure branch) avoids setting Blocked itself for exactly
    this reason ("Priority 3 would then retry it as 'Fix'").
 
@@ -872,10 +882,10 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 
 6. **`refine.skip_labels`, `plan.skip_labels` and `refine.min_issue_body_length` in
    `config/config.yaml` are not read by any script.** The lists the scheduler uses are
-   the constants at `scheduler.sh:9` and `:29`, which also include `ready-for-human`,
+   the constants at `scheduler.sh:9` and `:30`, which also include `ready-for-human`,
    absent from the config lists.
 
-7. **Comment says S only; code allows S, L and unlabelled.** `scheduler.sh:317-318`:
+7. **Comment says S only; code allows S, L and unlabelled.** `scheduler.sh:318-319`:
    "timer-based advance applies only to S-size items. M and L require explicit human
    plan approval". `is_below_ceiling` returns true for `S`, `L` and no size label
    (`scheduler_lib.sh`), and `tests/test_scheduler_ceiling.sh` asserts that L is
@@ -884,9 +894,9 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 8. **Autopilot and the plan grace timer disagree about size M.** Autopilot treats
    everything below `XL` as eligible (`is_eligible`, default ceiling `XL`) and advances
    by adding `direct-to-pr`. For a `plan-pending-review` ticket of `size: M`,
-   `plan_advance_check` then returns before the grace timer (`scheduler.sh:319-321`),
+   `plan_advance_check` then returns before the grace timer (`scheduler.sh:320-322`),
    so the label alone does not move it. The autopilot comment in the code also says it
-   reviews "refined, below-ceiling children" (`scheduler.sh:1535-1537`), while the
+   reviews "refined, below-ceiling children" (`scheduler.sh:1542-1544`), while the
    selection is by gate label, not by the Refined status.
 
 9. **The epic-start path has fewer checks than the child-advance path.**
@@ -921,7 +931,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
 
 12. **Two dispatches can happen after a single capacity check.** When main is red,
     `main_red_recheck_check` and `main_red_fixer_check` run back to back
-    (`scheduler.sh:1750-1751`) and may both dispatch in one poll; the capacity guard
+    (`scheduler.sh:1762-1763`) and may both dispatch in one poll; the capacity guard
     was evaluated once, before them. The summary's `dispatched=` shows only the second.
     The comment at `:160` says "Callers guarantee a free factory slot".
 
@@ -979,7 +989,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     `scripts/factory_core/board.py` (`:161-162`) now calls
     `gh issue comment <n> --repo <owner>/<repo> --body-file …`. From the scheduler's
     `/workspace`, which is not a git checkout, `gh` cannot infer the repo, and a bare
-    `gh issue …` call fails with "not a git repository" (`scheduler.sh:685-687`). Its
+    `gh issue …` call fails with "not a git repository" (`scheduler.sh:692-694`). Its
     lookup and PATCH calls already named the repo. This is the path used by the
     blocked-rescue comment when no earlier rescue comment exists, and by
     `tracker comment`, which `GitHubTracker.upsert_comment` routes to it
@@ -989,7 +999,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     is retried after a 1s pause, and a second failure skips the post with a stderr warning.
 
 22. **Minor comment drift.** `config/config.yaml:5` says polling pauses when remaining
-    is "<" the floor; the code uses `-le` (`scheduler.sh:82`). The comment above
+    is "<" the floor; the code uses `-le` (`scheduler.sh:83`). The comment above
     `evaluate_stop` cites line numbers "l.395" and "l.10" that no longer match
     (`:110-111`). `config.yaml:1` names a path (`.claude/skills/refinement/config.yaml`)
     that is not in the scheduler's search list. The stale-preview warning looks for the

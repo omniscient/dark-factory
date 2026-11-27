@@ -121,16 +121,16 @@ time: leaving it set after the proxy is disabled breaks runs.
 
 Spec: `docs/archive/2026-11-25-hybrid-runtime-adapter-design.md`. Nothing here is
 reachable in production yet. #557's `_NO_LOCAL_DISPATCH` rejects every local selection except
-one made for the `classify-preview-helper` intent (#633), and nothing dispatches that intent
-until #587. `factory-model-proxy` never receives the variables a local selection needs: the
+one made for the `classify-preview-helper` intent (#633), and only the #587 helper lane
+(`scripts/preview_helper_dispatch.sh`, off by default) dispatches that intent. `factory-model-proxy` never receives the variables a local selection needs: the
 helper lane gets its own proxy service, described next. The adapter is built and hermetically
-tested so #587 can enable it.
+tested for the #587 lane.
 
 **The helper lane's proxy (#634).** `run-compose.yml`'s `preview-helper-proxy` service, under
 its own `preview-helper-proxy` profile, runs this module with the literal argument
 `--intent classify-preview-helper` in its `entrypoint:`. It is the only path from the helper
-container to the local endpoint. Nothing in this repository starts it: #587's dispatcher
-starts it for each helper dispatch, removes it when the helper exits, and refuses a dispatch
+container to the local endpoint. Only the #587 lane (`scripts/preview_helper_dispatch.sh`, off by default)
+starts it: it starts it for each helper dispatch, removes it when the helper exits, and refuses a dispatch
 that finds a stale one. Its environment is interpolated from the scheduler's at that moment,
 with no `env_file`, from five scheduler-side variables: `PREVIEW_HELPER_ENDPOINT` (becomes
 `FACTORY_MODEL_ENDPOINT`), `FACTORY_MODEL_REGISTRY_SHA256`, `PREVIEW_HELPER_ENDPOINT_BASE_URL`

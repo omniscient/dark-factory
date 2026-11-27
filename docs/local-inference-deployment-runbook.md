@@ -13,7 +13,8 @@ destination (protocol, refusals, failure classes) is in
 
 An opt-in profile for registering a candidate local inference endpoint: a model served on your
 own hardware, on the Docker host or on your LAN. You use it to check the endpoint's connectivity
-and resource fit before certification (#562) and the first local-eligible dispatch (#587) exist.
+and resource fit before certification (#562) exists and before the first local-eligible dispatch
+(#587's helper lane, off by default) is switched on.
 
 It changes no default behaviour. With `FACTORY_MODEL_ENDPOINT` unset (the default), nothing in
 this runbook is read, staged or checked, and dispatch argv and env are unchanged.
@@ -21,11 +22,12 @@ this runbook is read, staged or checked, and dispatch argv and env are unchanged
 It routes nothing either. `_NO_LOCAL_DISPATCH` in
 `scripts/factory_core/providers/model_endpoint.py` rejects every `hosting_location: local`
 selection on the scheduler side. On the run side it rejects every dispatch intent except
-`classify-preview-helper` (#633), and nothing dispatches that intent until #587 ships. So every
-local registry entry fails preflight today. `factory-model-proxy` receives none of the endpoint
+`classify-preview-helper` (#633), and only the #587 helper lane dispatches that intent. That lane
+selects its endpoint with `PREVIEW_HELPER_ENDPOINT`, never `FACTORY_MODEL_ENDPOINT`, so every
+local `FACTORY_MODEL_ENDPOINT` selection fails preflight. `factory-model-proxy` receives none of the endpoint
 variables. The helper lane's own `preview-helper-proxy` service interpolates them from the
-scheduler's environment (#634), but nothing starts it until #587's dispatcher. Live activation needs #562's certification and
-#587's first local-eligible dispatch. It is not part of this runbook.
+scheduler's environment (#634), and only the #587 lane starts it. Live activation of that lane is
+#564's canary (`docs/configuration.md`, "The helper lane (#587)"). It is not part of this runbook.
 
 "Operator" means the person who controls the instance's `deploy/instances/<instance>/` directory
 and the scheduler's env files. Every step below is the operator's, on their own host. The factory
@@ -85,7 +87,7 @@ The schema requires a `secret_reference` on every entry. It is an env-var *name*
   itself.
 - **Not possible yet:** the proxy sends this value as a local request's only `x-api-key`, but the
   value reaches only the `preview-helper-proxy` service, as `FACTORY_HELPER_MODEL_SECRET` in the
-  scheduler's own environment (#634), and nothing starts that service until #587. The helper's
+  scheduler's own environment (#634), and only the #587 lane (off by default) starts that service. The helper's
   entry must name `secret_reference: FACTORY_HELPER_MODEL_SECRET`. There is no step for it here.
 
 ## Pinning identity
@@ -302,7 +304,8 @@ scheduler.
 
    Expected: exit 1, with exactly one line about the model endpoint: the `_NO_LOCAL_DISPATCH`
    message, `endpoint 'lan-ollama-qwen3-coder' is local, but no local-eligible dispatch exists
-   yet`. That is the correct outcome until #587. It shows that the registry is valid and the id
+   yet`. That is the correct outcome: the #587 lane selects its endpoint with
+   `PREVIEW_HELPER_ENDPOINT`, not `FACTORY_MODEL_ENDPOINT`. It shows that the registry is valid and the id
    resolves. It dials nothing, so it says nothing about reachability.
 
 3. **Reachability from the factory's network.** From a throwaway container on
@@ -327,7 +330,7 @@ scheduler.
 
    These are operator checks against real hardware. They are not certification (#562).
 
-Not available before #587, so they are not steps here: the run-side `preflight`, and
+Not available by hand (the #587 lane stages the registry for each of its own dispatches), so they are not steps here: the run-side `preflight`, and
 `model-endpoints show` without `--from-source`. Both need the per-dispatch
 `FACTORY_MODEL_REGISTRY_SHA256` and fail without it when run by hand.
 
@@ -383,7 +386,7 @@ With `FACTORY_MODEL_ENDPOINT` unset, nothing reads the mount, and dispatch argv 
 unchanged. Then run the three readiness steps.
 
 > **Warning:** never set `FACTORY_MODEL_ENDPOINT` to a local id in a running instance's
-> `instance.env` before #587 ships. `scheduler.sh` runs `preflight --side scheduler` at boot under
+> `instance.env` (the #587 lane uses `PREVIEW_HELPER_ENDPOINT` instead). `scheduler.sh` runs `preflight --side scheduler` at boot under
 > `set -e`, and a local selection always fails it (`_NO_LOCAL_DISPATCH`). The scheduler service is
 > `restart: unless-stopped`, so the scheduler restart-loops and every dispatch stops, cloud
 > dispatch included.
@@ -397,8 +400,8 @@ nothing was ever staged.
 `instance.env` and recreate the scheduler with the same command, including its `--env-file`. Cloud-only behaviour is
 restored.
 
-Live activation is not part of this runbook. It needs #562's certification and #587's first
-local-eligible dispatch.
+Live activation is not part of this runbook. It needs #562's certification and #564's canary of
+the #587 helper lane.
 
 ## No-purchase test path
 
@@ -423,8 +426,8 @@ PYTHONPATH=scripts python -m pytest tests/test_provider_model_endpoint.py tests/
 - Nothing here is certification. Every number in this runbook is a starting point; #562 owns
   certified figures.
 - Selecting a local endpoint is refused by the scheduler, and by the run container for every
-  intent except `classify-preview-helper` (#633), which nothing dispatches until #587
-  (`_NO_LOCAL_DISPATCH`).
+  intent except `classify-preview-helper` (#633), which only the #587 helper lane dispatches (off
+  by default; `_NO_LOCAL_DISPATCH`).
 - The run container's cloud-credential guard also covers the Bedrock, Vertex, Foundry and Mantle
   switches and AWS/GCP alternate credentials (#594, closed by #633; the full list is in
   [configuration.md](configuration.md) "Model endpoint registry"). A capability-evidence record

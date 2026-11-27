@@ -62,7 +62,9 @@ The command is interpreted twice, by two different mechanisms:
    `fix main` become `fix-main`, and `Audit deps` / `audit deps` become `audit-deps`.
    `Classify preview (helper) #N` and `Verify preview classification #N`, matched as whole
    strings and case-sensitively, become `classify-preview-helper` and
-   `classify-preview-checker`; both exit 1 with "not available" until #587. Any other command
+   `classify-preview-checker`; both still exit 1 with "not available" here: the #587 lane
+   sends the helper string to the separate `preview-helper` service, which never runs
+   `entrypoint.sh`, and nothing sends the checker string (#641). Any other command
    is matched case-insensitively by its leading word against
    `fix|continue|close|refine|plan|deconflict|recheck`. No match exits 1 with the usage text on
    stderr, before any clone, tracker or model call; there is no fallback to `fix`. The first
@@ -85,10 +87,18 @@ The command is interpreted twice, by two different mechanisms:
 | `Recheck main` (`scheduler.sh:159`) | `recheck` | never reached | Entrypoint only: smoke gate, then exit |
 | `Fix main` (`scheduler.sh:185`) | `fix-main` | never reached | Entrypoint only: main-red auto-fix |
 | `Audit deps` (`deps_audit_check` in `scheduler.sh`) | `audit-deps` | never reached | Entrypoint only: dependency-health loop |
-| `Classify preview (helper) #N` (not issued yet; #587) | `classify-preview-helper` | never reached | Exits 1, "not available", until #587 |
-| `Verify preview classification #N` (not issued yet; #587) | `classify-preview-checker` | never reached | Exits 1, "not available", until #587 |
+| `Classify preview (helper) #N` (`dispatch_preview_helper` in `scripts/preview_helper_dispatch.sh`, #587) | not reached: the command goes to the `preview-helper` service | never reached | `scripts/preview_helper_entry.sh` in the `preview-helper` service (#642): one tool-less model call on the local endpoint, one `result.json`. Shadow only |
+| `Verify preview classification #N` (not issued; #641) | `classify-preview-checker` | never reached | Exits 1, "not available" |
 
 When and why the scheduler picks each command is covered in [scheduler.md](scheduler.md).
+
+The helper's run has no entrypoint, workflow, cost report or comment. The scheduler finalises
+it: `preview_helper_finalize`, the first call of every poll (before the rate-limit wait, the
+board fetch and the capacity guard), notices that the container named
+`<FACTORY_RUN_PREFIX>ph-<N>` has gone or has run past its limit, removes it and its proxy, and
+writes its one `runs.jsonl` row (`intent: classify-preview-helper`) through
+`scripts/factory_core/preview_helper.py record-outcome`. Nothing reads that row
+([configuration.md](configuration.md#model-endpoint-registry-557), "The helper lane").
 
 The workflow's `resolve` intent has no command that reaches it today; see
 [oddity 1](#open-questions-and-oddities).
@@ -109,11 +119,11 @@ The workflow's `resolve` intent has no command that reaches it today; see
 - `BUILDKIT_HOST` / `BUILDKIT_PORT` name the build daemon the preview step uses (`:56-57`).
 - An optional `factory-model-proxy` service exists under its own profile (`:76-91`), and a
   per-dispatch `preview-helper-proxy` service for the classify-preview-helper lane under the
-  `preview-helper-proxy` profile (`:93-123`; nothing starts it until #587); see
+  `preview-helper-proxy` profile (`:93-123`; only the #587 lane in `scripts/preview_helper_dispatch.sh` starts it); see
   [dark-factory-model-proxy-rollout.md](dark-factory-model-proxy-rollout.md). The helper
   container itself is the `preview-helper` service under the `preview-helper` profile
   (`:125-163`, #642): entry script `scripts/preview_helper_entry.sh`, not `entrypoint.sh`, so
-  none of the steps below run in it; nothing starts it until #587 (see
+  none of the steps below run in it; only the #587 lane starts it (see
   [configuration.md](configuration.md) "Model endpoint registry").
 
 ---
@@ -127,7 +137,7 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 | 1 | Source instance identity (`scripts/identity.sh`) | 5-6 | Provides repo slug, clone dir, board constants |
 | 2 | Parse arguments into `INTENT` and `ISSUE_NUM` | 8-77 | Explicit `case` ([section 1](#1-intents)). No argument prints usage; an unrecognized command or a not-yet-available intent exits 1. All of these happen before any provider, tracker, clone or model call (#633) |
 | 3 | Provider preflight (`providers/cli.py preflight --intent "$INTENT"`) | 79-81 | Validates required environment. When `FACTORY_MODEL_ENDPOINT` is set it also checks the staged model endpoint registry against `FACTORY_MODEL_REGISTRY_SHA256` and the selected entry (#557; [configuration.md](configuration.md) "Model endpoint registry"). A local entry passes only for `classify-preview-helper` (#633). A failure here ends the run before any ticket signal exists |
-| 3a | Resolve the model-endpoint hosting location (`providers/cli.py model-endpoints hosting --intent "$INTENT"`, the baked copy) | 83-92 | Sets `DF_ENDPOINT_HOSTING` to `local` only when the resolver prints exactly `hosting=local`; anything else is `cloud`. Built on `load_verified_entry`, so it is `local` only for a verified local entry and `classify-preview-helper`, which nothing dispatches until #587 (#586, #633, [section 6.F](#f-rate-limit-and-session-window-handling-entrypoint)) |
+| 3a | Resolve the model-endpoint hosting location (`providers/cli.py model-endpoints hosting --intent "$INTENT"`, the baked copy) | 83-92 | Sets `DF_ENDPOINT_HOSTING` to `local` only when the resolver prints exactly `hosting=local`; anything else is `cloud`. Built on `load_verified_entry`, so it is `local` only for a verified local entry and `classify-preview-helper`, which no run container receives: the #587 lane runs it in the `preview-helper` service, not `entrypoint.sh` (#586, #633, [section 6.F](#f-rate-limit-and-session-window-handling-entrypoint)) |
 | 4 | Git identity (`<Product> Factory`, `factory@<repo>`) | 105-107 | |
 | 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 169-179 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
 | 6 | Ledger-writability check on `runs.jsonl` | 181-203 | Warning plus a health event; never fatal |

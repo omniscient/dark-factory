@@ -78,7 +78,7 @@ Two consequences worth knowing:
 
 ## Layer 1: `config/config.yaml`
 
-The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 110 leaf keys,
+The file is baked at `/opt/dark-factory/config/config.yaml` (`Dockerfile:152`). 111 leaf keys,
 documented below section by section. The scheduler's env projection is `apply_run_config_env`
 (`scripts/run_config_env.sh`); the list of exported keys is `ENV_WHITELIST`
 (`scripts/factory_core/effective_config.py:43-80`).
@@ -244,6 +244,18 @@ loop has two halves with separate environments, and both must be set to turn it 
 | `deps_audit.ci_wait_minutes` | `20` | bounded wait for the deps PR's CI | **unread**; `deps_fixer.py` `main_once` (env, code default `20`) | `DEPS_AUDIT_CI_WAIT_MINUTES` (run only) | no |
 | `deps_audit.auto_merge` | `false` | merge the deps PR on green CI without approval | **unread**; `deps_fixer.py` `main_once` (env, code default `false`) | `DEPS_AUDIT_AUTO_MERGE` (run only) | `safety.deps_allowed_paths` bounds what the fix may touch |
 
+### `preview_helper_dispatch`
+
+Preview-helper shadow lane (#587). The key is **documentation only**: no code path reads
+`config/config.yaml` for it, and none of the lane's variables is in `ENV_WHITELIST`
+(`effective_config.py`). The lane lives entirely in the scheduler (`scripts/preview_helper_dispatch.sh`),
+so only the scheduler's environment matters; see "The helper lane (#587)" under
+[Model endpoint registry](#model-endpoint-registry-557) for activation.
+
+| Key | Default | Controls | Reader | Env override (scope) | Adapter |
+|---|---|---|---|---|---|
+| `preview_helper_dispatch.enabled` | `false` | kill-switch for the lane | **unread**. `preview_helper_check` in `scripts/preview_helper_dispatch.sh` dispatches only when `PREVIEW_HELPER_DISPATCH_ENABLED=true` **and** `PREVIEW_HELPER_ENDPOINT` is set in the scheduler's own environment; switching it off stops a running helper on the next poll (`kill_switch`) | `PREVIEW_HELPER_DISPATCH_ENABLED` (scheduler, `deploy/instance.env`; never forwarded) | no |
+
 ### `side_effect.phase_levels`
 
 Each phase starts at `5`. Reader: `scripts/factory_core/side_effect.py:209-231` (`phase_level`), called
@@ -331,9 +343,9 @@ Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, 
 
 Counting: `scheduler` 10, `refine` 3, `plan` 1, `direct_to_pr` 3, `conformance` 7, `code_review` 5,
 `docs_conformance` 2, `preview` 2, `conflict_resolution` 2, `blast_radius` 4, `dispatch_ceiling` 3,
-`epic_autopilot` 11, `main_red_autofix` 5, `deps_audit` 6, `side_effect.phase_levels` 10, `token_optimization` 32
+`epic_autopilot` 11, `main_red_autofix` 5, `deps_audit` 6, `preview_helper_dispatch` 1, `side_effect.phase_levels` 10, `token_optimization` 32
 (`enforce_budgets`, `default_budget_tokens`, 6 budgets, 6 enforce, `issue_context` 1,
-`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 110 leaf keys.
+`architecture` 4, `memory` 5, `comments` 4, `diff` 3, `escalation` 1), `materializer` 4: 111 leaf keys.
 
 ### `materializer`
 
@@ -487,6 +499,10 @@ containers (`run-compose.yml:31-47`).
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:215` | `.archon/.env` |
 | `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:77` | `.archon/.env` |
+| `PREVIEW_HELPER_DISPATCH_ENABLED` | `false` | `preview_helper_enabled` in `scripts/preview_helper_dispatch.sh`: the lane runs only when this is `true` **and** `PREVIEW_HELPER_ENDPOINT` is set (#587) | `instance.env` (scheduler only; never forwarded) |
+| `PREVIEW_HELPER_ENDPOINT` | unset (a local registry `id`) | `scripts/preview_helper_dispatch.sh` (`_ph_entry`), interpolated by `run-compose.yml` into the `preview-helper` and `preview-helper-proxy` services as their `FACTORY_MODEL_ENDPOINT` (#634, #642). Not in `PROVIDER_PASSTHROUGH_VARS`; the instance-wide `FACTORY_MODEL_ENDPOINT` is not used | `instance.env` (scheduler only) |
+| `PREVIEW_HELPER_DAILY_MAX` | `20` | `preview_helper_check`: helper dispatches per UTC day, counted per attempt in `preview_helper:day:<date>`; a non-numeric value means 20, `0` dispatches nothing | `instance.env` (scheduler only) |
+| `PREVIEW_HELPER_CHANGESET_FLAG` | unset | set to `true` by `dispatch()` on `Fix issue #N` and `Continue issue #N` only while the lane is enabled; read by the marked block in `push-and-pr` (`workflows/archon-dark-factory.yaml`), which then writes `/var/lib/dark-factory/preview-pending/<issue>-<head_sha>.json` | never set by hand |
 | `SHADOW_BASE_URL` | set by the launcher only | `bench/_shadow_worker.py` (the one local arm's endpoint, from the arms file's `base_url`) | never set by hand; the worker's environment is exactly `PATH`, `HOME`, `SHADOW_BASE_URL` and the arm's `secret_env` (#563) |
 | (arm `secret_env`, e.g. `SHADOW_LOCAL_API_KEY`) | none | `bench/shadow_runner.py` (copied into the worker under the same name), `bench/_shadow_worker.py` (sent as `x-api-key`) | the operator's shell; a keyless server takes a dummy value (`bench/hosting_shadow.md`) |
 | `GH_TOKEN`, `GITHUB_TOKEN`, `model_endpoint.CLOUD_CREDENTIALS` names | must be unset | `bench/shadow_runner.py` presence check: the launcher refuses to start if any is set (no override) | the operator's shell (#563) |
@@ -556,8 +572,8 @@ except `classify-preview-helper` (`LOCAL_ELIGIBLE_INTENTS`, #633). `entrypoint.s
 intent from its command and passes it to the baked CLI's `preflight` and
 `model-endpoints hosting` as `--intent`; no environment variable, `current-run.json` field or
 registry content can supply it. The scheduler side (`preflight --side scheduler`,
-`model-endpoints hosting-check`) still refuses every local selection, and nothing dispatches
-the helper intent until #587. A helper run reaches its endpoint only through the
+`model-endpoints hosting-check`) still refuses every local selection, and only the #587 lane
+(`scripts/preview_helper_dispatch.sh`, off by default) dispatches the helper intent. A helper run reaches its endpoint only through the
 `preview-helper-proxy` service (#634), so for that intent the run container's
 `ANTHROPIC_BASE_URL` must be exactly `http://preview-helper-proxy:8787`
 (`HELPER_PROXY_BASE_URL`) instead of the entry's `base_url`, and the entry's secret must be
@@ -637,13 +653,13 @@ A run container also resolves its hosting location once, before the clone, with
 `hosting=cloud` and always exits 0; any problem prints `hosting=cloud`. It reads the same
 staged copy and digest as `model-endpoints show` and passes the run's `--intent` to
 `load_verified_entry()`. So it prints `hosting=local` only for a verified local entry and the
-`classify-preview-helper` intent, which nothing dispatches until #587 (#586, #633;
+`classify-preview-helper` intent, which only the #587 lane's helper container runs (#586, #633;
 [run-lifecycle.md](run-lifecycle.md) section 6.F).
 
 **The helper container (#642, inert).** `run-compose.yml`'s `preview-helper` service, under its
-own `preview-helper` profile, is the container #587's dispatcher will start for each
-`classify-preview-helper` dispatch. Nothing in this repository starts it, and nothing dispatches
-it until #587: `entrypoint.sh` still answers that command string "not available". Its
+own `preview-helper` profile, is the container the #587 lane starts for each
+`classify-preview-helper` dispatch (below); nothing else starts it, and `entrypoint.sh` still
+answers that command string "not available". Its
 `entrypoint:` is `scripts/preview_helper_entry.sh`, not `entrypoint.sh`: no tracker or code-host
 preflight, no clone, no `git`, `gh` or `docker`. Its environment is exactly nine keys and holds
 no credential of any kind: `PYTHONPATH`, `ANTHROPIC_BASE_URL` (`http://preview-helper-proxy:8787`),
@@ -664,6 +680,33 @@ only a local entry passing. `scripts/factory_core/preview_helper.py` holds the d
 halves on both sides (prompt, answer, result, and the scheduler-side verbs #587 will call). The
 `docker-build` CI job checks the pinned CLI's request shape through the real helper proxy with
 `tests/tier2_preview_helper_cli.sh`.
+
+**The helper lane (#587).** `scripts/preview_helper_dispatch.sh`, sourced by `scheduler.sh`,
+dispatches that container as a **shadow, non-gating** classifier: nothing reads its result,
+and `preview-up` still reads only the implement run's own `classify-preview` node. While the
+lane is enabled, `dispatch()` adds `-e PREVIEW_HELPER_CHANGESET_FLAG=true` to `Fix issue #N`
+and `Continue issue #N`, and `push-and-pr` writes the pushed changeset to
+`preview-pending/<issue>-<head_sha>.json`. Each poll, `preview_helper_finalize` runs first
+(before the rate-limit wait, the board fetch and the capacity guard) and `preview_helper_check`
+runs last (no session-window pause, nothing else dispatched). The stage stages the registry
+itself, starts `preview-helper-proxy` with `up -d` (refusing if a proxy of this compose project
+already exists, in any state), writes `current-run.json`, and starts the helper as
+`<FACTORY_RUN_PREFIX>ph-<issue>` with no `-e` flag, so it counts toward `FACTORY_WIP_LIMIT`.
+One helper at a time, one dispatch per issue and head SHA (`preview_helper:stamp:<issue>:<sha>`,
+deleted after 7 days), at most `PREVIEW_HELPER_DAILY_MAX` a day. A helper running longer than
+the entry's `timeouts.total_seconds` is stopped. The scheduler is the only writer of the
+helper's `runs.jsonl` row (`intent: classify-preview-helper`, `cost_usd: null`); every failure
+ends `abstained`, never touches an issue's breaker or retry keys, and counts on
+`preview_helper:failures`: two in a row stop the lane until
+`breaker-reset --key preview_helper:failures`. Every gated run container mounts the same state
+volume read-write and can forge any of these files; the lane only guarantees that the
+scheduler never blocks on, reads unboundedly, or writes or deletes through what is planted
+there. **Activation is #564's canary only.** The operator must (1) run Docker Engine 26 or
+later, (2) place on the human-only instance surface a local registry entry with
+`secret_reference: FACTORY_HELPER_MODEL_SECRET` and its `tested` capability-evidence record from
+#562 (`invalidated_by` at least `model_digest`, `harness_version`, `registry_config`), and (3) set
+`PREVIEW_HELPER_DISPATCH_ENABLED=true`, `PREVIEW_HELPER_ENDPOINT=<that id>` and
+`FACTORY_HELPER_MODEL_SECRET` in the scheduler's environment. To stop: unset the switch.
 
 **Back to default cloud:** remove `FACTORY_MODEL_ENDPOINT` from `instance.env` (and
 `FACTORY_MODEL_REGISTRY_DIR` from the interpolation env), then recreate the scheduler with

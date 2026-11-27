@@ -388,4 +388,4 @@ See `docs/dark-factory-token-optimization.md` for the full operator runbook.
 - [`bench/hosting_shadow.md`](bench/hosting_shadow.md) — hosting shadow comparator (#563): isolated rules-only/local replay of the preview classifier; non-authoritative, no cloud arm
 - [`docs/adapter-authoring-guide.md`](docs/adapter-authoring-guide.md) — how to write a tracker, code-host, or model-endpoint adapter
 - [`docs/hybrid-execution-contract.md`](docs/hybrid-execution-contract.md) — hybrid cloud + local model execution contract (#556): decision report, not yet implemented
-- [`docs/local-inference-deployment-runbook.md`](docs/local-inference-deployment-runbook.md) — operator runbook for registering and checking a candidate local inference endpoint (#560); routes nothing until #587
+- [`docs/local-inference-deployment-runbook.md`](docs/local-inference-deployment-runbook.md) — operator runbook for registering and checking a candidate local inference endpoint (#560); routes nothing; the only local dispatch is the #587 helper lane, off by default
