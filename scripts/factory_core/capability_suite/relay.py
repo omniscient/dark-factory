@@ -23,7 +23,7 @@ from factory_core.providers import model_adapter
 FORWARDED = (("POST", "/v1/messages"), ("HEAD", "/api/hello"))
 DROPPED_HEADERS = frozenset({"host", "content-length", "connection", "keep-alive",
                              "proxy-connection", "te", "transfer-encoding", "upgrade",
-                             "accept-encoding"})
+                             "accept-encoding", "proxy-authorization", "proxy-authenticate"})
 RETURNED_HEADERS = ("Content-Type", "Retry-After")
 MODEL_SCAN_BYTES = 65536  # response_model is read from at most this many response bytes
 LINE_BYTES = 65536  # the most of one unfinished response line kept for matching
@@ -135,6 +135,8 @@ async def _forward(request):
         body = json.loads(raw) if raw else None
     except ValueError:
         body = None
+    if not isinstance(body, dict):
+        body = None
     record = {"method": request.method, "path": request.path_qs,
               "headers": {k.lower(): v for k, v in request.headers.items()},
               "body": body, "status": None, "response_model": None, "completed": False}
@@ -143,7 +145,10 @@ async def _forward(request):
         record["status"] = 404
         return web.Response(status=404)
     watched = relayed.marker is not None and _has_user_text(body, relayed.marker)
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in DROPPED_HEADERS}
+    connection_tokens = {t.strip().lower() for t in request.headers.get("connection", "").split(",")
+                         if t.strip()}
+    dropped = DROPPED_HEADERS | connection_tokens
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in dropped}
     headers["Accept-Encoding"] = "identity"
     if config.fault:
         headers[mock_server.FAULT_HEADER] = config.fault
@@ -213,7 +218,7 @@ async def _refuse(relayed, reader, writer):
         relayed.other_host.append(line.decode("latin-1").strip()[:200] or "<empty>")
         writer.write(_SINK_REFUSAL)
         await writer.drain()
-    except (TimeoutError, ConnectionError):
+    except Exception:
         relayed.other_host.append("<no request line>")
     finally:
         writer.close()
