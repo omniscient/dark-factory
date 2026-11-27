@@ -469,7 +469,7 @@ effective.
 | `FACTORY_PRODUCT_NAME` | `MarketHawk` | also read at `scripts/comment_digest.py`, `scripts/ceiling_revisit.py`, `entrypoint.sh:31` |
 | `FACTORY_CLONE_DIR` | `/workspace/${FACTORY_REPO}` | clone path in the run container (`entrypoint.sh:30`) |
 | `FACTORY_RUN_PREFIX` | `${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-` | WIP guard greps `docker ps` for this (`scheduler.sh:124`, `entrypoint.sh:200`) |
-| `FACTORY_INSTANCE` | `dark-factory` | compose project and state volume name (`deploy/docker-compose.yml`, `run-compose.yml:18,114`); must also be in `instance.env` |
+| `FACTORY_INSTANCE` | `dark-factory` | compose project and state volume name (`deploy/docker-compose.yml`, `run-compose.yml:18,190`); must also be in `instance.env` |
 | `FACTORY_IMAGE`, `IMAGE_TAG`, `IMAGE_REF` | `ghcr.io/omniscient/dark-factory:${IMAGE_TAG:-latest}` | `identity.sh:23`, `deploy/docker-compose.yml`; `IMAGE_REF` pins a digest |
 | `PROJECT_DIR` | parent of `deploy/` | host path bind-mounted at `/workspace/project` (read-only) |
 
@@ -520,7 +520,7 @@ containers (`run-compose.yml:31-47`).
 | `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:53,513`; env-only by design | `.archon/.env` |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` | `1200` | `main_red_fixer.py:291` | `.archon/.env` |
 | `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:1001`; set via `run-compose.yml:56-57` | `instance.env` |
-| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:141` | `instance.env` |
+| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:186` | `instance.env` |
 | `RUN_ID`, `RUN_STARTED_AT`, `ISSUE_NUM`, `INTENT` | per run | `entrypoint.sh` internal | not operator-settable |
 
 ### Model endpoint registry (#557)
