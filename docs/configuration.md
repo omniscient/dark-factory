@@ -520,7 +520,7 @@ containers (`run-compose.yml:31-47`).
 | `DELIVERY_FAILURE_MAX_SECONDS` | `30` | `entrypoint.sh:53,513`; env-only by design | `.archon/.env` |
 | `MAIN_RED_AUTOFIX_AGENT_TIMEOUT` | `1200` | `main_red_fixer.py:291` | `.archon/.env` |
 | `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:1001`; set via `run-compose.yml:56-57` | `instance.env` |
-| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:110` | `instance.env` |
+| `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:141` | `instance.env` |
 | `RUN_ID`, `RUN_STARTED_AT`, `ISSUE_NUM`, `INTENT` | per run | `entrypoint.sh` internal | not operator-settable |
 
 ### Model endpoint registry (#557)
