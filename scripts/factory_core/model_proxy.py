@@ -14,9 +14,12 @@ no code path reaches the cloud default. Interfaces this process must hold for a 
 selection: FACTORY_MODEL_ENDPOINT, FACTORY_MODEL_REGISTRY_SHA256, MODEL_PROXY_UPSTREAM
 (optional; must equal the entry's base_url when set), ANTHROPIC_BASE_URL and the four
 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL aliases (checked by the loader), and the
-variable named by the entry's secret_reference. The proxy service receives none of these
-today; delivering them is #587's.
+variable named by the entry's secret_reference. The proxy service receives them for the
+classify-preview-helper lane only, through run-compose.yml's preview-helper-proxy service
+(#634), whose literal entrypoint adds `--intent classify-preview-helper`; dispatching that
+intent at all is still gated on #587.
 """
+import argparse
 import asyncio
 import fcntl
 import gzip
@@ -595,22 +598,55 @@ def create_app(destination=None, current_run_path=None) -> web.Application:
     return app
 
 
-def main() -> None:
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(prog="factory_core.model_proxy", allow_abbrev=False)
+    # Written only in run-compose.yml's preview-helper-proxy entrypoint (#634); never read from
+    # the environment. Present at all (even "") means a helper proxy: no cloud fallback.
+    parser.add_argument("--intent", default=None,
+                        help="the dispatch intent this proxy serves (preview-helper-proxy only)")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> None:
+    # argv None means no arguments, never sys.argv: callers that pass nothing get today's
+    # behaviour (#634). The module entry point below passes sys.argv[1:].
+    args = _parse_args([] if argv is None else argv)
     destination = None
     endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT")
+    if args.intent is not None and not endpoint_id:
+        print(f"factory-model-proxy: --intent {args.intent!r} is given but "
+              "FACTORY_MODEL_ENDPOINT is not set — a helper proxy never falls back to the "
+              "cloud default", file=sys.stderr)
+        sys.exit(1)
     if endpoint_id:
         # Lazy: the default cloud path never loads the adapter or registry code (#558).
         from factory_core.providers import model_adapter, model_endpoint
         try:
             destination = model_adapter.resolve_local_destination(
-                model_endpoint.staged_registry_dir(), endpoint_id)
+                model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent)
         except model_adapter.DestinationError as e:
             for problem in e.problems:
                 print(f"factory-model-proxy: {problem}", file=sys.stderr)
             sys.exit(1)
+        if args.intent is not None:
+            # A helper proxy serves one verified local entry or nothing (#634): a cloud entry
+            # would otherwise bind as a passthrough to UPSTREAM.
+            problem = None
+            if destination["hosting_location"] != "local":
+                problem = (f"--intent {args.intent!r} needs a local endpoint, but "
+                           f"'{destination['endpoint_id']}' is "
+                           f"hosting_location={destination['hosting_location']} — a helper "
+                           "proxy never forwards to the cloud default")
+            elif (destination["upstream"].rstrip("/")
+                  == model_endpoint.HELPER_PROXY_BASE_URL.rstrip("/")):
+                problem = (f"endpoint '{destination['endpoint_id']}' base_url is the helper "
+                           "proxy's own address — a proxy must never forward to its own address")
+            if problem:
+                print(f"factory-model-proxy: {problem}", file=sys.stderr)
+                sys.exit(1)
     sweep_raw_artifacts()
     web.run_app(create_app(destination), port=PORT)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
