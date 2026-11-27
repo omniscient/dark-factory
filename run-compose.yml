@@ -90,6 +90,37 @@ services:
     profiles:
       - factory-model-proxy
 
+  # Per-dispatch proxy for the classify-preview-helper lane (#634); the only path from the
+  # helper container to its local endpoint. Started and removed with each helper dispatch by
+  # #587's dispatcher, never by this file: no depends_on in either direction, no restart, no
+  # container_name. Environment comes from the scheduler's at dispatch time (no env_file):
+  # PREVIEW_HELPER_* and FACTORY_HELPER_MODEL_SECRET are scheduler-only and must never be
+  # added to PROVIDER_PASSTHROUGH_VARS. ${VAR:-} throughout, because interpolation covers the
+  # whole file and :? would fail every ordinary dispatch. The --intent pair is a literal.
+  # An interpolated `docker compose config` with this profile prints the secret — never run
+  # or log one. See docs/dark-factory-model-proxy-rollout.md.
+  preview-helper-proxy:
+    image: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+    entrypoint: ["python3", "-m", "factory_core.model_proxy", "--intent", "classify-preview-helper"]
+    environment:
+      PYTHONPATH: /opt/dark-factory/scripts
+      MODEL_PROXY_PORT: "8787"
+      CURRENT_RUN_DIR: /var/lib/dark-factory/preview-helper
+      FACTORY_MODEL_ENDPOINT: ${PREVIEW_HELPER_ENDPOINT:-}
+      FACTORY_MODEL_REGISTRY_SHA256: ${FACTORY_MODEL_REGISTRY_SHA256:-}
+      ANTHROPIC_BASE_URL: ${PREVIEW_HELPER_ENDPOINT_BASE_URL:-}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_FABLE_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      FACTORY_HELPER_MODEL_SECRET:
+    volumes:
+      - scheduler_state:/var/lib/dark-factory
+    networks:
+      - dark-factory-net
+    profiles:
+      - preview-helper-proxy
+
 networks:
   dark-factory-net:
     driver: bridge

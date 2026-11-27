@@ -133,13 +133,27 @@ def test_resolve_local_destination_surfaces_loader_problems(tmp_path):
 def test_resolve_local_destination_builds_from_the_verified_entry(tmp_path, monkeypatch):
     seen = []
 
-    def loader(path, eid):
-        seen.append((path, eid))
+    def loader(path, eid, intent=None):
+        seen.append((path, eid, intent))
         return [], copy.deepcopy(CLOUD)
 
     monkeypatch.setattr(me, "load_verified_entry", loader)
     assert ma.resolve_local_destination(tmp_path, "cloud-test")["endpoint_id"] == "cloud-test"
-    assert seen == [(tmp_path, "cloud-test")]
+    assert seen == [(tmp_path, "cloud-test", None)]
+
+
+def test_resolve_local_destination_forwards_the_intent(tmp_path, monkeypatch):
+    # #634: the proxy's --intent reaches the loader unchanged, and nothing else does.
+    seen = []
+
+    def loader(path, eid, **kwargs):
+        seen.append(kwargs)
+        return [], copy.deepcopy(CLOUD)
+
+    monkeypatch.setattr(me, "load_verified_entry", loader)
+    ma.resolve_local_destination(tmp_path, "cloud-test", intent="classify-preview-helper")
+    ma.resolve_local_destination(tmp_path, "cloud-test")
+    assert seen == [{"intent": "classify-preview-helper"}, {"intent": None}]
 
 
 def test_adapter_module_does_not_import_aiohttp():

@@ -11,6 +11,8 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
@@ -81,10 +83,16 @@ def test_selection_and_optional_vars_forwarded():
 
 
 def test_forwarded_vars_not_also_in_compose_environment():
-    compose = (REPO / "run-compose.yml").read_text(encoding="utf-8")
-    for name in _forwarded():
-        assert not re.search(rf"^\s+{name}:", compose, re.M), \
-            f"{name} in run-compose.yml environment: would override or blank env_file"
+    services = yaml.safe_load((REPO / "run-compose.yml").read_text(encoding="utf-8"))["services"]
+    forwarded = _forwarded()
+    for service, spec in services.items():
+        clash = set(spec.get("environment") or {}) & forwarded
+        if service == "preview-helper-proxy":
+            # #634: no env_file and never a dispatch() target; its FACTORY_MODEL_ENDPOINT key
+            # is interpolated from PREVIEW_HELPER_ENDPOINT, never forwarded.
+            clash -= {"FACTORY_MODEL_ENDPOINT"}
+        assert not clash, \
+            f"{sorted(clash)} in run-compose.yml {service} environment: would override or blank env_file"
 
 
 def test_dispatch_uses_provider_env_flags():

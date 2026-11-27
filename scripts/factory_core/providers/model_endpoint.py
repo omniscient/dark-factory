@@ -95,6 +95,11 @@ _NO_LOCAL_DISPATCH = (
 # gate change with its own reviewed ticket; classify-preview-checker must never be added (a
 # local endpoint never hosts a checker, contract §4.2). scheduler_preflight() ignores this.
 LOCAL_ELIGIBLE_INTENTS = ("classify-preview-helper",)
+# The run-side address of a local-eligible dispatch (#634): run-compose.yml's
+# preview-helper-proxy service on model_proxy's MODEL_PROXY_PORT. A helper run container
+# reaches its local endpoint only through that proxy, which holds the entry's base_url and
+# secret; the run container holds neither.
+HELPER_PROXY_BASE_URL = "http://preview-helper-proxy:8787"
 
 # Alternate cloud-auth switches and credentials Claude Code honours without ANTHROPIC_BASE_URL
 # (#594, #633). Mirrors, never imports, providers/model.py's _AWS_ALT_AUTH_SIGNALS /
@@ -648,7 +653,7 @@ def _select(registry_path, endpoint_id):
     return _pick(endpoints, endpoint_id, path)
 
 
-def _local_problems(entry, files, registry_path, intent=None):
+def _local_problems(entry, files, registry_path, intent=None, expected_base_url=None):
     eid = entry["id"]
     problems = []
     present = sorted(n for n in CLOUD_CREDENTIALS
@@ -662,7 +667,13 @@ def _local_problems(entry, files, registry_path, intent=None):
         problems.append(f"endpoint '{eid}' is local but an alternate cloud credential signal is set "
                         f"in this container: {', '.join(signals)} — a local-routed container "
                         "holds none (contract §4.3)")
-    if os.environ.get("ANTHROPIC_BASE_URL") != entry["base_url"]:
+    # expected_base_url is the caller's statement of which container it checks (#634): None
+    # (the proxy, and every non-helper caller) keeps the entry's base_url. Exact match.
+    if expected_base_url is not None:
+        if os.environ.get("ANTHROPIC_BASE_URL") != expected_base_url:
+            problems.append(f"endpoint '{eid}': ANTHROPIC_BASE_URL must equal the helper proxy "
+                            f"address {expected_base_url} (#634)")
+    elif os.environ.get("ANTHROPIC_BASE_URL") != entry["base_url"]:
         problems.append(f"endpoint '{eid}': ANTHROPIC_BASE_URL must equal the entry's base_url "
                         "(contract §4.11 decision 1)")
     served = entry["model_identity"]["served_name"]
@@ -714,24 +725,38 @@ def preflight(registry_path, endpoint_id, intent=None) -> tuple[list[str], str |
         return problems, None
     hosting = entry["hosting_location"]
     ref = entry["secret_reference"]
+    # A local-eligible run goes through preview-helper-proxy (#634): the proxy's address, and
+    # the secret held by the proxy alone. Every other intent keeps the unproxied rules.
+    helper = intent in LOCAL_ELIGIBLE_INTENTS
     if hosting == "cloud":
         problems += _missing([ref])  # a cloud entry's secret arrives via .archon/.env
+    elif helper:
+        if os.environ.get(ref):
+            problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is set in this "
+                            "container — a helper run reaches its endpoint only through "
+                            "preview-helper-proxy, which holds it (#634)")
     elif not os.environ.get(ref):
         # Not _missing(): a local secret must not be delivered through .archon/.env (spec §C).
         problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is not set")
     if hosting == "local":
-        problems += _local_problems(entry, files, registry_path, intent=intent)
+        problems += _local_problems(entry, files, registry_path, intent=intent,
+                                    expected_base_url=HELPER_PROXY_BASE_URL if helper else None)
     return problems, hosting
 
 
-def load_verified_entry(registry_path, endpoint_id, intent=None) -> tuple[list[str], dict | None]:
+def load_verified_entry(registry_path, endpoint_id, intent=None,
+                        expected_base_url=None) -> tuple[list[str], dict | None]:
     """The model proxy's Configuration-contract loader (#558): (problems, entry).
 
     entry is non-None only when problems is empty. Exactly one read_verified_tree() call;
     registry, entry and evidence are parsed only from the bytes it hashed (#593) — never
     _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered: a local
-    entry comes back only when intent is in LOCAL_ELIGIBLE_INTENTS (#633). The model proxy
-    passes none, so it never gets one.
+    entry comes back only when intent is in LOCAL_ELIGIBLE_INTENTS (#633).
+    The model proxy passes its own --intent (#634): factory-model-proxy has none, so it never
+    gets one. expected_base_url is forwarded to _local_problems() and used for nothing else
+    (#634): the proxy never passes it, so its own ANTHROPIC_BASE_URL must be the entry's
+    base_url; the run container's hosting resolution passes HELPER_PROXY_BASE_URL for a
+    local-eligible intent only.
     """
     registry_path = Path(registry_path)
     problems, files = read_verified_tree(registry_path)
@@ -748,7 +773,8 @@ def load_verified_entry(registry_path, endpoint_id, intent=None) -> tuple[list[s
     if entry is None:
         return problems, None
     if entry["hosting_location"] == "local":
-        problems = problems + _local_problems(entry, files, registry_path, intent=intent)
+        problems = problems + _local_problems(entry, files, registry_path, intent=intent,
+                                              expected_base_url=expected_base_url)
     return (problems, None) if problems else ([], entry)
 
 

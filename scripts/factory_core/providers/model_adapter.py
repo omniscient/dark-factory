@@ -113,9 +113,13 @@ def destination_from_entry(entry, environ=None):
     })
 
 
-def resolve_local_destination(registry_path, endpoint_id):
-    """The proxy's one startup resolution (spec Req. 2): verified loader, then the checks."""
-    problems, entry = model_endpoint.load_verified_entry(registry_path, endpoint_id)
+def resolve_local_destination(registry_path, endpoint_id, intent=None):
+    """The proxy's one startup resolution (spec Req. 2): verified loader, then the checks.
+
+    intent is the proxy's own --intent argument (#634), forwarded to the loader unchanged.
+    """
+    problems, entry = model_endpoint.load_verified_entry(registry_path, endpoint_id,
+                                                         intent=intent)
     if problems:
         raise DestinationError(problems)
     return destination_from_entry(entry)

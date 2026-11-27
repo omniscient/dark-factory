@@ -279,8 +279,13 @@ def _model_endpoints_hosting(args):
     try:
         if endpoint_id:
             from factory_core.providers import model_endpoint
+            # A local-eligible run's container points at preview-helper-proxy, not the
+            # entry (#634). Any other intent passes no expected_base_url at all.
+            extra = ({"expected_base_url": model_endpoint.HELPER_PROXY_BASE_URL}
+                     if args.intent in model_endpoint.LOCAL_ELIGIBLE_INTENTS else {})
             problems, entry = model_endpoint.load_verified_entry(
-                model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent or None)
+                model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent or None,
+                **extra)
             if problems:
                 print(f"WARNING: model-endpoints hosting: {'; '.join(problems)}", file=sys.stderr)
             elif entry["hosting_location"] == "local":

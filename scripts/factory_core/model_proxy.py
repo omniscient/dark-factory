@@ -14,9 +14,12 @@ no code path reaches the cloud default. Interfaces this process must hold for a 
 selection: FACTORY_MODEL_ENDPOINT, FACTORY_MODEL_REGISTRY_SHA256, MODEL_PROXY_UPSTREAM
 (optional; must equal the entry's base_url when set), ANTHROPIC_BASE_URL and the four
 ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL aliases (checked by the loader), and the
-variable named by the entry's secret_reference. The proxy service receives none of these
-today; delivering them is #587's.
+variable named by the entry's secret_reference. The proxy service receives them for the
+classify-preview-helper lane only, through run-compose.yml's preview-helper-proxy service
+(#634), whose literal entrypoint adds `--intent classify-preview-helper`; dispatching that
+intent at all is still gated on #587.
 """
+import argparse
 import asyncio
 import fcntl
 import gzip
@@ -27,6 +30,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from datetime import datetime, timezone
@@ -37,6 +41,13 @@ from aiohttp import web
 LEDGER_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
 )
+# Sidecar lock (#634): preview-helper-proxy and factory-model-proxy can share this same
+# LEDGER_PATH (the helper mounts scheduler_state but sets no MODEL_PROXY_LEDGER_PATH of its
+# own), so rotation and append must be serialized across processes, not just within one. A
+# lock file that is never itself rotated/renamed lets append_ledger() hold one lock across
+# both steps below, instead of flocking LEDGER_PATH only for the append. The lock path is
+# derived from LEDGER_PATH at call time (_ledger_lock_path), so it always sits beside the
+# ledger actually being written.
 CURRENT_RUN_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_CURRENT_RUN_PATH")
     or f"{os.environ.get('CURRENT_RUN_DIR', '/var/lib/dark-factory')}/current-run.json"
@@ -168,15 +179,23 @@ def _rotate_if_needed(path: pathlib.Path) -> None:
     path.rename(path.with_suffix(path.suffix + ".1"))
 
 
+def _ledger_lock_path() -> pathlib.Path:
+    return LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
+
+
 def append_ledger(row: dict) -> None:
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _rotate_if_needed(LEDGER_PATH)
-    with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    # Rotate-and-append under one lock (#634): locking LEDGER_PATH itself only covered the
+    # write, so two processes could both pass the rotate check at once and clobber/misplace
+    # rows. The lock file is never rotated/renamed, so it stays a stable mutex for both steps.
+    with open(_ledger_lock_path(), "a", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
-            fh.write(json.dumps(row) + "\n")
+            _rotate_if_needed(LEDGER_PATH)
+            with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
 def post_seq_ledger(row: dict) -> None:
@@ -595,22 +614,67 @@ def create_app(destination=None, current_run_path=None) -> web.Application:
     return app
 
 
-def main() -> None:
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(prog="factory_core.model_proxy", allow_abbrev=False)
+    # Written only in run-compose.yml's preview-helper-proxy entrypoint (#634); never read from
+    # the environment. Present at all (even "") means a helper proxy: no cloud fallback.
+    parser.add_argument("--intent", default=None,
+                        help="the dispatch intent this proxy serves (preview-helper-proxy only)")
+    return parser.parse_args(argv)
+
+
+def _same_proxy_address(a: str, b: str) -> bool:
+    """True when two base_urls name the same host:port (#634).
+
+    A bare `.rstrip("/")` string compare misses a scheme-relative or casing mismatch, e.g.
+    `http://preview-helper-proxy:8787/v1` or `http://PREVIEW-HELPER-PROXY:8787` against
+    `http://preview-helper-proxy:8787` — both reach the same socket. Compare the parsed
+    hostname (case-insensitively) and port instead; the path/scheme are irrelevant here.
+    """
+    pa, pb = urllib.parse.urlsplit(a), urllib.parse.urlsplit(b)
+    return (pa.hostname or "").lower() == (pb.hostname or "").lower() and pa.port == pb.port
+
+
+def main(argv=None) -> None:
+    # argv None means no arguments, never sys.argv: callers that pass nothing get today's
+    # behaviour (#634). The module entry point below passes sys.argv[1:].
+    args = _parse_args([] if argv is None else argv)
     destination = None
     endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT")
+    if args.intent is not None and not endpoint_id:
+        print(f"factory-model-proxy: --intent {args.intent!r} is given but "
+              "FACTORY_MODEL_ENDPOINT is not set — a helper proxy never falls back to the "
+              "cloud default", file=sys.stderr)
+        sys.exit(1)
     if endpoint_id:
         # Lazy: the default cloud path never loads the adapter or registry code (#558).
         from factory_core.providers import model_adapter, model_endpoint
         try:
             destination = model_adapter.resolve_local_destination(
-                model_endpoint.staged_registry_dir(), endpoint_id)
+                model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent)
         except model_adapter.DestinationError as e:
             for problem in e.problems:
                 print(f"factory-model-proxy: {problem}", file=sys.stderr)
             sys.exit(1)
+        if args.intent is not None:
+            # A helper proxy serves one verified local entry or nothing (#634): a cloud entry
+            # would otherwise bind as a passthrough to UPSTREAM.
+            problem = None
+            if destination["hosting_location"] != "local":
+                problem = (f"--intent {args.intent!r} needs a local endpoint, but "
+                           f"'{destination['endpoint_id']}' is "
+                           f"hosting_location={destination['hosting_location']} — a helper "
+                           "proxy never forwards to the cloud default")
+            elif _same_proxy_address(destination["upstream"],
+                                     model_endpoint.HELPER_PROXY_BASE_URL):
+                problem = (f"endpoint '{destination['endpoint_id']}' base_url is the helper "
+                           "proxy's own address — a proxy must never forward to its own address")
+            if problem:
+                print(f"factory-model-proxy: {problem}", file=sys.stderr)
+                sys.exit(1)
     sweep_raw_artifacts()
     web.run_app(create_app(destination), port=PORT)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

@@ -102,12 +102,14 @@ The workflow's `resolve` intent has no command that reaches it today; see
   option ids, `FACTORY_PRODUCT_NAME`, `FACTORY_CLONE_DIR`, `FACTORY_RUN_PREFIX`; `:31-47`).
 - Model aliases used by the workflow and commands (`opus`, `sonnet`, `haiku`, `fable`)
   are pinned to model ids by `ANTHROPIC_DEFAULT_*_MODEL` (`:50-53`).
-- `/var/lib/dark-factory` is a named volume shared with the scheduler (`:59`, `:112-114`).
+- `/var/lib/dark-factory` is a named volume shared with the scheduler (`:59`, `:143-145`).
   The run writes state there that the scheduler reads back: the main-red sentinel, the
   session-window pause sentinel, error-signature files, `runs.jsonl`, `current-run.json`,
   `hook-warnings.log`.
 - `BUILDKIT_HOST` / `BUILDKIT_PORT` name the build daemon the preview step uses (`:56-57`).
-- An optional `factory-model-proxy` service exists under its own profile (`:76-91`); see
+- An optional `factory-model-proxy` service exists under its own profile (`:76-91`), and a
+  per-dispatch `preview-helper-proxy` service for the classify-preview-helper lane under the
+  `preview-helper-proxy` profile (`:93-122`; nothing starts it until #587); see
   [dark-factory-model-proxy-rollout.md](dark-factory-model-proxy-rollout.md).
 
 ---

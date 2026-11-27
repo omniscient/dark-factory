@@ -40,6 +40,25 @@ if ! echo "$ON_SERVICES" | grep -qx "factory-model-proxy"; then
   exit 1
 fi
 echo "PASS: factory-model-proxy present when its profile is explicitly enabled"
+# 3) helper_proxy_absent_without_its_profile (#634, regression guard): preview-helper-proxy
+#    is never selected by the profile sets scheduler.sh dispatches with — dark-factory does
+#    not pull it in — and appears only under its own profile.
+for profiles in "" "--profile factory" "--profile factory --profile factory-model-proxy"; do
+  # shellcheck disable=SC2086
+  SERVICES=$(docker compose -f "$RC" $profiles config --services 2>&1)
+  if echo "$SERVICES" | grep -qx "preview-helper-proxy"; then
+    echo "FAIL: preview-helper-proxy selected by profiles [${profiles:-none}] (must be opt-in)"
+    [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
+    exit 1
+  fi
+done
+HELPER_SERVICES=$(docker compose -f "$RC" --profile preview-helper-proxy config --services 2>&1)
+if [ "$HELPER_SERVICES" != "preview-helper-proxy" ]; then
+  echo "FAIL: --profile preview-helper-proxy must select exactly preview-helper-proxy"
+  [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
+  exit 1
+fi
+echo "PASS: preview-helper-proxy present only under its own profile"
 
 [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
 echo "PASS: test_model_proxy_compose.sh"

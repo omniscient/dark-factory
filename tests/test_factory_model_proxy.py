@@ -2,6 +2,8 @@ import asyncio
 import copy
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -135,6 +137,16 @@ def test_append_ledger_writes_line(tmp_path, monkeypatch):
     lines = path.read_text().strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0]) == {"a": 1}
+
+
+def test_append_ledger_lock_follows_the_ledger_path(tmp_path, monkeypatch):
+    # The sidecar lock must sit beside whatever LEDGER_PATH is at call time, not the
+    # import-time default — otherwise a relocated ledger still opens a lock under
+    # /var/lib/dark-factory (absent in CI, a live state dir elsewhere).
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    mp.append_ledger({"a": 1})
+    assert (tmp_path / "request-ledger.jsonl.lock").exists()
 
 
 def test_append_ledger_rotates_at_max_bytes(tmp_path, monkeypatch):
@@ -603,7 +615,8 @@ def test_a_local_entry_still_fails_startup_on_no_local_dispatch(startup, tmp_pat
 ])
 def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeypatch, capsys, setup, needle):
     # A fixture entry stands in for the loader: a real local entry never passes it (#587).
-    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], copy.deepcopy(LOCAL_ENTRY)))
+    monkeypatch.setattr(me, "load_verified_entry",
+                        lambda path, eid, intent=None: ([], copy.deepcopy(LOCAL_ENTRY)))
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
     setup(monkeypatch)
@@ -614,7 +627,7 @@ def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeyp
 
 def test_payload_decision_allow_false_fails_startup(startup, monkeypatch, capsys):
     entry = dict(copy.deepcopy(LOCAL_ENTRY), accepts_payload_classes=["cloud_ok"])
-    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], entry))
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid, intent=None: ([], entry))
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
     assert "payload decision does not allow dispatch" in _main_exit(capsys)
@@ -1714,3 +1727,320 @@ def test_ac5_a_checker_dispatch_without_a_provable_identity_is_void(
     assert ri.check_verdict_independence(
         worker, checker, actor_issue=ISSUE, producer_issue=issue, verdict_issue=ISSUE) == (
         False, reason)
+
+
+# --- #634: the helper intent (preview-helper-proxy) --------------------------------------
+
+HELPER = "classify-preview-helper"
+HELPER_ARGV = ["--intent", HELPER]
+HELPER_SECRET = "FACTORY_HELPER_MODEL_SECRET"
+HELPER_BASE_URL = "http://192.0.2.10:8080"
+HELPER_ENTRY = dict(copy.deepcopy(LOCAL_ENTRY), id="helper-local", base_url=HELPER_BASE_URL,
+                    secret_reference=HELPER_SECRET)
+HELPER_NO_LOCAL = me._NO_LOCAL_DISPATCH.format(eid="helper-local")
+HELPER_RUN = "run-helper"
+
+
+def _tested_evidence(entry):
+    """A `tested`, actor-qualified capability evidence record for entry."""
+    return {
+        "schema_version": "1.0", "endpoint_id": entry["id"],
+        "model_identity": dict(entry["model_identity"], quantisation="q4_k_m"),
+        "runtime_stack": {"name": "rt", "version": "1.0.0", "chat_template": "t",
+                          "context_settings": {}},
+        "harness_version": "2.1.282", "fixture_suite_version": "suite-1",
+        "results": {dim: "pass" for dim in me.ACTOR_REQUIRED_DIMENSIONS},
+        "qualified_roles": ["actor"], "certified_by": "operator",
+        "certified_at": "2026-11-01T00:00:00+00:00", "expires_at": "2099-01-01T00:00:00+00:00",
+        "invalidated_by": ["model_digest", "harness_version", "fixture_suite_version",
+                           "registry_config"],
+        "registry_config": me.registry_config_sha256(entry),
+    }
+
+
+@pytest.fixture
+def helper_proxy(startup, tmp_path, monkeypatch):
+    """configure(**entry overrides) stages one `tested` local entry and sets exactly the
+    environment run-compose.yml gives preview-helper-proxy; .served records each app main()
+    would have bound (empty == exited before binding)."""
+    monkeypatch.setattr(me, "PINNED_FIXTURE_SUITE_VERSION", "suite-1")
+    monkeypatch.setattr(me, "observed_harness_version", lambda: "2.1.282")
+    for name in (HELPER_SECRET, *me.LOCAL_CREDENTIAL_ENV_SIGNALS, "INTENT",
+                 "FACTORY_DISPATCH_INTENT", "FACTORY_INTENT", "MODEL_PROXY_INTENT"):
+        monkeypatch.delenv(name, raising=False)
+
+    def configure(extra=(), **overrides):
+        entry = dict(copy.deepcopy(HELPER_ENTRY), **overrides)
+        shutil.rmtree(tmp_path / "staged", ignore_errors=True)
+        reg = _stage_registry(tmp_path, monkeypatch, [entry, *extra])
+        (reg / me.EVIDENCE_DIR).mkdir()
+        (reg / me.EVIDENCE_DIR / f"{entry['id']}.yaml").write_text(
+            yaml.safe_dump({"capability_evidence": _tested_evidence(entry)}), encoding="utf-8")
+        monkeypatch.setenv("FACTORY_MODEL_REGISTRY_SHA256", me.tree_sha256(reg))
+        monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", entry["id"])
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", entry["base_url"])
+        for alias in me.TIER_ALIASES:
+            monkeypatch.setenv(alias, SERVED)
+        monkeypatch.setenv(HELPER_SECRET, SENTINEL)
+        return entry
+
+    configure.served = startup
+    return configure
+
+
+def _helper_exit(capsys, argv=HELPER_ARGV):
+    with pytest.raises(SystemExit) as exc:
+        mp.main(argv)
+    assert exc.value.code == 1
+    return capsys.readouterr().err
+
+
+def test_helper_intent_starts_with_the_local_destination(helper_proxy):
+    helper_proxy()
+    mp.main(HELPER_ARGV)
+    assert len(helper_proxy.served) == 1
+    dest = helper_proxy.served[0]["local_destination"]
+    assert (dest["endpoint_id"], dest["hosting_location"], dest["upstream"],
+            dest["secret_reference"]) == ("helper-local", "local", HELPER_BASE_URL, HELPER_SECRET)
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_helper_intent_without_an_endpoint_exits_before_binding(helper_proxy, monkeypatch, capsys,
+                                                                value):
+    helper_proxy()
+    if value is None:
+        monkeypatch.delenv("FACTORY_MODEL_ENDPOINT")
+    else:
+        monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", value)
+    err = _helper_exit(capsys)
+    assert "FACTORY_MODEL_ENDPOINT is not set" in err and helper_proxy.served == []
+
+
+def test_helper_intent_with_a_cloud_entry_exits_before_binding(helper_proxy, monkeypatch, capsys):
+    helper_proxy(extra=[CLOUD_ENTRY])
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "cloud-test")
+    err = _helper_exit(capsys)
+    assert "'cloud-test' is hosting_location=cloud" in err and helper_proxy.served == []
+
+
+@pytest.mark.parametrize("base_url", ["http://preview-helper-proxy:8787",
+                                      "http://preview-helper-proxy:8787/"])
+def test_helper_intent_refuses_an_entry_pointing_at_the_proxy_address(helper_proxy, capsys,
+                                                                      base_url):
+    helper_proxy(base_url=base_url)
+    err = _helper_exit(capsys)
+    assert "forward to its own address" in err and helper_proxy.served == []
+
+
+def test_empty_intent_value_counts_as_given(helper_proxy, monkeypatch, capsys):
+    helper_proxy()
+    assert HELPER_NO_LOCAL in _helper_exit(capsys, ["--intent", ""])
+    monkeypatch.delenv("FACTORY_MODEL_ENDPOINT")
+    assert "FACTORY_MODEL_ENDPOINT is not set" in _helper_exit(capsys, ["--intent", ""])
+    assert helper_proxy.served == []
+
+
+_ENTRY_BASE_URL = "ANTHROPIC_BASE_URL must equal the entry's base_url"
+_SECRET_UNSET = f"{HELPER_SECRET} (secret_reference of endpoint 'helper-local') is not set"
+
+
+@pytest.mark.parametrize("change,needle", [
+    pytest.param(lambda m: m.delenv("FACTORY_MODEL_REGISTRY_SHA256"),
+                 "FACTORY_MODEL_REGISTRY_SHA256 is not set", id="digest-missing"),
+    pytest.param(lambda m: m.setenv("FACTORY_MODEL_REGISTRY_SHA256", "0" * 64),
+                 "does not match FACTORY_MODEL_REGISTRY_SHA256", id="digest-wrong"),
+    pytest.param(lambda m: m.delenv("ANTHROPIC_BASE_URL"), _ENTRY_BASE_URL,
+                 id="base-url-missing"),
+    pytest.param(lambda m: m.setenv("ANTHROPIC_BASE_URL", "http://preview-helper-proxy:8787"),
+                 _ENTRY_BASE_URL, id="base-url-is-the-proxy-constant"),
+    *[pytest.param(lambda m, a=alias: m.delenv(a),
+                   f"{alias} must equal model_identity.served_name", id=f"{alias}-missing")
+      for alias in me.TIER_ALIASES],
+    pytest.param(lambda m: m.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-5"),
+                 "ANTHROPIC_DEFAULT_SONNET_MODEL must equal model_identity.served_name",
+                 id="alias-wrong"),
+    pytest.param(lambda m: m.delenv(HELPER_SECRET), _SECRET_UNSET, id="secret-missing"),
+    pytest.param(lambda m: m.setenv(HELPER_SECRET, ""), _SECRET_UNSET, id="secret-empty"),
+    pytest.param(lambda m: m.setenv("MODEL_PROXY_UPSTREAM", "http://192.0.2.77:8080"),
+                 "MODEL_PROXY_UPSTREAM is set and differs", id="upstream-elsewhere"),
+])
+def test_helper_intent_refuses_each_missing_or_wrong_variable(helper_proxy, monkeypatch, capsys,
+                                                              change, needle):
+    helper_proxy()
+    change(monkeypatch)
+    err = _helper_exit(capsys)
+    assert needle in err and SENTINEL not in err and helper_proxy.served == []
+
+
+@pytest.mark.parametrize("name", me.CLOUD_CREDENTIALS)
+def test_helper_intent_refuses_each_cloud_credential(helper_proxy, monkeypatch, capsys, name):
+    helper_proxy()
+    monkeypatch.setenv(name, "cloud-sentinel")
+    err = _helper_exit(capsys)
+    assert f"cloud model credential(s) are set in this container: {name}" in err
+    assert "cloud-sentinel" not in err and SENTINEL not in err and helper_proxy.served == []
+
+
+def test_no_intent_argument_still_refuses_a_local_entry(helper_proxy, capsys):
+    # Regression guard (passes before #634): factory-model-proxy's own startup is unchanged.
+    helper_proxy()
+    assert HELPER_NO_LOCAL in _main_exit(capsys)
+    assert helper_proxy.served == []
+
+
+def test_bare_main_ignores_sys_argv(helper_proxy, monkeypatch, capsys):
+    # Regression guard: main() with no argv parses no arguments, never sys.argv (pytest's own
+    # argv would otherwise reach the parser, and an argv-borne --intent would be honoured).
+    helper_proxy()
+    monkeypatch.setattr(sys, "argv", ["model_proxy", *HELPER_ARGV])
+    with pytest.raises(SystemExit):
+        mp.main()
+    assert HELPER_NO_LOCAL in capsys.readouterr().err and helper_proxy.served == []
+
+
+def test_intent_is_not_read_from_the_environment(helper_proxy, monkeypatch, capsys):
+    # Regression guard: plausible variable names never stand in for the fixed argument.
+    helper_proxy()
+    for name in ("INTENT", "FACTORY_DISPATCH_INTENT", "FACTORY_INTENT", "MODEL_PROXY_INTENT"):
+        monkeypatch.setenv(name, HELPER)
+    assert HELPER_NO_LOCAL in _main_exit(capsys)
+    assert helper_proxy.served == []
+
+
+def test_module_entry_point_parses_its_own_arguments(tmp_path):
+    # `python3 -m factory_core.model_proxy --intent …` is the service's literal entrypoint.
+    # With no endpoint it must exit 1 before binding; an unknown option exits 2 (argparse).
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(Path(mp.__file__).parents[1])}
+    run = lambda *argv: subprocess.run(  # noqa: E731
+        [sys.executable, "-m", "factory_core.model_proxy", *argv], env=env, cwd=tmp_path,
+        capture_output=True, text=True, timeout=30)
+    helper = run(*HELPER_ARGV)
+    assert helper.returncode == 1 and "FACTORY_MODEL_ENDPOINT is not set" in helper.stderr
+    assert run("--intent-x", HELPER).returncode == 2
+
+
+def test_current_run_dir_selects_the_helper_pointer(tmp_path):
+    # Regression guard (passes before #634): the service's CURRENT_RUN_DIR literal is honoured.
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(Path(mp.__file__).parents[1]),
+           "CURRENT_RUN_DIR": "/var/lib/dark-factory/preview-helper"}
+    out = subprocess.run(
+        [sys.executable, "-c", "from factory_core import model_proxy as m; print(m.CURRENT_RUN_PATH)"],
+        env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True).stdout
+    assert out == "/var/lib/dark-factory/preview-helper/current-run.json\n"
+
+
+def _helper_scenario(helper_proxy, local_env, monkeypatch, handler, send, *, rows=1,
+                     timeouts=None):
+    """Stage the entry at a fake local upstream, start the app main(HELPER_ARGV) builds, run
+    send(client); returns (send's result, upstream calls, cloud-default calls)."""
+    calls, cloud_calls = [], []
+
+    async def scenario():
+        upstream = await _make_upstream(_recording(handler, calls))
+        cloud = await _make_upstream(_recording(_ok_json, cloud_calls))
+        monkeypatch.setattr(mp, "UPSTREAM", _url(cloud))
+        helper_proxy(base_url=_url(upstream),
+                     timeouts=dict(HELPER_ENTRY["timeouts"], **(timeouts or {})))
+        mp.main(HELPER_ARGV)
+        client = TestClient(TestServer(helper_proxy.served[-1]))
+        await client.start_server()
+        try:
+            result = await send(client)
+            await _wait_for(lambda: len(_rows(local_env)) >= rows)
+        finally:
+            await client.close()
+            await upstream.close()
+            await cloud.close()
+        return result
+
+    return (_run(scenario()), calls, cloud_calls)
+
+
+def _helper_pointer(local_env, monkeypatch):
+    # The file entrypoint.sh writes under CURRENT_RUN_DIR=/var/lib/dark-factory/preview-helper.
+    (local_env / "preview-helper").mkdir(exist_ok=True)
+    path = _pointer(local_env / "preview-helper" / "current-run.json", HELPER_RUN)
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", path)
+
+
+def _helper_dispatch(local_env):
+    rows, _ = rr._read_ledger_rows(HELPER_RUN, local_env / "ledger.jsonl")
+    return rows, rr._compute_model_dispatch(rows)["result"]
+
+
+def test_helper_intent_forwards_only_to_the_entry_base_url(helper_proxy, local_env, monkeypatch):
+    (status, _), calls, cloud_calls = _helper_scenario(helper_proxy, local_env, monkeypatch,
+                                                       _ok_json, _post_json)
+    assert status == 200 and len(calls) == 1 and cloud_calls == []
+    assert calls[0]["headers"]["x-api-key"] == SENTINEL
+
+
+def test_helper_request_writes_the_local_actor_row(helper_proxy, local_env, monkeypatch):
+    _helper_pointer(local_env, monkeypatch)
+    _helper_scenario(helper_proxy, local_env, monkeypatch, _ok_json, _post_json)
+    rows, result = _helper_dispatch(local_env)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["endpoint_id"], row["hosting_location"], row["role"], row["correlation"],
+            row["issue_number"]) == ("helper-local", "local", "actor", "inferred_pointer", ISSUE)
+    assert row["payload_decision"]["secret_reference"] == HELPER_SECRET
+    assert row["payload_decision"]["allow"] is True and row["failure_class"] is None
+    assert (result["outcome"], result["endpoint_id"], result["hosting_location"], result["role"],
+            result["correlation"]) == ("ok", "helper-local", "local", "actor", "inferred_pointer")
+
+
+def _not_ready(status):
+    async def handler(request):
+        return web.json_response({"error": {"type": "loading_model"}}, status=status)
+    return handler
+
+
+@pytest.mark.parametrize("handler,timeouts,failure_class", [
+    *[pytest.param(_not_ready(s), None, ma.ENDPOINT_UNREACHABLE, id=f"upstream-{s}")
+      for s in ma.NOT_READY_STATUSES],
+    pytest.param(_silent, {"time_to_first_token_seconds": 0.2}, ma.TIMEOUT_TIME_TO_FIRST_TOKEN,
+                 id="timeout"),
+    pytest.param(_answering_as("claude-opus-5-5"), None, ma.PROTOCOL_INCOMPATIBILITY,
+                 id="wrong-served-model"),
+])
+def test_helper_failure_rows(helper_proxy, local_env, monkeypatch, handler, timeouts,
+                             failure_class):
+    _helper_pointer(local_env, monkeypatch)
+    _helper_scenario(helper_proxy, local_env, monkeypatch, handler, _post_json,
+                     timeouts=timeouts)
+    rows, result = _helper_dispatch(local_env)
+    assert [r["failure_class"] for r in rows] == [failure_class]
+    assert rows[0]["hosting_location"] == "local" and rows[0]["endpoint_id"] == "helper-local"
+    assert result["outcome"] == "failed" and result["failure_classes_seen"] == [failure_class]
+
+
+def test_missing_pointer_gives_correlation_unknown(helper_proxy, local_env, monkeypatch):
+    monkeypatch.setattr(mp, "CURRENT_RUN_PATH", local_env / "preview-helper" / "absent.json")
+    _helper_scenario(helper_proxy, local_env, monkeypatch, _ok_json, _post_json)
+    rows, _ = rr._read_ledger_rows("unknown", local_env / "ledger.jsonl")
+    assert [r["correlation"] for r in rows] == ["unknown"]
+
+
+def test_secret_value_is_in_no_row_artifact_or_log(helper_proxy, local_env, monkeypatch, capfd):
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_CAPTURE", True)
+    artifacts = local_env / "artifacts"
+    monkeypatch.setattr(mp, "RAW_ARTIFACT_DIR", artifacts)
+    _helper_pointer(local_env, monkeypatch)
+    answers = iter([_ok_json, _answering_as("claude-opus-5-5")])
+
+    async def ok_then_wrong_model(request):
+        return await next(answers)(request)
+
+    async def send(client):
+        return [await _post_json(client), await _post_json(client)]
+
+    (results, calls, _) = _helper_scenario(helper_proxy, local_env, monkeypatch,
+                                           ok_then_wrong_model, send, rows=2)
+    assert [status for status, _ in results] == [200, 502] and len(calls) == 2
+    assert all(c["headers"]["x-api-key"] == SENTINEL for c in calls)  # sent only upstream
+    captured = [(local_env / "ledger.jsonl").read_text(),
+                *(p.read_text() for p in artifacts.rglob("*") if p.is_file())]
+    assert len(captured) >= 2
+    out, err = capfd.readouterr()
+    for text in (*captured, out, err, json.dumps(results)):
+        assert SENTINEL not in text
