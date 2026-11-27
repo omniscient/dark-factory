@@ -640,6 +640,31 @@ staged copy and digest as `model-endpoints show` and passes the run's `--intent`
 `classify-preview-helper` intent, which nothing dispatches until #587 (#586, #633;
 [run-lifecycle.md](run-lifecycle.md) section 6.F).
 
+**The helper container (#642, inert).** `run-compose.yml`'s `preview-helper` service, under its
+own `preview-helper` profile, is the container #587's dispatcher will start for each
+`classify-preview-helper` dispatch. Nothing in this repository starts it, and nothing dispatches
+it until #587: `entrypoint.sh` still answers that command string "not available". Its
+`entrypoint:` is `scripts/preview_helper_entry.sh`, not `entrypoint.sh`: no tracker or code-host
+preflight, no clone, no `git`, `gh` or `docker`. Its environment is exactly nine keys and holds
+no credential of any kind: `PYTHONPATH`, `ANTHROPIC_BASE_URL` (`http://preview-helper-proxy:8787`),
+the four `ANTHROPIC_DEFAULT_*_MODEL` aliases (interpolated from the scheduler-side
+`PREVIEW_HELPER_ENDPOINT_SERVED_NAME`), `FACTORY_MODEL_ENDPOINT` (from `PREVIEW_HELPER_ENDPOINT`),
+`FACTORY_MODEL_REGISTRY_SHA256` and `CURRENT_RUN_DIR=/var/lib/dark-factory/preview-helper`. It
+is on the internal network `preview-helper-net` only, which `preview-helper-proxy` also joins. It
+does not mount the state volume's root: two `volume.subpath` mounts give it the staged registry
+(`model-registry/`, read-only) and its artifact directory (`preview-helper/`, read-write), and
+both must exist before a start (Docker Engine 26 or later). The script runs the endpoint checks,
+reads four fields of `input.json` (changed-file names, diff stat, title, labels), makes one
+model call with no tools, and writes `result.json`, whose failure class is one of
+`preflight_refused`, `missing_input`, `input_too_large`, `local_timeout_total`,
+`model_call_failed` and `schema_invalid`. Its endpoint check is
+`model-endpoints endpoint-preflight --intent <intent>` on the baked CLI: the run-side endpoint
+check of `preflight` alone, with nothing skipped, no tracker or code-host variable needed, and
+only a local entry passing. `scripts/factory_core/preview_helper.py` holds the deterministic
+halves on both sides (prompt, answer, result, and the scheduler-side verbs #587 will call). The
+`docker-build` CI job checks the pinned CLI's request shape through the real helper proxy with
+`tests/tier2_preview_helper_cli.sh`.
+
 **Back to default cloud:** remove `FACTORY_MODEL_ENDPOINT` from `instance.env` (and
 `FACTORY_MODEL_REGISTRY_DIR` from the interpolation env), then recreate the scheduler with
 `docker compose -f deploy/docker-compose.yml up -d`. No staged copy is read while
