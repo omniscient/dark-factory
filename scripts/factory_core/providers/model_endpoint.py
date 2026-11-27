@@ -91,6 +91,11 @@ _NO_LOCAL_DISPATCH = (
     "dispatch runs a gated phase (contract §4.11 decision 3; the first helper dispatch is #587)"
 )
 
+# The only dispatch intents a local entry may serve on the run side (#633). Adding a name is a
+# gate change with its own reviewed ticket; classify-preview-checker must never be added (a
+# local endpoint never hosts a checker, contract §4.2). scheduler_preflight() ignores this.
+LOCAL_ELIGIBLE_INTENTS = ("classify-preview-helper",)
+
 
 class RegistryError(Exception):
     """Invalid registry, evidence or staged tree. .problems is the list of messages."""
@@ -619,7 +624,7 @@ def _select(registry_path, endpoint_id):
     return _pick(endpoints, endpoint_id, path)
 
 
-def _local_problems(entry, files, registry_path):
+def _local_problems(entry, files, registry_path, intent=None):
     eid = entry["id"]
     problems = []
     present = sorted(n for n in CLOUD_CREDENTIALS
@@ -650,11 +655,14 @@ def _local_problems(entry, files, registry_path):
             problems += reasons
         else:
             problems += role_problems(record, "actor")
-    problems.append(_NO_LOCAL_DISPATCH.format(eid=eid))
+    # Lifted only for a local-eligible intent, passed explicitly by the caller (#633). None,
+    # "" or any other value keeps the refusal; every check above runs regardless.
+    if intent not in LOCAL_ELIGIBLE_INTENTS:
+        problems.append(_NO_LOCAL_DISPATCH.format(eid=eid))
     return problems
 
 
-def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
+def preflight(registry_path, endpoint_id, intent=None) -> tuple[list[str], str | None]:
     """Run-container check of the staged registry for one selected endpoint.
 
     Returns (problems, hosting); ([], hosting) == OK. hosting is the selected entry's
@@ -683,17 +691,18 @@ def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
         # Not _missing(): a local secret must not be delivered through .archon/.env (spec §C).
         problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is not set")
     if hosting == "local":
-        problems += _local_problems(entry, files, registry_path)
+        problems += _local_problems(entry, files, registry_path, intent=intent)
     return problems, hosting
 
 
-def load_verified_entry(registry_path, endpoint_id) -> tuple[list[str], dict | None]:
+def load_verified_entry(registry_path, endpoint_id, intent=None) -> tuple[list[str], dict | None]:
     """The model proxy's Configuration-contract loader (#558): (problems, entry).
 
     entry is non-None only when problems is empty. Exactly one read_verified_tree() call;
     registry, entry and evidence are parsed only from the bytes it hashed (#593) — never
-    _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered, so a
-    local entry never comes back until #587 lifts it.
+    _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered: a local
+    entry comes back only when intent is in LOCAL_ELIGIBLE_INTENTS (#633). The model proxy
+    passes none, so it never gets one.
     """
     registry_path = Path(registry_path)
     problems, files = read_verified_tree(registry_path)
@@ -710,7 +719,7 @@ def load_verified_entry(registry_path, endpoint_id) -> tuple[list[str], dict | N
     if entry is None:
         return problems, None
     if entry["hosting_location"] == "local":
-        problems = problems + _local_problems(entry, files, registry_path)
+        problems = problems + _local_problems(entry, files, registry_path, intent=intent)
     return (problems, None) if problems else ([], entry)
 
 

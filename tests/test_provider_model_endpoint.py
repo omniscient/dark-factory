@@ -1296,3 +1296,95 @@ def test_hosting_check_reads_the_source_mount_never_the_staged_copy(tmp_path, mo
     code, out = _hosting_check(monkeypatch, capsys, "sel")
     assert code == 1
     assert out.out.startswith("hosting=local ")
+
+
+# --- #633: the local-dispatch refusal scoped to one helper intent --------------------------
+
+HELPER = "classify-preview-helper"
+EXISTING_INTENTS = ("fix", "continue", "close", "refine", "plan", "deconflict", "recheck",
+                    "fix-main", "audit-deps")
+NO_LOCAL = me._NO_LOCAL_DISPATCH.format(eid="local-test")
+
+
+def _valid_local(tmp_path, monkeypatch, record=None):
+    """A fully valid, `tested` local entry staged with its digest and a matching env."""
+    reg = _stage(tmp_path, monkeypatch, [LOCAL],
+                 evidence={"local-test": record if record is not None else _record(LOCAL)})
+    _local_env(monkeypatch)
+    return reg
+
+
+def test_local_eligible_intents_is_exactly_the_helper():
+    assert me.LOCAL_ELIGIBLE_INTENTS == (HELPER,)
+
+
+# Exact match only: a padded, re-cased or non-string value is not the helper intent either.
+NEAR_HELPER = (" classify-preview-helper", "classify-preview-helper ", "classify-preview-helper\n",
+               "CLASSIFY-PREVIEW-HELPER", b"classify-preview-helper", ["classify-preview-helper"],
+               True)
+
+
+@pytest.mark.parametrize("loader", ["preflight", "load_verified_entry"])
+@pytest.mark.parametrize("intent", [*EXISTING_INTENTS, "classify-preview-checker", None, "",
+                                    *NEAR_HELPER])
+def test_local_entry_refused_for_every_intent_except_helper(tmp_path, monkeypatch, pinned_suite,
+                                                           loader, intent):
+    reg = _valid_local(tmp_path, monkeypatch)
+    expected = ([NO_LOCAL], "local") if loader == "preflight" else ([NO_LOCAL], None)
+    assert getattr(me, loader)(reg, "local-test", intent=intent) == expected
+
+
+def test_helper_intent_omits_only_no_local_dispatch(tmp_path, monkeypatch, pinned_suite):
+    reg = _valid_local(tmp_path, monkeypatch)
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
+    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
+    assert problems == [] and entry["id"] == "local-test" and entry["hosting_location"] == "local"
+
+
+@pytest.mark.parametrize("check, expected", [
+    ("cloud_credential", "cloud model credential(s) are set in this container: ANTHROPIC_API_KEY"),
+    ("base_url", "ANTHROPIC_BASE_URL must equal the entry's base_url"),
+    ("tier_alias", "ANTHROPIC_DEFAULT_OPUS_MODEL must equal model_identity.served_name"),
+    ("evidence_not_tested", "capability evidence is 'stale', not 'tested'"),
+    ("role_not_qualified", "streaming is fail, not pass"),
+])
+def test_helper_intent_still_fails_each_local_check(tmp_path, monkeypatch, pinned_suite,
+                                                    check, expected):
+    record = _record(LOCAL)
+    if check == "evidence_not_tested":
+        record = _record(LOCAL, expires_at="2020-01-01T00:00:00+00:00")
+    elif check == "role_not_qualified":
+        record = _record(LOCAL, results=dict(record["results"], streaming="fail"))
+    reg = _valid_local(tmp_path, monkeypatch, record)
+    if check == "cloud_credential":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL + "-cloud")
+    elif check == "base_url":
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.0.2.99:8080")
+    elif check == "tier_alias":
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5-5")
+    problems, hosting = me.preflight(reg, "local-test", intent=HELPER)
+    assert hosting == "local" and any(expected in p for p in problems)
+    assert NO_LOCAL not in problems
+    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
+    assert entry is None and any(expected in p for p in problems)
+
+
+def test_intent_not_read_from_environment_or_pointer(base_env, tmp_path, monkeypatch, capsys,
+                                                     pinned_suite):
+    # Regression guard: passes on main too, where the refusal is unconditional.
+    from factory_core import providers
+    reg = _valid_local(tmp_path, monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    for name in ("INTENT", "FACTORY_DISPATCH_INTENT", "FACTORY_INTENT", "DISPATCH_INTENT"):
+        monkeypatch.setenv(name, HELPER)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "current-run.json").write_text(
+        f'{{"run_id":"r","issue_number":1,"intent":"{HELPER}","stage":"{HELPER}"}}\n',
+        encoding="utf-8")
+    monkeypatch.setenv("CURRENT_RUN_DIR", str(run_dir))
+    assert me.preflight(reg, "local-test") == ([NO_LOCAL], "local")
+    assert me.load_verified_entry(reg, "local-test") == ([NO_LOCAL], None)
+    assert providers.preflight()[-1] == NO_LOCAL
+    out, err = _hosting(monkeypatch, capsys)
+    assert out == "hosting=cloud\n" and NO_LOCAL in err
