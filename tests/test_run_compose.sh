@@ -48,7 +48,7 @@ grep -q 'FACTORY_RUN_PREFIX:-${FACTORY_INSTANCE:-dark-factory}-dark-factory-run-
 
 # 3e) Model endpoint registry (#557): the scheduler alone gets one read-only mount of the
 # instance's model-registry/ (default: the empty tracked placeholder). Run containers get
-# the staged copy through the existing state volume, so run-compose.yml gains no mount.
+# the staged copy through the existing state volume; #642's preview-helper mounts only that.
 grep -qF -- '- ${FACTORY_MODEL_REGISTRY_DIR:-./model-registry.empty}:/etc/dark-factory/model-registry:ro' "$DC" \
   || { echo "FAIL: deploy compose missing the read-only model registry mount"; exit 1; }
 [ "$(grep -c ':/etc/dark-factory/model-registry' "$DC")" -eq 1 ] \
@@ -57,9 +57,33 @@ grep -qF -- '- ${FACTORY_MODEL_REGISTRY_DIR:-./model-registry.empty}:/etc/dark-f
   || { echo "FAIL: deploy/model-registry.empty/.gitkeep placeholder missing"; exit 1; }
 [ "$(ls -A "$REPO_ROOT/deploy/model-registry.empty")" = ".gitkeep" ] \
   || { echo "FAIL: deploy/model-registry.empty/ must hold only .gitkeep"; exit 1; }
-if grep -q 'model-registry' "$RC"; then
-  echo "FAIL: run-compose.yml must not mount the model registry (staged via scheduler_state)"; exit 1
-fi
+# #642 narrows the last 3e check, keeping its purpose: no service mounts the operator's
+# registry directory. The only registry mount in run-compose.yml is preview-helper's read-only
+# scheduler_state subpath of the staged copy, and the string occurs nowhere outside that block.
+python3 - "$RC" <<'PY' || { echo "FAIL: run-compose.yml must not mount the operator's model registry (staged via scheduler_state)"; exit 1; }
+import sys, yaml
+text = open(sys.argv[1], encoding="utf-8").read()
+hits = []
+for name, svc in yaml.safe_load(text)["services"].items():
+    for vol in svc.get("volumes") or []:
+        parts = [vol] if isinstance(vol, str) else [str(vol.get("source")), str(vol.get("target")),
+                                                    str((vol.get("volume") or {}).get("subpath"))]
+        if any("model-registry" in p for p in parts):
+            hits.append((name, vol))
+assert len(hits) == 1, f"expected exactly one model-registry mount, found {hits}"
+assert hits[0] == ("preview-helper", {"type": "volume", "source": "scheduler_state",
+                                      "target": "/var/lib/dark-factory/model-registry",
+                                      "read_only": True, "volume": {"subpath": "model-registry"}}), hits[0]
+lines = text.splitlines()
+start = lines.index("  preview-helper:")
+# The block ends at the next service or top-level key (a line indented two spaces or less),
+# so a service added after preview-helper is outside it.
+end = next(i for i in range(start + 1, len(lines))
+           if lines[i].strip() and len(lines[i]) - len(lines[i].lstrip(" ")) <= 2)
+outside = [l for i, l in enumerate(lines) if "model-registry" in l and not start <= i < end]
+assert not outside, f"model-registry outside the preview-helper block: {outside}"
+assert "FACTORY_MODEL_REGISTRY_DIR" not in text and "/etc/dark-factory" not in text
+PY
 # 3f) preview-helper-proxy (#634), asserted on the parsed SOURCE: a render carries
 # `command: null` for every service and merges an env_file into environment.
 python3 - "$RC" <<'PY' || { echo "FAIL: preview-helper-proxy source-definition checks"; exit 1; }
@@ -82,8 +106,9 @@ assert isinstance(env, dict), \
 passthrough = sorted(k for k, v in env.items() if v is None)
 assert passthrough == ["FACTORY_HELPER_MODEL_SECRET"], \
     f"{name} must pass through exactly FACTORY_HELPER_MODEL_SECRET, not {passthrough}"
-# decision D1: dark-factory-net only until #587 adds the helper's internal network
-assert svc.get("networks") == ["dark-factory-net"], f"{name} must be on dark-factory-net only"
+# decision D1, amended by #642: dark-factory-net, plus the helper's internal network
+assert svc.get("networks") == ["dark-factory-net", "preview-helper-net"], \
+    f"{name} must be on exactly dark-factory-net and preview-helper-net"
 # helper_proxy_entrypoint_is_the_literal_intent
 expected = ["python3", "-m", "factory_core.model_proxy", "--intent", "classify-preview-helper"]
 assert svc.get("entrypoint") == expected, f"{name} entrypoint must be exactly {expected}"
@@ -99,6 +124,55 @@ for other, spec in services.items():
                 f"{other} declares a network alias {name}"
 PY
 echo "PASS: preview-helper-proxy source definition (no forbidden keys, literal intent, no depends_on/alias)"
+# 3g) preview-helper (#642), asserted on the parsed SOURCE.
+python3 - "$RC" "$REPO_ROOT/scripts" <<'PY' || { echo "FAIL: preview-helper source-definition checks"; exit 1; }
+import sys, yaml
+sys.path.insert(0, sys.argv[2])
+from factory_core.providers import model_endpoint as me
+doc = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+services, networks = doc["services"], doc.get("networks") or {}
+name = "preview-helper"
+svc = services.get(name)
+assert svc is not None, f"{name} service missing"
+# preview_helper_source_has_no_forbidden_keys: exactly these keys, so no env_file,
+# depends_on, restart, command, container_name, privileges or extra hosts can appear.
+assert set(svc) == {"image", "entrypoint", "environment", "volumes", "networks", "profiles"}, \
+    f"{name} declares {sorted(svc)}"
+assert svc["profiles"] == [name], f"{name} must be only under its own profile"
+assert svc["image"] == "${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}"
+assert svc["entrypoint"] == ["/opt/dark-factory/scripts/preview_helper_entry.sh"]
+# preview_helper_env_is_exactly_the_nine_keys (source form): a mapping, three interpolations
+# from the dispatcher's per-dispatch variables, every other value a literal.
+served = "${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}"
+assert svc["environment"] == {
+    "PYTHONPATH": "/opt/dark-factory/scripts",
+    "ANTHROPIC_BASE_URL": me.HELPER_PROXY_BASE_URL,
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": served, "ANTHROPIC_DEFAULT_SONNET_MODEL": served,
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": served, "ANTHROPIC_DEFAULT_FABLE_MODEL": served,
+    "FACTORY_MODEL_ENDPOINT": "${PREVIEW_HELPER_ENDPOINT:-}",
+    "FACTORY_MODEL_REGISTRY_SHA256": "${FACTORY_MODEL_REGISTRY_SHA256:-}",
+    "CURRENT_RUN_DIR": "/var/lib/dark-factory/preview-helper",
+}, f"{name} environment is not exactly the nine keys"
+# preview_helper_is_on_the_internal_network_only
+assert svc["networks"] == ["preview-helper-net"], f"{name} must be on preview-helper-net only"
+assert networks.get("preview-helper-net") == {"driver": "bridge", "internal": True}, \
+    "preview-helper-net must be an internal bridge network"
+assert services["preview-helper-proxy"]["networks"] == ["dark-factory-net", "preview-helper-net"]
+for other, spec in services.items():
+    if other in (name, "preview-helper-proxy"):
+        continue
+    nets = spec.get("networks") or []
+    assert "preview-helper-net" not in nets, f"{other} must not be on preview-helper-net"
+# preview_helper_mounts_two_subpaths_and_not_the_volume_root
+assert svc["volumes"] == [
+    {"type": "volume", "source": "scheduler_state", "target": "/var/lib/dark-factory/model-registry",
+     "read_only": True, "volume": {"subpath": "model-registry"}},
+    {"type": "volume", "source": "scheduler_state", "target": "/var/lib/dark-factory/preview-helper",
+     "volume": {"subpath": "preview-helper"}},
+], f"{name} volumes are not exactly the two subpath mounts"
+PY
+echo "PASS: preview-helper source definition (nine keys, internal network only, two subpath mounts)"
+
 # 4) Parse check via docker compose config (skipped if docker not available)
 if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
   # Provision a scratch .archon/.env so the required env_file check passes
@@ -208,6 +282,122 @@ sys.exit(0 if env.get("FACTORY_HELPER_MODEL_SECRET") is None else 1)
     exit 1
   fi
   echo "PASS: the helper secret is in no uninterpolated or factory-profile render"
+
+  # 4e) preview_helper_renders / preview_helper_env_is_exactly_the_nine_keys (#642): rendered
+  # with its profile, every forbidden caller name set to a sentinel, the three per-dispatch
+  # sources set to fixtures. DOCKER_HOST keeps a working value (the CLI reads it); the check is
+  # that its value is not in the render.
+  HOSTILE_NAMES="$(bash -c 'source "$1" && echo "${PROVIDER_PASSTHROUGH_VARS[*]}"' _ "$REPO_ROOT/scripts/provider_env.sh")"
+  HOSTILE_NAMES="$HOSTILE_NAMES $(PYTHONPATH="$REPO_ROOT/scripts" python3 -c \
+    "from factory_core.providers import model_endpoint as me; print(' '.join(me.CLOUD_CREDENTIALS + me.LOCAL_CREDENTIAL_ENV_SIGNALS))")"
+  HOSTILE_NAMES="$HOSTILE_NAMES GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN JIRA_TOKEN FACTORY_HELPER_MODEL_SECRET"
+  HOSTILE_NAMES="$HOSTILE_NAMES PREVIEW_HELPER_ENDPOINT_BASE_URL ANTHROPIC_BASE_URL CURRENT_RUN_DIR"
+  HOSTILE=()
+  for n in $HOSTILE_NAMES; do HOSTILE+=("$n=hostile-fixture-$n"); done
+  WORKING_DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+  if ! env "${HOSTILE[@]}" DOCKER_HOST="$WORKING_DOCKER_HOST" \
+      PREVIEW_HELPER_ENDPOINT=helper-fixture \
+      FACTORY_MODEL_REGISTRY_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
+      PREVIEW_HELPER_ENDPOINT_SERVED_NAME=served-fixture \
+      docker compose -f "$RC" --profile preview-helper config --format json 2>/dev/null \
+    | DOCKER_HOST_VALUE="$WORKING_DOCKER_HOST" python3 -c '
+import json, os, sys
+doc = json.load(sys.stdin)
+selected = sorted(doc["services"])
+if selected != ["preview-helper"]:
+    sys.exit(f"--profile preview-helper selects {selected}")
+svc = doc["services"]["preview-helper"]
+served = "served-fixture"
+expected = {
+    "PYTHONPATH": "/opt/dark-factory/scripts", "ANTHROPIC_BASE_URL": "http://preview-helper-proxy:8787",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": served, "ANTHROPIC_DEFAULT_SONNET_MODEL": served,
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": served, "ANTHROPIC_DEFAULT_FABLE_MODEL": served,
+    "FACTORY_MODEL_ENDPOINT": "helper-fixture", "FACTORY_MODEL_REGISTRY_SHA256": "0" * 64,
+    "CURRENT_RUN_DIR": "/var/lib/dark-factory/preview-helper",
+}
+env = svc.get("environment") or {}
+if env != expected:
+    sys.exit(f"rendered environment differs: extra {sorted(set(env) - set(expected))}, "
+             f"missing {sorted(set(expected) - set(env))}, "
+             f"wrong {sorted(k for k in expected if k in env and env[k] != expected[k])}")
+text = json.dumps(doc)
+if "hostile-fixture" in text or os.environ["DOCKER_HOST_VALUE"] in text:
+    sys.exit("a caller variable reached the render")
+for key in ("env_file", "depends_on", "restart"):
+    if key in svc:
+        sys.exit(f"rendered service has {key}")
+if svc.get("entrypoint") != ["/opt/dark-factory/scripts/preview_helper_entry.sh"]:
+    sys.exit("rendered entrypoint differs")
+nets = svc.get("networks")
+if nets != {"preview-helper-net": None}:
+    sys.exit(f"rendered networks {nets}")
+if (doc.get("networks") or {}).get("preview-helper-net", {}).get("internal") is not True:
+    sys.exit("preview-helper-net is not internal in the render")
+mounts = [(m.get("type"), m.get("source"), m.get("target"), bool(m.get("read_only")),
+           (m.get("volume") or {}).get("subpath")) for m in svc.get("volumes") or []]
+if mounts != [("volume", "scheduler_state", "/var/lib/dark-factory/model-registry", True, "model-registry"),
+              ("volume", "scheduler_state", "/var/lib/dark-factory/preview-helper", False, "preview-helper")]:
+    sys.exit(f"rendered mounts {mounts}")
+'; then
+    echo "FAIL: preview-helper render is not exactly the nine keys, the internal network and two subpath mounts"
+    [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
+    exit 1
+  fi
+  echo "PASS: preview-helper renders exactly its nine environment keys under a hostile caller environment"
+
+  # 4f) preview_helper_does_not_change_other_renders (#642, regression guard): a copy of the
+  # file without the three additions renders byte-identically for every profile set
+  # scheduler.sh dispatches with; under --profile preview-helper-proxy it differs only by that
+  # service's second network and the preview-helper-net definition.
+  DIFF_DIR=$(mktemp -d)
+  mkdir -p "$DIFF_DIR/with/.archon" "$DIFF_DIR/without/.archon"
+  touch "$DIFF_DIR/with/.archon/.env" "$DIFF_DIR/without/.archon/.env"
+  cp "$RC" "$DIFF_DIR/with/run-compose.yml"
+  awk '
+    /^  preview-helper:$/ {svc = 1; next}
+    svc && /^[^ ]/ {svc = 0}
+    svc {next}
+    /^  preview-helper-net:$/ {net = 1; next}
+    net && /^    / {next}
+    {net = 0}
+    /^      - preview-helper-net$/ {next}
+    {print}
+  ' "$RC" > "$DIFF_DIR/without/run-compose.yml"
+  # Comment lines stay behind (the service's own comment names the network); they never render.
+  if grep -vE '^[[:space:]]*#' "$DIFF_DIR/without/run-compose.yml" \
+       | grep -qE 'preview-helper-net|^  preview-helper:$'; then
+    echo "FAIL: could not strip the #642 additions for the differential render"
+    rm -rf "$DIFF_DIR"; [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"; exit 1
+  fi
+  for profiles in "" "--profile factory" "--profile factory --profile factory-model-proxy"; do
+    # shellcheck disable=SC2086
+    if ! WITH=$(docker compose -f "$DIFF_DIR/with/run-compose.yml" $profiles config 2>&1) \
+       || ! WITHOUT=$(docker compose -f "$DIFF_DIR/without/run-compose.yml" $profiles config 2>&1) \
+       || [ "$WITH" != "$WITHOUT" ]; then
+      echo "FAIL: preview-helper changes the render for profiles [${profiles:-none}]"
+      rm -rf "$DIFF_DIR"; [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"; exit 1
+    fi
+  done
+  if ! python3 - "$DIFF_DIR" <<'PY'
+import json, subprocess, sys
+def render(which):
+    return json.loads(subprocess.run(
+        ["docker", "compose", "-f", f"{sys.argv[1]}/{which}/run-compose.yml",
+         "--profile", "preview-helper-proxy", "config", "--format", "json"],
+        capture_output=True, text=True, check=True).stdout)
+with_, without = render("with"), render("without")
+proxy = with_["services"]["preview-helper-proxy"]
+assert proxy["networks"] == {"dark-factory-net": None, "preview-helper-net": None}, proxy["networks"]
+del proxy["networks"]["preview-helper-net"]
+del with_["networks"]["preview-helper-net"]
+assert with_ == without, "the proxy render differs by more than its second network"
+PY
+  then
+    echo "FAIL: preview-helper-proxy's render differs by more than preview-helper-net"
+    rm -rf "$DIFF_DIR"; [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"; exit 1
+  fi
+  rm -rf "$DIFF_DIR"
+  echo "PASS: preview-helper leaves every other render byte-identical; the proxy gains only preview-helper-net"
   [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
 else
   echo "SKIP: docker not available — skipping compose config parse check"

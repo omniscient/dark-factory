@@ -118,12 +118,57 @@ services:
       - scheduler_state:/var/lib/dark-factory
     networks:
       - dark-factory-net
+      - preview-helper-net
     profiles:
       - preview-helper-proxy
+
+  # The classify-preview-helper lane's container (#642). Inert: nothing in this repository
+  # starts it, and entrypoint.sh still answers its command string "not available"; #587's
+  # dispatcher starts it once per helper dispatch. No env_file, no DOCKER_HOST, no
+  # depends_on, no restart: its environment is these nine keys, three of them interpolated
+  # from variables the dispatcher exports for that one call, and it holds no credential of any
+  # kind. It is on the internal preview-helper-net only, which reaches nothing but
+  # preview-helper-proxy. It never mounts the state volume's root: two subpaths give it the
+  # staged registry (read-only) and its own artifact directory, and both must exist before a
+  # start (Docker Engine 26 or later; a missing subpath fails the start).
+  preview-helper:
+    image: ${FACTORY_IMAGE:-ghcr.io/omniscient/dark-factory:latest}
+    entrypoint: ["/opt/dark-factory/scripts/preview_helper_entry.sh"]
+    environment:
+      PYTHONPATH: /opt/dark-factory/scripts
+      ANTHROPIC_BASE_URL: http://preview-helper-proxy:8787
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      ANTHROPIC_DEFAULT_FABLE_MODEL: ${PREVIEW_HELPER_ENDPOINT_SERVED_NAME:-}
+      FACTORY_MODEL_ENDPOINT: ${PREVIEW_HELPER_ENDPOINT:-}
+      FACTORY_MODEL_REGISTRY_SHA256: ${FACTORY_MODEL_REGISTRY_SHA256:-}
+      CURRENT_RUN_DIR: /var/lib/dark-factory/preview-helper
+    volumes:
+      - type: volume
+        source: scheduler_state
+        target: /var/lib/dark-factory/model-registry
+        read_only: true
+        volume:
+          subpath: model-registry
+      - type: volume
+        source: scheduler_state
+        target: /var/lib/dark-factory/preview-helper
+        volume:
+          subpath: preview-helper
+    networks:
+      - preview-helper-net
+    profiles:
+      - preview-helper
 
 networks:
   dark-factory-net:
     driver: bridge
+  # The helper's network (#642): internal, so preview-helper has no route out; only
+  # preview-helper-proxy joins it as well.
+  preview-helper-net:
+    driver: bridge
+    internal: true
   # Optional external network carrying the target's BuildKit daemon (#455), set by
   # FACTORY_BUILD_NETWORK in the scheduler's instance.env. Unset or empty, it names this
   # instance's own dark-factory-net (created by deploy/docker-compose.yml under the same

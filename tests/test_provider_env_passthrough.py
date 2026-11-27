@@ -87,9 +87,9 @@ def test_forwarded_vars_not_also_in_compose_environment():
     forwarded = _forwarded()
     for service, spec in services.items():
         clash = set(spec.get("environment") or {}) & forwarded
-        if service == "preview-helper-proxy":
-            # #634: no env_file and never a dispatch() target; its FACTORY_MODEL_ENDPOINT key
-            # is interpolated from PREVIEW_HELPER_ENDPOINT, never forwarded.
+        if service in ("preview-helper-proxy", "preview-helper"):
+            # #634, #642: no env_file and never a dispatch() target; their FACTORY_MODEL_ENDPOINT
+            # key is interpolated from PREVIEW_HELPER_ENDPOINT, never forwarded.
             clash -= {"FACTORY_MODEL_ENDPOINT"}
         assert not clash, \
             f"{sorted(clash)} in run-compose.yml {service} environment: would override or blank env_file"
