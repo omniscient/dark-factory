@@ -219,6 +219,8 @@ def main(argv=None) -> int:
            "rubric_source_commit": rubric["source_commit"],
            "fixture_set_digest": schema.sha256_file(args.fixtures)}
     units = schema.run_order(fixtures, by_id, args.repetitions, args.seed)
+    if fixtures and any(arm["arm_kind"] == "local" for arm in arms):
+        schema.render_prompt(ctx["prompt"], next(iter(fixtures.values())))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "manifest.json", "x") as manifest:

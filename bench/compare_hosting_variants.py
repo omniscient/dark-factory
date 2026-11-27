@@ -48,6 +48,15 @@ def load_results(results_dir) -> tuple:
         lines = (results_dir / "rows.jsonl").read_text().splitlines()
     except (OSError, ValueError) as e:
         raise CompareError(f"{results_dir}: manifest.json/rows.jsonl unreadable ({e})") from None
+    if not isinstance(manifest, dict):
+        raise CompareError(f"{results_dir}: manifest.json is not a JSON object")
+    if "arms" not in manifest or "rubric_source_commit" not in manifest:
+        raise CompareError(f"{results_dir}: manifest.json missing arms or rubric_source_commit")
+    if not isinstance(manifest["arms"], list) or any(
+            not isinstance(a, dict) or (a.get("arm_kind") != "rules_only"
+                                        and "base_url_scope" not in a)
+            for a in manifest["arms"]):
+        raise CompareError(f"{results_dir}: manifest.json arms missing base_url_scope")
     rows = []
     for n, line in enumerate(lines, start=1):
         try:
@@ -71,6 +80,12 @@ def check_rows(manifest, rows, fixtures_path) -> None:
     local = [r for r in rows if r["arm_kind"] == "local"]
     if len({json.dumps(r["request_params"], sort_keys=True) for r in local}) > 1:
         raise CompareError("local rows disagree on request_params")
+    arms_by_id = {a["arm_id"]: a for a in manifest.get("arms", [])}
+    for r in rows:
+        arm = arms_by_id.get(r["arm_id"])
+        if arm is None or arm.get("arm_kind") != r["arm_kind"]:
+            raise CompareError(f"row arm_id {r['arm_id']!r} does not match a manifest arm with "
+                               "the same arm_kind")
     first = rows[0]
     expected = {"schema_version": manifest.get("schema_version"),
                 "runner_version": manifest.get("runner_version"),
@@ -173,7 +188,8 @@ def cell_metrics(items) -> dict:
     reported = {k: sum(1 for r in rows if r[k] is not None) for k in schema.USAGE_KEYS[2:]}
     cache_ratio = None
     if all(n == assigned for n in reported.values()) and in_total:
-        cache_ratio = _sum(r["gen_ai.usage.cache_read_input_tokens"] for r in rows) / in_total
+        cache_ratio = _sum(r["gen_ai.usage.cache_read_input_tokens"]
+                           for r, i in zip(rows, inputs) if i is not None) / in_total
     accepted = counts["accepted"]
     summed_ms = sum(durations)
     measured = sum(1 for r in rows if r["gen_ai.usage.input_tokens"] is not None
@@ -249,7 +265,9 @@ def build_report(manifest, rows, fixtures_doc, labels_doc, labels_digest, pre) -
     fixtures = {fx["fixture_id"]: fx for fx in fixtures_doc["fixtures"]}
     labels = labels_doc["labels"]
     arms = manifest["arms"]
-    rules_id = next(a["arm_id"] for a in arms if a["arm_kind"] == "rules_only")
+    rules_id = next((a["arm_id"] for a in arms if a["arm_kind"] == "rules_only"), None)
+    if rules_id is None:
+        raise CompareError("manifest.json has no rules_only arm")
     runner_version = rows[0]["runner_version"]
     arm_labels = {}
     for a in arms:
