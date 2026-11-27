@@ -40,8 +40,10 @@ case "$ARGUMENTS" in
     elif [[ "$ARGUMENTS" =~ ^Verify\ preview\ classification\ \#[0123456789]+$ ]]; then
       INTENT="classify-preview-checker"; INTENT_NOT_YET_AVAILABLE=1
     else
-      # Today's matching for every other command: a case-insensitive leading word, no
-      # word boundary (so "Fixup #3" is still fix), no leading whitespace.
+      # Matching for every other command: a case-insensitive leading word, no word boundary
+      # (so "Fixup #3" is still fix). Unlike the old regex (`^\s*\K(fix|...)`), leading
+      # whitespace is no longer skipped — an intentional change (#633): no scheduler-issued
+      # command string has any.
       shopt -s nocasematch
       case "$ARGUMENTS" in
         fix*)        INTENT="fix" ;;
@@ -349,11 +351,13 @@ run_post_mortem() {
   post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
-# Verified-local runs only (#633). The clone's cli.py may predate --hosting-location and reject
-# it with exit code 2 (an argparse unknown flag or subcommand, or a missing script — a real
-# failure of either subcommand exits 1 or 3). Then the baked copy runs with the identical argv:
-# never a retry without the flag. Only the output of the attempt whose status is returned is
-# printed, stderr merged into stdout.
+# Verified-local runs only (#633). Deliberately broad: ANY exit code 2 from the clone's cli.py
+# triggers the fallback, not only a rejected --hosting-location. Exit code 2 is what CPython
+# returns for an argparse unknown flag, an argparse unknown subcommand, or a script file that
+# does not exist — all three mean the clone's copy cannot serve this call (a real failure of
+# either subcommand exits 1 or 3), so all three fall back with the flag intact. Then the baked
+# copy runs with the identical argv: never a retry without the flag. Only the output of the
+# attempt whose status is returned is printed, stderr merged into stdout.
 _cli_with_hosting_fallback() {
   local out rc=0
   # TARGET-PATH: the clone's copy first, as at every other cli.py call site.
