@@ -6,6 +6,10 @@
 **Status**: Stub baseline — pass^k tables show 0 (no runs executed yet).  
              Run `bench/run_suite.sh --baseline` to populate with real results.
 
+This is the replay bench: it re-runs whole tickets through the workflow. The hosting shadow
+comparator (`bench/hosting_shadow.md`, #563) is separate — it replays only the preview
+classifier's prompt against labelled fixtures and never runs the workflow.
+
 ---
 
 ## pass^k by Size Bucket
