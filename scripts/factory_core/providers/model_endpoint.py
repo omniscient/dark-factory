@@ -111,6 +111,10 @@ LOCAL_CREDENTIAL_ENV_SIGNALS = (
     "AWS_SESSION_TOKEN", "GOOGLE_CLOUD_PROJECT",
 )
 
+# invalidated_by must list at least these (#587 AC4, owner decision 2026-11-26);
+# fixture_suite_version is compared whether listed or not.
+INVALIDATED_BY_MINIMUM = ("model_digest", "harness_version", "registry_config")
+
 
 class RegistryError(Exception):
     """Invalid registry, evidence or staged tree. .problems is the list of messages."""
@@ -567,6 +571,11 @@ def _evidence_problems(record, entry):
     names = record["invalidated_by"]
     if not isinstance(names, list) or any(n not in FINGERPRINTS for n in names):
         problems.append(f"{where}: invalidated_by may only list {', '.join(FINGERPRINTS)}")
+    # List membership, not set(): reached only when every element is a known name, but a
+    # set() of a malformed list would raise TypeError on an unhashable element.
+    elif not all(m in names for m in INVALIDATED_BY_MINIMUM):
+        problems.append(f"{where}: invalidated_by must include at least "
+                        f"{', '.join(INVALIDATED_BY_MINIMUM)}")
     return problems
 
 

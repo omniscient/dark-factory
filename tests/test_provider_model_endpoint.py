@@ -564,14 +564,18 @@ def test_fingerprint_mismatch_is_stale(pinned_suite, monkeypatch, change):
 
 @pytest.mark.parametrize("name", ["quantisation", "runtime_version", "chat_template", "context_settings"])
 def test_unresolvable_fingerprint_is_unknown(pinned_suite, name):
-    record = _record(LOCAL, invalidated_by=["model_digest", name])
+    # #633: the three required names plus the one under test, so the record clears the
+    # invalidated_by minimum and reaches the fingerprint comparison.
+    record = _record(LOCAL, invalidated_by=["model_digest", "harness_version", "registry_config",
+                                            name])
     state, reasons = me.evidence_state(record, LOCAL)
     assert state == "unknown" and name in reasons[0]
 
 
 def test_unpinned_fixture_suite_is_unknown(monkeypatch):
     monkeypatch.setattr(me, "PINNED_FIXTURE_SUITE_VERSION", None)
-    state, reasons = me.evidence_state(_record(LOCAL, invalidated_by=["model_digest"]), LOCAL)
+    record = _record(LOCAL, invalidated_by=["model_digest", "harness_version", "registry_config"])
+    state, reasons = me.evidence_state(record, LOCAL)
     assert state == "unknown" and "fixture_suite_version" in reasons[0]
 
 
@@ -1440,3 +1444,39 @@ def test_platform_identity_variable_does_not_fail_local_selection(tmp_path, monk
 def test_measured_non_diverting_names_are_not_guard_signals():
     assert not set(NON_DIVERTING_VARS) & set(me.LOCAL_CREDENTIAL_ENV_SIGNALS)
     assert not set(PLATFORM_IDENTITY_VARS) & set(me.LOCAL_CREDENTIAL_ENV_SIGNALS)
+
+
+MINIMUM = ["model_digest", "harness_version", "registry_config"]
+
+
+@pytest.mark.parametrize("names", [[], ["harness_version", "registry_config"],
+                                   ["model_digest", "registry_config"],
+                                   ["model_digest", "harness_version"],
+                                   ["fixture_suite_version"]])
+def test_invalidated_by_below_minimum_is_declared(pinned_suite, names):
+    state, reasons = me.evidence_state(_record(LOCAL, invalidated_by=names), LOCAL)
+    assert state == "declared"
+    assert any("invalidated_by must include at least model_digest, harness_version, "
+               "registry_config" in r for r in reasons)
+
+
+def test_invalidated_by_exact_minimum_is_tested(pinned_suite, monkeypatch):
+    # Regression guard (passes on main): the three alone are enough, and they are compared.
+    assert me.evidence_state(_record(LOCAL, invalidated_by=list(MINIMUM)), LOCAL) == ("tested", [])
+    monkeypatch.setattr(me, "observed_harness_version", lambda: "2.1.300")
+    assert me.evidence_state(_record(LOCAL, invalidated_by=list(MINIMUM)), LOCAL)[0] == "stale"
+
+
+@pytest.mark.parametrize("bad", [{"model_digest": 1}, ["model_digest"], 7, None])
+def test_invalidated_by_non_string_element_is_declared_not_an_exception(pinned_suite, bad):
+    # Regression guard (passes on main): a malformed element must never raise.
+    record = _record(LOCAL, invalidated_by=[*MINIMUM, bad])
+    assert me.evidence_state(record, LOCAL)[0] == "declared"
+
+
+def test_below_minimum_evidence_fails_the_helper_closed(tmp_path, monkeypatch, pinned_suite):
+    reg = _valid_local(tmp_path, monkeypatch, _record(LOCAL, invalidated_by=[]))
+    problems, hosting = me.preflight(reg, "local-test", intent=HELPER)
+    assert hosting == "local"
+    assert "endpoint 'local-test': capability evidence is 'declared', not 'tested' (contract §4.5)" \
+        in problems
