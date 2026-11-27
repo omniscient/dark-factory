@@ -117,6 +117,11 @@ if command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; the
   # caller's environment. The render is piped straight into the parser, never echoed.
   CLOUD_CREDS=$(PYTHONPATH="$REPO_ROOT/scripts" python3 -c \
     "from factory_core.providers import model_endpoint as me; print(' '.join(me.CLOUD_CREDENTIALS))")
+  if [ -z "$CLOUD_CREDS" ]; then
+    echo "FAIL: CLOUD_CREDS lookup returned empty (import error or wrong PYTHONPATH?) — the forbidden-credential coverage below would test nothing"
+    [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
+    exit 1
+  fi
   # shellcheck disable=SC2086
   # DOCKER_HOST keeps a working value: the CLI itself reads it.
   if ! env DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}" \
@@ -179,15 +184,26 @@ if wrong:
   echo "PASS: preview-helper-proxy leaves every other render byte-identical"
 
   # 4d) helper_secret_is_not_in_rendered_config (#634): with a sentinel in the caller's
-  # environment, the uninterpolated helper render and (guard) an interpolated factory render
-  # never carry it. No test captures an interpolated helper-profile render with it set.
+  # environment, an interpolated factory-profile render never carries it (guard — no test
+  # captures an interpolated helper-profile render with it set), and the uninterpolated
+  # helper render's secret key stays unresolved (null), never stamped with a value by
+  # --no-interpolate — a bare `grep` for the sentinel here can never fail either way, since
+  # the pass-through form (`KEY:` with no value) has no literal to match against.
   SENTINEL_VALUE="sk-sentinel-helper-secret-never-rendered"
   if FACTORY_HELPER_MODEL_SECRET="$SENTINEL_VALUE" \
-       docker compose -f "$RC" --profile preview-helper-proxy config --no-interpolate 2>&1 \
-       | grep -qF "$SENTINEL_VALUE" \
-     || FACTORY_HELPER_MODEL_SECRET="$SENTINEL_VALUE" \
        docker compose -f "$RC" --profile factory config 2>&1 | grep -qF "$SENTINEL_VALUE"; then
     echo "FAIL: the helper secret value appears in a rendered config"
+    [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
+    exit 1
+  fi
+  if ! FACTORY_HELPER_MODEL_SECRET="$SENTINEL_VALUE" \
+       docker compose -f "$RC" --profile preview-helper-proxy config --no-interpolate --format json 2>/dev/null \
+     | python3 -c '
+import json, sys
+env = json.load(sys.stdin)["services"]["preview-helper-proxy"]["environment"]
+sys.exit(0 if env.get("FACTORY_HELPER_MODEL_SECRET") is None else 1)
+'; then
+    echo "FAIL: the helper secret key carries a value in the uninterpolated render (expected null/pass-through)"
     [ "$SCRATCH_ENV" = "1" ] && rm -f "$REPO_ROOT/.archon/.env"
     exit 1
   fi

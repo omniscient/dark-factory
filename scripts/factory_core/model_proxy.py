@@ -30,6 +30,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from datetime import datetime, timezone
@@ -40,6 +41,12 @@ from aiohttp import web
 LEDGER_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
 )
+# Sidecar lock (#634): preview-helper-proxy and factory-model-proxy can share this same
+# LEDGER_PATH (the helper mounts scheduler_state but sets no MODEL_PROXY_LEDGER_PATH of its
+# own), so rotation and append must be serialized across processes, not just within one. A
+# lock file that is never itself rotated/renamed lets append_ledger() hold one lock across
+# both steps below, instead of flocking LEDGER_PATH only for the append.
+LEDGER_LOCK_PATH = LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
 CURRENT_RUN_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_CURRENT_RUN_PATH")
     or f"{os.environ.get('CURRENT_RUN_DIR', '/var/lib/dark-factory')}/current-run.json"
@@ -173,13 +180,17 @@ def _rotate_if_needed(path: pathlib.Path) -> None:
 
 def append_ledger(row: dict) -> None:
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _rotate_if_needed(LEDGER_PATH)
-    with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    # Rotate-and-append under one lock (#634): locking LEDGER_PATH itself only covered the
+    # write, so two processes could both pass the rotate check at once and clobber/misplace
+    # rows. The lock file is never rotated/renamed, so it stays a stable mutex for both steps.
+    with open(LEDGER_LOCK_PATH, "a", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
-            fh.write(json.dumps(row) + "\n")
+            _rotate_if_needed(LEDGER_PATH)
+            with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
         finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
 def post_seq_ledger(row: dict) -> None:
@@ -607,6 +618,18 @@ def _parse_args(argv):
     return parser.parse_args(argv)
 
 
+def _same_proxy_address(a: str, b: str) -> bool:
+    """True when two base_urls name the same host:port (#634).
+
+    A bare `.rstrip("/")` string compare misses a scheme-relative or casing mismatch, e.g.
+    `http://preview-helper-proxy:8787/v1` or `http://PREVIEW-HELPER-PROXY:8787` against
+    `http://preview-helper-proxy:8787` — both reach the same socket. Compare the parsed
+    hostname (case-insensitively) and port instead; the path/scheme are irrelevant here.
+    """
+    pa, pb = urllib.parse.urlsplit(a), urllib.parse.urlsplit(b)
+    return (pa.hostname or "").lower() == (pb.hostname or "").lower() and pa.port == pb.port
+
+
 def main(argv=None) -> None:
     # argv None means no arguments, never sys.argv: callers that pass nothing get today's
     # behaviour (#634). The module entry point below passes sys.argv[1:].
@@ -637,8 +660,8 @@ def main(argv=None) -> None:
                            f"'{destination['endpoint_id']}' is "
                            f"hosting_location={destination['hosting_location']} — a helper "
                            "proxy never forwards to the cloud default")
-            elif (destination["upstream"].rstrip("/")
-                  == model_endpoint.HELPER_PROXY_BASE_URL.rstrip("/")):
+            elif _same_proxy_address(destination["upstream"],
+                                     model_endpoint.HELPER_PROXY_BASE_URL):
                 problem = (f"endpoint '{destination['endpoint_id']}' base_url is the helper "
                            "proxy's own address — a proxy must never forward to its own address")
             if problem:
