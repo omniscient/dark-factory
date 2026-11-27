@@ -18,11 +18,13 @@ and resource fit before certification (#562) and the first local-eligible dispat
 It changes no default behaviour. With `FACTORY_MODEL_ENDPOINT` unset (the default), nothing in
 this runbook is read, staged or checked, and dispatch argv and env are unchanged.
 
-It routes nothing either. Every local registry entry fails preflight today: `_NO_LOCAL_DISPATCH`
-in `scripts/factory_core/providers/model_endpoint.py` rejects any `hosting_location: local`
-selection until #587 ships. The proxy service receives none of the endpoint variables; delivering
-them is also #587's. Live activation needs #562's certification and #587's first local-eligible
-dispatch. It is not part of this runbook.
+It routes nothing either. `_NO_LOCAL_DISPATCH` in
+`scripts/factory_core/providers/model_endpoint.py` rejects every `hosting_location: local`
+selection on the scheduler side. On the run side it rejects every dispatch intent except
+`classify-preview-helper` (#633), and nothing dispatches that intent until #587 ships. So every
+local registry entry fails preflight today. The proxy service receives none of the endpoint
+variables; delivering them is also #587's. Live activation needs #562's certification and
+#587's first local-eligible dispatch. It is not part of this runbook.
 
 "Operator" means the person who controls the instance's `deploy/instances/<instance>/` directory
 and the scheduler's env files. Every step below is the operator's, on their own host. The factory
@@ -418,9 +420,15 @@ PYTHONPATH=scripts python -m pytest tests/test_provider_model_endpoint.py tests/
 
 - Nothing here is certification. Every number in this runbook is a starting point; #562 owns
   certified figures.
-- Selecting a local endpoint is refused everywhere until #587 (`_NO_LOCAL_DISPATCH`).
-- The run container's cloud-credential guard does not yet cover Bedrock/Vertex switches or AWS/GCP
-  alternate credentials (#594). That is a precondition of #587, not part of this runbook.
+- Selecting a local endpoint is refused by the scheduler, and by the run container for every
+  intent except `classify-preview-helper` (#633), which nothing dispatches until #587
+  (`_NO_LOCAL_DISPATCH`).
+- The run container's cloud-credential guard also covers the Bedrock, Vertex, Foundry and Mantle
+  switches and AWS/GCP alternate credentials (#594, closed by #633; the full list is in
+  [configuration.md](configuration.md) "Model endpoint registry"). A capability-evidence record
+  must list `model_digest`, `harness_version` and `registry_config` in `invalidated_by`, and only
+  names `evidence_state()` can resolve (those three and `fixture_suite_version`). Otherwise it is
+  not `tested`.
 - The probed rig ignores a forced `tool_choice` and has no `/v1/messages/count_tokens`. The adapter
   refuses both before any outbound call (see `docs/dark-factory-model-proxy-rollout.md`).
 - HTTP `500` has no failure class (see "Failure modes").

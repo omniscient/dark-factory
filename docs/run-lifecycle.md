@@ -53,15 +53,21 @@ The scheduler starts a run with
 (`scheduler.sh:388-417`; the compose file is `run-compose.yml`, baked to that path by
 `Dockerfile:150`). The command string is the only argument. A human can start the same
 run by hand; with no argument the entrypoint prints usage and exits 1
-(`entrypoint.sh:99-108`).
+(`entrypoint.sh:21-25`).
 
 The command is interpreted twice, by two different mechanisms:
 
-1. **Entrypoint intent.** `entrypoint.sh:113-119` takes the first `#<digits>` as the issue
-   number and matches the first word, case-insensitively, against
-   `fix|continue|close|refine|plan|deconflict|recheck`. No match means `fix`. The exact
-   strings `Fix main` / `fix main` become `fix-main`, and `Audit deps` / `audit deps`
-   become `audit-deps`.
+1. **Entrypoint intent.** An explicit `case` (`entrypoint.sh:26-74`) runs right after the
+   identity is sourced and before any provider-CLI call (#633). The exact strings `Fix main` /
+   `fix main` become `fix-main`, and `Audit deps` / `audit deps` become `audit-deps`.
+   `Classify preview (helper) #N` and `Verify preview classification #N`, matched as whole
+   strings and case-sensitively, become `classify-preview-helper` and
+   `classify-preview-checker`; both exit 1 with "not available" until #587. Any other command
+   is matched case-insensitively by its leading word against
+   `fix|continue|close|refine|plan|deconflict|recheck`. No match exits 1 with the usage text on
+   stderr, before any clone, tracker or model call; there is no fallback to `fix`. The first
+   `#<digits>` is the issue number (`:77`). The intent goes to the provider preflight and the
+   hosting resolution as `--intent` ([section 2](#2-before-the-workflow-entrypointsh)).
 2. **Workflow intent.** If the run reaches the workflow, the `parse-intent` node (a Haiku
    prompt with no tools) re-parses the same string into
    `new|continue|close|refine|plan|resolve` (`workflows/archon-dark-factory.yaml:21-41`).
@@ -79,6 +85,8 @@ The command is interpreted twice, by two different mechanisms:
 | `Recheck main` (`scheduler.sh:159`) | `recheck` | never reached | Entrypoint only: smoke gate, then exit |
 | `Fix main` (`scheduler.sh:185`) | `fix-main` | never reached | Entrypoint only: main-red auto-fix |
 | `Audit deps` (`deps_audit_check` in `scheduler.sh`) | `audit-deps` | never reached | Entrypoint only: dependency-health loop |
+| `Classify preview (helper) #N` (not issued yet; #587) | `classify-preview-helper` | never reached | Exits 1, "not available", until #587 |
+| `Verify preview classification #N` (not issued yet; #587) | `classify-preview-checker` | never reached | Exits 1, "not available", until #587 |
 
 When and why the scheduler picks each command is covered in [scheduler.md](scheduler.md).
 
@@ -111,37 +119,37 @@ The script runs under `set -euo pipefail` (`entrypoint.sh:2`). Steps, in executi
 | # | Step | Lines | Notes |
 |---|---|---|---|
 | 1 | Source instance identity (`scripts/identity.sh`) | 5-6 | Provides repo slug, clone dir, board constants |
-| 2 | Provider preflight (`providers/cli.py preflight`) | 9-10 | Validates required environment. When `FACTORY_MODEL_ENDPOINT` is set it also checks the staged model endpoint registry against `FACTORY_MODEL_REGISTRY_SHA256` and the selected entry (#557; [configuration.md](configuration.md) "Model endpoint registry"). A failure here ends the run before any ticket signal exists |
-| 2a | Resolve the model-endpoint hosting location (`providers/cli.py model-endpoints hosting`, the baked copy) | 12-21 | Sets `DF_ENDPOINT_HOSTING` to `local` only when the resolver prints exactly `hosting=local`; anything else is `cloud`. Built on `load_verified_entry`, so it stays `cloud` until #587 lifts the local-dispatch block (#586, [section 6.F](#f-rate-limit-and-session-window-handling-entrypoint)) |
-| 3 | Git identity (`<Product> Factory`, `factory@<repo>`) | 31-36 | |
-| 4 | Parse arguments into `ISSUE_NUM` and `INTENT` | 99-119 | See [section 1](#1-intents) |
-| 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 123-131 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
-| 6 | Ledger-writability check on `runs.jsonl` | 137-155 | Warning plus a health event; never fatal |
-| 7 | Write `current-run.json` to the state dir | 169-194 | Read by the model proxy. `stage` is the intent for single-phase intents and `unknown` for `fix`/`continue`. A `role` field is added only when `FACTORY_DISPATCH_ROLE` is non-empty (a non-token value is written as `invalid`); the proxy reads it only when `FACTORY_MODEL_ENDPOINT` is set (#559, [configuration.md](configuration.md) "Model endpoint registry") |
-| 8 | Concurrency guard | 201-211 | Counts other running containers whose name contains `FACTORY_RUN_PREFIX`; exits 1 if that count is at or above `FACTORY_WIP_LIMIT` |
-| 9 | Move the issue to **In Progress** | 225-228 | Skipped for `close`, `refine`, `plan`, `deconflict`, and when there is no issue number |
-| 10 | Install the `ERR` trap `on_failure` | 679 | From here on, an unguarded failing command runs `on_failure` ([section 9](#9-how-a-run-ends)) |
-| 11 | `gh auth setup-git` | 802 | Credentials come from the `gh` helper, not the remote URL (reason at `:24-28`) |
-| 12 | Delete any existing clone dir, `git clone`, `cd` into it | 805-810 | |
-| 13 | Adapter validity gate | 813 | [Gate A2](#a-run-start-gates-entrypoint) |
-| 14 | Self-contained fallbacks | 824-841 | If the clone lacks `dark-factory/scripts`, `.archon/workflows` or `.archon/commands`, copy the baked copies in and add them to `.git/info/exclude` |
-| 15 | Materialize the effective config | 849-853 | `factory_core.effective_config --materialize --out-dir "$ARTIFACTS_DIR"`: the clone-side `.claude/skills/refinement/config.yaml` (unless the target commits one) plus `$ARTIFACTS_DIR/run-config.{json,env}`; exports `FACTORY_RUN_CONFIG_JSON`; fail-open |
-| 16 | Apply config knobs | 857 (`apply_run_config_env`, `scripts/run_config_env.sh`) | Reads `scheduler.factory_wip_limit`, `conflict_resolution.ai_tier` and the three `scheduler.session_window_*` keys from `$ARTIFACTS_DIR/run-config.env`; a missing file warns and keeps the bootstrap defaults |
-| 17 | Compute the side-effect level, prepend the git/gh shim dir to `PATH` | 861 (`_compute_side_effect_level`, 71-96) | Reads only the baked config. Falls back to level 1 if resolution fails |
-| 18 | Copy the preview compose template and `seed/` into `dark-factory/` in the clone; git-exclude both | 866-873 | |
-| 19 | Install target dependencies | 878-892 | `pip install -r backend/requirements.txt` and `npm install` in `frontend/`, each only if the file exists |
-| 20 | Write `.claude/settings.local.json` (Workflow tool disabled; codeindex MCP server if the binary exists); git-exclude it | 901-911 | |
-| 21 | `pre-commit install` | 914 | Failure ignored |
-| 22 | `fix-main` branch | 916-924 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
-| 22a | `audit-deps` branch | after the `fix-main` branch | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
-| 23 | Smoke gate, for `fix`, `continue`, `deconflict`, `recheck` | 946-949 | [Gate A3](#a-run-start-gates-entrypoint) |
-| 24 | `recheck` exit | 955-958 | Reaching this line means the gate passed |
-| 25 | `deconflict` flow | 964-1060 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
-| 26 | Run the workflow | 1063-1122 | `archon workflow run archon-dark-factory "$ARGUMENTS"`, output tee'd to a temp file |
+| 2 | Parse arguments into `INTENT` and `ISSUE_NUM` | 8-77 | Explicit `case` ([section 1](#1-intents)). No argument prints usage; an unrecognized command or a not-yet-available intent exits 1. All of these happen before any provider, tracker, clone or model call (#633) |
+| 3 | Provider preflight (`providers/cli.py preflight --intent "$INTENT"`) | 79-81 | Validates required environment. When `FACTORY_MODEL_ENDPOINT` is set it also checks the staged model endpoint registry against `FACTORY_MODEL_REGISTRY_SHA256` and the selected entry (#557; [configuration.md](configuration.md) "Model endpoint registry"). A local entry passes only for `classify-preview-helper` (#633). A failure here ends the run before any ticket signal exists |
+| 3a | Resolve the model-endpoint hosting location (`providers/cli.py model-endpoints hosting --intent "$INTENT"`, the baked copy) | 83-92 | Sets `DF_ENDPOINT_HOSTING` to `local` only when the resolver prints exactly `hosting=local`; anything else is `cloud`. Built on `load_verified_entry`, so it is `local` only for a verified local entry and `classify-preview-helper`, which nothing dispatches until #587 (#586, #633, [section 6.F](#f-rate-limit-and-session-window-handling-entrypoint)) |
+| 4 | Git identity (`<Product> Factory`, `factory@<repo>`) | 105-107 | |
+| 5 | Generate `RUN_ID` (uuid4 hex), record `RUN_STARTED_AT`, create `ARTIFACTS_DIR` | 169-179 | `~/.archon/workspaces/<owner>/<repo>/artifacts/runs/<run-id>` |
+| 6 | Ledger-writability check on `runs.jsonl` | 181-203 | Warning plus a health event; never fatal |
+| 7 | Write `current-run.json` to the state dir | 205-242 | Read by the model proxy. `stage` is the intent for single-phase intents and `unknown` for `fix`/`continue`. A `role` field is added only when `FACTORY_DISPATCH_ROLE` is non-empty (a non-token value is written as `invalid`); the proxy reads it only when `FACTORY_MODEL_ENDPOINT` is set (#559, [configuration.md](configuration.md) "Model endpoint registry") |
+| 8 | Concurrency guard | 244-259 | Counts other running containers whose name contains `FACTORY_RUN_PREFIX`; exits 1 if that count is at or above `FACTORY_WIP_LIMIT` |
+| 9 | Move the issue to **In Progress** | 272-276 | Skipped for `close`, `refine`, `plan`, `deconflict`, and when there is no issue number |
+| 10 | Install the `ERR` trap `on_failure` | 811 | From here on, an unguarded failing command runs `on_failure` ([section 9](#9-how-a-run-ends)) |
+| 11 | `gh auth setup-git` | 934 | Credentials come from the `gh` helper, not the remote URL (reason at `:95-99`) |
+| 12 | Delete any existing clone dir, `git clone`, `cd` into it | 936-942 | |
+| 13 | Adapter validity gate | 945 | [Gate A2](#a-run-start-gates-entrypoint) |
+| 14 | Self-contained fallbacks | 947-973 | If the clone lacks `dark-factory/scripts`, `.archon/workflows` or `.archon/commands`, copy the baked copies in and add them to `.git/info/exclude` |
+| 15 | Materialize the effective config | 975-988 | `factory_core.effective_config --materialize --out-dir "$ARTIFACTS_DIR"`: the clone-side `.claude/skills/refinement/config.yaml` (unless the target commits one) plus `$ARTIFACTS_DIR/run-config.{json,env}`; exports `FACTORY_RUN_CONFIG_JSON`; fail-open |
+| 16 | Apply config knobs | 992 (`apply_run_config_env`, `scripts/run_config_env.sh`) | Reads `scheduler.factory_wip_limit`, `conflict_resolution.ai_tier` and the three `scheduler.session_window_*` keys from `$ARTIFACTS_DIR/run-config.env`; a missing file warns and keeps the bootstrap defaults |
+| 17 | Compute the side-effect level, prepend the git/gh shim dir to `PATH` | 996 (`_compute_side_effect_level`, 142-167) | Reads only the baked config. Falls back to level 1 if resolution fails |
+| 18 | Copy the preview compose template and `seed/` into `dark-factory/` in the clone; git-exclude both | 998-1008 | |
+| 19 | Install target dependencies | 1010-1027 | `pip install -r backend/requirements.txt` and `npm install` in `frontend/`, each only if the file exists |
+| 20 | Write `.claude/settings.local.json` (Workflow tool disabled; codeindex MCP server if the binary exists); git-exclude it | 1029-1046 | |
+| 21 | `pre-commit install` | 1049 | Failure ignored |
+| 22 | `fix-main` branch | 1051-1059 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
+| 22a | `audit-deps` branch | 1061-1075 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
+| 23 | Smoke gate, for `fix`, `continue`, `deconflict`, `recheck` | 1077-1084 | [Gate A3](#a-run-start-gates-entrypoint) |
+| 24 | `recheck` exit | 1086-1093 | Reaching this line means the gate passed |
+| 25 | `deconflict` flow | 1096-1195 | Runs and exits; [section 3](#3-paths-handled-entirely-by-the-entrypoint) |
+| 26 | Run the workflow | 1197-1265 | `archon workflow run archon-dark-factory "$ARGUMENTS"`, output tee'd to a temp file |
 
 The workflow therefore runs for `refine`, `plan`, `fix`, `continue` and `close` only.
 `refine`, `plan` and `close` skip the smoke gate; `close` and `recheck` skip the adapter
-gate (`entrypoint.sh:759-764`).
+gate (`entrypoint.sh:831-836`).
 
 ---
 

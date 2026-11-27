@@ -549,22 +549,35 @@ from the source's (#593). The run container's preflight fails if the digest is m
 not match, if any file in the staged tree is larger than 1 MiB, and also if a digest arrives
 with no endpoint selected. Every check is made on the bytes the digest was computed over: each
 staged file is read once (#593). A local selection also fails if any
-cloud model credential is set in the container, if `ANTHROPIC_BASE_URL` or any of the four
-`ANTHROPIC_DEFAULT_*_MODEL` aliases does not match the entry, if its capability evidence is
-not `tested`, and in every case until #587 ships a local-eligible dispatch.
+cloud model credential or alternate cloud-auth signal (below) is set in the container, if
+`ANTHROPIC_BASE_URL` or any of the four `ANTHROPIC_DEFAULT_*_MODEL` aliases does not match the
+entry, or if its capability evidence is not `tested`. It also fails for every dispatch intent
+except `classify-preview-helper` (`LOCAL_ELIGIBLE_INTENTS`, #633). `entrypoint.sh` derives the
+intent from its command and passes it to the baked CLI's `preflight` and
+`model-endpoints hosting` as `--intent`; no environment variable, `current-run.json` field or
+registry content can supply it. The scheduler side (`preflight --side scheduler`,
+`model-endpoints hosting-check`) still refuses every local selection, and nothing dispatches
+the helper intent until #587.
 
-Known gap, a precondition of #587 (#594): that cloud-credential check covers only the static
-credentials in `CLOUD_CREDENTIALS` (`scripts/factory_core/providers/model_endpoint.py`). It does
-not yet see three ways Claude Code reaches a cloud model without `ANTHROPIC_BASE_URL`:
-`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`; the AWS alternate-auth signals
-`_AWS_ALT_AUTH_SIGNALS` in `scripts/factory_core/providers/model.py` already enumerates for the
-Bedrock preflight (`AWS_PROFILE`, `AWS_SESSION_TOKEN`, role and container credentials); and GCP
-application-default credentials (compare `_GCP_ALT_AUTH_SIGNALS` in the same file). This is
-inert today, because every local selection already fails, but #587 must widen the guard
-before the first local-eligible dispatch, mirroring `_AWS_ALT_AUTH_SIGNALS` rather than
-copying it, with its own tests. #587 must also decide whether a capability-evidence record
-may carry an empty `invalidated_by`: one is accepted today, and then only
-`fixture_suite_version` is compared.
+Alternate cloud-auth guard (#594, closed by #633): besides the static credentials in
+`CLOUD_CREDENTIALS`, a local selection fails, with no warn-only mode, when any name in
+`LOCAL_CREDENTIAL_ENV_SIGNALS` (`scripts/factory_core/providers/model_endpoint.py`) is set:
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`,
+`CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`,
+`CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `AWS_PROFILE`, `AWS_ROLE_ARN`,
+`AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`,
+`AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_SESSION_TOKEN`, `GOOGLE_CLOUD_PROJECT`. Each is a way
+Claude Code reaches a cloud model without `ANTHROPIC_BASE_URL`. The tuple mirrors, and never
+imports, `_AWS_ALT_AUTH_SIGNALS` / `_GCP_ALT_AUTH_SIGNALS` in
+`scripts/factory_core/providers/model.py`. It leaves out the platform-identity variables
+(`AWS_EXECUTION_ENV`, `K_SERVICE`, `GAE_APPLICATION`, `FUNCTION_TARGET`,
+`KUBERNETES_SERVICE_HOST`), which name where a container runs, not a credential. It also leaves
+out `CLAUDE_CODE_USE_GATEWAY` and `AWS_BEARER_TOKEN_BEDROCK`, which the pinned CLI 2.1.282 was
+measured not to divert when either is set alone. A capability-evidence record's
+`invalidated_by` must list at least `model_digest`, `harness_version` and `registry_config`. A
+record below that minimum, an empty list included, resolves `declared`. List only fingerprints
+`evidence_state()` can resolve (those three and `fixture_suite_version`); any other name
+resolves `unknown`. `fixture_suite_version` is compared whether listed or not.
 
 A record's `fixture_suite_version` is compared with
 `model_endpoint.PINNED_FIXTURE_SUITE_VERSION`, the SHA-256 digest of the capability suite in
@@ -618,8 +631,10 @@ registry directory mounted at `/etc/dark-factory/model-registry`
 A run container also resolves its hosting location once, before the clone, with
 `model-endpoints hosting` on the baked CLI. It prints exactly `hosting=local` or
 `hosting=cloud` and always exits 0; any problem prints `hosting=cloud`. It reads the same
-staged copy and digest as `model-endpoints show`, so it stays `cloud` for every entry until
-#587 (#586; [run-lifecycle.md](run-lifecycle.md) section 6.F).
+staged copy and digest as `model-endpoints show` and passes the run's `--intent` to
+`load_verified_entry()`. So it prints `hosting=local` only for a verified local entry and the
+`classify-preview-helper` intent, which nothing dispatches until #587 (#586, #633;
+[run-lifecycle.md](run-lifecycle.md) section 6.F).
 
 **Back to default cloud:** remove `FACTORY_MODEL_ENDPOINT` from `instance.env` (and
 `FACTORY_MODEL_REGISTRY_DIR` from the interpolation env), then recreate the scheduler with
