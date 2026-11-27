@@ -146,7 +146,7 @@ IDs are opaque strings. This operation set is the entire contract an adapter imp
 | `add_label(id, name)` / `remove_label(id, name)` | label state machine | `gh issue edit` | `PUT /issue/{key}` labels update |
 | `upsert_comment(id, marker, body)` | idempotent marker comment | find-by-marker + PATCH/create | find-by-marker + PUT/POST |
 | `add_comment(id, body)` → bool | append-only comment (never edits) | `gh issue comment N --repo SLUG --body` | `POST /issue/{key}/comment` |
-| `find_comment(id, marker)` → `{id, body}` or `None` | newest marker comment with its body (cost-report upsert) | `gh api .../issues/N/comments --jq` + `gh api .../issues/comments/ID --jq .body` | `GET /issue/{key}/comment`, newest match |
+| `find_comment(id, marker)` → `{id, body}` or `None` | newest marker comment with its body (cost-report upsert) | `gh api .../issues/N/comments?per_page=100 --paginate` (match in Python, #629) + `gh api .../issues/comments/ID --jq .body` | `GET /issue/{key}/comment`, newest match |
 | `update_comment(id, comment_id, body)` → bool | edit a found comment in place | `gh api .../issues/comments/ID --method PATCH -F body=@file` | `PUT /issue/{key}/comment/{id}` |
 | `list_board_items()` → `{"items": [{content:{number,title,type}, labels, status}]}` | scheduler poll snapshot of the whole board (one call sequence per poll) | the `ProjectV2 items(first: 100)` GraphQL query, paged | JQL `project=KEY`, paged |
 | `list_items(label, limit)` → `[id]` | open items carrying a label, board or not (off-board detection) | `gh issue list --state open --label L --limit N --json number` | JQL `labels = "L" AND statusCategory != Done` |

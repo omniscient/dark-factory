@@ -424,30 +424,68 @@ def test_find_comment_argv_matches_entrypoint_cost_report_lookup(monkeypatch):
 
     def fake(cmd, **kw):
         calls.append(cmd)
-        return _ok(stdout="777\n" if cmd[-1] != ".body" else "prior body\nline2\n")
+        # lookup: the merged array; body fetch: the matched comment's body
+        if cmd[-1] != ".body":
+            return _ok(stdout=json.dumps([{"id": 776, "body": "x"},
+                                          {"id": 777, "body": "<!-- dark-factory-cost-report --> prior"}]))
+        return _ok(stdout="prior body\nline2\n")
     monkeypatch.setattr(subprocess, "run", fake)
     marker = "<!-- dark-factory-cost-report -->"
     found = GitHubTracker().find_comment("42", marker)
     assert calls == [
-        ["gh", "api", f"repos/{identity.SLUG}/issues/42/comments", "--jq",
-         '[.[] | select(.body | contains("%s"))] | last | .id // empty' % marker],
+        ["gh", "api", f"repos/{identity.SLUG}/issues/42/comments?per_page=100", "--paginate"],
         ["gh", "api", f"repos/{identity.SLUG}/issues/comments/777", "--jq", ".body"],
     ]
     assert found == {"id": "777", "body": "prior body\nline2\n"}
 
 
-def test_find_comment_none_when_absent_or_lookup_fails_and_skips_body_fetch(monkeypatch):
+def test_find_comment_none_when_absent_or_lookup_fails_and_skips_body_fetch(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), _ok(stdout=""))[1])
     assert GitHubTracker().find_comment("42", "m") is None
-    assert len(calls) == 1
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _ok(stdout="777", returncode=1))
+    assert len(calls) == 2  # retried once, then gave up; no body fetch
+    assert "lookup failed twice" in capsys.readouterr().err
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd),
+                                                               _ok(stdout="777", returncode=1))[1])
     assert GitHubTracker().find_comment("42", "m") is None
+    assert len(calls) == 2
+
+
+def test_find_comment_retries_once_then_succeeds(monkeypatch):
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _ok(stdout="not json", returncode=1)  # first lookup attempt fails
+        if cmd[-1] != ".body":
+            return _ok(stdout=json.dumps([{"id": 777, "body": "marker m"}]))
+        return _ok(stdout="b\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert GitHubTracker().find_comment("42", "m") == {"id": "777", "body": "b\n"}
+    assert len(calls) == 3  # one failed lookup, one retry, one body fetch
+
+
+def test_find_comment_sees_a_marker_on_the_second_page(monkeypatch):
+    """The merged array carries every page: a marker past the old 30-comment single-page
+    limit is found (the #629 defect), and the newest match wins."""
+    def fake(cmd, **kw):
+        if cmd[-1] != ".body":
+            page = [{"id": i, "body": "filler"} for i in range(30)]
+            page.append({"id": 31, "body": "the marker comment"})
+            return _ok(stdout=json.dumps(page))
+        return _ok(stdout="newest\n")
+    monkeypatch.setattr(subprocess, "run", fake)
+    assert GitHubTracker().find_comment("42", "the marker comment") == {"id": "31",
+                                                                         "body": "newest\n"}
 
 
 def test_find_comment_body_fetch_failure_yields_empty_body_like_old_or_true(monkeypatch):
     def fake(cmd, **kw):
-        return _ok(stdout="777") if cmd[-1] != ".body" else _ok(stdout="partial", returncode=1)
+        if cmd[-1] != ".body":
+            return _ok(stdout=json.dumps([{"id": 777, "body": "with m"}]))
+        return _ok(stdout="partial", returncode=1)
     monkeypatch.setattr(subprocess, "run", fake)
     assert GitHubTracker().find_comment("42", "m") == {"id": "777", "body": ""}
 

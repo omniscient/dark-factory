@@ -33,6 +33,9 @@ export CURRENT_RUN_DIR
 
 ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/../entrypoint.sh"
 
+# The gh shim (a subprocess) needs the marker to build a matching list reply.
+export COST_MARKER
+
 trap - ERR
 set +e; set +u; set +o pipefail
 
@@ -43,7 +46,13 @@ cat > "$SHIM_DIR/gh" <<'SHIM'
 #!/usr/bin/env bash
 echo "$*" >> "$GH_LOG"
 case "$*" in
-  "api repos/"*"/issues/"*"/comments --jq "*) printf '%s' "${GH_LIST_OUT:-}"; exit "${GH_LIST_RC:-0}" ;;
+  # The paginated marker lookup (#629): reply is the merged array; the marker match is
+  # done in Python by the tracker. Empty GH_LIST_OUT = an unparseable/failed lookup.
+  "api repos/"*"/issues/"*"/comments?"*)
+    if [ -n "${GH_LIST_OUT:-}" ]; then
+      printf '[{"id": %s, "body": "%s"}]' "$GH_LIST_OUT" "$COST_MARKER"
+    fi
+    exit "${GH_LIST_RC:-0}" ;;
   "api repos/"*"/issues/comments/"*" --jq .body") printf '%s' "${GH_BODY_OUT:-}"; exit 0 ;;
   "api repos/"*"/issues/comments/"*" --method PATCH -F body=@"*)
     last="${!#}"; cp "${last#body=@}" "$GH_PATCHED_BODY"; exit "${GH_PATCH_RC:-0}" ;;
@@ -84,17 +93,16 @@ assert_eq() {
   else echo "  FAIL: $desc -- expected='$expected' got='$actual'" >&2; FAILED=$((FAILED+1)); fi
 }
 reset() { : > "$GH_LOG"; rm -f "$PRIOR_SEEN" "$GH_PATCHED_BODY"; unset GH_LIST_OUT GH_LIST_RC GH_BODY_OUT GH_PATCH_RC GH_POST_RC; }
-MARKER_JQ='[.[] | select(.body | contains("'"$COST_MARKER"'"))] | last | .id // empty'
 
 echo "--- A: no prior cost-report comment -> new comment, no prior body ---"
 reset
 OUT=$(post_cost_report 2>&1); RC=$?
 assert_eq "A: returns 0" "0" "$RC"
 assert_eq "A: gh call 1 is the marker list (exact argv)" \
-  "api repos/$SLUG/issues/$ISSUE_NUM/comments --jq $MARKER_JQ" "$(sed -n 1p "$GH_LOG")"
-assert_eq "A: gh call 2 posts the rendered report" \
-  "issue comment $ISSUE_NUM --repo $SLUG --body RENDERED REPORT" "$(sed -n 2p "$GH_LOG")"
-assert_eq "A: exactly two gh calls" "2" "$(grep -cE "^(api|issue) " "$GH_LOG")"
+  "api repos/$SLUG/issues/$ISSUE_NUM/comments?per_page=100 --paginate" "$(sed -n 1p "$GH_LOG")"
+assert_eq "A: gh call 3 posts the rendered report" \
+  "issue comment $ISSUE_NUM --repo $SLUG --body RENDERED REPORT" "$(sed -n 3p "$GH_LOG")"
+assert_eq "A: exactly three gh calls (the empty lookup is retried once, then gives up)" "3" "$(grep -cE "^(api|issue) " "$GH_LOG")"
 assert_eq "A: renderer was not handed a prior body" "no" "$([ -f "$PRIOR_SEEN" ] && echo yes || echo no)"
 
 echo "--- B: prior comment exists -> body fetched, passed to renderer, PATCHed in place ---"
