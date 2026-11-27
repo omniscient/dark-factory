@@ -20,6 +20,7 @@ RECHECK_STAMP_FILE="${SCHEDULER_STATE_DIR}/main-red-last-recheck"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/identity.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/scheduler_lib.sh"
 source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/provider_env.sh"
+source "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts/preview_helper_dispatch.sh"
 SCHEDULER_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/scripts" && pwd)"
 source "${SCHEDULER_SCRIPTS_DIR}/run_config_env.sh"
 FACTORY_CORE_CLI="${FACTORY_CORE_CLI:-/opt/dark-factory/scripts/factory_core/cli.py}"
@@ -482,6 +483,12 @@ dispatch() {
   # Forward provider selection/env set in the scheduler's env (#489); see scripts/provider_env.sh.
   local -a env_flags=()
   mapfile -t env_flags < <(provider_env_flags)
+  # #587: the one changeset flag, on an implement dispatch only and only while the preview-helper
+  # lane is enabled (switch on AND endpoint set). Otherwise this adds nothing.
+  case "$command" in
+    "Fix issue #"*|"Continue issue #"*)
+      if preview_helper_enabled; then env_flags+=(-e PREVIEW_HELPER_CHANGESET_FLAG=true); fi ;;
+  esac
   local -x FACTORY_MODEL_REGISTRY_SHA256  # #557: set only by model_registry_env_flags, for this run
   model_registry_env_flags env_flags \
     || {
@@ -1669,6 +1676,11 @@ echo "Backlog scheduler started (poll every ${POLL_INTERVAL}s)"
 
 while true; do
   DISPATCHED=""
+
+  # --- Preview-helper finalise/reap (#587): first in the poll. A helper counts toward WIP, so
+  # this must run before the capacity guard; it needs no board data, so it also runs before
+  # the rate-limit wait and the board fetch. Dispatches nothing, calls no tracker. ---
+  preview_helper_finalize
   BOT_RE=$(python3 "$FACTORY_CORE_CLI" markers-regex)
 
   # Guard against rate limit exhaustion (REST call, doesn't cost GraphQL points)
@@ -1765,6 +1777,12 @@ while true; do
 
   # --- Priority 6: Epic Autopilot (see stage_epic_autopilot) ---
   stage_epic_autopilot
+
+  # --- Lowest priority: the preview-helper shadow dispatch (#587). Same slot/pause
+  # discipline as deps_audit_check, and never a second dispatch this cycle. ---
+  if [ "$SESSION_WINDOW_PAUSED" = "false" ] && [ -z "$DISPATCHED" ]; then
+    preview_helper_check
+  fi
 
   # --- Log cycle summary ---
   BUDGET=$(python3 "$FACTORY_PROVIDERS_CLI" tracker get-rate-budget 2>/dev/null \
