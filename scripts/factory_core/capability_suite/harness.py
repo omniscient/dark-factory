@@ -219,30 +219,62 @@ def _tool_results(body):
                 yield block
 
 
-def _strings(value, inside=False):
-    """(string, inside the fabricated call's tool_result block) for every string in a body."""
+def _strings(value, inside=False, ids=frozenset({mock_server.TOOL_USE_ID})):
+    """(string, inside a tool_result block for one of `ids`) for every string in a body. `ids`
+    defaults to the mock's fabricated call; the endpoint judge passes the calls it found."""
     if isinstance(value, str):
         yield value, inside
     elif isinstance(value, list):
         for item in value:
-            yield from _strings(item, inside)
+            yield from _strings(item, inside, ids)
     elif isinstance(value, dict):
         inside = inside or (value.get("type") == "tool_result"
-                            and value.get("tool_use_id") == mock_server.TOOL_USE_ID)
+                            and value.get("tool_use_id") in ids)
         for item in value.values():
-            yield from _strings(item, inside)
+            yield from _strings(item, inside, ids)
 
 
-def _naming_problem(requests):
-    """None, or why the requests did not all name the served model with the dummy credential."""
+def _without_assistant(body):
+    """A request body with its role: assistant messages removed (the model's own output)."""
+    if not isinstance(body, dict):
+        return body
+    return dict(body, messages=[m for m in body.get("messages") or []
+                                if not (isinstance(m, dict) and m.get("role") == "assistant")])
+
+
+def _read_ids(posts, seeded, cwd):
+    """The ids of every assistant Read call, in the CLI's own follow-up requests, whose
+    file_path (absolute, or relative to cwd) names the seeded file."""
+    ids = set()
+    for post in posts:
+        for message in (post["body"] or {}).get("messages") or []:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            for block in content if isinstance(content, list) else []:
+                tool_input = block.get("input") if isinstance(block, dict) else None
+                if not (isinstance(tool_input, dict) and block.get("type") == "tool_use"
+                        and block.get("name") == "Read"):
+                    continue
+                path = tool_input.get("file_path")
+                if (isinstance(path, str)
+                        and os.path.normpath(os.path.join(cwd, path)) == os.path.normpath(seeded)):
+                    ids.add(block.get("id"))
+    return ids
+
+
+def _naming_problem(requests, served_name=mock_server.SERVED_NAME,
+                    credential=mock_server.DUMMY_CREDENTIAL,
+                    credential_reason="credential_not_dummy"):
+    """None, or why the requests did not all name `served_name` with `credential` only."""
     posts = _posts(requests)
-    if any((r["body"] or {}).get("model") != mock_server.SERVED_NAME for r in posts):
+    if any((r["body"] or {}).get("model") != served_name for r in posts):
         return "model_not_served_name"
-    if (any(r["headers"].get("x-api-key") != mock_server.DUMMY_CREDENTIAL for r in posts)
+    if (any(r["headers"].get("x-api-key") != credential for r in posts)
             or any("authorization" in r["headers"]
-                   or r["headers"].get("x-api-key") not in (None, mock_server.DUMMY_CREDENTIAL)
+                   or r["headers"].get("x-api-key") not in (None, credential)
                    for r in requests)):
-        return "credential_not_dummy"
+        return credential_reason
     return None
 
 
@@ -398,3 +430,91 @@ async def check_sigint(app, base_url):
         finally:
             await finish(proc, DISCONNECT_SECONDS)
     return judge_sigint(sent, closed, list(observed.requests))
+
+
+# --- endpoint judges (#631): pure functions over what the relay recorded --------------------
+
+def judge_alias_endpoint(runs, served_name, credential):
+    """protocol_compatibility against the endpoint. runs: [(tier, exit status, requests)].
+    Every request names `served_name` with `credential` only; at least one POST per alias was
+    answered 200 and every 200 answer streamed `served_name` as its model; the CLI exited 0.
+    Only 200 answers are compared: a 429 or 5xx the CLI retried past is no mismatch."""
+    for label, status, requests in runs:
+        posts = _posts(requests)
+        if not posts:
+            return "fail", f"{label}_no_request"
+        problem = _naming_problem(requests, served_name, credential, "credential_mismatch")
+        if problem:
+            return "fail", f"{label}_{problem}"
+        answered = [p for p in posts if p["status"] == 200]
+        if not answered:
+            return "fail", f"{label}_not_answered_200"
+        if any(p["response_model"] != served_name for p in answered):
+            return "fail", f"{label}_response_model_mismatch"
+        if status != 0:
+            return "fail", f"{label}_cli_failed"
+    return "pass", "ok"
+
+
+def judge_read_endpoint(requests, seeded, cwd, served_name):
+    """tool_call_fidelity against the endpoint. Only Read was offered; the model called Read on
+    the seeded file (ids from the requests: a real endpoint mints its own); the CLI returned a
+    tool_result for such a call; both planted lines reached the endpoint only inside those
+    tool_results (assistant turns excluded: quoting is output, not promotion); no request's
+    model changed. read_not_called is the one reason that consumes an attempt."""
+    posts = _posts(requests)
+    if not posts:
+        return "fail", "no_request"
+    if _tool_names(posts[0]) != ["Read"]:
+        return "fail", "tools_not_read_only"
+    ids = _read_ids(posts, seeded, cwd)
+    if not ids:
+        return "fail", "read_not_called"
+    if not any(block.get("tool_use_id") in ids
+               for p in posts for block in _tool_results(p["body"])):
+        return "fail", "tool_use_id_mismatch"
+    for planted in (PLANTED_RESULT, PLANTED_SWITCH):
+        placed = {inside for p in posts
+                  for text, inside in _strings(_without_assistant(p["body"]), ids=ids)
+                  if planted in text}
+        if True not in placed:
+            return "fail", "planted_not_carried"
+        if False in placed:
+            return "fail", "payload_promoted"
+    if any((p["body"] or {}).get("model") != served_name for p in posts):
+        return "fail", "model_switched"
+    return "pass", "ok"
+
+
+def judge_padded_endpoint(requests, words):
+    """context_length against the endpoint: judge_padded, and the relayed answer to that
+    request reached message_stop. Never reads usage (a later change that does must sum
+    input_tokens and both cache_*_input_tokens fields, as runner.check_context_window does)."""
+    value, reason = judge_padded(requests, words)
+    if value != "pass":
+        return value, reason
+    block = padded_prompt(words).split("\n", 1)[0]
+    hit = next(p for p in _posts(requests) if any(block in text for text in _user_texts(p)))
+    if not hit["completed"]:
+        return "fail", "stream_incomplete"
+    return "pass", "ok"
+
+
+def judge_sigint_attempt(upstream_errors, first_chunk, watched, client_gone, upstream_done):
+    """timeout_cancellation, one attempt. client_gone/upstream_done are the snapshot taken
+    BEFORE the process was reaped (reaping hangs up too); watched is the attempt's watched
+    requests, counted AFTER it (a retry comes after the hang-up). None: the stream finished
+    before SIGINT landed, the attempt is consumed."""
+    if upstream_errors:
+        return "fail", upstream_errors[0]
+    if not first_chunk:
+        return "fail", "no_stream"
+    if not watched or watched[0]["status"] != 200:
+        return "fail", "not_answered_200"
+    if len(watched) != 1:
+        return "fail", "retried"
+    if upstream_done:
+        return None
+    if not client_gone:
+        return "fail", "connection_not_closed"
+    return "pass", "ok"

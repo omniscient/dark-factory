@@ -1501,3 +1501,148 @@ def test_the_fixed_observations_name_their_reason():
         "cli_over_limit_not_tested": "over_limit_not_judged_on_endpoint",
         "cli_nested_agent_not_tested": "nested_agent_not_judged_on_endpoint"}
     assert harness.VARIANTS == ("unplanted_file", "no_sigint")
+
+
+SERVED = "local-model-a"
+
+
+def _relayed_rec(body, status=200, model=SERVED, completed=True, key=SENTINEL):
+    return {"method": "POST", "path": "/v1/messages?beta=true", "status": status, "body": body,
+            "headers": {"x-api-key": key}, "response_model": model, "completed": completed}
+
+
+def _endpoint_alias_runs():
+    return [(tier, 0, [_relayed_rec(_cli_body(harness.ASK_OK, model=SERVED, tools=()))])
+            for tier in harness.TIERS]
+
+
+def test_judge_alias_endpoint_passes_and_tolerates_a_retried_429():
+    assert harness.judge_alias_endpoint(_endpoint_alias_runs(), SERVED, SENTINEL) == ("pass", "ok")
+    runs = _endpoint_alias_runs()
+    runs[0][2].insert(0, _relayed_rec(_cli_body(harness.ASK_OK, model=SERVED), status=429,
+                                      model=None, completed=False))
+    assert harness.judge_alias_endpoint(runs, SERVED, SENTINEL) == ("pass", "ok")
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r[3][2].clear(), "fable_no_request"),
+    (lambda r: r[1][2][0]["body"].update(model="sonnet"), "sonnet_model_not_served_name"),
+    (lambda r: r[0][2][0]["headers"].update({"x-api-key": "sk-other"}),
+     "opus_credential_mismatch"),
+    (lambda r: r[2][2][0]["headers"].update(authorization="Bearer x"),
+     "haiku_credential_mismatch"),
+    (lambda r: r[0][2][0].update(status=429), "opus_not_answered_200"),
+    (lambda r: r[0][2][0].update(response_model=mock_server.FALLBACK_MODEL),
+     "opus_response_model_mismatch"),
+    (lambda r: r.__setitem__(3, ("fable", 1, r[3][2])), "fable_cli_failed"),
+])
+def test_judge_alias_endpoint_fails(edit, reason):
+    runs = _endpoint_alias_runs()
+    edit(runs)
+    assert harness.judge_alias_endpoint(runs, SERVED, SENTINEL) == ("fail", reason)
+
+
+CWD = "/tmp/capability-suite-x/cwd"
+SEEDED = f"{CWD}/{harness.PLANTED_FILE}"
+PLANTED_CONTENT = f"1\t{harness.PLANTED_RESULT}\n2\t{harness.PLANTED_SWITCH}\n3\t"
+
+
+def _use(tool_id, path=SEEDED):
+    return {"type": "tool_use", "id": tool_id, "name": "Read", "input": {"file_path": path}}
+
+
+def _result_block(tool_id, content=PLANTED_CONTENT):
+    return {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+
+
+def _endpoint_read_requests(*rounds):
+    """The relay's records for one tool-case spawn: the first POST, then one follow-up per
+    round of (assistant tool_use blocks, user tool_result blocks), each repeating the history."""
+    rounds = rounds or (([_use("toolu_endpoint_7")], [_result_block("toolu_endpoint_7")]),)
+    records, history = [_relayed_rec(_cli_body(harness.READ_PROMPT, model=SERVED,
+                                               tools=("Read",)))], []
+    for uses, results in rounds:
+        history += [{"role": "assistant", "content": uses}, {"role": "user", "content": results}]
+        records.append(_relayed_rec(_cli_body(harness.READ_PROMPT, model=SERVED, tools=("Read",),
+                                              after=tuple(history))))
+    return records
+
+
+def _judge_read(requests):
+    return harness.judge_read_endpoint(requests, SEEDED, CWD, SERVED)
+
+
+@pytest.mark.parametrize("requests", [
+    _endpoint_read_requests(),
+    _endpoint_read_requests(([_use("toolu_r", harness.PLANTED_FILE)], [_result_block("toolu_r")])),
+    _endpoint_read_requests(([_use("toolu_a")], [_result_block("toolu_a")]),
+                            ([_use("toolu_b")], [_result_block("toolu_b")])),
+    _endpoint_read_requests(([_use("toolu_a"), _use("toolu_b")],
+                             [_result_block("toolu_a"), _result_block("toolu_b")])),
+    _endpoint_read_requests(([_use("toolu_e"), {"type": "text", "text": harness.PLANTED_SWITCH}],
+                             [_result_block("toolu_e")])),
+], ids=["endpoint_id", "relative_path", "read_twice", "read_in_parallel", "assistant_echo"])
+def test_judge_read_endpoint_passes(requests):
+    assert _judge_read(requests) == ("pass", "ok")
+
+
+def _follow_up(requests):
+    return requests[-1]["body"]
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r.clear(), "no_request"),
+    (lambda r: r[0]["body"].update(tools=[{"name": "Read"}, {"name": "Bash"}]),
+     "tools_not_read_only"),
+    (lambda r: r.pop(), "read_not_called"),
+    (lambda r: _follow_up(r)["messages"][2]["content"][0]["input"].update(
+        file_path="/etc/hostname"), "read_not_called"),
+    (lambda r: _follow_up(r)["messages"][3]["content"][0].update(tool_use_id="toolu_other"),
+     "tool_use_id_mismatch"),
+    (lambda r: _follow_up(r)["messages"][3]["content"][0].update(content="1\tnothing\n"),
+     "planted_not_carried"),
+    (lambda r: _follow_up(r)["system"].append({"type": "text", "text": harness.PLANTED_SWITCH}),
+     "payload_promoted"),
+    (lambda r: _follow_up(r)["messages"][0]["content"].append(
+        {"type": "text", "text": harness.PLANTED_RESULT}), "payload_promoted"),
+    (lambda r: _follow_up(r)["messages"][3]["content"].append(
+        _result_block("toolu_unrelated")), "payload_promoted"),
+    (lambda r: _follow_up(r).update(model=mock_server.FALLBACK_MODEL), "model_switched"),
+])
+def test_judge_read_endpoint_fails(edit, reason):
+    requests = _endpoint_read_requests()
+    edit(requests)
+    assert _judge_read(requests) == ("fail", reason)
+
+
+def test_judge_padded_endpoint():
+    words = 50
+    good = harness.padded_prompt(words)
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good))], words) == ("pass", "ok")
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good), completed=False)],
+                                         words) == ("fail", "stream_incomplete")
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good), status=400)], words) == (
+        "fail", "not_answered_200")
+    damaged = good.replace(" pad pad ", " pad ", 1)
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(damaged))], words) == (
+        "fail", "padding_damaged")
+
+
+def _watched(*statuses):
+    return [_relayed_rec(_cli_body(f"{harness.SIGINT_MARKER} 1: write"), status=s)
+            for s in statuses]
+
+
+@pytest.mark.parametrize("args, verdict", [
+    ((["timeout_time_to_first_token"], False, [], False, False),
+     ("fail", "timeout_time_to_first_token")),
+    (([], False, [], False, False), ("fail", "no_stream")),
+    (([], True, _watched(500), False, True), ("fail", "not_answered_200")),
+    (([], True, _watched(200, 200), True, False), ("fail", "retried")),
+    (([], True, _watched(200), False, True), None),
+    # flags that were only set by reaping are not in the snapshot: not a pass
+    (([], True, _watched(200), False, False), ("fail", "connection_not_closed")),
+    (([], True, _watched(200), True, False), ("pass", "ok")),
+])
+def test_judge_sigint_attempt(args, verdict):
+    assert harness.judge_sigint_attempt(*args) == verdict
