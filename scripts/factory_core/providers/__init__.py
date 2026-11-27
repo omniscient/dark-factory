@@ -41,11 +41,13 @@ def get_codehost():
 _missing_env = model._missing
 
 
-def preflight(side: str = "run") -> list[str]:
+def preflight(side: str = "run", intent: str | None = None) -> list[str]:
     """Return a list of human-readable problems; empty list == OK.
 
     side="scheduler" is scheduler.sh's boot check; the default is the run container's
     (entrypoint.sh). The two differ only when FACTORY_MODEL_ENDPOINT is set (#557).
+    intent is the run's dispatch intent, from entrypoint.sh's --intent only (#633); it
+    reaches the run-side endpoint check and is ignored on the scheduler side.
     """
     problems = []
 
@@ -66,7 +68,7 @@ def preflight(side: str = "run") -> list[str]:
     model_name = os.environ.get("FACTORY_MODEL_PROVIDER", "anthropic")
     endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT", "")
     if endpoint_id:
-        problems += _endpoint_preflight(side, endpoint_id, model_name)
+        problems += _endpoint_preflight(side, endpoint_id, model_name, intent)
         return problems
     if os.environ.get("FACTORY_MODEL_REGISTRY_SHA256"):
         problems.append("FACTORY_MODEL_REGISTRY_SHA256 is set but FACTORY_MODEL_ENDPOINT is not "
@@ -76,7 +78,8 @@ def preflight(side: str = "run") -> list[str]:
     return problems
 
 
-def _endpoint_preflight(side: str, endpoint_id: str, model_name: str) -> list[str]:
+def _endpoint_preflight(side: str, endpoint_id: str, model_name: str,
+                        intent: str | None = None) -> list[str]:
     # Imported here so the default path (FACTORY_MODEL_ENDPOINT unset) never loads it.
     from factory_core.providers import model_endpoint
 
@@ -87,7 +90,7 @@ def _endpoint_preflight(side: str, endpoint_id: str, model_name: str) -> list[st
             model_endpoint.SOURCE_REGISTRY_DIR, endpoint_id)
     else:
         problems, hosting = model_endpoint.preflight(
-            model_endpoint.staged_registry_dir(), endpoint_id)
+            model_endpoint.staged_registry_dir(), endpoint_id, intent=intent)
     # A local selection holds no cloud model credential, so the cloud credential check is
     # skipped for it; a cloud selection runs it in addition to the endpoint checks. hosting is
     # None when no entry was selected (unknown id, invalid or unverified registry): those

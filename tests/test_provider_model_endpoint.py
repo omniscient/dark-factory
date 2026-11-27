@@ -1206,26 +1206,27 @@ def test_hosting_is_local_only_for_a_verified_local_entry(tmp_path, monkeypatch,
     # patching _NO_LOCAL_DISPATCH cannot work, _local_problems appends it unconditionally).
     calls = []
 
-    def verified_local(path, eid):
-        calls.append((Path(path), eid))
+    def verified_local(path, eid, intent=None):
+        calls.append((Path(path), eid, intent))
         return [], {"hosting_location": "local"}
 
     monkeypatch.setattr(me, "load_verified_entry", verified_local)
     _select_staged(monkeypatch, tmp_path / "staged", "local-test")
     assert _hosting(monkeypatch, capsys) == ("hosting=local\n", "")
-    assert calls == [(tmp_path / "staged", "local-test")]
+    assert calls == [(tmp_path / "staged", "local-test", None)]
 
 
 def test_hosting_any_problem_from_the_verified_loader_is_cloud(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(me, "load_verified_entry",
-                        lambda path, eid: (["some problem"], {"hosting_location": "local"}))
+                        lambda path, eid, intent=None: (["some problem"],
+                                                        {"hosting_location": "local"}))
     _select_staged(monkeypatch, tmp_path / "staged", "local-test")
     out, err = _hosting(monkeypatch, capsys)
     assert out == "hosting=cloud\n" and "some problem" in err
 
 
 def test_hosting_exception_is_cloud_and_exits_zero(tmp_path, monkeypatch, capsys):
-    def boom(path, eid):
+    def boom(path, eid, intent=None):
         raise OSError("disk on fire")
 
     monkeypatch.setattr(me, "load_verified_entry", boom)
@@ -1480,3 +1481,45 @@ def test_below_minimum_evidence_fails_the_helper_closed(tmp_path, monkeypatch, p
     assert hosting == "local"
     assert "endpoint 'local-test': capability evidence is 'declared', not 'tested' (contract §4.5)" \
         in problems
+
+
+def _providers_cli(monkeypatch, capsys, *argv):
+    """Run `providers-cli <argv>`; returns (exit code, stdout, stderr)."""
+    from factory_core.providers import cli
+    monkeypatch.setattr(sys, "argv", ["providers-cli", *argv])
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as e:
+        code = e.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_hosting_cli_threads_intent(tmp_path, monkeypatch, capsys, pinned_suite):
+    reg = _valid_local(tmp_path, monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    assert _providers_cli(monkeypatch, capsys, "model-endpoints", "hosting", "--intent", HELPER) \
+        == (0, "hosting=local\n", "")
+    for extra in ([], ["--intent", ""], ["--intent", "fix"]):
+        code, out, err = _providers_cli(monkeypatch, capsys, "model-endpoints", "hosting", *extra)
+        assert (code, out) == (0, "hosting=cloud\n") and NO_LOCAL in err, extra
+
+
+def test_preflight_cli_threads_intent(base_env, tmp_path, monkeypatch, capsys, pinned_suite):
+    reg = _valid_local(tmp_path, monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    code, out, err = _providers_cli(monkeypatch, capsys, "preflight", "--intent", HELPER)
+    assert (code, out, err) == (0, "providers preflight: OK\n", "")
+    code, out, err = _providers_cli(monkeypatch, capsys, "preflight")
+    assert code == 1 and NO_LOCAL in err
+
+
+def test_scheduler_side_ignores_intent(base_env, tmp_path, monkeypatch, capsys):
+    from factory_core import providers
+    monkeypatch.setattr(me, "SOURCE_REGISTRY_DIR", _write_registry(tmp_path / "src", [LOCAL]))
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    assert providers.preflight(side="scheduler", intent=HELPER) == [NO_LOCAL]
+    code, out, err = _providers_cli(monkeypatch, capsys,
+                                    "preflight", "--side", "scheduler", "--intent", HELPER)
+    assert code == 1 and NO_LOCAL in err
