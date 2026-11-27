@@ -603,7 +603,8 @@ def test_a_local_entry_still_fails_startup_on_no_local_dispatch(startup, tmp_pat
 ])
 def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeypatch, capsys, setup, needle):
     # A fixture entry stands in for the loader: a real local entry never passes it (#587).
-    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], copy.deepcopy(LOCAL_ENTRY)))
+    monkeypatch.setattr(me, "load_verified_entry",
+                        lambda path, eid, intent=None: ([], copy.deepcopy(LOCAL_ENTRY)))
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
     setup(monkeypatch)
@@ -614,7 +615,7 @@ def test_fixture_fed_local_startup_failures_exit_before_binding(startup, monkeyp
 
 def test_payload_decision_allow_false_fails_startup(startup, monkeypatch, capsys):
     entry = dict(copy.deepcopy(LOCAL_ENTRY), accepts_payload_classes=["cloud_ok"])
-    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid: ([], entry))
+    monkeypatch.setattr(me, "load_verified_entry", lambda path, eid, intent=None: ([], entry))
     monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
     monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
     assert "payload decision does not allow dispatch" in _main_exit(capsys)
