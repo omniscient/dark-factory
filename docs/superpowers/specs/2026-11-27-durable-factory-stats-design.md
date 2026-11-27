@@ -1,272 +1,344 @@
-# Keep Factory Stats Forever — Non-Deleting Rotation and a Scheduler-Only Durable Stats Folder
+# Keep Factory Stats Forever — Non-Deleting Rotation and Readers for Every Generation
 
 **Issue:** #652
-**Depends on:** #645 (OPEN — model/cache-token capture in run records). #652 is scoped
-to rotation and mount mechanics only, on files #645 also touches (`model_proxy.py`,
-`run_record.py`); see "Sequencing with #645" below.
+**Depends on:** #645 (open; it changes the same two files, `model_proxy.py` and
+`run_record.py`, for a different purpose). See "Sequencing with #645".
+
+**Scope decision (operator, 2026-11-27).** #652 was cut in two. This ticket keeps rotation
+and the readers. The host mirror (the `deploy/` mount, the stats folder and the `stats-sync`
+scheduler step) moved to its own ticket; see "Moved to the mirror ticket". Nothing under
+`deploy/**` is touched here.
 
 ---
 
-## Overview / Problem Statement
+## Problem
 
-Three things are at risk of silent, permanent data loss today, verified against `main`:
+Verified against `main`:
 
-1. **Model-proxy ledger** (`request-ledger.jsonl`, `scripts/factory_core/model_proxy.py`)
-   rotates at `MODEL_PROXY_MAX_BYTES` (default 100 MiB) and **unlinks** the oldest of
-   `MODEL_PROXY_BACKUP_COUNT` (default 3) generations (`_rotate_if_needed`, `:168-179`).
-2. **Cost log** (`graphql-costs.jsonl`, `scripts/factory_core/cost_log.py`) keeps exactly
-   one rotated generation (`.1`) and **overwrites** it on every rotation
-   (`path.replace(str(path)+".1")`, `:32-38`) — and has no lock at all, so two writers
-   (scheduler + run containers) can corrupt it concurrently.
-3. **Everything durable** (`runs.jsonl`, `run-records/*.json`, the ledger, the cost log,
-   and — after #645 — per-run session transcripts) lives only inside the
-   `<instance>-scheduler-state` named volume. `docker compose down -v`, a volume prune,
-   or a Docker Desktop reset erases all of it; nothing backs it up today.
+1. **The model-proxy ledger deletes history.** `request-ledger.jsonl` rotates at
+   `MODEL_PROXY_MAX_BYTES` (default 100 MiB) and unlinks the oldest of
+   `MODEL_PROXY_BACKUP_COUNT` (default 3) generations
+   (`scripts/factory_core/model_proxy.py::_rotate_if_needed`, `:168-179`).
+2. **The cost log overwrites history and takes no lock.** `graphql-costs.jsonl` keeps one
+   rotated generation and replaces it on every rotation
+   (`scripts/factory_core/cost_log.py:32-38`, `path.replace(str(path) + ".1")`), although the
+   scheduler and every run container append to the file.
+3. **Readers see only plain generations `.1` … `.BACKUP_COUNT` and take no lock.**
+   `run_record.py::_iter_ledger_paths` (`:753-758`) lists exactly those names;
+   `_read_ledger_rows` (`:761`) and `_build_issue_economics` (`:1236`) read them while
+   `append_ledger` may be rotating.
 
-`run_record.py::_read_ledger_rows` also reads without holding any lock, racing freely
-against `append_ledger`'s rotate+write.
+## Goal
 
-## Requirements
+No code path deletes or overwrites a rotated generation of the ledger or of the cost log,
+every generation stays readable by every reader, and none of this makes a model request, a
+scheduler poll or a preview-helper outcome wait on a file that a run container can plant or
+a lock that a run container can hold.
 
-### R1 — Non-deleting rotation (ledger and cost log, one shared scheme)
+## Threat model
 
-- Rotation triggers at the existing size thresholds (`MAX_LEDGER_BYTES` /
-  `ROTATE_BYTES`), unchanged.
-- Under the file's lock: rename the live file to `<name>.<N>`, where `N` = highest
-  existing generation number + 1 (never 1, never reused). The rename must use a
-  mechanism that fails rather than overwrite an existing `<name>.<N>` (e.g.
-  `os.link` + `os.unlink` of the source, or `os.rename` after confirming the
-  destination doesn't exist — `Path.rename`/`os.rename` on POSIX silently replaces an
-  existing destination, so an explicit pre-check or `os.link`+unlink is required, not a
-  bare `rename`).
-- Lock released. Gzip-compress `<name>.<N>` to a **unique per-process temp name**
-  (e.g. `<name>.<N>.gz.tmp.<pid>`) — compression never runs while the lock is held.
-- Re-acquire the lock briefly: if `<name>.<N>.gz` does not already exist, rename the
-  temp file onto it (atomic) and remove the plain `<name>.<N>`. If it already exists
-  (another process won the race — relevant for the ledger, which two processes can
-  write: factory-model-proxy and preview-helper-proxy), discard the losing temp file.
-  The finished `.gz` is never overwritten, renamed, or removed by anything.
-- **Stalled-compression recovery** (crash/kill between the rename and the final swap):
-  each rotation, after compressing the generation it just created, also scans for any
-  older plain `<name>.<M>` with no matching `<name>.<M>.gz` and compresses those too —
-  triggered only by the next rotation reaching its size limit, not a new background
-  trigger. This recovers a stalled generation with no operator action and no new lock
-  behavior (same lock-release-then-swap idiom as the main path). A generation that is
-  briefly both plain and `.gz` (crash after the atomic rename, before plain-file
-  removal) is harmless — the `.gz` is already complete; the next retry pass removes the
-  stale plain copy under the lock.
-- `MODEL_PROXY_BACKUP_COUNT` is no longer read by the rotation path; document it as
-  ignored (keep the env var name reserved, do not repurpose it).
-- `cost_log.py` gets a lock. Use the sidecar-lock-file variant from `model_proxy.py`
-  (`_ledger_lock_path`-style: `<name>.lock`, never itself rotated) rather than locking
-  the data file directly, since it already covers "rotate+append as one atomic unit
-  across multiple processes" — the exact property `cost_log.py` is missing today (it
-  currently has no lock of any kind). `log_call` keeps its fail-soft contract (never
-  raises).
-- Each rotation logs the store's total size (sum of live + all generations, compressed
-  and plain). Nothing prunes; pruning is a manual operator action. Docs must state the
-  expected growth (unbounded, by design) and that manual pruning is the only reduction
-  path.
+The state directory (`$SCHEDULER_STATE_DIR`) is a volume that every gated run container
+mounts read-write. A run container can therefore create any name there (a FIFO, a link, a
+directory, a huge or forged `.gz`), hold `flock` on any lock file for as long as it lives,
+and be killed at any instruction. The rules below assume all of that. A run container can
+already append to or delete the live files; this ticket does not change that and does not
+claim to.
 
-### R2 — Reading rotated generations
+## Names
 
-- `run_record.py` gains a shared generation-discovery helper (exposed as an importable
-  function, not buried inline in `_read_ledger_rows` — see "Follow-up: cost-report
-  cross-check" below) that:
-  - Lists generations by the **whole-suffix pattern** `.<N>` / `.<N>.gz` (a temp file
-    like `.<N>.gz.tmp.<pid>` must not match either pattern).
-  - When both a plain `.<N>` and `.<N>.gz` exist for the same `N` (the brief overlap
-    window), **prefers the plain file**.
-  - Reads `.gz` generations transparently (decompress-on-read).
-- `_read_ledger_rows` holds the ledger lock **shared** while it lists and reads, closing
-  the existing race where a concurrent rotation could duplicate or drop rows for a
-  reader that takes no lock at all today.
-- A **per-run** read (the common case, used by `_backfill_run_economics` and friends)
-  scans the live file plus only the generations whose mtime is at or after the run's
-  start — not the whole store. A full-history read (if ever needed) is a separate,
-  unbounded-scan code path, not the default.
-- Any other ledger-backup-name-aware code in the repo uses the same whole-suffix
-  pattern. The only other consumer found repo-wide, `scripts/reconcile_cost_reports.py`,
-  does **not** currently walk backups at all (see "Follow-up" below) — this ticket does
-  not add that behavior to it, only makes the pattern available for that follow-up.
+For a live file `<name>` (`request-ledger.jsonl`, `graphql-costs.jsonl`):
 
-### R3 — Host stats mount, written by the scheduler only
+| Name | What it is |
+|---|---|
+| `<name>` | the live file |
+| `<name>.lock` | the sidecar lock; never rotated, renamed or removed |
+| `<name>.<N>` | plain generation `N` (decimal, no leading zero) |
+| `<name>.<N>.gz` | compressed generation `N`; once it exists it is never rewritten, renamed or removed by any code |
+| `<name>.<N>.gz.tmp.<16 hex>` | a compression in progress |
 
-- `deploy/docker-compose.yml`, `backlog-scheduler` service only: one new bind mount
-  following the `FACTORY_MODEL_REGISTRY_DIR` precedent exactly (`:92-96`):
-  ```yaml
-  - ${FACTORY_STATS_DIR:-./stats.empty}:/var/lib/dark-factory-stats
-  ```
-  (no `:ro` — this mount is written to, unlike the registry mount). A new tracked
-  placeholder, `deploy/stats.empty/.gitkeep`, mirrors `deploy/model-registry.empty/`.
-  Run containers get no new mount and no new variable — they never touch this path.
-- `deploy/instance.env.example` documents `FACTORY_STATS_DIR` following the `PROJECT_DIR`
-  comment-block-plus-bare-`VAR=`-line style (`:38-42`). Note for the plan phase: unlike
-  `FACTORY_MODEL_REGISTRY_DIR` (which has no `instance.env.example` entry at all —
-  confirmed absent by grep), this is a deliberate departure from precedent, made
-  explicit here per the issue's own acceptance criterion, not an oversight to "fix" by
-  removing the entry.
-- `docs/configuration.md` gets a new `### Durable stats mount (#652)` section mirroring
-  the "Model endpoint registry" section's `| Variable | Set where | Read by | Notes |`
-  table format (`:536` is the row to mirror).
-- A new scheduler-only step, `stats-sync`, runs **synchronously, inline**, once per
-  poll — not backgrounded. Placement: immediately after `check_rate_limit`, before
-  `fetch_board_items` (~`scheduler.sh:1675`), so it runs on every poll regardless of the
-  GraphQL-failure `continue` (`:1678`) or the WIP-capacity `continue` (`:1704-1709`).
-  Wrapped the way `stage_epic_autopilot` wraps its own call (`:1541`):
-  ```bash
-  OUT=$(python3 "$FACTORY_CORE_CLI" stats-sync 2>&1) || echo "[scheduler] stats_sync=failed: $OUT"
-  ```
-  so a failure logs one line and the poll loop continues (the loop runs under `set -e`
-  with an ERR trap, matching existing step error handling). On success, log one summary
-  line (`stats_sync=ok copied=<N> skipped=<M>`). Enabled only when `FACTORY_STATS_DIR` is
-  non-empty in the scheduler's environment; a no-op (and no log line) otherwise.
-  - **Write-once files** (`run-records/*.json`, `transcripts/**`, each rotated `.gz`
-    generation of the ledger and the cost log): copy via a temporary name + rename if
-    absent at the destination. If a same-named file already exists at the destination
-    with the same size, skip — never overwrite.
-  - **Growing files** (`runs.jsonl`, the live ledger, the live cost log): copy to a
-    temporary name, then rename over the previous copy on the stats mount.
-  - The first sync after `FACTORY_STATS_DIR` is set is the migration of all existing
-    history — no separate migration step or script. This poll may be slow (confirmed:
-    nothing in `scheduler.sh` is backgrounded today, and `FACTORY_WIP_LIMIT` defaults to
-    1, so a slow first poll only delays that poll's dispatch, which is harmless — see the
-    rejected background-sync alternative below). Document this in the operator-facing
-    docs.
-  - Loss window (to document): anything written to the volume after the last
-    completed poll is not yet on the host if the volume is removed before the next poll
-    runs.
-- Docs: `deploy/instance.env.example` and `docs/configuration.md` document the variable,
-  sync behavior, loss window, unbounded growth, and manual pruning.
-  `docs/scheduler.md` and `docs/run-lifecycle.md` are updated wherever they currently
-  describe the named volume as the sole copy of this state (`docs/scheduler.md:420-423`,
-  `:440`'s cost-log description, `docs/run-lifecycle.md:105`) to also mention the
-  optional durable mirror and point at the new `docs/configuration.md` section.
+A generation is recognised by the **whole** suffix: `^\.[1-9][0-9]*$` or
+`^\.[1-9][0-9]*\.gz$` after `<name>`. A temporary file matches neither.
 
-### Follow-up, explicitly out of scope: `reconcile_cost_reports.py`
+## Write rules (ledger and cost log, one shared scheme)
 
-`scripts/reconcile_cost_reports.py::_load_ledger_run_ids` (`:21-36`) reads only the live
-`request-ledger.jsonl` and does not walk numbered backups today — it is a second,
-independent consumer of the ledger, but since it doesn't already check backups by name,
-it falls outside the issue's "any other code that checks ledger backups by name" clause.
-It is a manual, dormant, one-shot report (`docs/features.md:138`: "Dormant (manual, by
-design)", no automated caller); its ledger cross-check is advisory-only (it can
-under-flag, it never misclassifies a run's recoverability). **This ticket does not
-modify it.** The gap this leaves: after #652, rows that rotate out of the live ledger
-are kept (not lost) but become invisible to this script unless pointed at a specific
-generation, and it cannot read `.gz` generations at all. R2's generation-discovery
-helper is exposed as an importable function specifically so a follow-up ticket can wire
-`reconcile_cost_reports.py` onto it without re-deriving the pattern. File that follow-up
-ticket at implementation time if one doesn't already exist.
+Thresholds are unchanged: `MAX_LEDGER_BYTES` (`model_proxy.py:60`) and `ROTATE_BYTES`
+(`cost_log.py:18`).
+
+- **W1 — Rotate under the lock, never onto an existing name.** Holding `LOCK_EX` on
+  `<name>.lock`, when the live file has reached the threshold: `N` = highest generation
+  number present in either form, plus one. `os.link(<name>, <name>.<N>)`, then
+  `os.unlink(<name>)`. `os.link` fails rather than replace; `os.rename` would silently
+  replace and is not used. The row is then appended to a new live file, still under the
+  lock. Numbers only grow and are never reused.
+- **W2 — An interrupted rotation is completed, not repeated.** A writer killed between the
+  link and the unlink leaves the live name and `<name>.<N>` on one inode; the next writer
+  would link the same content to `<name>.<N+1>` and every row of that generation would be
+  read twice. Before rotating, under the lock: if the live file's link count is above one
+  and it is the same inode as the highest plain generation, the live name is removed and no
+  new generation is made.
+- **W3 — Compression runs outside the lock and off the request path.** After the lock is
+  released, `<name>.<N>` is gzip-compressed to `<name>.<N>.gz.tmp.<16 random hex>`, created
+  with `O_CREAT | O_EXCL`. A pid is not a unique suffix: both ledger writers are the
+  entrypoint of their container (`run-compose.yml:78`, `:104`), so both are pid 1.
+  - In `model_proxy.py`, `append_ledger` returns as soon as the row is appended. The
+    compress-and-swap step is submitted as its own task to the default executor (where
+    `append_ledger` already runs, `model_proxy.py:313`); its failure is logged and never
+    reaches a request. Compressing 100 MiB inside the request's ledger step would hold that
+    one request for seconds.
+  - In `cost_log.py` (1 MiB threshold, synchronous callers) compression runs inline, after
+    the lock is released.
+- **W4 — The swap takes the lock again, briefly.** Under `LOCK_EX`: if `<name>.<N>.gz`
+  does not exist, `os.link(<temp>, <name>.<N>.gz)`; the temporary name is removed either
+  way; if `<name>.<N>.gz` now exists, the plain `<name>.<N>` is removed. A generation that
+  is briefly present in both forms is harmless (readers prefer the plain one, R2).
+- **W5 — Recovery pass.** Each rotation, after compressing the generation it created,
+  also compresses plain generations that have no `.gz` (a writer was killed between W1 and
+  W4): at most two per rotation, highest number first, by W3 and W4. It also removes, under
+  the lock, a plain generation whose `.gz` exists, and temporary files older than one hour.
+  Nothing else triggers it; there is no background task.
+- **W6 — Only regular files are ever opened, and never blockingly.** Rotation,
+  compression and the recovery pass open a generation with `O_RDONLY | O_NOFOLLOW |
+  O_NONBLOCK`, require `fstat` to report a regular file no larger than twice the rotation
+  threshold, and skip anything else with one log line. A skipped entry does not count
+  towards W5's two. (A FIFO planted under a generation name blocked the writer in a
+  prototype without this.)
+- **W7 — `cost_log.py` gets the sidecar lock, with a bounded wait.** `log_call` opens
+  `graphql-costs.jsonl.lock` with `O_NOFOLLOW | O_NONBLOCK` (regular file required) and
+  takes `LOCK_EX | LOCK_NB`, retried for at most one second. With the lock it rotates (W1,
+  W2) and appends. Without it — the lock is held, or the lock file cannot be opened as a
+  regular file — it appends the line and does **not** rotate. `log_call` runs inside the
+  scheduler's board fetch on every poll (`providers/tracker/github.py:310`); a blocking
+  `LOCK_EX` would let any process holding that lock stop the poll. `log_call` still never
+  raises. `append_ledger`'s own wait on `<ledger>.lock` (#634) is not changed by this
+  ticket.
+- **W8 — Generations from before this change are kept.** The ledger's `.1` … `.3` and the
+  cost log's `.1` keep their names and are compressed by the recovery pass like any other
+  plain generation. Among themselves their numbers do not mean "higher is newer"; no reader
+  depends on generation order for correctness.
+- **W9 — `MODEL_PROXY_BACKUP_COUNT` is ignored.** The variable is no longer read by any
+  code path; the module keeps no `BACKUP_COUNT` that a reader could use as an upper bound.
+  It stays documented, as ignored.
+- **W10 — Growth is logged, nothing prunes.** Each rotation logs one line with the
+  store's total size: the live file plus every generation in either form. Pruning is a
+  manual operator action.
+
+## Read rules
+
+- **R1 — One generation helper.** `run_record._iter_ledger_paths(ledger_path,
+  since_epoch=None)` yields the live file, then generations by descending number, found by
+  the whole-suffix patterns above. With `since_epoch` it yields only generations whose
+  modification time is not earlier than it. It is an importable function; nothing else in
+  the repository derives generation names on its own.
+- **R2 — Plain wins.** When both forms of one number exist, the plain file is read and
+  the `.gz` is not.
+- **R3 — `.gz` is read as a bounded stream.** A `.gz` generation is decompressed line by
+  line, never loaded whole, and abandoned with one log line once twice the rotation
+  threshold of decompressed bytes has been read. A real generation is at most the threshold
+  plus one row; a forged archive must not exhaust memory.
+- **R4 — The shared lock covers listing and opening, not reading.** The reader opens
+  `<ledger>.lock` **without** `O_CREAT` (`O_NOFOLLOW | O_NONBLOCK`, regular file required)
+  and takes `LOCK_SH | LOCK_NB`, retried for at most two seconds. Under the lock it lists
+  the generations, opens every file it will read (as in W6) and notes the live file's size;
+  it then releases the lock and reads from those descriptors, the live file only up to the
+  noted size. An open descriptor survives the rename and the removal of a plain generation,
+  so the set is a consistent snapshot, and a long read holds no writer back.
+- **R5 — No lock, same result shape.** When the lock file does not exist, is not a
+  regular file, or is still held after two seconds, the reader proceeds without it. The
+  caller's result has the same shape; a read concurrent with a rotation can then miss or
+  repeat rows, as every read can today.
+- **R6 — All four readers use the helper.**
+  - `_read_ledger_rows(run_id, ledger_path, since_epoch=None)` (`run_record.py:761`) passes
+    `since_epoch` through.
+  - `cmd_assemble` (`:1086`) passes the run's `started_at`.
+  - `_compute_harness_economics` (`:840`), when it is given no rows (the
+    `_backfill_run_economics` path), passes the record's `started_at`. A `started_at` that
+    does not parse gives `since_epoch=None`, the full scan.
+  - `_build_issue_economics` (`:1236`) is the full-history reader: no `since_epoch`, the
+    same lock rule, `.gz` through R3. Today it uses `read_text` on each path and would lose
+    every compressed generation.
+- **R7 — `preview_helper.py` (#642) keeps working.**
+  - `record_outcome` (`:598`) passes `since_epoch = now - 3600 - 60` (the lane's limit
+    ceiling plus a margin) to both `ledger_files_ok` and the bounded read. Unbounded, a
+    store that has grown for months would exceed the five-second read limit
+    (`_read_ledger_rows_bounded`, `:574`) and turn every helper outcome into
+    `ledger_unavailable`.
+  - `ledger_files_ok` (`:552`) keeps its rule — each listed path is a regular file itself
+    (not a link, FIFO, device or directory) of at most `MAX_LEDGER_FILE_BYTES` — and
+    applies it to `<ledger>.lock` as well when that exists.
+  - #642's planted-file tests stay: a FIFO, a link to `/dev/zero` and a directory at the
+    live name and at a backup name. `request-ledger.jsonl.1` is still a valid plain
+    generation name, so the backup case needs no rename.
+- **R8 — `scripts/reconcile_cost_reports.py` is not changed.** It reads only the live
+  ledger today (`_load_ledger_run_ids`, `:21-36`), is a manual report with no automated
+  caller, and falls outside "code that checks ledger backups by name". Rows that rotate out
+  become invisible to it; R1's helper is importable so a follow-up can wire it. File that
+  follow-up at implementation time if none exists.
+
+No code in the repository reads cost-log generations (`graphql-costs.jsonl` is referenced
+only by `cost_log.py`); the cost log gets the write rules and no reader.
+
+## Files touched
+
+| File | Change |
+|---|---|
+| `scripts/factory_core/model_proxy.py` | W1–W6, W8–W10: numbered rotation, completion of an interrupted one, compress-and-swap as its own executor task, recovery pass, size log; `BACKUP_COUNT` removed |
+| `scripts/factory_core/cost_log.py` | W1–W8, W10: the sidecar lock with the bounded wait, the same rotation, inline compression |
+| `scripts/factory_core/run_record.py` | R1–R6: the helper with `since_epoch`, streamed `.gz` reading, list-and-open under the shared lock; all four readers on it |
+| `scripts/factory_core/preview_helper.py` | R7: `record_outcome` passes `since_epoch`; `ledger_files_ok` takes it and checks the lock file |
+| `docs/configuration.md` | `MODEL_PROXY_BACKUP_COUNT` documented as ignored (`:510`); a short "Ledger and cost-log generations" note: names, never deleted, unbounded growth by design, manual pruning is the only reduction |
+| `docs/scheduler.md` | the `graphql-costs.jsonl` row (`:440`, "rotates to `.1`") describes numbered, compressed generations |
+| `tests/test_factory_model_proxy.py`, `tests/test_cost_log.py`, `tests/test_run_record.py`, `tests/test_preview_helper.py` | below |
+
+Not touched: everything under `deploy/**`, `scheduler.sh`, `entrypoint.sh`,
+`run-compose.yml`, `workflows/**`, `scripts/factory_core/cli.py`,
+`scripts/reconcile_cost_reports.py`, every `gate_*`, the breaker, budgets,
+`.github/workflows/**`.
+
+Whether the write rules live in one new helper module shared by `model_proxy.py` and
+`cost_log.py` or are written twice is the plan's choice. If a module is added it is
+`scripts/factory_core/rotation.py`, it imports nothing from `providers`, and it is added to
+this list by the plan.
+
+## Blast radius
+
+Expected `gate_blast_radius.py` verdict: **HUMAN_REQUIRED**, trigger `hotspot`:
+`scripts/factory_core/run_record.py` (5.5) and `scripts/factory_core/model_proxy.py` (5.0).
+No `deploy/` path and no workflow file is in the list. All new tests are pytest in the four
+existing test files, so `.github/workflows/ci.yml` is not touched; a new `tests/test_*.sh`
+would add it as a second trigger and is to be avoided.
+
+## Test plan
+
+Hermetic; names are binding. *guard* marks a test that exists today and must pass
+unmodified.
+
+**Tests on `main` that pin the behaviour being removed** and are rewritten:
+`tests/test_factory_model_proxy.py::test_append_ledger_rotates_at_max_bytes` (`:152`) and
+`::test_append_ledger_rotation_keeps_backup_count` (`:167`, asserts that a generation is
+gone); `tests/test_cost_log.py::test_log_call_rotates_when_over_cap` (`:59`, reads `.1` as
+plain text). `tests/test_run_record.py::test_read_ledger_rows_includes_rotation_backups`
+(`:569`) stays valid and is kept as a *guard* for a plain `.1`.
+
+| Rule / acceptance criterion | Test |
+|---|---|
+| Criterion 1: nothing deletes or overwrites a generation (W1, W4) | `test_rotation_keeps_every_generation` (ledger and cost log: five rotations; every `.gz` present, readable, and byte-identical after later rotations) |
+| Criterion 2: concurrent writers (W1, W3, W4) | `test_concurrent_appends_through_rotations_lose_nothing` (8 processes, ledger and cost log: no missing row, no duplicate, no temporary file and no plain generation left) |
+| W1 | `test_rotation_never_replaces_an_existing_generation_name` (a file planted at the next number is intact; the rotation takes the number after it) |
+| W2 | `test_rotation_killed_between_link_and_unlink_duplicates_no_row` |
+| W3 | `test_two_compressors_of_one_generation_never_share_a_temporary_file`; `test_append_ledger_returns_before_compression_finishes`; `test_compression_failure_is_logged_not_raised` |
+| Criterion 4: compression outside the lock (W3) | `test_append_is_not_blocked_by_a_slow_compression` (ledger and cost log) |
+| W4 | `test_existing_gz_is_never_replaced_by_a_second_compressor` |
+| W5 | `test_stalled_generation_is_compressed_by_the_next_rotation`; `test_recovery_compresses_at_most_two_generations_per_rotation`; `test_stale_temporary_file_is_removed_by_the_recovery_pass` (older than one hour removed, a fresh one kept) |
+| W6 | `test_planted_fifo_under_a_generation_name_never_blocks` (under a 10 s alarm; also a link, a directory and a file over twice the threshold: skipped, one log line each) |
+| W7 | `test_log_call_returns_within_two_seconds_when_the_lock_is_held` (the row is appended, no rotation happens); `test_log_call_with_a_fifo_as_lock_file_appends_and_returns`; `tests/test_cost_log.py::test_log_call_fails_soft_on_unwritable_dir` (*guard*) |
+| W8 | `test_old_numbered_generations_are_kept_compressed_and_read` (ledger `.1`–`.3`, cost log `.1`, present before the first new rotation) |
+| W9 | `test_backup_count_variable_is_ignored` (set to 1: five rotations keep five generations) |
+| W10 | `test_rotation_logs_the_store_size` |
+| Criterion 3: reader (R1, R2) | `test_reader_finds_rows_in_live_plain_and_gz`; `test_temporary_file_is_not_a_generation`; `test_plain_preferred_when_both_forms_exist`; `test_generations_older_than_the_run_are_not_opened` |
+| R3 | `test_oversized_gz_is_abandoned` (at twice the threshold, read as a stream; peak memory bounded) |
+| R4 | `test_concurrent_read_is_consistent` (writers rotating every ~25 rows: no read with a missing or repeated row); `test_append_is_not_blocked_while_a_reader_reads` |
+| R5 | `test_reader_does_not_create_the_lock_file`; `test_reader_proceeds_when_the_lock_is_held` (returns within three seconds, same result shape) |
+| R6 | `test_issue_economics_reads_gz_generations`; `test_backfill_read_is_bounded_by_started_at`; `test_unparseable_started_at_means_a_full_scan` |
+| R7 | `tests/test_preview_helper.py` stays green, including `::test_ledger_directory_oversized_or_bad_backup_is_unavailable` (*guard*); `test_record_outcome_bounds_the_ledger_scan`; `test_ledger_files_ok_rejects_a_planted_lock_file` |
+| #634 unchanged | `tests/test_factory_model_proxy.py::test_append_ledger_lock_follows_the_ledger_path` and `::test_ledger_persistence_does_not_block_event_loop` (*guard*) |
+| Docs | the existing docs reference checks |
+
+## Acceptance criteria of #652 that stay with this ticket
+
+1. No code path deletes or overwrites a rotated generation of the ledger or the cost log; a
+   test rotates several times and asserts every generation is still present and readable.
+2. Concurrent writers: several processes appending through rotations lose no row and
+   duplicate none, for the ledger and for the cost log.
+3. `_read_ledger_rows` returns rows split across the live file, a plain generation and
+   `.gz` generations; a temporary file is ignored; a read concurrent with rotations is
+   consistent; generations older than the run are not opened.
+4. Compression does not run while the lock is held.
+5. (The rotation part of the issue's documentation criterion.) Growth and manual pruning
+   are documented in `docs/configuration.md`; `MODEL_PROXY_BACKUP_COUNT` is documented as
+   ignored.
+
+## Moved to the mirror ticket
+
+Out of this ticket, with everything the earlier drafts of this spec said about it:
+
+- The `deploy/docker-compose.yml` mount line, the `FACTORY_STATS_DIR` variable in
+  `deploy/instance.env.example`, the placeholder directory, and the owner's `deploy/**`
+  authorisation, which now applies to that ticket only.
+- The `stats-sync` step, `scripts/factory_core/stats_sync.py`, its `cli.py` sub-command and
+  its call in `scheduler.sh`.
+- The mirror's documentation: the variable, the sync, the loss window, and the edits to
+  `docs/scheduler.md:420-423` and `docs/run-lifecycle.md:105` that stop describing the
+  named volume as the only copy.
+
+Acceptance criteria of #652 that move with it:
+
+- `docker compose config` renders differ from `main` by exactly the one placeholder mount;
+  `run-compose.yml` renders byte-identical.
+- `stats-sync` copies new write-once files and never overwrites one, refreshes the growing
+  files, does nothing when the variable is empty, never stops the poll loop, and changes
+  nothing on a second run.
+- After the first sync the stats directory holds every record that is in the volume.
+- The variable, the sync and the loss window are documented; `docs/scheduler.md` and
+  `docs/run-lifecycle.md` no longer describe the named volume as the only copy.
+- The operator's one-time check after `docker compose down -v`.
+
+**What this leaves open.** After this ticket the state volume is still the only copy of
+every stat. Removing the volume still erases all of it. This ticket stops the two losses
+that happen inside the volume.
 
 ## Sequencing with #645
 
-#645 (OPEN) adds model/cache-token fields to the same ledger rows and reads them in
-`run_record.py`. #652 only changes rotation/mount mechanics and the generation-discovery
-helper's shape — it does not change the row schema. The two tickets touch overlapping
-files but orthogonal concerns; the plan phase should re-check for merge conflicts against
-whichever of the two lands first, but neither needs to block design work on the other.
-The issue's `Depends on: #645` line gates *implementation dispatch* only (per
-`docs/triage-labels.md` convention), not this refinement.
+#645 adds fields to ledger rows and reads them in `run_record.py`; it does not change
+rotation or generation names. This ticket does not change the row schema. The plan rebases
+on whichever lands first. The issue's `Depends on: #645` line gates implementation
+dispatch, not this spec.
 
-## Architecture / Approach
+## Alternatives considered
 
-**Chosen approach: extend `model_proxy.py`/`cost_log.py` in place with a shared
-rotation helper; extend `run_record.py` with a shared generation-discovery helper;
-extend `scheduler.sh` with one new inline step.** No new module, no new service, no
-message queue or external store — matches the existing single-purpose-script
-architecture of `scripts/factory_core/`.
+- **Keep `os.rename` with a prior existence check.** Rejected: the check and the rename
+  are two steps; `os.link` is one and fails on an existing name.
+- **Compress under the lock.** Rejected: every append would wait for a 100 MiB compression.
+- **Leave stalled plain generations for manual clean-up.** Rejected: readers handle them,
+  but the recovery pass costs one directory listing on an already rare path.
+- **Hold the shared lock for the whole read.** Rejected: a full-history read would hold
+  every `append_ledger` call back for its duration, and the descriptor snapshot is as
+  consistent.
+- **Fold `reconcile_cost_reports.py` in.** Rejected: dormant, advisory, and not covered by
+  the issue's criterion (R8).
 
-```
-Ledger / cost-log write path (per writer process):
-  append_row()
-    acquire sidecar lock (<name>.lock)
-      if size >= threshold:
-        rename live -> <name>.<N>          (N = max existing + 1, lock held)
-      append row to live file
-    release lock
-    compress <name>.<N> -> <name>.<N>.gz.tmp.<pid>   (lock released, may be slow)
-    acquire sidecar lock
-      if <name>.<N>.gz absent: rename tmp -> <name>.<N>.gz; remove plain <name>.<N>
-      else: discard tmp (another writer won)
-      opportunistically repeat the swap for any other unmatched older plain generation
-    release lock
+## Not verified
 
-Ledger read path (run_record.py):
-  acquire sidecar lock SHARED
-    list generations (whole-suffix .N / .N.gz match; ignore .tmp.*)
-    for each N: prefer plain over .gz; decompress .gz transparently
-    per-run mode: skip generations with mtime < run_start
-  release lock
+What was run, by whom, and what rests on reasoning. "Prototype" means a stand-alone script
+of the rule, not this repository's code.
 
-Scheduler poll loop (scheduler.sh, inline, once per poll):
-  check_rate_limit
-  stats-sync (new; no-op if FACTORY_STATS_DIR unset)   <-- R3
-  fetch_board_items
-  ... (unchanged) ...
-```
-
-## Alternatives Considered
-
-- **Background the `stats-sync` step with an overlap guard.** Rejected (per Q&A):
-  nothing in `scheduler.sh` is backgrounded today; a background sync reintroduces the
-  overlap/partial-copy races the copy-to-temp-and-rename design exists to avoid, and
-  needs a new lock plus a way to surface a detached failure, for no real benefit given
-  `FACTORY_WIP_LIMIT` defaults to 1 and polls are already 60s apart.
-- **Leave stalled uncompressed generations (crash mid-compression) as a permanent,
-  manual-cleanup gap.** Rejected: no data is at risk either way (readers already prefer
-  plain over `.gz`), but the issue's intent is that every generation ends up compressed,
-  and the retry costs one cheap extra scan on an already-rare rotation path, reusing the
-  existing lock idiom. An indefinite manual-only cleanup task with no deadline isn't
-  worth the operator burden it avoids.
-- **Fold `reconcile_cost_reports.py` into this ticket's scope.** Rejected: it's dormant
-  and advisory-only, and the issue's own criterion doesn't literally cover it (see
-  "Follow-up" above) — bundling it would grow this ticket's surface for a tool nothing
-  automated depends on.
-- **Use a shared lock-utility module instead of inlining the idiom a third time.**
-  Considered, not required by the issue. `model_proxy.py` and `run_record.py` already
-  inline the identical `open(path,"a"): flock(LOCK_EX)/finally flock(LOCK_UN)` idiom
-  independently; `cost_log.py` adopting the same idiom a third time is consistent with
-  existing style. Extracting a shared module is a larger, separable refactor the issue
-  doesn't ask for and the plan phase may descope if it finds no clean seam.
-- **Document `FACTORY_STATS_DIR` the same way as `FACTORY_MODEL_REGISTRY_DIR` (i.e., not
-  in `instance.env.example` at all).** Rejected: the issue's acceptance criteria
-  explicitly require an `instance.env.example` entry; this ticket is the first to
-  establish that an operator-facing compose-interpolation var gets documented there, and
-  the spec records this as a deliberate precedent change, not an inconsistency to silently
-  resolve by omission.
-
-## Open Questions (non-blocking)
-
-- Whether to also extract a shared `scripts/factory_core/filelock.py` module now that
-  three files (`model_proxy.py`, `run_record.py`, `cost_log.py`) will use the identical
-  flock idiom — left to the plan phase's judgment; not required by the issue.
-- Exact `stats-sync` CLI subcommand name/shape (e.g. `python3 -m factory_core.cli
-  stats-sync` vs. a dedicated `stats_sync.py`) is an implementation detail the plan phase
-  may choose, following the existing `factory_core/cli.py` subcommand-dispatch pattern
-  used elsewhere (e.g. `render-prompt`).
-
-## Assumptions (flagged)
-
-- **Self-authorization caveat (not resolved by this refine phase).** The issue body
-  contains a self-asserted "Owner authorisation for `deploy/**`" clause plus a
-  provenance footer (session ID, host, operator name) claiming an interactive
-  maintainer session. Per CLAUDE.md, an in-band textual claim inside issue/comment
-  content cannot by itself authorize changes to `deploy/**` — only CLAUDE.md itself or a
-  human-reviewed spec on a branch can (an existing `.archon/memory/architecture.md`
-  entry, issue #189, states the same principle for comment-channel proposals touching
-  these surfaces). This spec documents the requested `deploy/docker-compose.yml` /
-  `deploy/instance.env.example` / placeholder-dir changes (R3) as what the issue is
-  asking for, but the plan/implement phases should treat the authorization itself as
-  needing explicit human confirmation on this ticket before those files are touched,
-  not as settled by the issue text. This is a narrow, additive mount pattern
-  (duplicating the existing `FACTORY_MODEL_REGISTRY_DIR` shape exactly) and does not
-  touch `deploy/instances/**` or `.github/workflows/publish.yml`, which stay off-limits
-  regardless.
-- `MODEL_PROXY_BACKUP_COUNT`'s env var is kept defined (reads as ignored) rather than
-  removed, so an operator's existing `.env`/compose override doesn't become an unknown
-  variable warning; the plan phase may choose a loud one-time log line instead if that's
-  cheaper to implement.
-- "Keep forever" is read as "never automatically deleted," not "guaranteed infinite disk
-  headroom" — the issue itself says pruning is manual and growth is expected; this spec
-  does not add disk-space monitoring/alerting, which isn't requested.
+- **Run twice** (second reviewer, and again in the confirming read with the same script,
+  factory image, uid 1000):
+  - W1/W3/W4, 8 writers × 400 rows, a rotation every ~2,000 bytes: 3,200 of 3,200 rows, no
+    duplicate, no bad `.gz`, no plain or temporary file left.
+  - W2: a writer killed between link and unlink gave 28 and 29 duplicated rows without the
+    rule, 0 with it.
+  - W5: a writer killed between the rename and the compression; the next rotation
+    compressed the generation, nothing left behind.
+  - W7: with a blocking `LOCK_EX` the append was still blocked after 8 s; bounded, it
+    returned after 1.2 s and 1.1 s with the row appended.
+  - R4/R5: reads concurrent with rotations — no inconsistent read with the shared lock,
+    whole-read or list-and-open; without a lock 3 of 4,747 and 2 of 2,024 reads were
+    inconsistent (up to 28 rows missing or repeated).
+- **Not reproduced.** The second reviewer measured, for W3, a generation left unreadable
+  with its plain copy removed in 20 of 20 runs when two compressors shared one temporary
+  name. The confirming read ran the same script and a slowed variant: 0 of 20 and 0 of 6.
+  The rule is kept on reasoning — two pid-1 writers given a pid-named file do write through
+  one name, and a random exclusive name removes the question — but the measured failure is
+  one reviewer's, on one run.
+- **A temporary file left by a killed compressor was observed** in both runs (a writer
+  killed after writing its temporary `.gz`): nothing removed it. W5's one-hour clean-up is
+  the rule for it; the clean-up itself was not run.
+- **Prototyped by the first review only:** the FIFO that blocked the recovery pass (W6).
+- **Reasoned, never run:** W8 (old generations), W9, W10, R3's memory bound, R6's
+  `_build_issue_economics` and backfill wiring, and all of R7 (the five-second limit
+  against a large store is arithmetic, not a measurement).
+- **Known, accepted:** a run container can hard-link the live ledger to the next
+  generation number; W2 then removes the live name early. No row is lost. A process that
+  holds `graphql-costs.jsonl.lock` for good stops cost-log rotation (the file grows) and
+  costs each `log_call` one second; it cannot stop the append.
+- Line numbers were read on the branch at `94770a2`; the plan re-checks them after #645.
