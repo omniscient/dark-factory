@@ -349,6 +349,23 @@ run_post_mortem() {
   post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
+# Verified-local runs only (#633). The clone's cli.py may predate --hosting-location and reject
+# it with exit code 2 (an argparse unknown flag or subcommand, or a missing script — a real
+# failure of either subcommand exits 1 or 3). Then the baked copy runs with the identical argv:
+# never a retry without the flag. Only the output of the attempt whose status is returned is
+# printed, stderr merged into stdout.
+_cli_with_hosting_fallback() {
+  local out rc=0
+  # TARGET-PATH: the clone's copy first, as at every other cli.py call site.
+  out=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "$@" 2>&1) || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    rc=0
+    out=$(python3 /opt/dark-factory/scripts/factory_core/cli.py "$@" 2>&1) || rc=$?
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
 # Detects a session-window exhaustion in the captured run output via the Python
 # session_window module (structured claude.rate_limit_event preferred, substring/regex
 # fallback otherwise). On match: writes the shared pause sentinel, records a distinct
@@ -359,21 +376,24 @@ _handle_session_window_pause() {
   local tmp_out="$1"
   [ "${SESSION_WINDOW_BACKOFF_ENABLED:-true}" = "true" ] || return 1
 
-  local sw_result sw_rc
+  local sw_result sw_rc=0
+  local sw_args=(session-window-check
+    --tmp-out "$tmp_out"
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+    --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}"
+    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}")
   # #586: only a verified-local run passes the flag; the default argv is unchanged, so a
   # target's older cli.py copy never sees an argument it would reject. On local the CLI
-  # writes no sentinel and prints matched=false, so this returns 1 below.
-  local hosting_flag=()
-  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
-  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
-  # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-  sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-check \
-    --tmp-out "$tmp_out" \
-    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
-    --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}" \
-    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" \
-    "${hosting_flag[@]}" 2>&1)
-  sw_rc=$?
+  # writes no sentinel and prints matched=false, so this returns 1 below. #633: on local, a
+  # clone cli.py that rejects the flag falls back to the baked copy, flag intact.
+  if [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ]; then
+    sw_result=$(_cli_with_hosting_fallback "${sw_args[@]}" --hosting-location local) || sw_rc=$?
+  else
+    # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
+    # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+    sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${sw_args[@]}" 2>&1) \
+      || sw_rc=$?
+  fi
   if [ "$sw_rc" -ne 0 ]; then
     echo "WARNING: session-window-check failed (exit ${sw_rc}) — path/import likely broken, falling through to legacy detection: ${sw_result}" >&2
     return 1
@@ -547,25 +567,29 @@ _write_error_signature() {
       fi
     done
   fi
+  # $dirty_flag / $artifact_flag unquoted on purpose: an empty one adds no argument, as before.
+  local es_args=(error-signature-write
+    --issue "$ISSUE_NUM"
+    --phase "$phase"
+    --exit-code "$exit_code"
+    --text-file "${text_file:-}"
+    --elapsed-seconds "$elapsed_seconds"
+    --commits-since-start "$commits_since_start"
+    $dirty_flag $artifact_flag
+    --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}"
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}")
   # #586: a verified-local run signs rate-limit/exhaustion output as a counted
   # substantive:endpoint_unreachable failure; the flag is passed only on local (default argv
-  # unchanged, as in _handle_session_window_pause).
-  local hosting_flag=()
-  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
-  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
-  # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" error-signature-write \
-    --issue "$ISSUE_NUM" \
-    --phase "$phase" \
-    --exit-code "$exit_code" \
-    --text-file "${text_file:-}" \
-    --elapsed-seconds "$elapsed_seconds" \
-    --commits-since-start "$commits_since_start" \
-    $dirty_flag $artifact_flag \
-    --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}" \
-    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
-    "${hosting_flag[@]}" \
-    2>/dev/null || true
+  # unchanged, as in _handle_session_window_pause). #633: on local, a clone cli.py that
+  # rejects the flag falls back to the baked copy, flag intact; its output is discarded.
+  if [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ]; then
+    _cli_with_hosting_fallback "${es_args[@]}" --hosting-location local >/dev/null 2>&1 || true
+  else
+    # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+    # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${es_args[@]}" \
+      2>/dev/null || true
+  fi
 }
 
 post_cost_report() {
