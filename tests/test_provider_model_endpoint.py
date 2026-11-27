@@ -1357,9 +1357,10 @@ def test_local_entry_refused_for_every_intent_except_helper(tmp_path, monkeypatc
 
 def test_helper_intent_omits_only_no_local_dispatch(tmp_path, monkeypatch, pinned_suite):
     reg = _valid_local(tmp_path, monkeypatch)
-    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
     problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
     assert problems == [] and entry["id"] == "local-test" and entry["hosting_location"] == "local"
+    _helper_run_env(monkeypatch)  # #634: the run container is checked in its proxied shape
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
 
 
 @pytest.mark.parametrize("check, expected", [
@@ -1377,17 +1378,27 @@ def test_helper_intent_still_fails_each_local_check(tmp_path, monkeypatch, pinne
     elif check == "role_not_qualified":
         record = _record(LOCAL, results=dict(record["results"], streaming="fail"))
     reg = _valid_local(tmp_path, monkeypatch, record)
-    if check == "cloud_credential":
-        monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL + "-cloud")
-    elif check == "base_url":
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.0.2.99:8080")
-    elif check == "tier_alias":
-        monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5-5")
+
+    def break_the_check():
+        if check == "cloud_credential":
+            monkeypatch.setenv("ANTHROPIC_API_KEY", SENTINEL + "-cloud")
+        elif check == "base_url":
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.0.2.99:8080")
+        elif check == "tier_alias":
+            monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-5-5")
+
+    break_the_check()
+    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
+    assert entry is None and any(expected in p for p in problems)
+    # #634: the run container is checked in its proxied shape, so its base_url rule names
+    # the helper proxy address instead of the entry's.
+    _helper_run_env(monkeypatch)
+    break_the_check()
+    if check == "base_url":
+        expected = "ANTHROPIC_BASE_URL must equal the helper proxy address"
     problems, hosting = me.preflight(reg, "local-test", intent=HELPER)
     assert hosting == "local" and any(expected in p for p in problems)
     assert NO_LOCAL not in problems
-    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
-    assert entry is None and any(expected in p for p in problems)
 
 
 def test_intent_not_read_from_environment_or_pointer(base_env, tmp_path, monkeypatch, capsys,
@@ -1430,14 +1441,15 @@ def test_local_selection_fails_on_alternate_credential_signal(tmp_path, monkeypa
     expected = (f"endpoint 'local-test' is local but an alternate cloud credential signal is set "
                 f"in this container: {name} — a local-routed container holds none "
                 "(contract §4.3)")
-    assert me.preflight(reg, "local-test", intent=HELPER) == ([expected], "local")
     assert me.load_verified_entry(reg, "local-test", intent=HELPER) == ([expected], None)
+    _helper_run_env(monkeypatch)  # #634: the run container is checked in its proxied shape
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([expected], "local")
 
 
 @pytest.mark.parametrize("name", [*PLATFORM_IDENTITY_VARS, *NON_DIVERTING_VARS])
 def test_platform_identity_variable_does_not_fail_local_selection(tmp_path, monkeypatch,
                                                                   pinned_suite, name):
-    reg = _valid_local(tmp_path, monkeypatch)
+    reg = _valid_helper_run(tmp_path, monkeypatch)  # #634: the proxied run-container shape
     monkeypatch.setenv(name, "1")
     assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
 
@@ -1497,7 +1509,7 @@ def _providers_cli(monkeypatch, capsys, *argv):
 
 
 def test_hosting_cli_threads_intent(tmp_path, monkeypatch, capsys, pinned_suite):
-    reg = _valid_local(tmp_path, monkeypatch)
+    reg = _valid_helper_run(tmp_path, monkeypatch)  # #634: the proxied run-container shape
     _select_staged(monkeypatch, reg, "local-test")
     assert _providers_cli(monkeypatch, capsys, "model-endpoints", "hosting", "--intent", HELPER) \
         == (0, "hosting=local\n", "")
@@ -1507,7 +1519,7 @@ def test_hosting_cli_threads_intent(tmp_path, monkeypatch, capsys, pinned_suite)
 
 
 def test_preflight_cli_threads_intent(base_env, tmp_path, monkeypatch, capsys, pinned_suite):
-    reg = _valid_local(tmp_path, monkeypatch)
+    reg = _valid_helper_run(tmp_path, monkeypatch)  # #634: the proxied run-container shape
     _select_staged(monkeypatch, reg, "local-test")
     code, out, err = _providers_cli(monkeypatch, capsys, "preflight", "--intent", HELPER)
     assert (code, out, err) == (0, "providers preflight: OK\n", "")
@@ -1523,3 +1535,135 @@ def test_scheduler_side_ignores_intent(base_env, tmp_path, monkeypatch, capsys):
     code, out, err = _providers_cli(monkeypatch, capsys,
                                     "preflight", "--side", "scheduler", "--intent", HELPER)
     assert code == 1 and NO_LOCAL in err
+
+
+# --- #634: run-side reconciliation for the helper intent (preview-helper-proxy) -------------
+
+HELPER_PROXY = "http://preview-helper-proxy:8787"
+BASE_URL_TO_PROXY = ("endpoint 'local-test': ANTHROPIC_BASE_URL must equal the helper proxy "
+                     f"address {HELPER_PROXY} (#634)")
+SECRET_PRESENT = ("LOCAL_GATEWAY_TOKEN (secret_reference of endpoint 'local-test') is set in "
+                  "this container — a helper run reaches its endpoint only through "
+                  "preview-helper-proxy, which holds it (#634)")
+
+
+def _helper_run_env(monkeypatch, entry=LOCAL):
+    """A correctly configured helper run container: the proxy's address, no secret."""
+    _local_env(monkeypatch, entry)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", HELPER_PROXY)
+    monkeypatch.delenv(entry["secret_reference"], raising=False)
+
+
+def _valid_helper_run(tmp_path, monkeypatch):
+    reg = _valid_local(tmp_path, monkeypatch)
+    _helper_run_env(monkeypatch)
+    return reg
+
+
+def test_helper_proxy_base_url_is_the_service_address():
+    assert me.HELPER_PROXY_BASE_URL == HELPER_PROXY
+
+
+def test_helper_preflight_passes_with_the_proxy_address_and_no_secret(base_env, tmp_path,
+                                                                     monkeypatch, capsys,
+                                                                     pinned_suite):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
+    _select_staged(monkeypatch, reg, "local-test")
+    assert _providers_cli(monkeypatch, capsys, "preflight", "--intent", HELPER) \
+        == (0, "providers preflight: OK\n", "")
+
+
+@pytest.mark.parametrize("base_url", ["entry", "http://192.0.2.50:8080", HELPER_PROXY + "/",
+                                      None])
+def test_helper_preflight_refuses_other_base_urls(tmp_path, monkeypatch, pinned_suite, base_url):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    if base_url is None:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    else:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL",
+                           LOCAL["base_url"] if base_url == "entry" else base_url)
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([BASE_URL_TO_PROXY], "local")
+
+
+def test_helper_preflight_refuses_a_present_secret(tmp_path, monkeypatch, pinned_suite):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", SENTINEL)
+    problems, hosting = me.preflight(reg, "local-test", intent=HELPER)
+    assert (problems, hosting) == ([SECRET_PRESENT], "local")
+    assert SENTINEL not in " ".join(problems)
+
+
+def test_helper_preflight_treats_an_empty_secret_as_absent(tmp_path, monkeypatch, pinned_suite):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_GATEWAY_TOKEN", "")
+    assert me.preflight(reg, "local-test", intent=HELPER) == ([], "local")
+
+
+def test_proxy_side_loader_still_requires_the_entry_base_url(tmp_path, monkeypatch, pinned_suite):
+    # Regression guard (passes before #634): the proxy's own loader call passes no
+    # expected_base_url, so its container must hold the entry's real base_url.
+    reg = _valid_local(tmp_path, monkeypatch)
+    assert me.load_verified_entry(reg, "local-test", intent=HELPER)[0] == []
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", HELPER_PROXY)
+    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER)
+    assert entry is None and problems == [
+        "endpoint 'local-test': ANTHROPIC_BASE_URL must equal the entry's base_url "
+        "(contract §4.11 decision 1)"]
+
+
+def test_loader_expected_base_url_replaces_only_the_base_url_rule(tmp_path, monkeypatch,
+                                                                  pinned_suite):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    problems, entry = me.load_verified_entry(reg, "local-test", intent=HELPER,
+                                             expected_base_url=HELPER_PROXY)
+    assert problems == [] and entry["id"] == "local-test"
+    # Without the helper intent the refusal stands, whatever address the caller expects.
+    assert me.load_verified_entry(reg, "local-test", intent="fix",
+                                  expected_base_url=HELPER_PROXY) == ([NO_LOCAL], None)
+
+
+_HELPER_SHAPED_PROBLEMS = [
+    "LOCAL_GATEWAY_TOKEN (secret_reference of endpoint 'local-test') is not set",
+    "endpoint 'local-test': ANTHROPIC_BASE_URL must equal the entry's base_url "
+    "(contract §4.11 decision 1)",
+    NO_LOCAL,
+]
+
+
+@pytest.mark.parametrize("env_shape", ["helper", "today"])
+@pytest.mark.parametrize("intent", [None, "", "fix", "refine", "classify-preview-checker"])
+def test_non_helper_intents_ignore_the_helper_rules(tmp_path, monkeypatch, pinned_suite,
+                                                    env_shape, intent):
+    # Regression guard (passes before #634): the same problems as #633 alone produces.
+    reg = _valid_local(tmp_path, monkeypatch)
+    if env_shape == "helper":
+        _helper_run_env(monkeypatch)
+    expected = _HELPER_SHAPED_PROBLEMS if env_shape == "helper" else [NO_LOCAL]
+    assert me.preflight(reg, "local-test", intent=intent) == (expected, "local")
+
+
+def test_helper_hosting_resolves_local_only_with_the_proxy_address(tmp_path, monkeypatch, capsys,
+                                                                   pinned_suite):
+    reg = _valid_helper_run(tmp_path, monkeypatch)
+    _select_staged(monkeypatch, reg, "local-test")
+    argv = ("model-endpoints", "hosting", "--intent", HELPER)
+    assert _providers_cli(monkeypatch, capsys, *argv) == (0, "hosting=local\n", "")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", LOCAL["base_url"])
+    code, out, err = _providers_cli(monkeypatch, capsys, *argv)
+    assert (code, out) == (0, "hosting=cloud\n") and BASE_URL_TO_PROXY in err
+
+
+def test_hosting_cli_passes_no_expected_base_url_for_other_intents(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def loader(path, eid, **kwargs):
+        calls.append(kwargs)
+        return ["stub"], None
+
+    monkeypatch.setattr(me, "load_verified_entry", loader)
+    monkeypatch.setenv("FACTORY_MODEL_ENDPOINT", "local-test")
+    for extra in ([], ["--intent", ""], ["--intent", "fix"], ["--intent", HELPER]):
+        _providers_cli(monkeypatch, capsys, "model-endpoints", "hosting", *extra)
+    assert calls == [{"intent": None}, {"intent": None}, {"intent": "fix"},
+                     {"intent": HELPER, "expected_base_url": HELPER_PROXY}]
