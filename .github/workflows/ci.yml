@@ -83,3 +83,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: capability-tier2-result, path: /tmp/capability-tier2/result.json }
+      - name: Preview helper — pinned CLI request shape (hermetic)
+        timeout-minutes: 5
+        run: |
+          docker run --rm --network none --add-host preview-helper-proxy:127.0.0.1 \
+            --tmpfs /var/lib/dark-factory:mode=1777 -v "$PWD/tests:/work/tests:ro" -w /work \
+            --entrypoint bash dark-factory:pr -c 'bash tests/tier2_preview_helper_cli.sh'
