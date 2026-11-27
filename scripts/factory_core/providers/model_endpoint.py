@@ -91,6 +91,30 @@ _NO_LOCAL_DISPATCH = (
     "dispatch runs a gated phase (contract §4.11 decision 3; the first helper dispatch is #587)"
 )
 
+# The only dispatch intents a local entry may serve on the run side (#633). Adding a name is a
+# gate change with its own reviewed ticket; classify-preview-checker must never be added (a
+# local endpoint never hosts a checker, contract §4.2). scheduler_preflight() ignores this.
+LOCAL_ELIGIBLE_INTENTS = ("classify-preview-helper",)
+
+# Alternate cloud-auth switches and credentials Claude Code honours without ANTHROPIC_BASE_URL
+# (#594, #633). Mirrors, never imports, providers/model.py's _AWS_ALT_AUTH_SIGNALS /
+# _GCP_ALT_AUTH_SIGNALS: credential-presence signals only, not the platform-identity ones
+# (AWS_EXECUTION_ENV, K_SERVICE, GAE_APPLICATION, FUNCTION_TARGET, KUBERNETES_SERVICE_HOST).
+# CLAUDE_CODE_USE_GATEWAY and AWS_BEARER_TOKEN_BEDROCK, each set alone, were measured with the
+# pinned CLI 2.1.282 not to divert a request, so they are not listed.
+LOCAL_CREDENTIAL_ENV_SIGNALS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "AWS_PROFILE", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_SESSION_TOKEN", "GOOGLE_CLOUD_PROJECT",
+)
+
+# invalidated_by must list at least these (#587 AC4, owner decision 2026-11-26);
+# fixture_suite_version is compared whether listed or not.
+INVALIDATED_BY_MINIMUM = ("model_digest", "harness_version", "registry_config")
+
 
 class RegistryError(Exception):
     """Invalid registry, evidence or staged tree. .problems is the list of messages."""
@@ -547,6 +571,11 @@ def _evidence_problems(record, entry):
     names = record["invalidated_by"]
     if not isinstance(names, list) or any(n not in FINGERPRINTS for n in names):
         problems.append(f"{where}: invalidated_by may only list {', '.join(FINGERPRINTS)}")
+    # List membership, not set(): reached only when every element is a known name, but a
+    # set() of a malformed list would raise TypeError on an unhashable element.
+    elif not all(m in names for m in INVALIDATED_BY_MINIMUM):
+        problems.append(f"{where}: invalidated_by must include at least "
+                        f"{', '.join(INVALIDATED_BY_MINIMUM)}")
     return problems
 
 
@@ -619,7 +648,7 @@ def _select(registry_path, endpoint_id):
     return _pick(endpoints, endpoint_id, path)
 
 
-def _local_problems(entry, files, registry_path):
+def _local_problems(entry, files, registry_path, intent=None):
     eid = entry["id"]
     problems = []
     present = sorted(n for n in CLOUD_CREDENTIALS
@@ -628,6 +657,11 @@ def _local_problems(entry, files, registry_path):
         problems.append(f"endpoint '{eid}' is local but cloud model credential(s) are set in this "
                         f"container: {', '.join(present)} — a local-routed container holds none "
                         "(contract §4.3)")
+    signals = sorted(n for n in LOCAL_CREDENTIAL_ENV_SIGNALS if os.environ.get(n))
+    if signals:
+        problems.append(f"endpoint '{eid}' is local but an alternate cloud credential signal is set "
+                        f"in this container: {', '.join(signals)} — a local-routed container "
+                        "holds none (contract §4.3)")
     if os.environ.get("ANTHROPIC_BASE_URL") != entry["base_url"]:
         problems.append(f"endpoint '{eid}': ANTHROPIC_BASE_URL must equal the entry's base_url "
                         "(contract §4.11 decision 1)")
@@ -650,11 +684,14 @@ def _local_problems(entry, files, registry_path):
             problems += reasons
         else:
             problems += role_problems(record, "actor")
-    problems.append(_NO_LOCAL_DISPATCH.format(eid=eid))
+    # Lifted only for a local-eligible intent, passed explicitly by the caller (#633). None,
+    # "" or any other value keeps the refusal; every check above runs regardless.
+    if intent not in LOCAL_ELIGIBLE_INTENTS:
+        problems.append(_NO_LOCAL_DISPATCH.format(eid=eid))
     return problems
 
 
-def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
+def preflight(registry_path, endpoint_id, intent=None) -> tuple[list[str], str | None]:
     """Run-container check of the staged registry for one selected endpoint.
 
     Returns (problems, hosting); ([], hosting) == OK. hosting is the selected entry's
@@ -683,17 +720,18 @@ def preflight(registry_path, endpoint_id) -> tuple[list[str], str | None]:
         # Not _missing(): a local secret must not be delivered through .archon/.env (spec §C).
         problems.append(f"{ref} (secret_reference of endpoint '{entry['id']}') is not set")
     if hosting == "local":
-        problems += _local_problems(entry, files, registry_path)
+        problems += _local_problems(entry, files, registry_path, intent=intent)
     return problems, hosting
 
 
-def load_verified_entry(registry_path, endpoint_id) -> tuple[list[str], dict | None]:
+def load_verified_entry(registry_path, endpoint_id, intent=None) -> tuple[list[str], dict | None]:
     """The model proxy's Configuration-contract loader (#558): (problems, entry).
 
     entry is non-None only when problems is empty. Exactly one read_verified_tree() call;
     registry, entry and evidence are parsed only from the bytes it hashed (#593) — never
-    _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered, so a
-    local entry never comes back until #587 lifts it.
+    _select(), load_registry() or a second read. _NO_LOCAL_DISPATCH is not filtered: a local
+    entry comes back only when intent is in LOCAL_ELIGIBLE_INTENTS (#633). The model proxy
+    passes none, so it never gets one.
     """
     registry_path = Path(registry_path)
     problems, files = read_verified_tree(registry_path)
@@ -710,7 +748,7 @@ def load_verified_entry(registry_path, endpoint_id) -> tuple[list[str], dict | N
     if entry is None:
         return problems, None
     if entry["hosting_location"] == "local":
-        problems = problems + _local_problems(entry, files, registry_path)
+        problems = problems + _local_problems(entry, files, registry_path, intent=intent)
     return (problems, None) if problems else ([], entry)
 
 

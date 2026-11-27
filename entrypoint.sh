@@ -5,9 +5,82 @@ set -euo pipefail
 IDENTITY_SH="${IDENTITY_SH:-/opt/dark-factory/scripts/identity.sh}"
 source "$IDENTITY_SH"
 
+# --- Parse arguments: issue number and intent (no AI needed) ---
+# Runs before the two provider-CLI calls below, which both receive the intent (#633). It is
+# derived once, here, from the dispatch command alone: ARGUMENTS, INTENT and
+# INTENT_NOT_YET_AVAILABLE are assigned before use, so an inherited value is never read.
+_entrypoint_usage() {
+  echo "Usage: docker compose --profile factory run --rm dark-factory \"<command>\""
+  echo "Commands (# followed by the issue number):"
+  echo "  \"Fix issue #3\"   \"Continue issue #3\"   \"Continue\"   \"Close issue #3\""
+  echo "  \"Refine issue #3\"   \"Plan issue #3\"   \"Deconflict issue #3\""
+  echo "  \"Recheck main\"   \"Fix main\"   \"Audit deps\""
+  echo "Recognized but not available until #587:"
+  echo "  \"Classify preview (helper) #3\"   \"Verify preview classification #3\""
+}
+ARGUMENTS="${*}"
+if [ -z "$ARGUMENTS" ] && [ "${ENTRYPOINT_SOURCE_ONLY:-0}" != "1" ]; then
+  _entrypoint_usage
+  exit 1
+fi
+INTENT=""
+INTENT_NOT_YET_AVAILABLE=0
+# An inherited BASHOPTS or BASH_ENV can start this shell with nocasematch on, which would make
+# every literal and regex below case-insensitive.
+shopt -u nocasematch
+case "$ARGUMENTS" in
+  # Exact two-casing literals first: the generic word match below must not capture them.
+  "Fix main"|"fix main") INTENT="fix-main" ;;
+  "Audit deps"|"audit deps") INTENT="audit-deps" ;;
+  *)
+    # The two #587 command strings match as a whole string only — the fixed text, "#", one or
+    # more digits, nothing after — case-sensitively, with the digit class written out.
+    if [[ "$ARGUMENTS" =~ ^Classify\ preview\ \(helper\)\ \#[0123456789]+$ ]]; then
+      INTENT="classify-preview-helper"; INTENT_NOT_YET_AVAILABLE=1
+    elif [[ "$ARGUMENTS" =~ ^Verify\ preview\ classification\ \#[0123456789]+$ ]]; then
+      INTENT="classify-preview-checker"; INTENT_NOT_YET_AVAILABLE=1
+    else
+      # Matching for every other command: a case-insensitive leading word, no word boundary
+      # (so "Fixup #3" is still fix). Unlike the old regex (`^\s*\K(fix|...)`), leading
+      # whitespace is no longer skipped — an intentional change (#633): no scheduler-issued
+      # command string has any.
+      shopt -s nocasematch
+      case "$ARGUMENTS" in
+        fix*)        INTENT="fix" ;;
+        continue*)   INTENT="continue" ;;
+        close*)      INTENT="close" ;;
+        refine*)     INTENT="refine" ;;
+        plan*)       INTENT="plan" ;;
+        deconflict*) INTENT="deconflict" ;;
+        recheck*)    INTENT="recheck" ;;
+      esac
+      shopt -u nocasematch
+    fi
+    ;;
+esac
+if [ -z "$INTENT" ]; then
+  if [ -z "$ARGUMENTS" ] && [ "${ENTRYPOINT_SOURCE_ONLY:-0}" = "1" ]; then
+    # Tests source this file with no arguments: keep today's value for that one case ("fix" is
+    # never local-eligible). `exit` here would end the sourcing test's own shell.
+    INTENT="fix"
+  else
+    # No fallback to fix (#633): an unrecognized command runs nothing.
+    echo "Unrecognized command: '$ARGUMENTS'" >&2
+    _entrypoint_usage >&2
+    exit 1
+  fi
+fi
+if [ "$INTENT_NOT_YET_AVAILABLE" = "1" ]; then
+  echo "Intent '$INTENT' is recognized but not available until #587 lands; nothing was run." >&2
+  exit 1
+fi
+# "Recheck main" carries no "#N" — the || true keeps the no-match grep (exit 1)
+# from killing the script under set -euo pipefail.
+ISSUE_NUM=$(echo "$ARGUMENTS" | grep -oP '#\K\d+' | head -1 || true)
+
 # --- Validate required environment (provider-aware; parent spec §4) ---
 FACTORY_PROVIDERS_CLI="${FACTORY_PROVIDERS_CLI:-/opt/dark-factory/scripts/factory_core/providers/cli.py}"
-python3 "$FACTORY_PROVIDERS_CLI" preflight
+python3 "$FACTORY_PROVIDERS_CLI" preflight --intent "$INTENT"
 
 # --- Model-endpoint hosting location (#586) ---
 # Resolved once, here, through the baked providers CLI: the clone does not exist yet, and
@@ -16,7 +89,7 @@ python3 "$FACTORY_PROVIDERS_CLI" preflight
 # but exactly "hosting=local" (an error, a crash, no output) is cloud. Assigned
 # unconditionally, so an inherited value is overwritten; not readonly, because
 # tests/test_entrypoint_current_run.sh sources this file twice in one shell.
-DF_ENDPOINT_HOSTING=$(python3 "$FACTORY_PROVIDERS_CLI" model-endpoints hosting 2>/dev/null \
+DF_ENDPOINT_HOSTING=$(python3 "$FACTORY_PROVIDERS_CLI" model-endpoints hosting --intent "$INTENT" 2>/dev/null \
   | grep -o '^hosting=local$' || echo "hosting=cloud")
 DF_ENDPOINT_HOSTING="${DF_ENDPOINT_HOSTING#hosting=}"
 
@@ -94,29 +167,6 @@ _compute_side_effect_level() {
   echo "side_effect_level=${FACTORY_SIDE_EFFECT_LEVEL} profile=${FACTORY_SIDE_EFFECT_PROFILE_VERSION} phases=${phases}"
   export PATH="${scripts_dir}/shims:${PATH}"
 }
-
-# --- Parse arguments ---
-ARGUMENTS="${*}"
-if [ -z "$ARGUMENTS" ] && [ "${ENTRYPOINT_SOURCE_ONLY:-0}" != "1" ]; then
-  echo "Usage: docker compose --profile factory run --rm dark-factory \"Fix issue #3\""
-  echo "       docker compose --profile factory run --rm dark-factory \"Continue issue #3\""
-  echo "       docker compose --profile factory run --rm dark-factory \"Close issue #3\""
-  echo "       docker compose --profile factory run --rm dark-factory \"Refine issue #3\""
-  echo "       docker compose --profile factory run --rm dark-factory \"Plan issue #3\""
-  echo "       docker compose --profile factory run --rm dark-factory \"Recheck main\""
-  exit 1
-fi
-
-# --- Extract issue number and intent immediately (no AI needed) ---
-# "Recheck main" carries no "#N" — the || true keeps the no-match grep (exit 1)
-# from killing the script under set -euo pipefail.
-ISSUE_NUM=$(echo "$ARGUMENTS" | grep -oP '#\K\d+' | head -1 || true)
-INTENT=$(echo "$ARGUMENTS" | grep -oiP '^\s*\K(fix|continue|close|refine|plan|deconflict|recheck)' | head -1 | tr '[:upper:]' '[:lower:]' || true)
-INTENT=${INTENT:-fix}
-case "$ARGUMENTS" in
-  "Fix main"|"fix main") INTENT="fix-main" ;;
-  "Audit deps"|"audit deps") INTENT="audit-deps" ;;
-esac
 
 # --- Canonical run identity and artifact directory ---
 # ARCHON_RUN_ID is not set by archon; always generate a UUID for correlation.
@@ -301,6 +351,25 @@ run_post_mortem() {
   post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
+# Verified-local runs only (#633). Deliberately broad: ANY exit code 2 from the clone's cli.py
+# triggers the fallback, not only a rejected --hosting-location. Exit code 2 is what CPython
+# returns for an argparse unknown flag, an argparse unknown subcommand, or a script file that
+# does not exist — all three mean the clone's copy cannot serve this call (a real failure of
+# either subcommand exits 1 or 3), so all three fall back with the flag intact. Then the baked
+# copy runs with the identical argv: never a retry without the flag. Only the output of the
+# attempt whose status is returned is printed, stderr merged into stdout.
+_cli_with_hosting_fallback() {
+  local out rc=0
+  # TARGET-PATH: the clone's copy first, as at every other cli.py call site.
+  out=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "$@" 2>&1) || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    rc=0
+    out=$(python3 /opt/dark-factory/scripts/factory_core/cli.py "$@" 2>&1) || rc=$?
+  fi
+  printf '%s\n' "$out"
+  return "$rc"
+}
+
 # Detects a session-window exhaustion in the captured run output via the Python
 # session_window module (structured claude.rate_limit_event preferred, substring/regex
 # fallback otherwise). On match: writes the shared pause sentinel, records a distinct
@@ -311,21 +380,24 @@ _handle_session_window_pause() {
   local tmp_out="$1"
   [ "${SESSION_WINDOW_BACKOFF_ENABLED:-true}" = "true" ] || return 1
 
-  local sw_result sw_rc
+  local sw_result sw_rc=0
+  local sw_args=(session-window-check
+    --tmp-out "$tmp_out"
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}"
+    --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}"
+    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}")
   # #586: only a verified-local run passes the flag; the default argv is unchanged, so a
   # target's older cli.py copy never sees an argument it would reject. On local the CLI
-  # writes no sentinel and prints matched=false, so this returns 1 below.
-  local hosting_flag=()
-  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
-  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
-  # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-  sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" session-window-check \
-    --tmp-out "$tmp_out" \
-    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
-    --buffer-minutes "${SESSION_WINDOW_BUFFER_MINUTES:-5}" \
-    --fallback-minutes "${SESSION_WINDOW_FALLBACK_MINUTES:-30}" \
-    "${hosting_flag[@]}" 2>&1)
-  sw_rc=$?
+  # writes no sentinel and prints matched=false, so this returns 1 below. #633: on local, a
+  # clone cli.py that rejects the flag falls back to the baked copy, flag intact.
+  if [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ]; then
+    sw_result=$(_cli_with_hosting_fallback "${sw_args[@]}" --hosting-location local) || sw_rc=$?
+  else
+    # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy
+    # until P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+    sw_result=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${sw_args[@]}" 2>&1) \
+      || sw_rc=$?
+  fi
   if [ "$sw_rc" -ne 0 ]; then
     echo "WARNING: session-window-check failed (exit ${sw_rc}) — path/import likely broken, falling through to legacy detection: ${sw_result}" >&2
     return 1
@@ -499,25 +571,29 @@ _write_error_signature() {
       fi
     done
   fi
+  # $dirty_flag / $artifact_flag unquoted on purpose: an empty one adds no argument, as before.
+  local es_args=(error-signature-write
+    --issue "$ISSUE_NUM"
+    --phase "$phase"
+    --exit-code "$exit_code"
+    --text-file "${text_file:-}"
+    --elapsed-seconds "$elapsed_seconds"
+    --commits-since-start "$commits_since_start"
+    $dirty_flag $artifact_flag
+    --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}"
+    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}")
   # #586: a verified-local run signs rate-limit/exhaustion output as a counted
   # substantive:endpoint_unreachable failure; the flag is passed only on local (default argv
-  # unchanged, as in _handle_session_window_pause).
-  local hosting_flag=()
-  [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ] && hosting_flag=(--hosting-location local)
-  # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
-  # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-  python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" error-signature-write \
-    --issue "$ISSUE_NUM" \
-    --phase "$phase" \
-    --exit-code "$exit_code" \
-    --text-file "${text_file:-}" \
-    --elapsed-seconds "$elapsed_seconds" \
-    --commits-since-start "$commits_since_start" \
-    $dirty_flag $artifact_flag \
-    --delivery-failure-max-seconds "${DELIVERY_FAILURE_MAX_SECONDS:-30}" \
-    --state-dir "${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}" \
-    "${hosting_flag[@]}" \
-    2>/dev/null || true
+  # unchanged, as in _handle_session_window_pause). #633: on local, a clone cli.py that
+  # rejects the flag falls back to the baked copy, flag intact; its output is discarded.
+  if [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ]; then
+    _cli_with_hosting_fallback "${es_args[@]}" --hosting-location local >/dev/null 2>&1 || true
+  else
+    # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
+    # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
+    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${es_args[@]}" \
+      2>/dev/null || true
+  fi
 }
 
 post_cost_report() {

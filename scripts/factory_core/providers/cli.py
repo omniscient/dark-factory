@@ -236,7 +236,7 @@ def _codehost_update_body(args):
 
 
 def _preflight(args):
-    problems = preflight(side=args.side)
+    problems = preflight(side=args.side, intent=args.intent or None)
     if problems:
         for p in problems:
             print(f"ERROR: {p}", file=sys.stderr)
@@ -270,16 +270,17 @@ def _model_endpoints_show(args):
 
 def _model_endpoints_hosting(args):
     # #586: entrypoint.sh resolves the run's hosting location once, before the clone, through
-    # this baked copy. Built only on load_verified_entry(), which keeps _NO_LOCAL_DISPATCH, so
-    # every real registry prints hosting=cloud until #587. Always exits 0: any problem or
-    # exception prints hosting=cloud (the caller fails closed on content, never on rc).
+    # this baked copy. Built only on load_verified_entry(), which keeps _NO_LOCAL_DISPATCH
+    # unless --intent names a local-eligible intent (#633), so without one every real registry
+    # prints hosting=cloud. Always exits 0: any problem or exception prints hosting=cloud (the
+    # caller fails closed on content, never on rc).
     hosting = "cloud"
     endpoint_id = os.environ.get("FACTORY_MODEL_ENDPOINT", "")
     try:
         if endpoint_id:
             from factory_core.providers import model_endpoint
             problems, entry = model_endpoint.load_verified_entry(
-                model_endpoint.staged_registry_dir(), endpoint_id)
+                model_endpoint.staged_registry_dir(), endpoint_id, intent=args.intent or None)
             if problems:
                 print(f"WARNING: model-endpoints hosting: {'; '.join(problems)}", file=sys.stderr)
             elif entry["hosting_location"] == "local":
@@ -488,6 +489,8 @@ def main():
     pf = top.add_parser("preflight")
     pf.add_argument("--side", choices=("run", "scheduler"), default="run",
                     help="scheduler: scheduler.sh's boot check; run (default): a run container's")
+    pf.add_argument("--intent", default="",
+                    help="the run's dispatch intent, from entrypoint.sh (#633); run side only")
     pf.set_defaults(func=_preflight)
 
     model_endpoints = top.add_parser("model-endpoints")
@@ -504,6 +507,8 @@ def main():
     mstage.set_defaults(func=_model_endpoints_stage)
 
     mhost = msub.add_parser("hosting")
+    mhost.add_argument("--intent", default="",
+                       help="the run's dispatch intent, from entrypoint.sh (#633)")
     mhost.set_defaults(func=_model_endpoints_hosting)
 
     mhc = msub.add_parser("hosting-check",

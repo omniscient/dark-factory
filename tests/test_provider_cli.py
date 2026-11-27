@@ -250,7 +250,7 @@ def test_codehost_verbs_pass_repo_through(monkeypatch):
 
 def test_preflight_ok_prints_ok_and_exits_0(monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": [])
+    monkeypatch.setattr(cli_mod, "preflight", lambda side="run", intent=None: [])
     monkeypatch.setattr(sys, "argv", ["cli.py", "preflight"])
     cli_mod.main()
     assert capsys.readouterr().out.strip() == "providers preflight: OK"
@@ -258,7 +258,7 @@ def test_preflight_ok_prints_ok_and_exits_0(monkeypatch, capsys):
 
 def test_preflight_failure_prints_every_problem_and_exits_1(monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": [
+    monkeypatch.setattr(cli_mod, "preflight", lambda side="run", intent=None: [
         "GH_TOKEN is not set. Add it to .archon/.env",
         "Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in .archon/.env",
     ])
@@ -432,11 +432,15 @@ MODEL_REGISTRY_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_
 def test_preflight_side_defaults_to_run_and_passes_scheduler_through(monkeypatch, capsys):
     import factory_core.providers.cli as cli_mod
     seen = []
-    monkeypatch.setattr(cli_mod, "preflight", lambda side="run": seen.append(side) or [])
-    for argv in (["cli.py", "preflight"], ["cli.py", "preflight", "--side", "scheduler"]):
+    monkeypatch.setattr(cli_mod, "preflight",
+                        lambda side="run", intent=None: seen.append((side, intent)) or [])
+    for argv in (["cli.py", "preflight"], ["cli.py", "preflight", "--side", "scheduler"],
+                 ["cli.py", "preflight", "--intent", ""],
+                 ["cli.py", "preflight", "--intent", "classify-preview-helper"]):
         monkeypatch.setattr(sys, "argv", argv)
         cli_mod.main()
-    assert seen == ["run", "scheduler"]
+    assert seen == [("run", None), ("scheduler", None), ("run", None),
+                    ("run", "classify-preview-helper")]
 
 
 def _staged_fixture(tmp_path, monkeypatch):

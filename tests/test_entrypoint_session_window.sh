@@ -567,10 +567,10 @@ assert_true "never reached the legacy sleep" "[ ! -f '$E2E_DIR_M/sleep.log' ]"
 assert_true "no sentinel written" "[ ! -f '$E2E_DIR_M/state/session-window-paused' ]"
 assert_eq "signature the scheduler consumes is the counted local class" \
   "substantive:endpoint_unreachable:1" "$(_e2e_sig "$E2E_DIR_M")"
-assert_eq "hosting resolved exactly once, through \$FACTORY_PROVIDERS_CLI" "1" \
-  "$(grep -c '^model-endpoints hosting$' "$E2E_DIR_M/providers.log")"
+assert_eq "hosting resolved exactly once, through \$FACTORY_PROVIDERS_CLI, with the intent (#633)" "1" \
+  "$(grep -c '^model-endpoints hosting --intent plan$' "$E2E_DIR_M/providers.log")"
 assert_true "hosting resolved right after the provider check, before anything else" \
-  "[ \"\$(sed -n 2p '$E2E_DIR_M/providers.log')\" = 'model-endpoints hosting' ]"
+  "[ \"\$(sed -n 2p '$E2E_DIR_M/providers.log')\" = 'model-endpoints hosting --intent plan' ]"
 assert_true "no pause comment posted" \
   "! grep -q 'df-session-window-pause' '$E2E_DIR_M/providers.log'"
 rm -rf "$E2E_DIR_M"
