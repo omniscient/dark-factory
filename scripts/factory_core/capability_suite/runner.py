@@ -733,7 +733,8 @@ def main(argv=None, *, fixtures_dir=FIXTURES_DIR) -> int:
     result = emit.build_result(
         target_kind="mock" if mock_mode else "endpoint", base_url=base_url,
         results=dimension_results(summary.probe_values), harness_pending=harness_pending,
-        controls=summary.controls, fixture_suite_version=suite_version)
+        controls=summary.controls, harness_sources=harness_sources(summary),
+        harness_probes=summary.harness_probes, fixture_suite_version=suite_version)
     emit.write_result(args.out, result)
     for line in summary.lines:
         print(line)

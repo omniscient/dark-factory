@@ -263,7 +263,8 @@ def test_stall_script_sees_the_client_hang_up():
 def _result(**kw):
     args = dict(target_kind="endpoint", base_url="http://192.0.2.10:8080",
                 results={d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}, harness_pending=(),
-                controls=[], fixture_suite_version="f" * 64,
+                controls=[], harness_sources={d: None for d in me.ACTOR_REQUIRED_DIMENSIONS},
+                harness_probes=[], fixture_suite_version="f" * 64,
                 now=datetime(2026, 11, 26, tzinfo=timezone.utc))
     args.update(kw)
     return emit.build_result(**args)
@@ -290,6 +291,35 @@ def test_result_carries_no_evidence_record_field():
     {"results": {d: "stale" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
 ])
 def test_result_rejects_values_outside_the_vocabulary(kw):
+    with pytest.raises(ValueError):
+        _result(**kw)
+
+
+def test_result_schema_is_1_1_with_harness_sources_and_probes():
+    probe = {"dimension": "streaming", "case": "c", "observed": "pass:ok", "source": "endpoint"}
+    body = _result(harness_sources={**{d: None for d in me.ACTOR_REQUIRED_DIMENSIONS},
+                                    "streaming": "both"},
+                   harness_probes=[probe])["certification_result"]
+    assert body["schema_version"] == "1.1"
+    assert body["harness_sources"]["streaming"] == "both"
+    assert body["harness_probes"] == [probe]
+
+
+@pytest.mark.parametrize("kw", [
+    {"harness_sources": {"streaming": "mock"}},
+    {"harness_sources": {d: "rig" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass",
+                         "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c",
+                         "observed": "fail:http://192.0.2.7", "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass:ok",
+                         "source": "both"}]},
+    {"harness_probes": [{"dimension": "nope", "case": "c", "observed": "pass:ok",
+                         "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass:ok",
+                         "source": "mock", "extra": 1}]},
+])
+def test_result_rejects_malformed_harness_sources_and_probes(kw):
     with pytest.raises(ValueError):
         _result(**kw)
 
@@ -600,6 +630,8 @@ def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
     assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
     assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
     assert len(body["controls"]) == 17 and all(c["ok"] for c in body["controls"])
+    assert body["schema_version"] == "1.1" and body["harness_probes"] == []
+    assert body["harness_sources"] == {d: None for d in me.ACTOR_REQUIRED_DIMENSIONS}
 
 
 def test_module_entry_point_runs(tmp_path):
