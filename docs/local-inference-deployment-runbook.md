@@ -22,8 +22,9 @@ It routes nothing either. `_NO_LOCAL_DISPATCH` in
 `scripts/factory_core/providers/model_endpoint.py` rejects every `hosting_location: local`
 selection on the scheduler side. On the run side it rejects every dispatch intent except
 `classify-preview-helper` (#633), and nothing dispatches that intent until #587 ships. So every
-local registry entry fails preflight today. The proxy service receives none of the endpoint
-variables; delivering them is also #587's. Live activation needs #562's certification and
+local registry entry fails preflight today. `factory-model-proxy` receives none of the endpoint
+variables. The helper lane's own `preview-helper-proxy` service interpolates them from the
+scheduler's environment (#634), but nothing starts it until #587's dispatcher. Live activation needs #562's certification and
 #587's first local-eligible dispatch. It is not part of this runbook.
 
 "Operator" means the person who controls the instance's `deploy/instances/<instance>/` directory
@@ -83,8 +84,9 @@ The schema requires a `secret_reference` on every entry. It is an env-var *name*
   see `docs/configuration.md`, "Model endpoint registry"), any tracked file, or the registry file
   itself.
 - **Not possible yet:** the proxy sends this value as a local request's only `x-api-key`, but the
-  proxy service receives none of the endpoint variables today. Delivering them is #587's. There
-  is no step for it here.
+  value reaches only the `preview-helper-proxy` service, as `FACTORY_HELPER_MODEL_SECRET` in the
+  scheduler's own environment (#634), and nothing starts that service until #587. The helper's
+  entry must name `secret_reference: FACTORY_HELPER_MODEL_SECRET`. There is no step for it here.
 
 ## Pinning identity
 

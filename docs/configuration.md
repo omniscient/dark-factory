@@ -536,7 +536,7 @@ Operator runbook for registering a candidate local endpoint: `docs/local-inferen
 | `FACTORY_MODEL_REGISTRY_DIR` | compose interpolation at `up` time (the `--env-file` file or the shell), like `PROJECT_DIR` | `deploy/docker-compose.yml` | host path of this instance's own `model-registry/` directory; unset mounts the empty `deploy/model-registry.empty/` |
 | `FACTORY_MODEL_REGISTRY_SHA256` | never set by hand | run-container preflight; the model proxy's startup when `FACTORY_MODEL_ENDPOINT` is set (#558) | computed by `dispatch()` per run and passed only with `docker compose run -e`; not in `PROVIDER_PASSTHROUGH_VARS` |
 | `FACTORY_DISPATCH_ROLE` | nowhere yet; the first dispatch that needs a non-default role forwards it with `docker compose run -e` | `entrypoint.sh`, which folds it into the `current-run.json` pointer as `role`; the model proxy, only when `FACTORY_MODEL_ENDPOINT` is set (#559) | per-dispatch; not in `PROVIDER_PASSTHROUGH_VARS`. Unset or empty leaves the pointer unchanged. A value that is not a bare lowercase token is recorded as `invalid`, which the proxy refuses (`role_invalid`) |
-| the variable a `secret_reference` names | cloud entry: the run container's `.archon/.env` (for example `ANTHROPIC_API_KEY`); local entry: not `.archon/.env`; the model proxy's own environment, delivered by #587 | run-container preflight (presence only); the model proxy, which sends it as the local request's only `x-api-key` (#558) | the registry stores the name, never the value |
+| the variable a `secret_reference` names | cloud entry: the run container's `.archon/.env` (for example `ANTHROPIC_API_KEY`); local entry: not `.archon/.env`. For the `classify-preview-helper` lane, the only local lane: `FACTORY_HELPER_MODEL_SECRET` in the scheduler's own environment, which compose interpolation delivers to the `preview-helper-proxy` service alone (#634) | run-container preflight: present for a cloud entry, absent for the helper lane; the model proxy, which sends it as the local request's only `x-api-key` (#558) | the registry stores the name, never the value. The helper's entry must name `secret_reference: FACTORY_HELPER_MODEL_SECRET`; any other name fails closed. The other four scheduler-side variables `preview-helper-proxy` interpolates are `PREVIEW_HELPER_ENDPOINT`, `FACTORY_MODEL_REGISTRY_SHA256`, `PREVIEW_HELPER_ENDPOINT_BASE_URL` and `PREVIEW_HELPER_ENDPOINT_SERVED_NAME`; none of the five is in `PROVIDER_PASSTHROUGH_VARS`. An interpolated `docker compose config` with the `preview-helper-proxy` profile prints the secret: never run or log one |
 | `FACTORY_MODEL_REGISTRY_PATH` | tests only | `model_endpoint.staged_registry_dir()` | overrides the staged path; never forwarded |
 
 The registry lives on the human-only instance surface,
@@ -557,7 +557,11 @@ intent from its command and passes it to the baked CLI's `preflight` and
 `model-endpoints hosting` as `--intent`; no environment variable, `current-run.json` field or
 registry content can supply it. The scheduler side (`preflight --side scheduler`,
 `model-endpoints hosting-check`) still refuses every local selection, and nothing dispatches
-the helper intent until #587.
+the helper intent until #587. A helper run reaches its endpoint only through the
+`preview-helper-proxy` service (#634), so for that intent the run container's
+`ANTHROPIC_BASE_URL` must be exactly `http://preview-helper-proxy:8787`
+(`HELPER_PROXY_BASE_URL`) instead of the entry's `base_url`, and the entry's secret must be
+absent from it.
 
 Alternate cloud-auth guard (#594, closed by #633): besides the static credentials in
 `CLOUD_CREDENTIALS`, a local selection fails, with no warn-only mode, when any name in

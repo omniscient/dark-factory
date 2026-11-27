@@ -120,9 +120,33 @@ time: leaving it set after the proxy is disabled breaks runs.
 ## Local destination: supported and uncertified modes (#558)
 
 Spec: `docs/archive/2026-11-25-hybrid-runtime-adapter-design.md`. Nothing here is
-reachable in production yet. #557's `_NO_LOCAL_DISPATCH` still rejects every local selection,
-and the proxy service receives none of the variables a local selection needs. Delivering them
-is #587's. The adapter is built and hermetically tested so #587 can enable it.
+reachable in production yet. #557's `_NO_LOCAL_DISPATCH` rejects every local selection except
+one made for the `classify-preview-helper` intent (#633), and nothing dispatches that intent
+until #587. `factory-model-proxy` never receives the variables a local selection needs: the
+helper lane gets its own proxy service, described next. The adapter is built and hermetically
+tested so #587 can enable it.
+
+**The helper lane's proxy (#634).** `run-compose.yml`'s `preview-helper-proxy` service, under
+its own `preview-helper-proxy` profile, runs this module with the literal argument
+`--intent classify-preview-helper` in its `entrypoint:`. It is the only path from the helper
+container to the local endpoint. Nothing in this repository starts it: #587's dispatcher
+starts it for each helper dispatch, removes it when the helper exits, and refuses a dispatch
+that finds a stale one. Its environment is interpolated from the scheduler's at that moment,
+with no `env_file`, from five scheduler-side variables: `PREVIEW_HELPER_ENDPOINT` (becomes
+`FACTORY_MODEL_ENDPOINT`), `FACTORY_MODEL_REGISTRY_SHA256`, `PREVIEW_HELPER_ENDPOINT_BASE_URL`
+(becomes `ANTHROPIC_BASE_URL`), `PREVIEW_HELPER_ENDPOINT_SERVED_NAME` (becomes the four
+`ANTHROPIC_DEFAULT_*_MODEL` aliases) and `FACTORY_HELPER_MODEL_SECRET`, plus three literals:
+`PYTHONPATH`, `MODEL_PROXY_PORT=8787` and `CURRENT_RUN_DIR=/var/lib/dark-factory/preview-helper`.
+With `--intent` given, startup also exits non-zero before binding if `FACTORY_MODEL_ENDPOINT`
+is empty, if the resolved entry is not `hosting_location: local`, or if its `base_url` is the
+proxy's own address: a helper proxy never falls back to the cloud default. The helper's
+registry entry must name `secret_reference: FACTORY_HELPER_MODEL_SECRET`; any other name fails
+closed. The helper run container sets `ANTHROPIC_BASE_URL=http://preview-helper-proxy:8787` and
+holds no secret, and its preflight requires both. Ledger rows go to the shared
+`request-ledger.jsonl` in the usual shape, correlated from
+`/var/lib/dark-factory/preview-helper/current-run.json`. An interpolated `docker compose config`
+with this profile prints the secret: never run or log one. While the proxy runs, any container
+on `dark-factory-net` can reach it by name; #587 adds the helper's internal network.
 
 When `FACTORY_MODEL_ENDPOINT` is set, the proxy verifies the staged registry once at startup.
 It recomputes the SHA-256 against `FACTORY_MODEL_REGISTRY_SHA256` and never re-reads the
