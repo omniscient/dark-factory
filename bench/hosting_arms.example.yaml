@@ -1,0 +1,15 @@
+# Example arms file for bench/shadow_runner.py (#563). Placeholders only: a 192.0.2.0/24
+# (TEST-NET-1) address and example names. Copy it OUTSIDE every git work tree before you
+# fill in a real endpoint — the runner refuses an --arms path inside one. secret_env is the
+# NAME of an environment variable, never a value.
+arms:
+  - arm_id: rules
+    arm_kind: rules_only
+  - arm_id: local-a
+    arm_kind: local
+    endpoint_id: example-local
+    base_url: http://192.0.2.10:8080
+    secret_env: SHADOW_LOCAL_API_KEY
+    model_identity: {served_name: example-model, digest_or_revision: example-digest, quantisation: example-quant}
+    runtime_stack: {name: example-runtime, version: "0.0.0", chat_template: example-template, context_settings: {context_tokens: 8192}}
+    hardware: example-hardware

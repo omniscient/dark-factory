@@ -1,0 +1,53 @@
+# Example oracle labels for tooling tests only (#563): labeled_by is
+# example-not-an-oracle, so none of these is a human adjudication.
+schema_version: "1.0"
+oracle_question: "Would this changeset need live endpoint validation to catch a regression?"
+labels:
+  ex-01:
+    oracle_label: false
+    expected_fail_safe: false
+    oracle_rationale: "Documentation only; nothing the running stack executes changes."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-02:
+    oracle_label: false
+    expected_fail_safe: false
+    oracle_rationale: "Backend tests only; CI exercises them without a live stack."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-03:
+    oracle_label: false
+    expected_fail_safe: false
+    oracle_rationale: "CI configuration only; no runtime code changes."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-04:
+    oracle_label: false
+    expected_fail_safe: false
+    oracle_rationale: "Agent memory file only; not part of the running app."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-05:
+    oracle_label: true
+    expected_fail_safe: false
+    oracle_rationale: "An API handler change; only a live endpoint shows the regression."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-06:
+    oracle_label: true
+    expected_fail_safe: false
+    oracle_rationale: "The base image changes; the stack must be rebuilt to validate it."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-07:
+    oracle_label: true
+    expected_fail_safe: true
+    oracle_rationale: "Empty changeset: insufficient evidence, so the fail-safe keeps the preview."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"
+  ex-08:
+    oracle_label: true
+    expected_fail_safe: false
+    oracle_rationale: "A script the factory runs; no rubric row covers it, so it is treated as runtime."
+    labeled_by: example-not-an-oracle
+    labeled_at: "2026-11-27T00:00:00+00:00"

@@ -1,0 +1,70 @@
+# Example inputs for tooling tests only (#563). Hand-built; no evidential weight.
+# Format: bench/fixtures/preview_classifier/README.md. The oracle lives in
+# oracle_labels.yaml, which the shadow runner never opens.
+schema_version: "1.0"
+preview_enabled: true
+fixtures:
+  - fixture_id: ex-01
+    provenance: synthetic
+    split: dev
+    name_only: [docs/features.md, README.md]
+    stat: " docs/features.md | 2 +-\n README.md | 1 +\n 2 files changed, 2 insertions(+), 1 deletion(-)"
+    title: "docs: clarify the replay bench row"
+    labels: [documentation]
+    labels_source: synthetic
+  - fixture_id: ex-02
+    provenance: synthetic
+    split: dev
+    name_only: [backend/tests/test_scanner.py]
+    stat: " backend/tests/test_scanner.py | 14 ++++++++++++++\n 1 file changed, 14 insertions(+)"
+    title: "test: cover the empty-watchlist scanner path"
+    labels: [testing]
+    labels_source: synthetic
+  - fixture_id: ex-03
+    provenance: synthetic
+    split: dev
+    name_only: [.github/workflows/ci.yml]
+    stat: " .github/workflows/ci.yml | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)"
+    title: "ci: pin the python version"
+    labels: [ci]
+    labels_source: synthetic
+  - fixture_id: ex-04
+    provenance: synthetic
+    split: dev
+    name_only: [.archon/memory/architecture.md]
+    stat: " .archon/memory/architecture.md | 4 ++++\n 1 file changed, 4 insertions(+)"
+    title: "memory: record an architecture decision"
+    labels: []
+    labels_source: synthetic
+  - fixture_id: ex-05
+    provenance: synthetic
+    split: dev
+    name_only: [backend/app/api/scans.py]
+    stat: " backend/app/api/scans.py | 9 +++++----\n 1 file changed, 5 insertions(+), 4 deletions(-)"
+    title: "fix: scans endpoint returns 500 on an empty filter"
+    labels: [bug]
+    labels_source: synthetic
+  - fixture_id: ex-06
+    provenance: synthetic
+    split: dev
+    name_only: [docs/deploy.md, Dockerfile]
+    stat: " Dockerfile | 2 +-\n docs/deploy.md | 3 ++-\n 2 files changed, 3 insertions(+), 2 deletions(-)"
+    title: "docs: document the new base image"
+    labels: [documentation]
+    labels_source: synthetic
+  - fixture_id: ex-07
+    provenance: synthetic
+    split: dev
+    name_only: []
+    stat: ""
+    title: "chore: empty changeset"
+    labels: []
+    labels_source: synthetic
+  - fixture_id: ex-08
+    provenance: synthetic
+    split: dev
+    name_only: [scripts/diff_rank.py]
+    stat: " scripts/diff_rank.py | 6 +++---\n 1 file changed, 3 insertions(+), 3 deletions(-)"
+    title: "refactor: simplify hunk ranking"
+    labels: [enhancement]
+    labels_source: synthetic
