@@ -1407,6 +1407,36 @@ nodes:
         exit 1
       fi
 
+      # >>> preview-helper changeset (#587) — shadow only. Written only when the scheduler
+      # passed the flag on this dispatch; in a subshell that can never fail this node.
+      if [ "${PREVIEW_HELPER_CHANGESET_FLAG:-}" = "true" ]; then
+        (
+          set +e
+          PH_DIR=/var/lib/dark-factory/preview-pending
+          PH_SHA=$(git rev-parse HEAD 2>/dev/null)
+          printf '%s' "$PH_SHA" | grep -qE '^[0-9a-f]{40}$' || exit 0
+          printf '%s' "$ISSUE" | grep -qE '^[1-9][0-9]*$' || exit 0
+          mkdir -p "$PH_DIR" 2>/dev/null || exit 0
+          PH_TMP=$(mktemp "$PH_DIR/.tmp.XXXXXX" 2>/dev/null) || exit 0
+          git diff main...HEAD --name-only > "$PH_TMP.files" 2>/dev/null
+          git diff main...HEAD --stat > "$PH_TMP.stat" 2>/dev/null
+          if jq -n --argjson issue "$ISSUE" --arg sha "$PH_SHA" \
+               --rawfile files "$PH_TMP.files" --rawfile stat "$PH_TMP.stat" \
+               --slurpfile ij "$ARTIFACTS_DIR/issue.json" \
+               '{issue_number: $issue, head_sha: $sha,
+                 changed_files: ($files | split("\n") | map(select(length > 0))),
+                 diff_stat: $stat,
+                 title: (($ij[0].title // "") | tostring),
+                 labels: [($ij[0].labels // [])[]
+                          | if type == "object" then ((.name // "") | tostring) else tostring end]}' \
+               > "$PH_TMP" 2>/dev/null; then
+            mv -f "$PH_TMP" "$PH_DIR/${ISSUE}-${PH_SHA}.json" 2>/dev/null
+          fi
+          rm -f "$PH_TMP" "$PH_TMP.files" "$PH_TMP.stat" 2>/dev/null
+        ) || true
+      fi
+      # <<< preview-helper changeset (#587)
+
       # --- Blast radius report (codeindex advisory) ---
       BLAST_SECTION=""
       if command -v codeindex &>/dev/null; then
