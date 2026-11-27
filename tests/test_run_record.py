@@ -3325,7 +3325,7 @@ def test_archon_fallback_sets_usage_source_and_reconciles_on_cost():
     assert node["usage_source"] == "archon"
     assert node["usage_reconciled"] is True   # 1.019869 + 1.5652096 == 2.5850786
     assert node["gen_ai.usage.cache_read_input_tokens"] == 4893508
-    assert node["hosting_location"] == "cloud"
+    assert node["hosting_location"] is None   # hosting unknown (no ledger rows passed)
 
 
 def test_node_with_no_figures_gets_none_and_no_numeric_key():
@@ -3368,7 +3368,8 @@ def test_assemble_records_model_cache_and_session_delta(tmp_path, monkeypatch):
     assert "cost_usd_session_delta" not in by["revise-advisory"]
     assert by["fetch-issue"]["model"] == "" and by["fetch-issue"]["usage_source"] == "none"
     assert not any(k in by["fetch-issue"] for k in _NEW_645_NODE_KEYS if k != "usage_source")
-    assert all(n["hosting_location"] == "cloud" for n in rec["nodes"] if n["node_id"] != "fetch-issue")
+    # No ledger rows in this fixture, so hosting is unknown rather than assumed "cloud".
+    assert all(n["hosting_location"] is None for n in rec["nodes"] if n["node_id"] != "fetch-issue")
     assert rec["totals"]["gen_ai.usage.cache_read_input_tokens"] == 15408 + 1000 + 2000 + 1000
     assert rec["totals"]["gen_ai.usage.cache_creation_input_tokens"] == 2750 + 50 + 30 + 50
     assert [s["first_prompt"] for s in rec["unattributed_sessions"]] == [

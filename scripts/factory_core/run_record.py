@@ -663,7 +663,7 @@ def _with_usage_keys(node: dict, called: bool, figures: "dict | None", hosting) 
         node["usage_reconciled"] = figures["usage_reconciled"]
     if source == "cli_cost_state" and not local:
         node["cost_usd_session_delta"] = figures["cost_usd_session_delta"]
-    node["hosting_location"] = "local" if local else "cloud"
+    node["hosting_location"] = "local" if local else ("cloud" if hosting == "cloud" else None)
     return node
 
 
@@ -1521,12 +1521,15 @@ def _backfill_usage(run_id: str, transcripts_dir) -> dict:
     ]
     stat_before = path.stat()
     pre = path.with_name(f"{run_id}.pre-645.json")
+    tmp_pre = path.with_name(f".{run_id}.pre-645.json.tmp")
     try:
-        with open(pre, "xb") as fh:
-            fh.write(original)
+        tmp_pre.write_bytes(original)
+        os.link(tmp_pre, pre)  # atomic: `pre` only ever appears fully written
         os.utime(pre, (stat_before.st_atime, stat_before.st_mtime))
     except FileExistsError:
         pass
+    finally:
+        tmp_pre.unlink(missing_ok=True)
     tmp = path.with_name(f".{run_id}.json.tmp")
     tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
     os.replace(tmp, path)

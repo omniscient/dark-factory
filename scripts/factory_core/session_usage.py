@@ -19,6 +19,7 @@ found nothing is guessed. Pure functions over files: never imports run_record, n
 raises on malformed input, and never opens anything but a regular file.
 """
 
+import gzip
 import json
 import os
 import pathlib
@@ -90,9 +91,10 @@ def _regular_file(path) -> bool:
 
 def _iter_lines(path):
     """Each line of a regular file as bytes; a line longer than MAX_LINE_BYTES is skipped
-    whole without ever being held in memory."""
+    whole without ever being held in memory. A ``.gz`` path is read through gzip."""
     cap = MAX_LINE_BYTES
-    with open(path, "rb") as fh:
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rb") as fh:
         while True:
             line = fh.readline(cap + 1)
             if not line:
@@ -166,9 +168,9 @@ def read_node_windows(log_file, node_ids) -> dict:
 
 
 def _transcript_files(root: pathlib.Path, started_at) -> list:
-    """Regular *.jsonl files under root, recursively, modified at or after started_at
-    (None: no time floor; unparseable: nothing). Symlinks, FIFOs and directories are
-    never opened."""
+    """Regular *.jsonl or *.jsonl.gz files under root, recursively, modified at or after
+    started_at (None: no time floor; unparseable: nothing). Symlinks, FIFOs and
+    directories are never opened."""
     if not root.is_dir():
         return []
     floor = None
@@ -180,7 +182,7 @@ def _transcript_files(root: pathlib.Path, started_at) -> list:
     out = []
     for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
         for name in filenames:
-            if not name.endswith(".jsonl"):
+            if not (name.endswith(".jsonl") or name.endswith(".jsonl.gz")):
                 continue
             path = pathlib.Path(dirpath) / name
             try:
