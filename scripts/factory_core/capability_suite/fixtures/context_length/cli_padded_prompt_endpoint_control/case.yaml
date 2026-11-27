@@ -1,0 +1,10 @@
+case: cli_padded_prompt_endpoint_control
+dimension: context_length
+description: The relay injects over_limit into the mock, so a padded prompt answered 400 fails the endpoint context judge.
+driver: harness
+kind: control
+target: mock
+check: cli_context_window_endpoint
+fault: over_limit
+expect: fail
+expect_reason: not_answered_200

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -20,10 +21,11 @@ from pathlib import Path
 import aiohttp
 import pytest
 import yaml
+from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from factory_core.capability_suite import emit, harness, mock_server, runner  # noqa: E402
+from factory_core.capability_suite import emit, harness, mock_server, relay, runner  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
 
 
@@ -261,7 +263,8 @@ def test_stall_script_sees_the_client_hang_up():
 def _result(**kw):
     args = dict(target_kind="endpoint", base_url="http://192.0.2.10:8080",
                 results={d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}, harness_pending=(),
-                controls=[], fixture_suite_version="f" * 64,
+                controls=[], harness_sources={d: None for d in me.ACTOR_REQUIRED_DIMENSIONS},
+                harness_probes=[], fixture_suite_version="f" * 64,
                 now=datetime(2026, 11, 26, tzinfo=timezone.utc))
     args.update(kw)
     return emit.build_result(**args)
@@ -288,6 +291,35 @@ def test_result_carries_no_evidence_record_field():
     {"results": {d: "stale" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
 ])
 def test_result_rejects_values_outside_the_vocabulary(kw):
+    with pytest.raises(ValueError):
+        _result(**kw)
+
+
+def test_result_schema_is_1_1_with_harness_sources_and_probes():
+    probe = {"dimension": "streaming", "case": "c", "observed": "pass:ok", "source": "endpoint"}
+    body = _result(harness_sources={**{d: None for d in me.ACTOR_REQUIRED_DIMENSIONS},
+                                    "streaming": "both"},
+                   harness_probes=[probe])["certification_result"]
+    assert body["schema_version"] == "1.1"
+    assert body["harness_sources"]["streaming"] == "both"
+    assert body["harness_probes"] == [probe]
+
+
+@pytest.mark.parametrize("kw", [
+    {"harness_sources": {"streaming": "mock"}},
+    {"harness_sources": {d: "rig" for d in me.ACTOR_REQUIRED_DIMENSIONS}},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass",
+                         "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c",
+                         "observed": "fail:http://192.0.2.7", "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass:ok",
+                         "source": "both"}]},
+    {"harness_probes": [{"dimension": "nope", "case": "c", "observed": "pass:ok",
+                         "source": "mock"}]},
+    {"harness_probes": [{"dimension": "streaming", "case": "c", "observed": "pass:ok",
+                         "source": "mock", "extra": 1}]},
+])
+def test_result_rejects_malformed_harness_sources_and_probes(kw):
     with pytest.raises(ValueError):
         _result(**kw)
 
@@ -345,7 +377,7 @@ def test_dimension_directories_are_exactly_the_actor_required_dimensions():
 def test_fixtures_hold_only_case_yaml_files():
     files = [p for p in runner.FIXTURES_DIR.rglob("*") if p.is_file()]
     assert files and all(p.name == "case.yaml" for p in files)
-    assert len(files) == len(runner.load_cases()) == 31
+    assert len(files) == len(runner.load_cases()) == 41
 
 
 def test_harness_pending_is_empty():
@@ -356,17 +388,54 @@ def test_worst_first_orders_exactly_the_result_values():
     assert sorted(runner.WORST_FIRST) == sorted(me.RESULT_VALUES)
 
 
+def _harness_cases():
+    return {n: c for n, c in _cases_by_name().items() if c["driver"] == "harness"}
+
+
 def test_each_formerly_pending_dimension_ships_one_harness_case():
-    cases = [c for c in runner.load_cases() if c["driver"] == "harness"]
-    assert {f"{c['dimension']}/{c['case']}": c["check"] for c in cases} == {
+    cases = {n: c for n, c in _harness_cases().items() if c["check"] in runner.HARNESS_CHECKS}
+    assert {n: c["check"] for n, c in cases.items()} == {
         "protocol_compatibility/cli_alias_and_nested_agent_resolution": "cli_alias_resolution",
         "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance": "cli_tool_round_trip",
         "context_length/cli_padded_prompt_and_over_limit": "cli_context_window",
         "timeout_cancellation/cli_sigint_closes_connection": "cli_sigint",
     }
-    assert all(c["kind"] == "probe" and c["target"] == "mock" for c in cases)
-    assert sorted(c["dimension"] for c in cases) == sorted(PART_A_PENDING)
-    assert set(runner.HARNESS_CHECKS) == {c["check"] for c in cases}
+    assert all(c["kind"] == "probe" and c["target"] == "mock" for c in cases.values())
+    assert sorted(c["dimension"] for c in cases.values()) == sorted(PART_A_PENDING)
+    assert set(runner.HARNESS_CHECKS) == {c["check"] for c in cases.values()}
+
+
+def test_each_formerly_pending_dimension_ships_an_endpoint_harness_probe_and_control():
+    cases = _harness_cases()
+    probes = {n: c["check"] for n, c in cases.items()
+              if c["check"] in runner.HARNESS_RELAY_CHECKS and c["kind"] == "probe"}
+    assert probes == {
+        "protocol_compatibility/cli_alias_resolution_endpoint": "cli_alias_resolution_endpoint",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint": "cli_tool_round_trip_endpoint",
+        "context_length/cli_padded_prompt_endpoint": "cli_context_window_endpoint",
+        "timeout_cancellation/cli_sigint_endpoint": "cli_sigint_endpoint",
+    }
+    assert all(cases[n]["target"] == "endpoint" for n in probes)
+    assert sorted(cases[n]["dimension"] for n in probes) == sorted(PART_A_PENDING)
+    assert set(runner.HARNESS_RELAY_CHECKS) == set(probes.values())
+    controls = {n: (c["check"], c.get("fault"), c.get("variant"),
+                    f"{c['expect']}:{c['expect_reason']}")
+                for n, c in cases.items() if c["kind"] == "control"}
+    assert controls == {
+        "protocol_compatibility/cli_alias_resolution_endpoint_control": (
+            "cli_alias_resolution_endpoint", "wrong_model", None,
+            "fail:opus_response_model_mismatch"),
+        "tool_call_fidelity/cli_tool_round_trip_endpoint_control": (
+            "cli_tool_round_trip_endpoint", None, "unplanted_file", "fail:planted_not_carried"),
+        "context_length/cli_padded_prompt_endpoint_control": (
+            "cli_context_window_endpoint", "over_limit", None, "fail:not_answered_200"),
+        "timeout_cancellation/cli_sigint_endpoint_control": (
+            "cli_sigint_endpoint", None, "no_sigint", "fail:connection_not_closed"),
+    }
+    assert {n: c["check"] for n, c in cases.items() if c["kind"] == "observation"} == {
+        "protocol_compatibility/cli_nested_agent_endpoint_scope": "cli_nested_agent_not_tested",
+        "context_length/cli_over_limit_endpoint_scope": "cli_over_limit_not_tested",
+    }
 
 
 def test_every_mapped_control_and_observation_exists():
@@ -389,9 +458,15 @@ def test_every_mapped_control_and_observation_exists():
         "timeout_cancellation/connection_refused",
         "timeout_cancellation/stall_before_first_byte",
         "timeout_cancellation/idle_stall_mid_stream",
+        "protocol_compatibility/cli_alias_resolution_endpoint_control",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint_control",
+        "context_length/cli_padded_prompt_endpoint_control",
+        "timeout_cancellation/cli_sigint_endpoint_control",
     }
     assert observations == {"protocol_compatibility/count_tokens_observed",
-                            "tool_call_fidelity/forced_tool_choice_observed"}
+                            "tool_call_fidelity/forced_tool_choice_observed",
+                            "protocol_compatibility/cli_nested_agent_endpoint_scope",
+                            "context_length/cli_over_limit_endpoint_scope"}
     probes = {n for n, c in cases.items() if c["kind"] == "probe"}
     assert {n for n in probes if not n.startswith("role_isolation/")} == {
         "protocol_compatibility/non_streaming_round_trip", "tool_call_fidelity/tool_use_round_trip",
@@ -399,7 +474,11 @@ def test_every_mapped_control_and_observation_exists():
         "protocol_compatibility/cli_alias_and_nested_agent_resolution",
         "tool_call_fidelity/cli_tool_round_trip_and_injection_resistance",
         "context_length/cli_padded_prompt_and_over_limit",
-        "timeout_cancellation/cli_sigint_closes_connection"}
+        "timeout_cancellation/cli_sigint_closes_connection",
+        "protocol_compatibility/cli_alias_resolution_endpoint",
+        "tool_call_fidelity/cli_tool_round_trip_endpoint",
+        "context_length/cli_padded_prompt_endpoint",
+        "timeout_cancellation/cli_sigint_endpoint"}
 
 
 def test_role_isolation_cases_are_function_probes():
@@ -421,6 +500,7 @@ def test_committed_fixtures_name_no_rig_address():
     (lambda c: c.update(target="endpoint"), "always targets the mock"),
     (lambda c: c.pop("expect_reason"), "needs expect"),
     (lambda c: c.update(fault="nope"), "fault is for controls"),
+    (lambda c: c.update(variant="no_sigint"), "variant is for harness controls"),
 ])
 def test_malformed_case_is_rejected(tmp_path, edit, message):
     fixtures = _copy_fixtures(tmp_path)
@@ -496,8 +576,20 @@ def test_a_skipped_harness_case_is_not_tested_and_never_a_failure(mode):
 
 @pytest.mark.parametrize("edit, message", [
     (lambda c: c.update(check="nope"), "check must be one of"),
-    (lambda c: c.update(target="endpoint"), "a harness case is a mock-target probe"),
-    (lambda c: c.update(kind="observation"), "a harness case is a mock-target probe"),
+    (lambda c: c.update(target="endpoint"), "a mock-driven harness check is a mock-target probe"),
+    (lambda c: c.update(kind="observation"),
+     "a mock-driven harness check is a mock-target probe"),
+    (lambda c: c.update(check="cli_sigint_endpoint"),
+     "a relay harness check is an endpoint-target probe or a control"),
+    (lambda c: c.update(check="cli_sigint_endpoint", kind="observation", target="endpoint"),
+     "a relay harness check is an endpoint-target probe or a control"),
+    (lambda c: c.update(check="cli_over_limit_not_tested", target="endpoint"),
+     "a fixed harness observation is an observation"),
+    (lambda c: c.update(check="cli_sigint_endpoint", target="endpoint", variant="no_sigint"),
+     "variant is for harness controls"),
+    (lambda c: c.update(check="cli_sigint_endpoint", kind="control", expect="fail",
+                        expect_reason="connection_not_closed", variant="nope"),
+     "variant is for harness controls"),
 ])
 def test_a_malformed_harness_case_is_rejected(tmp_path, edit, message):
     case = dict(HARNESS_CASE)
@@ -585,6 +677,8 @@ def test_mock_run_exits_0_with_streaming_and_role_isolation_pass(tmp_path):
     assert body["fixture_suite_version"] == me.PINNED_FIXTURE_SUITE_VERSION
     assert body["target_kind"] == "mock" and body["base_url_scope"] == "same-host"
     assert len(body["controls"]) == 17 and all(c["ok"] for c in body["controls"])
+    assert body["schema_version"] == "1.1" and body["harness_probes"] == []
+    assert body["harness_sources"] == {d: None for d in me.ACTOR_REQUIRED_DIMENSIONS}
 
 
 def test_module_entry_point_runs(tmp_path):
@@ -632,9 +726,16 @@ def test_a_malformed_tree_exits_3_and_writes_nothing(tmp_path):
 
 
 def _fake_harness(monkeypatch, outcome):
-    """Every HARNESS_CHECKS entry -> a fake that arms a script (which the runner must clear
-    again) and returns `outcome`, or raises it if it is an exception. Returns the base URLs."""
-    calls = []
+    """Every HARNESS_CHECKS and HARNESS_RELAY_CHECKS entry -> a fake that arms a script (which
+    the runner must clear again) and returns `outcome`, or raises it if it is an exception. A
+    relay check run for a control returns that control's own expect, so a faked run is never
+    exit 3. The real runner._harness_probe still routes every case. Returns the base URLs."""
+    calls, current = [], {}
+    original = runner._harness_probe
+
+    async def tracking(case, name, **kw):
+        current["case"] = case
+        return await original(case, name, **kw)
 
     async def fake(app, base_url):
         calls.append(base_url)
@@ -643,8 +744,22 @@ def _fake_harness(monkeypatch, outcome):
             raise outcome
         return outcome
 
+    async def fake_relay(relay_app, relay_url, *, mock_app, **_):
+        calls.append(relay_url)
+        if mock_app is not None:
+            mock_server.arm(mock_app, mock_server.Script("text"))
+        case = current["case"]
+        if case["kind"] == "control":
+            return case["expect"], case["expect_reason"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
     for name in runner.HARNESS_CHECKS:
         monkeypatch.setitem(runner.HARNESS_CHECKS, name, fake)
+    for name in runner.HARNESS_RELAY_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, name, fake_relay)
     return calls
 
 
@@ -659,13 +774,16 @@ def test_tier2_runs_every_harness_case_and_clears_its_script(tmp_path, monkeypat
     calls = _fake_harness(monkeypatch, ("pass", "ok"))
     fixtures = _with_harness_case(tmp_path)
     code, result, _ = _run(tmp_path, "--base-url", "mock", fixtures_dir=fixtures)
-    harness_cases = [c for c in runner.load_cases(fixtures) if c["driver"] == "harness"]
+    # The two fixed observations call no check.
+    harness_cases = [c for c in runner.load_cases(fixtures) if c["driver"] == "harness"
+                     and c["check"] not in harness.FIXED_OBSERVATIONS]
     # Exit 0 also proves the script was cleared: a left-armed `text` script would turn part A's
     # tool_call_fidelity controls and probe (which run after streaming/via_cli) red.
     assert code == 0 and len(calls) == len(harness_cases)
     assert all(url.startswith("http://127.0.0.1:") for url in calls)
     body = result["certification_result"]
     assert body["results"]["streaming"] == "pass" and "streaming" not in body["harness_pending"]
+    assert body["harness_sources"]["streaming"] == "mock"
 
 
 @pytest.mark.parametrize("fault", [FileNotFoundError("claude"), KeyError("messages")])
@@ -712,9 +830,16 @@ def test_tier2_with_passing_harness_checks_passes_all_six_dimensions(tmp_path, m
     calls = _fake_harness(monkeypatch, ("pass", "ok"))
     code, result, _ = _run(tmp_path, "--base-url", "mock")
     body = result["certification_result"]
-    assert code == 0 and len(calls) == 4
+    assert code == 0 and len(calls) == 12  # 4 mock-driven, 4 endpoint probes, 4 controls
     assert body["results"] == {d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}
     assert body["harness_pending"] == []
+    assert body["harness_sources"] == {d: "mock" if d in PART_A_PENDING else None
+                                       for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert len(body["harness_probes"]) == 8
+    assert all(p["observed"] == "pass:ok" and p["source"] == "mock"
+               for p in body["harness_probes"])
+    harness_records = [c for c in body["controls"] if "source" in c]
+    assert len(harness_records) == 6 and all(c["source"] == "mock" for c in harness_records)
 
 
 def test_tier2_without_a_claude_binary_reports_the_four_dimensions(tmp_path, monkeypatch):
@@ -1125,8 +1250,9 @@ def test_the_padded_prompts_straddle_the_mock_window():
 
 
 def test_every_harness_check_is_a_coroutine_function():
-    for check in (harness.check_alias_resolution, harness.check_tool_round_trip,
-                  harness.check_context_window, harness.check_sigint):
+    checks = [*runner.HARNESS_CHECKS.values(), *runner.HARNESS_RELAY_CHECKS.values()]
+    assert len(checks) == 8
+    for check in checks:
         assert inspect.iscoroutinefunction(check)  # asyncio's is deprecated in 3.14
 
 
@@ -1146,3 +1272,878 @@ def test_ci_runs_tier2_as_a_blocking_docker_build_step():
     upload = steps[tier2 + 1]
     assert upload["uses"].startswith("actions/upload-artifact@") and upload["if"] == "always()"
     assert "continue-on-error" not in upload
+
+
+# --- recording relay (#631) -----------------------------------------------------------------
+
+STREAM_OK = [b'event: message_start\n'
+             b'data: {"type": "message_start", "message": {"model": "m"}}\n\n',
+             b'event: message_stop\ndata: {"type": "message_stop"}\n\n']
+
+
+async def _listener(handler):
+    """A stand-in upstream on 127.0.0.1:<ephemeral> answering every path with `handler`."""
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    app_runner = web.AppRunner(app, handler_cancellation=True, shutdown_timeout=1.0)
+    await app_runner.setup()
+    await web.TCPSite(app_runner, "127.0.0.1", 0).start()
+    return app_runner, f"http://127.0.0.1:{app_runner.addresses[0][1]}"
+
+
+def _sse_upstream(chunks, seen=None, gate=None):
+    """A handler streaming `chunks` (bytes) as text/event-stream; records each request's raw
+    body and headers in `seen`; waits for `gate` (an asyncio.Event) after the first chunk."""
+    async def handler(request):
+        if seen is not None:
+            seen.append({"body": await request.read(), "headers": dict(request.headers),
+                         "path": request.path_qs})
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                           "Retry-After": "7", "X-Other": "dropped"})
+        await resp.prepare(request)
+        for i, chunk in enumerate(chunks):
+            await resp.write(chunk)
+            if i == 0 and gate is not None:
+                await asyncio.wait_for(gate.wait(), 5)
+        await resp.write_eof()
+        return resp
+    return handler
+
+
+def _through_relay(handler, client, fault=None, timeouts=None):
+    """client(session, relay url, relay app) against a relay whose upstream is a stand-in
+    serving `handler`; returns (client's value, Relayed, upstream URL)."""
+    async def go():
+        up_runner, up_url = await _listener(handler)
+        try:
+            async with relay.started(up_url, timeouts=timeouts or runner.DEFAULT_TIMEOUTS,
+                                     fault=fault) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    value = await client(session, url, app)
+                await asyncio.sleep(0.1)
+                return value, app[relay.RELAYED], up_url
+        finally:
+            await up_runner.cleanup()
+    return asyncio.run(go())
+
+
+async def _post_read(session, url, body=b'{"messages": []}', headers=None, path="/v1/messages"):
+    async with session.post(url + path, data=body, headers=headers or {},
+                            allow_redirects=False) as resp:
+        return resp.status, dict(resp.headers), await resp.read()
+
+
+def test_relay_and_sink_bind_loopback_only():
+    async def client(session, url, app):
+        return url, app[relay.RELAYED].sink_url
+    (url, sink), _, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert url.startswith("http://127.0.0.1:") and sink.startswith("http://127.0.0.1:")
+
+
+def test_relay_forwards_body_and_credential_verbatim_and_rewrites_hop_headers():
+    seen = []
+    raw = b'{"model": "m",  "messages": [ ]}'
+
+    async def client(session, url, app):
+        return await _post_read(session, url, raw, path="/v1/messages?beta=true", headers={
+            "x-api-key": SENTINEL, "anthropic-version": "2023-06-01",
+            "Accept-Encoding": "gzip", "Keep-Alive": "5", "TE": "trailers",
+            "Proxy-Connection": "keep-alive"})
+    (status, headers, data), relayed, up_url = _through_relay(_sse_upstream(STREAM_OK, seen),
+                                                              client, fault="wrong_model")
+    assert status == 200 and data == b"".join(STREAM_OK)
+    got = {k.lower(): v for k, v in seen[0]["headers"].items()}
+    assert seen[0]["body"] == raw and seen[0]["path"] == "/v1/messages?beta=true"
+    assert got["x-api-key"] == SENTINEL and got["anthropic-version"] == "2023-06-01"
+    assert got["accept-encoding"] == "identity"
+    assert not {"keep-alive", "te", "proxy-connection"} & set(got)
+    assert got["host"] == up_url.split("//", 1)[1]
+    assert got[mock_server.FAULT_HEADER.lower()] == "wrong_model"
+    assert headers["Content-Type"] == "text/event-stream" and headers["Retry-After"] == "7"
+    assert "X-Other" not in headers
+    assert relayed.dialled == [up_url.split("//", 1)[1]]
+    record = relayed.requests[0]
+    assert record["headers"]["x-api-key"] == SENTINEL and record["status"] == 200
+    assert record["body"] == {"model": "m", "messages": []}
+
+
+def test_relay_streams_each_chunk_before_the_upstream_finishes():
+    gate = asyncio.Event()
+
+    async def client(session, url, app):
+        async with session.post(url + "/v1/messages", data=b"{}") as resp:
+            first = await asyncio.wait_for(resp.content.readany(), 5)
+            gate.set()  # the upstream sends its second chunk only now
+            return first + await resp.read()
+    data, _, _ = _through_relay(_sse_upstream(STREAM_OK, gate=gate), client)
+    assert data == b"".join(STREAM_OK)
+
+
+@pytest.mark.parametrize("chunks, model, completed", [
+    (STREAM_OK, "m", True),
+    ([STREAM_OK[0], b'event: message_stop\ndata: {"type" :  "mess', b'age_stop"}\n\n'],
+     "m", True),
+    ([STREAM_OK[0], b"event: message_stop\n\n"], "m", False),
+    ([b'data: {"type": "message_start", "message": {"model": 7}}\n\n'], None, False),
+])
+def test_relay_records_response_model_and_completion(chunks, model, completed):
+    async def client(session, url, app):
+        return await _post_read(session, url)
+    _, relayed, _ = _through_relay(_sse_upstream(chunks), client)
+    assert relayed.requests[0]["response_model"] == model
+    assert relayed.requests[0]["completed"] is completed
+
+
+def test_relay_answers_an_unknown_path_404_without_contacting_the_upstream():
+    seen = []
+
+    async def client(session, url, app):
+        async with session.get(url + "/v1/models") as resp:
+            return resp.status
+    status, relayed, _ = _through_relay(_sse_upstream(STREAM_OK, seen), client)
+    assert status == 404 and seen == [] and relayed.dialled == []
+    assert relayed.requests[0]["status"] == 404 and relayed.requests[0]["path"] == "/v1/models"
+
+
+def test_relay_never_follows_a_redirect_and_drops_its_location():
+    async def go():
+        hits = []
+
+        async def second(request):
+            hits.append(request.path)
+            return web.Response()
+        second_runner, second_url = await _listener(second)
+
+        async def redirect(request):
+            return web.Response(status=307, headers={"Location": second_url + "/v1/messages"})
+        first_runner, first_url = await _listener(redirect)
+        try:
+            async with relay.started(first_url, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    status, headers, _ = await _post_read(session, url)
+                return status, headers, hits, app[relay.RELAYED].dialled, first_url
+        finally:
+            await first_runner.cleanup()
+            await second_runner.cleanup()
+    status, headers, hits, dialled, first_url = asyncio.run(go())
+    assert status == 307 and "Location" not in headers
+    assert hits == [] and dialled == [first_url.split("//", 1)[1]]
+
+
+def test_relay_answers_a_refused_upstream_502_and_classifies_it():
+    async def go():
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))  # bound and never listening: every connect is refused
+            upstream = f"http://127.0.0.1:{sock.getsockname()[1]}"
+            async with relay.started(upstream, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    status, _, data = await _post_read(session, url)
+                return status, json.loads(data), app[relay.RELAYED]
+    status, body, relayed = asyncio.run(go())
+    assert status == 502 and body == relay.BAD_GATEWAY_BODY
+    assert relayed.upstream_errors == ["endpoint_unreachable"]
+    assert relayed.upstream_failed.is_set() and relayed.requests[0]["status"] == 502
+
+
+def test_relay_hangs_up_on_the_cli_when_the_upstream_stalls_mid_stream():
+    async def stall(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(STREAM_OK[0])
+        await asyncio.sleep(3)
+        return resp
+
+    async def client(session, url, app):
+        with pytest.raises(aiohttp.ClientPayloadError):
+            await _post_read(session, url)
+        return True
+    _, relayed, _ = _through_relay(stall, client, timeouts=dict(runner.DEFAULT_TIMEOUTS,
+                                                                idle_seconds=0.3))
+    assert relayed.upstream_errors == ["timeout_idle"] and relayed.upstream_failed.is_set()
+
+
+def _marked(marker):
+    return json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": f"{marker} write"}]}]}).encode()
+
+
+def test_watch_resets_only_the_watched_request_state():
+    relayed = relay.Relayed(requests=[{"x": 1}], upstream_errors=["timeout_idle"],
+                            other_host=["CONNECT x:443 HTTP/1.1"], client_gone=True,
+                            upstream_done=True, upstream_closed=True)
+    relayed.first_chunk.set()
+    app = web.Application()
+    app[relay.RELAYED] = relayed
+    assert relay.watch(app, "m:") is relayed
+    assert relayed.marker == "m:" and not relayed.first_chunk.is_set()
+    assert not (relayed.client_gone or relayed.upstream_done or relayed.upstream_closed)
+    assert relayed.requests == [{"x": 1}] and relayed.upstream_errors == ["timeout_idle"]
+    assert relayed.other_host == ["CONNECT x:443 HTTP/1.1"]
+
+
+def test_relay_sees_a_watched_client_hang_up_and_the_upstream_sees_it_too():
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        try:
+            observed = mock_server.arm(mock_runner.app, mock_server.Script("stall"))
+            async with relay.started(mock_url, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                relayed = relay.watch(app, "m 1:")
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(url + "/v1/messages", data=_marked("m 1:"))
+                    await asyncio.wait_for(relayed.first_chunk.wait(), 5)
+                    resp.close()  # the client hangs up mid-stream
+                for _ in range(50):
+                    if relayed.client_gone and observed.disconnected:
+                        break
+                    await asyncio.sleep(0.1)
+                return relayed, observed.disconnected
+        finally:
+            await mock_runner.cleanup()
+    relayed, upstream_saw_it = asyncio.run(go())
+    assert relayed.client_gone and relayed.upstream_closed and not relayed.upstream_done
+    assert upstream_saw_it
+
+
+def test_relay_marks_a_watched_stream_that_ends_normally_as_done():
+    async def client(session, url, app):
+        relayed = relay.watch(app, "m 1:")
+        await _post_read(session, url, _marked("other"))
+        unwatched = (relayed.first_chunk.is_set(), relayed.upstream_done)
+        await _post_read(session, url, _marked("m 1:"))
+        return unwatched
+    unwatched, relayed, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert unwatched == (False, False)
+    assert relayed.first_chunk.is_set() and relayed.upstream_done and not relayed.client_gone
+
+
+def test_the_proxy_sink_records_and_refuses_every_connection():
+    async def client(session, url, app):
+        async with session.get("http://192.0.2.1/x", proxy=app[relay.RELAYED].sink_url) as resp:
+            return resp.status
+    status, relayed, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert status == 403 and relayed.other_host == ["GET http://192.0.2.1/x HTTP/1.1"]
+    assert relayed.dialled == []
+
+
+# --- endpoint-driven harness spawns and judges (#631) ---------------------------------------
+
+def _logging_claude(bin_dir, log, sleep=0, fetch=None):
+    """A `claude` on PATH that appends {env, cwd, argv} (env from /proc/self/environ) to `log`
+    as one JSON line, optionally fetches `fetch` honouring HTTP_PROXY, then sleeps `sleep`."""
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys, time, urllib.request\n"
+        "raw = open('/proc/self/environ', 'rb').read().split(b'\\0')\n"
+        "env = dict(item.decode().split('=', 1) for item in raw if item)\n"
+        f"with open({str(log)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'env': env, 'cwd': os.getcwd(), 'argv': sys.argv[1:]}) + '\\n')\n"
+        f"if {fetch!r}:\n"
+        "    try:\n"
+        f"        urllib.request.urlopen({fetch!r}, timeout=5)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        f"time.sleep({sleep})\n")
+    stub.chmod(0o755)
+
+
+def _spawns(log):
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def _on_relay(coro_fn, fault=None):
+    """coro_fn(relay app, relay url, mock app) with a fresh mock as the relay's upstream."""
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        try:
+            async with relay.started(mock_url, timeouts=runner.DEFAULT_TIMEOUTS,
+                                     fault=fault) as (app, url):
+                return await coro_fn(app, url, mock_runner.app)
+        finally:
+            await mock_runner.cleanup()
+    return asyncio.run(go())
+
+
+needs_proc = pytest.mark.skipif(not Path("/proc/self/environ").exists(),
+                                reason="reads the child's initial environment from /proc")
+
+
+@needs_proc
+def test_an_endpoint_spawn_gets_only_the_relay_environment(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log)
+    caller_home = tmp_path / "caller-home"
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-oauth-must-not-leak")
+    monkeypatch.setenv("GH_TOKEN", "gh-must-not-leak")
+    monkeypatch.setenv("HOME", str(caller_home))
+
+    async def go(app, url, _mock_app):
+        with harness.workdir() as root:
+            status, _ = await harness.run_relayed(app, url, root, "a prompt", "--tools", "",
+                                                  served_name="local-model-a",
+                                                  credential=SENTINEL, seconds=30)
+            return status, root, url, app[relay.RELAYED].sink_url
+    status, root, url, sink = _on_relay(go)
+    [seen] = _spawns(log)
+    env = seen["env"]
+    assert status == 0 and set(env) == set(harness.RELAY_ENV_KEYS)
+    assert env["ANTHROPIC_API_KEY"] == SENTINEL and env["ANTHROPIC_BASE_URL"] == url
+    assert all(env[alias] == "local-model-a" for alias in me.TIER_ALIASES)
+    assert env["HTTP_PROXY"] == env["HTTPS_PROXY"] == sink and env["NO_PROXY"] == "127.0.0.1"
+    assert env["HOME"] == str(root / "home") != str(caller_home)
+    assert "sk-oauth-must-not-leak" not in json.dumps(seen)
+    assert "gh-must-not-leak" not in json.dumps(seen)
+    assert seen["argv"] == ["-p", "a prompt", "--tools", ""]
+
+
+def test_scrubbed_env_adds_exactly_the_proxy_keys_and_the_given_credential(tmp_path):
+    env = harness.scrubbed_env(base_url="http://127.0.0.1:9", served_name="local-model-a",
+                               home=tmp_path, credential=SENTINEL, proxy="http://127.0.0.1:8")
+    assert set(env) == set(harness.RELAY_ENV_KEYS)
+    assert env["ANTHROPIC_API_KEY"] == SENTINEL
+    assert (env["HTTP_PROXY"], env["HTTPS_PROXY"], env["NO_PROXY"]) == (
+        "http://127.0.0.1:8", "http://127.0.0.1:8", "127.0.0.1")
+    assert harness.RELAY_ENV_KEYS == harness.BASE_ENV_KEYS + ("HTTP_PROXY", "HTTPS_PROXY",
+                                                              "NO_PROXY")
+
+
+def test_spawn_seconds_allows_a_real_endpoint_its_first_byte_bound():
+    assert harness.spawn_seconds(None) == harness.ENDPOINT_RUN_SECONDS == 900.0
+    assert harness.spawn_seconds(object()) == harness.RUN_SECONDS
+    assert harness.ENDPOINT_RUN_SECONDS > runner.DEFAULT_TIMEOUTS["time_to_first_token_seconds"]
+    assert harness.FIRST_CHUNK_SECONDS > runner.DEFAULT_TIMEOUTS["time_to_first_token_seconds"]
+
+
+def test_the_longest_padded_prompt_fits_one_argv_string():
+    assert len(harness.padded_prompt(harness.MAX_ARG_WORDS).encode()) < 131072
+
+
+def test_the_fixed_observations_name_their_reason():
+    assert harness.FIXED_OBSERVATIONS == {
+        "cli_over_limit_not_tested": "over_limit_not_judged_on_endpoint",
+        "cli_nested_agent_not_tested": "nested_agent_not_judged_on_endpoint"}
+    assert harness.VARIANTS == ("unplanted_file", "no_sigint")
+
+
+SERVED = "local-model-a"
+
+
+def _relayed_rec(body, status=200, model=SERVED, completed=True, key=SENTINEL):
+    return {"method": "POST", "path": "/v1/messages?beta=true", "status": status, "body": body,
+            "headers": {"x-api-key": key}, "response_model": model, "completed": completed}
+
+
+def _endpoint_alias_runs():
+    return [(tier, 0, [_relayed_rec(_cli_body(harness.ASK_OK, model=SERVED, tools=()))])
+            for tier in harness.TIERS]
+
+
+def test_judge_alias_endpoint_passes_and_tolerates_a_retried_429():
+    assert harness.judge_alias_endpoint(_endpoint_alias_runs(), SERVED, SENTINEL) == ("pass", "ok")
+    runs = _endpoint_alias_runs()
+    runs[0][2].insert(0, _relayed_rec(_cli_body(harness.ASK_OK, model=SERVED), status=429,
+                                      model=None, completed=False))
+    assert harness.judge_alias_endpoint(runs, SERVED, SENTINEL) == ("pass", "ok")
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r[3][2].clear(), "fable_no_request"),
+    (lambda r: r[1][2][0]["body"].update(model="sonnet"), "sonnet_model_not_served_name"),
+    (lambda r: r[0][2][0]["headers"].update({"x-api-key": "sk-other"}),
+     "opus_credential_mismatch"),
+    (lambda r: r[2][2][0]["headers"].update(authorization="Bearer x"),
+     "haiku_credential_mismatch"),
+    (lambda r: r[0][2][0].update(status=429), "opus_not_answered_200"),
+    (lambda r: r[0][2][0].update(response_model=mock_server.FALLBACK_MODEL),
+     "opus_response_model_mismatch"),
+    (lambda r: r.__setitem__(3, ("fable", 1, r[3][2])), "fable_cli_failed"),
+])
+def test_judge_alias_endpoint_fails(edit, reason):
+    runs = _endpoint_alias_runs()
+    edit(runs)
+    assert harness.judge_alias_endpoint(runs, SERVED, SENTINEL) == ("fail", reason)
+
+
+CWD = "/tmp/capability-suite-x/cwd"
+SEEDED = f"{CWD}/{harness.PLANTED_FILE}"
+PLANTED_CONTENT = f"1\t{harness.PLANTED_RESULT}\n2\t{harness.PLANTED_SWITCH}\n3\t"
+
+
+def _use(tool_id, path=SEEDED):
+    return {"type": "tool_use", "id": tool_id, "name": "Read", "input": {"file_path": path}}
+
+
+def _result_block(tool_id, content=PLANTED_CONTENT):
+    return {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+
+
+def _endpoint_read_requests(*rounds):
+    """The relay's records for one tool-case spawn: the first POST, then one follow-up per
+    round of (assistant tool_use blocks, user tool_result blocks), each repeating the history."""
+    rounds = rounds or (([_use("toolu_endpoint_7")], [_result_block("toolu_endpoint_7")]),)
+    records, history = [_relayed_rec(_cli_body(harness.READ_PROMPT, model=SERVED,
+                                               tools=("Read",)))], []
+    for uses, results in rounds:
+        history += [{"role": "assistant", "content": uses}, {"role": "user", "content": results}]
+        records.append(_relayed_rec(_cli_body(harness.READ_PROMPT, model=SERVED, tools=("Read",),
+                                              after=tuple(history))))
+    return records
+
+
+def _judge_read(requests):
+    return harness.judge_read_endpoint(requests, SEEDED, CWD, SERVED)
+
+
+@pytest.mark.parametrize("requests", [
+    _endpoint_read_requests(),
+    _endpoint_read_requests(([_use("toolu_r", harness.PLANTED_FILE)], [_result_block("toolu_r")])),
+    _endpoint_read_requests(([_use("toolu_a")], [_result_block("toolu_a")]),
+                            ([_use("toolu_b")], [_result_block("toolu_b")])),
+    _endpoint_read_requests(([_use("toolu_a"), _use("toolu_b")],
+                             [_result_block("toolu_a"), _result_block("toolu_b")])),
+    _endpoint_read_requests(([_use("toolu_e"), {"type": "text", "text": harness.PLANTED_SWITCH}],
+                             [_result_block("toolu_e")])),
+], ids=["endpoint_id", "relative_path", "read_twice", "read_in_parallel", "assistant_echo"])
+def test_judge_read_endpoint_passes(requests):
+    assert _judge_read(requests) == ("pass", "ok")
+
+
+def _follow_up(requests):
+    return requests[-1]["body"]
+
+
+@pytest.mark.parametrize("edit, reason", [
+    (lambda r: r.clear(), "no_request"),
+    (lambda r: r[0]["body"].update(tools=[{"name": "Read"}, {"name": "Bash"}]),
+     "tools_not_read_only"),
+    (lambda r: r.pop(), "read_not_called"),
+    (lambda r: _follow_up(r)["messages"][2]["content"][0]["input"].update(
+        file_path="/etc/hostname"), "read_not_called"),
+    (lambda r: _follow_up(r)["messages"][3]["content"][0].update(tool_use_id="toolu_other"),
+     "tool_use_id_mismatch"),
+    (lambda r: _follow_up(r)["messages"][3]["content"][0].update(content="1\tnothing\n"),
+     "planted_not_carried"),
+    (lambda r: _follow_up(r)["system"].append({"type": "text", "text": harness.PLANTED_SWITCH}),
+     "payload_promoted"),
+    (lambda r: _follow_up(r)["messages"][0]["content"].append(
+        {"type": "text", "text": harness.PLANTED_RESULT}), "payload_promoted"),
+    (lambda r: _follow_up(r)["messages"][3]["content"].append(
+        _result_block("toolu_unrelated")), "payload_promoted"),
+    (lambda r: _follow_up(r).update(model=mock_server.FALLBACK_MODEL), "model_switched"),
+])
+def test_judge_read_endpoint_fails(edit, reason):
+    requests = _endpoint_read_requests()
+    edit(requests)
+    assert _judge_read(requests) == ("fail", reason)
+
+
+def test_judge_padded_endpoint():
+    words = 50
+    good = harness.padded_prompt(words)
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good))], words) == ("pass", "ok")
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good), completed=False)],
+                                         words) == ("fail", "stream_incomplete")
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(good), status=400)], words) == (
+        "fail", "not_answered_200")
+    damaged = good.replace(" pad pad ", " pad ", 1)
+    assert harness.judge_padded_endpoint([_relayed_rec(_cli_body(damaged))], words) == (
+        "fail", "padding_damaged")
+
+
+def _watched(*statuses):
+    return [_relayed_rec(_cli_body(f"{harness.SIGINT_MARKER} 1: write"), status=s)
+            for s in statuses]
+
+
+@pytest.mark.parametrize("args, verdict", [
+    ((["timeout_time_to_first_token"], False, [], False, False),
+     ("fail", "timeout_time_to_first_token")),
+    (([], False, [], False, False), ("fail", "no_stream")),
+    (([], True, _watched(500), False, True), ("fail", "not_answered_200")),
+    (([], True, _watched(200, 200), True, False), ("fail", "retried")),
+    (([], True, _watched(200), False, True), None),
+    # flags that were only set by reaping are not in the snapshot: not a pass
+    (([], True, _watched(200), False, False), ("fail", "connection_not_closed")),
+    (([], True, _watched(200), True, False), ("pass", "ok")),
+])
+def test_judge_sigint_attempt(args, verdict):
+    assert harness.judge_sigint_attempt(*args) == verdict
+
+
+@needs_proc
+def test_each_relay_check_restricts_the_tool_surface(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    kw = dict(served_name="local-model-a", credential=SENTINEL, context_tokens=64,
+              mock_app=None, variant=None)
+
+    async def go(app, url, _mock_app):
+        return [await check(app, url, **kw) for check in (
+            harness.check_alias_resolution_endpoint, harness.check_tool_round_trip_endpoint,
+            harness.check_context_window_endpoint)]
+    outcomes = _on_relay(go)
+    assert outcomes == [("fail", "opus_no_request"), ("fail", "no_request"),
+                        ("fail", "no_request")]
+    argvs = [s["argv"] for s in _spawns(log)]
+    assert [a[2:] for a in argvs[:4]] == [["--model", t, "--tools", ""] for t in harness.TIERS]
+    assert argvs[4][2:] == ["--tools", "Read"] and argvs[5][2:] == ["--tools", ""]
+    assert all("--allowedTools" not in a for a in argvs)
+
+
+@needs_proc
+def test_a_killed_spawn_is_cli_timeout_and_never_judged(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log, sleep=30)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(harness, "ENDPOINT_RUN_SECONDS", 2.0)
+
+    def judged(*_):
+        raise AssertionError("a judge ran over a killed spawn")
+    for judge in ("judge_alias_endpoint", "judge_read_endpoint", "judge_padded_endpoint"):
+        monkeypatch.setattr(harness, judge, judged)
+    kw = dict(served_name="local-model-a", credential=SENTINEL, context_tokens=64,
+              mock_app=None, variant=None)
+    for check in (harness.check_alias_resolution_endpoint,
+                  harness.check_tool_round_trip_endpoint,
+                  harness.check_context_window_endpoint):
+        before = len(_spawns(log))
+
+        async def go(app, url, _mock_app):
+            return await check(app, url, **kw)
+        assert _on_relay(go) == ("fail", "cli_timeout")
+        assert len(_spawns(log)) == before + 1  # nothing further spawned
+
+
+def _streaming_claude(bin_dir, retry):
+    """A `claude` on PATH that POSTs its prompt to ANTHROPIC_BASE_URL as one streamed request
+    and reads the answer. On SIGINT it hangs up; with `retry` it sends the same request once
+    more 0.3 s after its hang-up, as a silently retrying CLI would, then exits."""
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, socket, sys, time\n"
+        "from urllib.parse import urlsplit\n"
+        "url = urlsplit(os.environ['ANTHROPIC_BASE_URL'])\n"
+        "body = json.dumps({'model': os.environ['ANTHROPIC_DEFAULT_OPUS_MODEL'], 'max_tokens': 8,\n"
+        "                   'stream': True,\n"
+        "                   'messages': [{'role': 'user', 'content': sys.argv[2]}]}).encode()\n"
+        "request = ('POST /v1/messages?beta=true HTTP/1.1\\r\\nHost: relay\\r\\n'\n"
+        "           'x-api-key: ' + os.environ['ANTHROPIC_API_KEY'] + '\\r\\n'\n"
+        "           'Content-Type: application/json\\r\\n'\n"
+        "           'Content-Length: ' + str(len(body)) + '\\r\\n\\r\\n').encode() + body\n"
+        "socks = []\n"
+        "def post():\n"
+        "    socks.append(socket.create_connection((url.hostname, url.port)))\n"
+        "    socks[-1].sendall(request)\n"
+        "def hang_up(*_):\n"
+        "    socks[0].close()\n"
+        f"    if {retry!r}:\n"
+        "        time.sleep(0.3)\n"
+        "        post()\n"
+        "        time.sleep(0.2)\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGINT, hang_up)\n"
+        "post()\n"
+        "while socks[0].recv(4096):\n"
+        "    pass\n")
+    stub.chmod(0o755)
+
+
+@pytest.mark.parametrize("retry, variant, outcome", [
+    (False, None, ("pass", "ok")),
+    # the retry arrives after the hang-up: only a count taken after reaping sees it
+    (True, None, ("fail", "retried")),
+    # no SIGINT: the only hang-up is the reaping kill, which the snapshot must not see
+    (False, "no_sigint", ("fail", "connection_not_closed")),
+])
+def test_the_sigint_check_snapshots_before_reaping_and_counts_after(tmp_path, monkeypatch, retry,
+                                                                    variant, outcome):
+    _streaming_claude(tmp_path / "bin", retry)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(harness, "DISCONNECT_SECONDS", 1.0)
+
+    async def go(app, url, mock_app):
+        return await harness.check_sigint_endpoint(
+            app, url, served_name=mock_server.SERVED_NAME,
+            credential=mock_server.DUMMY_CREDENTIAL, context_tokens=64, mock_app=mock_app,
+            variant=variant)
+    assert _on_relay(go) == outcome
+
+
+@needs_proc
+def test_a_cli_request_for_another_host_fails_the_case(tmp_path, monkeypatch):
+    _logging_claude(tmp_path / "bin", tmp_path / "spawns.jsonl", fetch="http://192.0.2.1/")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    case = {"dimension": "context_length", "case": "cli_padded_prompt_endpoint",
+            "driver": "harness", "kind": "probe", "target": "endpoint",
+            "check": "cli_context_window_endpoint"}
+
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            mock = runner.Target(url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            return await runner._harness_probe(case, "context_length/x", mock_app=mock_runner.app,
+                                               mock=mock, endpoint=mock, mock_mode=False,
+                                               context_tokens=64)
+        finally:
+            await mock_runner.cleanup()
+    assert asyncio.run(go()) == (("fail", "other_host_contacted"), "endpoint")
+
+
+def _probe_case(check="cli_context_window_endpoint"):
+    return {"dimension": "context_length", "case": "x", "driver": "harness", "kind": "probe",
+            "target": "endpoint", "check": check}
+
+
+@pytest.mark.parametrize("behaviour, outcome", [
+    ("other_host", ("fail", "other_host_contacted")),
+    ("slow", ("fail", "timeout_total")),
+])
+def test_harness_probe_overrides(monkeypatch, behaviour, outcome):
+    monkeypatch.setattr(harness, "ENDPOINT_CASE_SECONDS", 0.3)
+
+    async def fake(relay_app, relay_url, **_):
+        if behaviour == "other_host":
+            relay_app[relay.RELAYED].other_host.append("CONNECT api.example.invalid:443 HTTP/1.1")
+            return "pass", "ok"
+        await asyncio.sleep(5)
+    monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, "cli_context_window_endpoint", fake)
+
+    async def go():
+        mock_runner, url = await mock_server.start()
+        try:
+            mock = runner.Target(url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            return await runner._harness_probe(_probe_case(), "context_length/x",
+                                               mock_app=mock_runner.app, mock=mock,
+                                               endpoint=mock, mock_mode=False,
+                                               context_tokens=64)
+        finally:
+            await mock_runner.cleanup()
+    assert asyncio.run(go()) == (outcome, "endpoint")
+
+
+# --- endpoint mode with Tier 2 on (#631) ----------------------------------------------------
+
+def _endpoint_summary(monkeypatch, relay_fake, cases=None, legacy=("pass", "ok"),
+                      mock_mode=False):
+    """run_cases over the shipped tree (or `cases`) with Tier 2 "ok": HARNESS_CHECKS faked to
+    return `legacy`, HARNESS_RELAY_CHECKS faked by `relay_fake`. In endpoint mode a second mock
+    stands in for the endpoint, under its own served name and credential."""
+    async def fake_legacy(app, base_url):
+        if isinstance(legacy, BaseException):
+            raise legacy
+        return legacy
+    for name in runner.HARNESS_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_CHECKS, name, fake_legacy)
+    for name in runner.HARNESS_RELAY_CHECKS:
+        monkeypatch.setitem(runner.HARNESS_RELAY_CHECKS, name, relay_fake)
+
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        end_runner, end_url = await mock_server.start()
+        try:
+            mock = runner.Target(mock_url, mock_server.SERVED_NAME, mock_server.DUMMY_CREDENTIAL)
+            endpoint = mock if mock_mode else runner.Target(end_url, SERVED, SENTINEL)
+            summary = await runner.run_cases(
+                runner.load_cases() if cases is None else cases, endpoint=endpoint, mock=mock,
+                context_tokens=4096, mock_app=mock_runner.app, tier2_mode="ok",
+                mock_mode=mock_mode)
+            return summary, mock_url, end_url
+        finally:
+            await mock_runner.cleanup()
+            await end_runner.cleanup()
+    return asyncio.run(go())
+
+
+def _relay_cases():
+    return [c for c in runner.load_cases() if c["driver"] == "harness"]
+
+
+def _routing_fake(seen, outcome=("pass", "ok")):
+    """A relay check that sends one request through the relay and records where it went."""
+    async def fake(relay_app, relay_url, *, served_name, credential, context_tokens, mock_app,
+                   variant):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(relay_url + "/v1/messages", json=ASK) as resp:
+                await resp.read()
+        seen.append({"dialled": relay_app[relay.RELAYED].dialled[0], "served_name": served_name,
+                     "credential": credential, "context_tokens": context_tokens,
+                     "mock_app": mock_app is not None, "variant": variant})
+        return outcome
+    return fake
+
+
+def test_endpoint_mode_routes_probes_to_the_endpoint_and_controls_to_the_mock(monkeypatch):
+    seen = []
+    cases = [c for c in _relay_cases() if c["check"] in runner.HARNESS_RELAY_CHECKS]
+    summary, mock_url, end_url = _endpoint_summary(monkeypatch, _routing_fake(seen), cases)
+    mock_host, end_host = mock_url.split("//")[1], end_url.split("//")[1]
+    by_kind = {(c["kind"], c["check"]): s for c, s in zip(cases, seen)}
+    for (kind, _check), s in by_kind.items():
+        if kind == "probe":
+            assert (s["dialled"], s["served_name"], s["credential"], s["context_tokens"],
+                    s["mock_app"]) == (end_host, SERVED, SENTINEL, 4096, False)
+        else:
+            assert (s["dialled"], s["served_name"], s["credential"], s["context_tokens"],
+                    s["mock_app"]) == (mock_host, mock_server.SERVED_NAME,
+                                       mock_server.DUMMY_CREDENTIAL, mock_server.CONTEXT_TOKENS,
+                                       True)
+    assert {s["variant"] for s in seen} == {None, "unplanted_file", "no_sigint"}
+    assert [p["source"] for p in summary.harness_probes] == ["endpoint"] * 4
+    # the fakes' pass:ok for controls is a mismatch: controls really ran, in endpoint mode
+    assert [(c["kind"], c["source"], c["ok"]) for c in summary.controls] == [
+        ("control", "mock", False)] * 4
+
+
+def test_mock_mode_routes_every_relay_case_to_the_mock(monkeypatch):
+    seen = []
+    cases = [c for c in _relay_cases() if c["check"] in runner.HARNESS_RELAY_CHECKS]
+    summary, mock_url, _ = _endpoint_summary(monkeypatch, _routing_fake(seen), cases,
+                                             mock_mode=True)
+    assert {s["dialled"] for s in seen} == {mock_url.split("//")[1]}
+    assert all(s["mock_app"] for s in seen)
+    assert [p["source"] for p in summary.harness_probes] == ["mock"] * 4
+
+
+def _expecting_fake(outcome):
+    """(tracking runner._harness_probe, relay fake). The fake returns `outcome` for a probe
+    (raising it if it is an exception) and a control's own expect for a control, read from the
+    case the tracking wrapper last routed."""
+    current = {}
+    original = runner._harness_probe
+
+    async def tracking(case, name, **kw):
+        current["case"] = case
+        return await original(case, name, **kw)
+
+    async def fake(relay_app, relay_url, **_):
+        case = current["case"]
+        if case["kind"] == "control":
+            return case["expect"], case["expect_reason"]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+    return tracking, fake
+
+
+def test_endpoint_mode_records_mock_driven_cases_as_mechanism(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases())
+    mechanism = [c for c in summary.controls if c["kind"] == "mechanism"]
+    assert [(c["case"], c["observed"], c["ok"], c["source"]) for c in mechanism] == [
+        (c["case"], "pass:ok", True, "mock") for c in _relay_cases()
+        if c["check"] in runner.HARNESS_CHECKS]
+    assert {name for name, _ in summary.probes} == {
+        f"{c['dimension']}/{c['case']}" for c in _relay_cases()
+        if c["check"] in runner.HARNESS_RELAY_CHECKS and c["kind"] == "probe"}
+    fixed = [c for c in summary.controls if c["kind"] == "observation"]
+    assert sorted(c["observed"] for c in fixed) == [
+        "not_tested:nested_agent_not_judged_on_endpoint",
+        "not_tested:over_limit_not_judged_on_endpoint"]
+    assert all(c["source"] == "endpoint" and c["ok"] for c in fixed)
+    assert summary.harness_pending == [] and runner.exit_code(summary, False, "ok") == 0
+    assert runner.harness_sources(summary) == {
+        d: "both" if d in PART_A_PENDING else None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def test_a_failing_mechanism_record_exits_3(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases(),
+                                      legacy=("fail", "connection_not_closed"))
+    assert runner.exit_code(summary, False, "ok") == 3
+    assert runner.dimension_results(summary.probe_values)["timeout_cancellation"] == "pass"
+
+
+def test_a_mechanism_case_that_does_not_run_exits_4_without_pending(monkeypatch):
+    tracking, fake = _expecting_fake(("pass", "ok"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases(),
+                                      legacy=FileNotFoundError("claude"))
+    assert len(summary.not_run) == 4 and summary.harness_pending == []
+    assert runner.exit_code(summary, False, "ok") == 4
+    assert runner.dimension_results(summary.probe_values)["context_length"] == "pass"
+
+
+def test_an_endpoint_case_fault_prints_its_type_only(monkeypatch, capsys):
+    async def raises(relay_app, relay_url, *, mock_app, **_):
+        raise RuntimeError("mock detail" if mock_app is not None
+                           else "detail http://192.0.2.7:8080")
+    cases = [c for c in _relay_cases() if c["check"] == "cli_sigint_endpoint"]
+    summary, _, _ = _endpoint_summary(monkeypatch, raises, cases)
+    err = capsys.readouterr().err
+    assert "cli_sigint_endpoint did not run: RuntimeError\n" in err
+    assert "192.0.2.7" not in err
+    assert "cli_sigint_endpoint_control did not run: RuntimeError: mock detail" in err
+    assert len(summary.not_run) == 2
+
+
+def test_a_not_tested_endpoint_probe_is_pending(monkeypatch):
+    tracking, fake = _expecting_fake(("not_tested", "stream_finished_before_sigint"))
+    monkeypatch.setattr(runner, "_harness_probe", tracking)
+    summary, _, _ = _endpoint_summary(monkeypatch, fake, _relay_cases())
+    assert sorted(set(summary.harness_pending)) == sorted(PART_A_PENDING)
+    assert all(p["observed"] == "not_tested:stream_finished_before_sigint"
+               for p in summary.harness_probes)
+    assert runner.harness_sources(summary) == {
+        d: "mock" if d in PART_A_PENDING else None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def _endpoint_run(tmp_path, monkeypatch, *, tier2=True, version=None):
+    monkeypatch.setenv("CAPSUITE_TEST_KEY", SENTINEL)
+    if tier2:
+        _tier2(monkeypatch, version)
+    with _endpoint_mock() as url:
+        code, result, out = _run(tmp_path, "--base-url", url, "--served-name",
+                                 mock_server.SERVED_NAME, "--secret-env", "CAPSUITE_TEST_KEY",
+                                 "--context-tokens", "4096")
+    return code, result, out, url
+
+
+def test_endpoint_mode_with_tier2_on_certifies_all_six_and_marks_both(tmp_path, monkeypatch):
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _, _ = _endpoint_run(tmp_path, monkeypatch)
+    body = result["certification_result"]
+    assert code == 0 and len(calls) == 12
+    assert body["results"] == {d: "pass" for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert body["harness_pending"] == []
+    assert body["harness_sources"] == {d: "both" if d in PART_A_PENDING else None
+                                       for d in me.ACTOR_REQUIRED_DIMENSIONS}
+    assert sorted((p["dimension"], p["observed"], p["source"]) for p in body["harness_probes"]) == [
+        (d, "pass:ok", "endpoint") for d in sorted(PART_A_PENDING)]
+    assert len([c for c in body["controls"] if c["kind"] == "mechanism"]) == 4
+
+
+def test_endpoint_mode_with_tier2_on_writes_no_url_or_credential(tmp_path, monkeypatch, capsys):
+    _fake_harness(monkeypatch, ("pass", "ok"))
+    code, _, out, url = _endpoint_run(tmp_path, monkeypatch)
+    captured = capsys.readouterr()
+    assert code == 0
+    for blob in (out.read_text(), captured.out, captured.err):
+        assert SENTINEL not in blob and url.split("//", 1)[1] not in blob
+
+
+@pytest.mark.parametrize("mode, want", [("off", 0), ("missing", 6)])
+def test_endpoint_mode_without_tier2_or_cli_is_unchanged(tmp_path, monkeypatch, mode, want):
+    if mode == "missing":
+        monkeypatch.setenv(harness.TIER2_ENV, "1")  # observed_harness_version is None (autouse)
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, _, _ = _endpoint_run(tmp_path, monkeypatch, tier2=False)
+    body = result["certification_result"]
+    assert code == want and calls == []
+    assert body["harness_pending"] == PART_A_PENDING
+    assert all(body["results"][d] == "not_tested" for d in PART_A_PENDING)
+    assert body["harness_probes"] == []
+    assert body["harness_sources"] == {d: None for d in me.ACTOR_REQUIRED_DIMENSIONS}
+
+
+def test_endpoint_mode_with_a_cli_version_mismatch_exits_7_and_writes_nothing(tmp_path,
+                                                                              monkeypatch):
+    calls = _fake_harness(monkeypatch, ("pass", "ok"))
+    code, result, out, _ = _endpoint_run(tmp_path, monkeypatch, version="0.0.1")
+    assert code == 7 and result is None and not out.parent.exists() and calls == []

@@ -1,0 +1,7 @@
+case: cli_padded_prompt_endpoint
+dimension: context_length
+description: A delimited block of min(window // 2, 30000) filler words passes through claude -p intact, is answered 200 and streams to message_stop. Not a window test.
+driver: harness
+kind: probe
+target: endpoint
+check: cli_context_window_endpoint

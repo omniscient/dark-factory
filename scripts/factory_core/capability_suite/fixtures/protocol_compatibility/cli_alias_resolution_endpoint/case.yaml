@@ -1,0 +1,7 @@
+case: cli_alias_resolution_endpoint
+dimension: protocol_compatibility
+description: claude -p through the recording relay with each tier alias names the endpoint's served name and its own credential, every 200 answer streams that name, and the CLI exits 0.
+driver: harness
+kind: probe
+target: endpoint
+check: cli_alias_resolution_endpoint

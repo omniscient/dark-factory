@@ -575,13 +575,32 @@ operator-run. No factory phase calls it; CI runs it against its own mock:
 `python3 -m factory_core.capability_suite run --base-url <mock|http(s)://...> --out <path>`
 (endpoint mode also takes `--served-name`, `--secret-env <NAME>` and `--context-tokens`). It
 writes a `certification_result`, never a capability-evidence record: `load_evidence()` rejects
-it and `--out` under a `model-registry` directory is refused. Four dimensions also need a
-harness case that spawns the pinned `claude -p` against the suite's mock (#624). Those cases run
-only with `FACTORY_CAPABILITY_TIER2=1` and a `claude` whose version is
-`harness.PINNED_HARNESS_VERSION`: exit 6 if the binary is missing, exit 7 and no result on a
-version mismatch. Without the variable they are skipped, stored `not_tested` and listed in the
-result's `harness_pending`, so that result qualifies no route. The `docker-build` CI job runs
-them in the built image with no network.
+it and `--out` under a `model-registry` directory is refused. Four dimensions also need
+harness cases that spawn the pinned `claude -p` (#624, #631). Those cases run only with
+`FACTORY_CAPABILITY_TIER2=1` and a `claude` whose version is `harness.PINNED_HARNESS_VERSION`:
+exit 6 if the binary is missing, exit 7 and no result on a version mismatch. Without the
+variable they are skipped, stored `not_tested` and listed in the result's `harness_pending`, so
+that result qualifies no route. The `docker-build` CI job runs them in the built image against
+the mock with no network. Each of the four dimensions has two harness probes: one always drives
+the CLI against the suite's own mock (#624), the other drives it through a local recording relay
+(`scripts/factory_core/capability_suite/relay.py`, #631) to the target, which is the mock in mock
+mode and the endpoint in endpoint mode. In endpoint mode the mock-driven probe still runs, but it
+is recorded in `controls` as a `mechanism` record, never as a dimension value; exit 3 also means
+a `mechanism` record that is not `pass:ok`. Each endpoint-driven probe has a control that runs
+it against a misbehaving mock in both modes. An endpoint-driven `pass` proves less than the mock
+one. The alias probe does not cover nested `Agent` dispatch. The context probe is not a window
+test: its block is at most 30,000 words (one argv string) and its judge never reads `usage`, so
+window acceptance stays with `context_length/sized_request`. Over-limit and nested-`Agent`
+behaviour are never judged against an endpoint; two observations record a fixed `not_tested`.
+The tool probe depends on the model calling `Read` (`fail:read_not_called` after two attempts),
+and the SIGINT probe on the model still streaming when the signal lands
+(`not_tested:stream_finished_before_sigint` after three). The CLI gets `--tools Read` or
+`--tools ""`, only the endpoint's credential (`--secret-env`), every tier alias set to
+`--served-name`, a temporary `HOME`, and proxy variables naming a loopback sink that refuses
+everything. A request the CLI sends for any other host fails the case
+(`other_host_contacted`). The sink sees only traffic that honours those variables, and verdicts
+are taken on that proxied path, on which the pinned CLI skips its `HEAD /api/hello` preflight. A
+result (schema `1.1`) lists each executed harness probe's `value:reason` and source in
 
 Inspect the effective configuration without printing secret values:
 `python3 /opt/dark-factory/scripts/factory_core/providers/cli.py model-endpoints show --from-source`

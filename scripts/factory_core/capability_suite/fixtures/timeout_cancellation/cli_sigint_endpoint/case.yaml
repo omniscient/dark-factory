@@ -1,0 +1,7 @@
+case: cli_sigint_endpoint
+dimension: timeout_cancellation
+description: SIGINT to claude -p while a real streamed reply is in flight makes the CLI hang up on the relay with no retry.
+driver: harness
+kind: probe
+target: endpoint
+check: cli_sigint_endpoint

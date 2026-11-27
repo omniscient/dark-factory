@@ -1,0 +1,7 @@
+case: cli_over_limit_endpoint_scope
+dimension: context_length
+description: Over-limit behaviour is not judged against a real endpoint, a fixed not_tested. The mock mechanism record covers it.
+driver: harness
+kind: observation
+target: endpoint
+check: cli_over_limit_not_tested
