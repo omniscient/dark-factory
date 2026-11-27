@@ -31,6 +31,8 @@ jobs:
       - run: bash tests/test_entrypoint_error_signature.sh
       - run: bash tests/test_entrypoint_adapter_validate.sh
       - run: bash tests/test_entrypoint_conflict_escalate.sh
+      - run: bash tests/test_entrypoint_intent_case.sh
+      - run: bash tests/test_entrypoint_hosting_fallback.sh
       - name: Assert none of the entrypoint tests touched /var/lib/dark-factory
         run: test -z "$(ls -A /var/lib/dark-factory)"
       - name: Remove the /var/lib/dark-factory scratch dir
