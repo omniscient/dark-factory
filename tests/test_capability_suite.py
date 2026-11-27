@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -20,10 +21,11 @@ from pathlib import Path
 import aiohttp
 import pytest
 import yaml
+from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from factory_core.capability_suite import emit, harness, mock_server, runner  # noqa: E402
+from factory_core.capability_suite import emit, harness, mock_server, relay, runner  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
 
 
@@ -1146,3 +1148,254 @@ def test_ci_runs_tier2_as_a_blocking_docker_build_step():
     upload = steps[tier2 + 1]
     assert upload["uses"].startswith("actions/upload-artifact@") and upload["if"] == "always()"
     assert "continue-on-error" not in upload
+
+
+# --- recording relay (#631) -----------------------------------------------------------------
+
+STREAM_OK = [b'event: message_start\n'
+             b'data: {"type": "message_start", "message": {"model": "m"}}\n\n',
+             b'event: message_stop\ndata: {"type": "message_stop"}\n\n']
+
+
+async def _listener(handler):
+    """A stand-in upstream on 127.0.0.1:<ephemeral> answering every path with `handler`."""
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    app_runner = web.AppRunner(app, handler_cancellation=True, shutdown_timeout=1.0)
+    await app_runner.setup()
+    await web.TCPSite(app_runner, "127.0.0.1", 0).start()
+    return app_runner, f"http://127.0.0.1:{app_runner.addresses[0][1]}"
+
+
+def _sse_upstream(chunks, seen=None, gate=None):
+    """A handler streaming `chunks` (bytes) as text/event-stream; records each request's raw
+    body and headers in `seen`; waits for `gate` (an asyncio.Event) after the first chunk."""
+    async def handler(request):
+        if seen is not None:
+            seen.append({"body": await request.read(), "headers": dict(request.headers),
+                         "path": request.path_qs})
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                           "Retry-After": "7", "X-Other": "dropped"})
+        await resp.prepare(request)
+        for i, chunk in enumerate(chunks):
+            await resp.write(chunk)
+            if i == 0 and gate is not None:
+                await asyncio.wait_for(gate.wait(), 5)
+        await resp.write_eof()
+        return resp
+    return handler
+
+
+def _through_relay(handler, client, fault=None, timeouts=None):
+    """client(session, relay url, relay app) against a relay whose upstream is a stand-in
+    serving `handler`; returns (client's value, Relayed, upstream URL)."""
+    async def go():
+        up_runner, up_url = await _listener(handler)
+        try:
+            async with relay.started(up_url, timeouts=timeouts or runner.DEFAULT_TIMEOUTS,
+                                     fault=fault) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    value = await client(session, url, app)
+                await asyncio.sleep(0.1)
+                return value, app[relay.RELAYED], up_url
+        finally:
+            await up_runner.cleanup()
+    return asyncio.run(go())
+
+
+async def _post_read(session, url, body=b'{"messages": []}', headers=None, path="/v1/messages"):
+    async with session.post(url + path, data=body, headers=headers or {},
+                            allow_redirects=False) as resp:
+        return resp.status, dict(resp.headers), await resp.read()
+
+
+def test_relay_and_sink_bind_loopback_only():
+    async def client(session, url, app):
+        return url, app[relay.RELAYED].sink_url
+    (url, sink), _, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert url.startswith("http://127.0.0.1:") and sink.startswith("http://127.0.0.1:")
+
+
+def test_relay_forwards_body_and_credential_verbatim_and_rewrites_hop_headers():
+    seen = []
+    raw = b'{"model": "m",  "messages": [ ]}'
+
+    async def client(session, url, app):
+        return await _post_read(session, url, raw, path="/v1/messages?beta=true", headers={
+            "x-api-key": SENTINEL, "anthropic-version": "2023-06-01",
+            "Accept-Encoding": "gzip", "Keep-Alive": "5", "TE": "trailers",
+            "Proxy-Connection": "keep-alive"})
+    (status, headers, data), relayed, up_url = _through_relay(_sse_upstream(STREAM_OK, seen),
+                                                              client, fault="wrong_model")
+    assert status == 200 and data == b"".join(STREAM_OK)
+    got = {k.lower(): v for k, v in seen[0]["headers"].items()}
+    assert seen[0]["body"] == raw and seen[0]["path"] == "/v1/messages?beta=true"
+    assert got["x-api-key"] == SENTINEL and got["anthropic-version"] == "2023-06-01"
+    assert got["accept-encoding"] == "identity"
+    assert not {"keep-alive", "te", "proxy-connection"} & set(got)
+    assert got["host"] == up_url.split("//", 1)[1]
+    assert got[mock_server.FAULT_HEADER.lower()] == "wrong_model"
+    assert headers["Content-Type"] == "text/event-stream" and headers["Retry-After"] == "7"
+    assert "X-Other" not in headers
+    assert relayed.dialled == [up_url.split("//", 1)[1]]
+    record = relayed.requests[0]
+    assert record["headers"]["x-api-key"] == SENTINEL and record["status"] == 200
+    assert record["body"] == {"model": "m", "messages": []}
+
+
+def test_relay_streams_each_chunk_before_the_upstream_finishes():
+    gate = asyncio.Event()
+
+    async def client(session, url, app):
+        async with session.post(url + "/v1/messages", data=b"{}") as resp:
+            first = await asyncio.wait_for(resp.content.readany(), 5)
+            gate.set()  # the upstream sends its second chunk only now
+            return first + await resp.read()
+    data, _, _ = _through_relay(_sse_upstream(STREAM_OK, gate=gate), client)
+    assert data == b"".join(STREAM_OK)
+
+
+@pytest.mark.parametrize("chunks, model, completed", [
+    (STREAM_OK, "m", True),
+    ([STREAM_OK[0], b'event: message_stop\ndata: {"type" :  "mess', b'age_stop"}\n\n'],
+     "m", True),
+    ([STREAM_OK[0], b"event: message_stop\n\n"], "m", False),
+    ([b'data: {"type": "message_start", "message": {"model": 7}}\n\n'], None, False),
+])
+def test_relay_records_response_model_and_completion(chunks, model, completed):
+    async def client(session, url, app):
+        return await _post_read(session, url)
+    _, relayed, _ = _through_relay(_sse_upstream(chunks), client)
+    assert relayed.requests[0]["response_model"] == model
+    assert relayed.requests[0]["completed"] is completed
+
+
+def test_relay_answers_an_unknown_path_404_without_contacting_the_upstream():
+    seen = []
+
+    async def client(session, url, app):
+        async with session.get(url + "/v1/models") as resp:
+            return resp.status
+    status, relayed, _ = _through_relay(_sse_upstream(STREAM_OK, seen), client)
+    assert status == 404 and seen == [] and relayed.dialled == []
+    assert relayed.requests[0]["status"] == 404 and relayed.requests[0]["path"] == "/v1/models"
+
+
+def test_relay_never_follows_a_redirect_and_drops_its_location():
+    async def go():
+        hits = []
+
+        async def second(request):
+            hits.append(request.path)
+            return web.Response()
+        second_runner, second_url = await _listener(second)
+
+        async def redirect(request):
+            return web.Response(status=307, headers={"Location": second_url + "/v1/messages"})
+        first_runner, first_url = await _listener(redirect)
+        try:
+            async with relay.started(first_url, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    status, headers, _ = await _post_read(session, url)
+                return status, headers, hits, app[relay.RELAYED].dialled, first_url
+        finally:
+            await first_runner.cleanup()
+            await second_runner.cleanup()
+    status, headers, hits, dialled, first_url = asyncio.run(go())
+    assert status == 307 and "Location" not in headers
+    assert hits == [] and dialled == [first_url.split("//", 1)[1]]
+
+
+def test_relay_answers_a_refused_upstream_502_and_classifies_it():
+    async def go():
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))  # bound and never listening: every connect is refused
+            upstream = f"http://127.0.0.1:{sock.getsockname()[1]}"
+            async with relay.started(upstream, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                async with aiohttp.ClientSession() as session:
+                    status, _, data = await _post_read(session, url)
+                return status, json.loads(data), app[relay.RELAYED]
+    status, body, relayed = asyncio.run(go())
+    assert status == 502 and body == relay.BAD_GATEWAY_BODY
+    assert relayed.upstream_errors == ["endpoint_unreachable"]
+    assert relayed.upstream_failed.is_set() and relayed.requests[0]["status"] == 502
+
+
+def test_relay_hangs_up_on_the_cli_when_the_upstream_stalls_mid_stream():
+    async def stall(request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(STREAM_OK[0])
+        await asyncio.sleep(3)
+        return resp
+
+    async def client(session, url, app):
+        with pytest.raises(aiohttp.ClientPayloadError):
+            await _post_read(session, url)
+        return True
+    _, relayed, _ = _through_relay(stall, client, timeouts=dict(runner.DEFAULT_TIMEOUTS,
+                                                                idle_seconds=0.3))
+    assert relayed.upstream_errors == ["timeout_idle"] and relayed.upstream_failed.is_set()
+
+
+def _marked(marker):
+    return json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": f"{marker} write"}]}]}).encode()
+
+
+def test_watch_resets_only_the_watched_request_state():
+    relayed = relay.Relayed(requests=[{"x": 1}], upstream_errors=["timeout_idle"],
+                            other_host=["CONNECT x:443 HTTP/1.1"], client_gone=True,
+                            upstream_done=True, upstream_closed=True)
+    relayed.first_chunk.set()
+    app = web.Application()
+    app[relay.RELAYED] = relayed
+    assert relay.watch(app, "m:") is relayed
+    assert relayed.marker == "m:" and not relayed.first_chunk.is_set()
+    assert not (relayed.client_gone or relayed.upstream_done or relayed.upstream_closed)
+    assert relayed.requests == [{"x": 1}] and relayed.upstream_errors == ["timeout_idle"]
+    assert relayed.other_host == ["CONNECT x:443 HTTP/1.1"]
+
+
+def test_relay_sees_a_watched_client_hang_up_and_the_upstream_sees_it_too():
+    async def go():
+        mock_runner, mock_url = await mock_server.start()
+        try:
+            observed = mock_server.arm(mock_runner.app, mock_server.Script("stall"))
+            async with relay.started(mock_url, timeouts=runner.DEFAULT_TIMEOUTS) as (app, url):
+                relayed = relay.watch(app, "m 1:")
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(url + "/v1/messages", data=_marked("m 1:"))
+                    await asyncio.wait_for(relayed.first_chunk.wait(), 5)
+                    resp.close()  # the client hangs up mid-stream
+                for _ in range(50):
+                    if relayed.client_gone and observed.disconnected:
+                        break
+                    await asyncio.sleep(0.1)
+                return relayed, observed.disconnected
+        finally:
+            await mock_runner.cleanup()
+    relayed, upstream_saw_it = asyncio.run(go())
+    assert relayed.client_gone and relayed.upstream_closed and not relayed.upstream_done
+    assert upstream_saw_it
+
+
+def test_relay_marks_a_watched_stream_that_ends_normally_as_done():
+    async def client(session, url, app):
+        relayed = relay.watch(app, "m 1:")
+        await _post_read(session, url, _marked("other"))
+        unwatched = (relayed.first_chunk.is_set(), relayed.upstream_done)
+        await _post_read(session, url, _marked("m 1:"))
+        return unwatched
+    unwatched, relayed, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert unwatched == (False, False)
+    assert relayed.first_chunk.is_set() and relayed.upstream_done and not relayed.client_gone
+
+
+def test_the_proxy_sink_records_and_refuses_every_connection():
+    async def client(session, url, app):
+        async with session.get("http://192.0.2.1/x", proxy=app[relay.RELAYED].sink_url) as resp:
+            return resp.status
+    status, relayed, _ = _through_relay(_sse_upstream(STREAM_OK), client)
+    assert status == 403 and relayed.other_host == ["GET http://192.0.2.1/x HTTP/1.1"]
+    assert relayed.dialled == []
