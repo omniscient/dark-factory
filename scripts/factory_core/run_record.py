@@ -1493,6 +1493,55 @@ def _backfill_run_economics(run_id: str, *, artifacts_root: pathlib.Path, ledger
     return True
 
 
+def _backfill_usage(run_id: str, transcripts_dir) -> dict:
+    """#645 requirement 8: add the usage keys to an existing durable run record from
+    retained transcripts. The original is first copied to <run_id>.pre-645.json (never
+    overwritten); the record is then replaced through a temporary file and a rename.
+    runs.jsonl is never rewritten. A node with no cost-matched file is left untouched."""
+    path = _durable_run_record_path(run_id)
+    if path is None or not path.is_file():
+        return {"run_id": run_id, "backfilled_nodes": [], "reason": "no_record"}
+    original = path.read_bytes()
+    record = json.loads(original)
+    nodes = record.get("nodes") or []
+    found = session_usage.backfill(
+        session_usage.load_transcripts(transcripts_dir),
+        {n["node_id"]: {"cost_usd": n.get("cost_usd"),
+                        "tokens": (n.get("gen_ai.usage.input_tokens"),
+                                   n.get("gen_ai.usage.output_tokens"))}
+         for n in nodes if isinstance(n.get("node_id"), str)},
+    )
+    if not found:
+        return {"run_id": run_id, "backfilled_nodes": [], "reason": "no_match"}
+    hosting = ((record.get("model_dispatch") or {}).get("result") or {}).get("hosting_location")
+    record["nodes"] = [
+        dict(_with_usage_keys(n, True, found[n["node_id"]], hosting), backfilled=True)
+        if n.get("node_id") in found else n
+        for n in nodes
+    ]
+    stat_before = path.stat()
+    pre = path.with_name(f"{run_id}.pre-645.json")
+    try:
+        with open(pre, "xb") as fh:
+            fh.write(original)
+        os.utime(pre, (stat_before.st_atime, stat_before.st_mtime))
+    except FileExistsError:
+        pass
+    tmp = path.with_name(f".{run_id}.json.tmp")
+    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    os.utime(path, (stat_before.st_atime, stat_before.st_mtime))
+    return {"run_id": run_id, "backfilled_nodes": sorted(found)}
+
+
+def cmd_backfill_usage(args) -> None:
+    if not pathlib.Path(args.transcripts_dir).is_dir():
+        print(f"run-record: --transcripts-dir {args.transcripts_dir} is not a directory",
+              file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(_backfill_usage(args.run_id, args.transcripts_dir)))
+
+
 def cmd_backfill_economics(args) -> None:
     ok = _backfill_run_economics(
         args.run_id,
@@ -1558,6 +1607,11 @@ def main() -> None:
     be.add_argument("--artifacts-root", required=True)
     be.add_argument("--ledger-path", default=None)
 
+    bu = sub.add_parser("backfill-usage",
+                        help="Add model/cache usage to a durable run record from retained transcripts")
+    bu.add_argument("--run-id", required=True)
+    bu.add_argument("--transcripts-dir", required=True)
+
     parsed = parser.parse_args()
     if parsed.cmd == "record":
         try:
@@ -1573,6 +1627,8 @@ def main() -> None:
         cmd_issue_economics(parsed)
     elif parsed.cmd == "backfill-economics":
         cmd_backfill_economics(parsed)
+    elif parsed.cmd == "backfill-usage":
+        cmd_backfill_usage(parsed)
 
 
 if __name__ == "__main__":

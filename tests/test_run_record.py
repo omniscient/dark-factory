@@ -3463,3 +3463,81 @@ def test_new_record_shape_renders_like_before_in_every_reader(tmp_path, monkeypa
         reports.append(reconcile_cost_reports.build_reconciliation_report(state_dir=state))
     assert reports[0] == reports[1]
     assert reports[0]["recoverable"][0]["cost_usd"] == pytest.approx(6.2096)
+
+
+# --- backfill-usage (#645 requirement 8) ---------------------------------------------
+
+def _u_durable(monkeypatch, tmp_path, record):
+    state = tmp_path / "state"
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", state)
+    path = state / "run-records" / f"{record['run_id']}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(record, indent=2))
+    return path
+
+
+def _u_old_record():
+    return {"run_id": "3ff088b6", "nodes": [
+        {"node_id": "conformance", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 200, "cost_usd": 1.0, "duration_ms": 1},
+        {"node_id": "code-review", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 200, "cost_usd": 2.1, "duration_ms": 1},
+        {"node_id": "revise-advisory", "model": "", "gen_ai.usage.input_tokens": 20,
+         "gen_ai.usage.output_tokens": 200, "cost_usd": 9.99, "duration_ms": 1},
+    ], "totals": {"cost_usd": 13.09}, "model_dispatch": {"result": {"hosting_location": None}}}
+
+
+def test_backfill_usage_matches_by_cost_and_keeps_the_original(tmp_path, monkeypatch):
+    path = _u_durable(monkeypatch, tmp_path, _u_old_record())
+    original = path.read_bytes()
+    tx = _u_transcripts(tmp_path / "tx")
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+    renames = []
+    real_replace = os.replace
+    monkeypatch.setattr(rr.os, "replace", lambda a, b: (renames.append((a, b)), real_replace(a, b)))
+
+    result = rr._backfill_usage("3ff088b6", str(tx))
+
+    assert result["backfilled_nodes"] == ["code-review", "conformance"]
+    by = {n["node_id"]: n for n in json.loads(path.read_text())["nodes"]}
+    assert by["conformance"]["backfilled"] is True
+    assert by["conformance"]["model"] == f"{_HAIKU},{_OPUS}"
+    assert by["code-review"]["cost_usd_session_delta"] == pytest.approx(1.1)
+    assert by["code-review"]["cost_usd"] == pytest.approx(2.1)
+    assert by["revise-advisory"] == _u_old_record()["nodes"][2]   # no matching file: untouched
+    pre = path.with_name("3ff088b6.pre-645.json")
+    assert pre.read_bytes() == original
+    assert [Path(b).name for _, b in renames] == ["3ff088b6.json"]
+    assert path.stat().st_mtime == 1_700_000_000
+
+    pre.write_text("kept")
+    rr._backfill_usage("3ff088b6", str(tx))
+    assert pre.read_text() == "kept"   # the first copy is never overwritten
+    assert not (rr.SCHEDULER_STATE_DIR / "runs.jsonl").exists()
+
+
+def test_backfill_usage_no_record_or_no_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "state")
+    assert rr._backfill_usage("nope", str(tmp_path))["reason"] == "no_record"
+    record = _u_old_record()
+    for n in record["nodes"]:
+        n["cost_usd"] = 42.0
+    path = _u_durable(monkeypatch, tmp_path, record)
+    before = path.read_bytes()
+    assert rr._backfill_usage("3ff088b6", str(_u_transcripts(tmp_path / "tx")))["reason"] == "no_match"
+    assert path.read_bytes() == before
+    assert not path.with_name("3ff088b6.pre-645.json").exists()
+
+
+def test_backfill_usage_cli(tmp_path, monkeypatch, capsys):
+    _u_durable(monkeypatch, tmp_path, _u_old_record())
+    tx = _u_transcripts(tmp_path / "tx")
+    monkeypatch.setattr(sys, "argv", ["run_record", "backfill-usage", "--run-id", "3ff088b6",
+                                      "--transcripts-dir", str(tx)])
+    rr.main()
+    assert json.loads(capsys.readouterr().out)["backfilled_nodes"] == ["code-review", "conformance"]
+    monkeypatch.setattr(sys, "argv", ["run_record", "backfill-usage", "--run-id", "3ff088b6",
+                                      "--transcripts-dir", str(tmp_path / "missing")])
+    with pytest.raises(SystemExit) as exc:
+        rr.main()
+    assert exc.value.code == 2
