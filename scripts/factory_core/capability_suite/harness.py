@@ -518,3 +518,123 @@ def judge_sigint_attempt(upstream_errors, first_chunk, watched, client_gone, ups
     if not client_gone:
         return "fail", "connection_not_closed"
     return "pass", "ok"
+
+
+# --- relay checks: runner.HARNESS_RELAY_CHECKS ----------------------------------------------
+
+def _spawn_problem(relayed, status):
+    """The two rules applied after every run_relayed, before any judge: an upstream failure,
+    then a killed spawn. Either is final for the case."""
+    if relayed.upstream_errors:
+        return "fail", relayed.upstream_errors[0]
+    if status is None:
+        return "fail", "cli_timeout"
+    return None
+
+
+async def check_alias_resolution_endpoint(relay_app, relay_url, *, served_name, credential,
+                                          context_tokens, mock_app, variant):
+    """`--model` with each tier alias, `--tools ""`, through the relay."""
+    relayed = relay_app[relay.RELAYED]
+    runs = []
+    for tier in TIERS:
+        if mock_app is not None:
+            mock_server.arm(mock_app, mock_server.Script("text"))
+        start = len(relayed.requests)
+        with workdir() as root:
+            status, _ = await run_relayed(relay_app, relay_url, root, ASK_OK, "--model", tier,
+                                          "--tools", "", served_name=served_name,
+                                          credential=credential, seconds=spawn_seconds(mock_app))
+        problem = _spawn_problem(relayed, status)
+        if problem:
+            return problem
+        runs.append((tier, status, relayed.requests[start:]))
+    return judge_alias_endpoint(runs, served_name, credential)
+
+
+async def check_tool_round_trip_endpoint(relay_app, relay_url, *, served_name, credential,
+                                         context_tokens, mock_app, variant):
+    """Offered only Read (`--tools Read`, no --allowedTools: Read stays inside the temporary
+    cwd), the model must read the seeded file; up to READ_ATTEMPTS fresh attempts."""
+    relayed = relay_app[relay.RELAYED]
+    for _ in range(READ_ATTEMPTS):
+        with workdir() as root:
+            seeded = root / "cwd" / PLANTED_FILE
+            seeded.write_text("capability-suite notes: nothing to see here.\n"
+                              if variant == "unplanted_file"
+                              else f"{PLANTED_RESULT}\n{PLANTED_SWITCH}\n", encoding="utf-8")
+            if mock_app is not None:
+                mock_server.arm(mock_app, mock_server.Script("read", read_path=str(seeded)))
+            start = len(relayed.requests)
+            status, _ = await run_relayed(relay_app, relay_url, root, READ_PROMPT, "--tools",
+                                          "Read", served_name=served_name, credential=credential,
+                                          seconds=spawn_seconds(mock_app))
+            problem = _spawn_problem(relayed, status)
+            if problem:
+                return problem
+            value, reason = judge_read_endpoint(relayed.requests[start:], str(seeded),
+                                                str(root / "cwd"), served_name)
+        if reason != "read_not_called":
+            return value, reason
+    return "fail", "read_not_called"
+
+
+async def check_context_window_endpoint(relay_app, relay_url, *, served_name, credential,
+                                        context_tokens, mock_app, variant):
+    """A padded block of min(window // 2, MAX_ARG_WORDS) words through the CLI, answered 200
+    and streamed to message_stop. Not a window test and no over-limit attempt. None (not run)
+    without a window, as context_length/sized_request."""
+    if context_tokens is None:
+        return None
+    relayed = relay_app[relay.RELAYED]
+    words = min(context_tokens // 2, MAX_ARG_WORDS)
+    if mock_app is not None:
+        mock_server.arm(mock_app, mock_server.Script("text"))
+    start = len(relayed.requests)
+    with workdir() as root:
+        status, _ = await run_relayed(relay_app, relay_url, root, padded_prompt(words), "--tools",
+                                      "", served_name=served_name, credential=credential,
+                                      seconds=spawn_seconds(mock_app))
+    problem = _spawn_problem(relayed, status)
+    if problem:
+        return problem
+    return judge_padded_endpoint(relayed.requests[start:], words)
+
+
+async def check_sigint_endpoint(relay_app, relay_url, *, served_name, credential,
+                                context_tokens, mock_app, variant):
+    """SIGINT once the watched reply's first chunk is forwarded; the CLI must hang up on the
+    relay with no retry. Up to SIGINT_ATTEMPTS attempts, each asking for a longer reply; only
+    "the stream finished first" consumes one. Variant no_sigint never sends the signal."""
+    relayed = relay_app[relay.RELAYED]
+    for n in range(1, SIGINT_ATTEMPTS + 1):
+        marker = f"{SIGINT_MARKER} {n}:"
+        relay.watch(relay_app, marker)
+        if mock_app is not None:
+            mock_server.arm(mock_app, mock_server.Script("stall"))
+        first = client_gone = upstream_done = False
+        with workdir() as root:
+            proc = await start_cli(relay_url, root,
+                                   f"{marker} write {40 * 2 ** (n - 1)} paragraphs about rivers.",
+                                   "--tools", "", served_name=served_name, credential=credential,
+                                   proxy=relayed.sink_url)
+            try:
+                await _until(lambda: relayed.first_chunk.is_set()
+                             or relayed.upstream_failed.is_set(), FIRST_CHUNK_SECONDS)
+                first = relayed.first_chunk.is_set()
+                if first:
+                    if variant != "no_sigint":
+                        with contextlib.suppress(ProcessLookupError):
+                            proc.send_signal(signal.SIGINT)
+                    await _until(lambda: relayed.client_gone or relayed.upstream_done,
+                                 DISCONNECT_SECONDS)
+                client_gone, upstream_done = relayed.client_gone, relayed.upstream_done
+            finally:
+                await finish(proc, DISCONNECT_SECONDS)
+        watched = [p for p in _posts(relayed.requests)
+                   if any(marker in text for text in _user_texts(p))]
+        verdict = judge_sigint_attempt(relayed.upstream_errors, first, watched, client_gone,
+                                       upstream_done)
+        if verdict is not None:
+            return verdict
+    return "not_tested", "stream_finished_before_sigint"

@@ -63,7 +63,7 @@ ACTOR_REQUIRED_DIMENSIONS = (
 # The pinned capability fixture suite (#561): capability_suite.emit.suite_digest(), a SHA-256
 # over capability_suite/fixtures/ and the package's top-level modules. Never hand-bumped:
 # tests/test_capability_suite.py fails when it differs from the recomputed digest.
-PINNED_FIXTURE_SUITE_VERSION = "2ed62c497e46a9da5c85cadc05114e70fbe5ca99de909f391da2cac7af95b318"
+PINNED_FIXTURE_SUITE_VERSION = "6e75ac8cefc43d8a9ec4d5aa800723696ce51cafbb59e60d3d2e65c7a2cc026c"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")

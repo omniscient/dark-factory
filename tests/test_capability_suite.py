@@ -1646,3 +1646,105 @@ def _watched(*statuses):
 ])
 def test_judge_sigint_attempt(args, verdict):
     assert harness.judge_sigint_attempt(*args) == verdict
+
+
+@needs_proc
+def test_each_relay_check_restricts_the_tool_surface(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    kw = dict(served_name="local-model-a", credential=SENTINEL, context_tokens=64,
+              mock_app=None, variant=None)
+
+    async def go(app, url, _mock_app):
+        return [await check(app, url, **kw) for check in (
+            harness.check_alias_resolution_endpoint, harness.check_tool_round_trip_endpoint,
+            harness.check_context_window_endpoint)]
+    outcomes = _on_relay(go)
+    assert outcomes == [("fail", "opus_no_request"), ("fail", "no_request"),
+                        ("fail", "no_request")]
+    argvs = [s["argv"] for s in _spawns(log)]
+    assert [a[2:] for a in argvs[:4]] == [["--model", t, "--tools", ""] for t in harness.TIERS]
+    assert argvs[4][2:] == ["--tools", "Read"] and argvs[5][2:] == ["--tools", ""]
+    assert all("--allowedTools" not in a for a in argvs)
+
+
+@needs_proc
+def test_a_killed_spawn_is_cli_timeout_and_never_judged(tmp_path, monkeypatch):
+    log = tmp_path / "spawns.jsonl"
+    _logging_claude(tmp_path / "bin", log, sleep=30)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(harness, "ENDPOINT_RUN_SECONDS", 2.0)
+
+    def judged(*_):
+        raise AssertionError("a judge ran over a killed spawn")
+    for judge in ("judge_alias_endpoint", "judge_read_endpoint", "judge_padded_endpoint"):
+        monkeypatch.setattr(harness, judge, judged)
+    kw = dict(served_name="local-model-a", credential=SENTINEL, context_tokens=64,
+              mock_app=None, variant=None)
+    for check in (harness.check_alias_resolution_endpoint,
+                  harness.check_tool_round_trip_endpoint,
+                  harness.check_context_window_endpoint):
+        before = len(_spawns(log))
+
+        async def go(app, url, _mock_app):
+            return await check(app, url, **kw)
+        assert _on_relay(go) == ("fail", "cli_timeout")
+        assert len(_spawns(log)) == before + 1  # nothing further spawned
+
+
+def _streaming_claude(bin_dir, retry):
+    """A `claude` on PATH that POSTs its prompt to ANTHROPIC_BASE_URL as one streamed request
+    and reads the answer. On SIGINT it hangs up; with `retry` it sends the same request once
+    more 0.3 s after its hang-up, as a silently retrying CLI would, then exits."""
+    bin_dir.mkdir()
+    stub = bin_dir / "claude"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, socket, sys, time\n"
+        "from urllib.parse import urlsplit\n"
+        "url = urlsplit(os.environ['ANTHROPIC_BASE_URL'])\n"
+        "body = json.dumps({'model': os.environ['ANTHROPIC_DEFAULT_OPUS_MODEL'], 'max_tokens': 8,\n"
+        "                   'stream': True,\n"
+        "                   'messages': [{'role': 'user', 'content': sys.argv[2]}]}).encode()\n"
+        "request = ('POST /v1/messages?beta=true HTTP/1.1\\r\\nHost: relay\\r\\n'\n"
+        "           'x-api-key: ' + os.environ['ANTHROPIC_API_KEY'] + '\\r\\n'\n"
+        "           'Content-Type: application/json\\r\\n'\n"
+        "           'Content-Length: ' + str(len(body)) + '\\r\\n\\r\\n').encode() + body\n"
+        "socks = []\n"
+        "def post():\n"
+        "    socks.append(socket.create_connection((url.hostname, url.port)))\n"
+        "    socks[-1].sendall(request)\n"
+        "def hang_up(*_):\n"
+        "    socks[0].close()\n"
+        f"    if {retry!r}:\n"
+        "        time.sleep(0.3)\n"
+        "        post()\n"
+        "        time.sleep(0.2)\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGINT, hang_up)\n"
+        "post()\n"
+        "while socks[0].recv(4096):\n"
+        "    pass\n")
+    stub.chmod(0o755)
+
+
+@pytest.mark.parametrize("retry, variant, outcome", [
+    (False, None, ("pass", "ok")),
+    # the retry arrives after the hang-up: only a count taken after reaping sees it
+    (True, None, ("fail", "retried")),
+    # no SIGINT: the only hang-up is the reaping kill, which the snapshot must not see
+    (False, "no_sigint", ("fail", "connection_not_closed")),
+])
+def test_the_sigint_check_snapshots_before_reaping_and_counts_after(tmp_path, monkeypatch, retry,
+                                                                    variant, outcome):
+    _streaming_claude(tmp_path / "bin", retry)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(harness, "DISCONNECT_SECONDS", 1.0)
+
+    async def go(app, url, mock_app):
+        return await harness.check_sigint_endpoint(
+            app, url, served_name=mock_server.SERVED_NAME,
+            credential=mock_server.DUMMY_CREDENTIAL, context_tokens=64, mock_app=mock_app,
+            variant=variant)
+    assert _on_relay(go) == outcome
