@@ -1,0 +1,110 @@
+"""Tests for check_command_cache_shape.py — the phase-command cache-shape lint (#236).
+
+R1 forbids the brace form of Archon-substituted names (it resolves to the wrong artifacts
+directory in a command node's shell); R2 ratchets each file's first volatile line against
+the committed baseline; R3 keeps the baseline complete. ``--json`` emits the static
+prompt-shape metadata.
+"""
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from check_command_cache_shape import shape  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_COMMANDS_DIR = _REPO_ROOT / "commands"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _setup(tmp_path: Path, files: dict, baseline: dict) -> tuple[Path, Path]:
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    for name, text in files.items():
+        (commands / f"{name}.md").write_bytes(text.encode("utf-8"))
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+    return commands, baseline_path
+
+
+def _one(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "cmd.md"
+    p.write_bytes(text.encode("utf-8"))  # bytes: no newline translation on Windows
+    return p
+
+
+def _names(tmp_path: Path, text: str) -> dict:
+    return {f["name"]: f["count"] for f in shape(_one(tmp_path, text))["cache_busting_fields"]}
+
+
+# ---------------------------------------------------------------------------
+# Token matching (mirrors Archon)
+# ---------------------------------------------------------------------------
+
+def test_plain_names_have_no_word_boundary(tmp_path):
+    assert _names(tmp_path, "$ARTIFACTS_DIRX\n") == {"ARTIFACTS_DIR": 1}
+
+
+def test_context_names_have_lookahead(tmp_path):
+    assert _names(tmp_path, "$CONTEXTS $ISSUE_CONTEXT_X\n") == {}
+
+
+def test_issue_context_reported_as_itself(tmp_path):
+    assert _names(tmp_path, "$ISSUE_CONTEXT and $CONTEXT\n") == {"ISSUE_CONTEXT": 1, "CONTEXT": 1}
+
+
+def test_node_output_references(tmp_path):
+    assert _names(tmp_path, "$plan.output then $plan.output.field\n") == {"NODE_OUTPUT": 2}
+
+
+# ---------------------------------------------------------------------------
+# Prompt-shape metadata
+# ---------------------------------------------------------------------------
+
+def test_prefix_hash_is_sha256_of_bytes_before_first_token(tmp_path):
+    prefix = "---\ndescription: é\n"
+    meta = shape(_one(tmp_path, prefix + "x $ARTIFACTS_DIR tail\n"))
+    stable = (prefix + "x ").encode("utf-8")
+    assert meta["prefix_hash"] == hashlib.sha256(stable).hexdigest()
+    assert meta["stable_prefix_bytes"] == len(stable)
+    assert meta["volatile_tail_bytes"] == len("$ARTIFACTS_DIR tail\n")
+    assert meta["volatile_tail_tokens_est"] == len("$ARTIFACTS_DIR tail\n") // 4
+    assert meta["first_volatile_line"] == 3
+
+
+def test_prefix_hash_ignores_tail_changes(tmp_path):
+    a = shape(_one(tmp_path, "head\n$WORKFLOW_ID tail one\n"))["prefix_hash"]
+    b = shape(_one(tmp_path, "head\n$WORKFLOW_ID tail two\n"))["prefix_hash"]
+    assert a == b
+
+
+def test_prefix_hash_changes_with_prefix(tmp_path):
+    a = shape(_one(tmp_path, "head\n$WORKFLOW_ID\n"))["prefix_hash"]
+    b = shape(_one(tmp_path, "heaD\n$WORKFLOW_ID\n"))["prefix_hash"]
+    assert a != b
+
+
+def test_cache_busting_fields_counts_and_first_lines(tmp_path):
+    text = "a\n$WORKFLOW_ID\n$ARTIFACTS_DIR $ARTIFACTS_DIR\n$ARTIFACTS_DIR\n"
+    meta = shape(_one(tmp_path, text))
+    assert meta["command"] == "cmd"
+    assert meta["cache_busting_fields"] == [
+        {"name": "WORKFLOW_ID", "count": 1, "first_line": 2},
+        {"name": "ARTIFACTS_DIR", "count": 3, "first_line": 3},
+    ]
+
+
+def test_file_with_no_token_is_all_prefix(tmp_path):
+    meta = shape(_one(tmp_path, "one\ntwo\n"))
+    assert meta["first_volatile_line"] == 3      # line count + 1
+    assert meta["volatile_tail_bytes"] == 0
+    assert meta["cache_busting_fields"] == []
+    assert meta["prefix_hash"] == hashlib.sha256(b"one\ntwo\n").hexdigest()
