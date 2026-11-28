@@ -67,7 +67,7 @@ maps each field to its current `.archon/memory/*.md` encoding.
 ```mermaid
 stateDiagram-v2
     [*] --> provisional : implement agent shell append (single-run observation)
-    [*] --> active : memory_write.py AVOID entry, or implement agent shell append (runtime-proven)
+    [*] --> active : memory_write.py entry (PATTERN, AVOID or FIX), or implement agent shell append (runtime-proven)
     provisional --> active : Promotion (second-run confirmation, different issue#)
     provisional --> [*] : Expiry (expires_at < today)
     active --> [*] : Expiry (expires_at < today)
@@ -118,7 +118,7 @@ An entry may only become durable memory if it passes this bar:
 
 | Phase | When to write | What to write |
 |---|---|---|
-| **Refine** | Only when a trade-off between two approaches was explicitly weighed in Phase 4 Q&A, or a codebase convention absent from `CLAUDE.md` and `ARCHITECTURE.md` was found during context assembly. Most refine runs add zero entries. | Architectural decisions to `architecture.md`; conventions to the matching area file. Never `codebase-patterns.md`. Written through `memory_write.py`, so every refine entry is tagged `[AVOID]` (see scoping matrix). |
+| **Refine** | Only when a trade-off between two approaches was explicitly weighed in Phase 4 Q&A, or a codebase convention absent from `CLAUDE.md` and `ARCHITECTURE.md` was found during context assembly. Most refine runs add zero entries. | Architectural decisions to `architecture.md`; conventions to the matching area file. Never `codebase-patterns.md`. Written through `memory_write.py`: a weighed decision as one `[AVOID]` entry that leads with the rejected approach, a convention with no prohibition as `[PATTERN]` (see "How each role writes"). |
 | **Implement** | Only when a pattern is runtime-proven in the delivered code. Single-run observations that cannot be verified via code go to `[PROVISIONAL]` first. | Area-specific patterns (backend, frontend, dark-factory-ops, codebase). Promoted from `[PROVISIONAL]` only when a different issue confirms them. |
 | **Conformance** | Only when a MATERIAL violation was found **and** successfully remediated in the same run (`CONFORMANCE_CYCLE > 0`). | `[AVOID]` entries in the area file matching the violation. |
 | **Code-review** | Only when `STATUS=BLOCKED` (confirmed blocking findings that were acted on). | `[AVOID]` entries in the area file matching the finding. |
@@ -152,13 +152,32 @@ Which files exist depends on the target. This repo's store holds `architecture.m
 
 | Role | Mechanism | Tags it can produce |
 |---|---|---|
-| Refine | `memory_write.py`, called directly from the command | `[AVOID]` only |
+| Refine | `memory_write.py`, called directly from the command | `[AVOID]`, `[PATTERN]`; `[FIX]` available but unused |
 | Conformance, code-review | `gate_lib.sh::write_memory_entry()` → `memory_write.py` | `[AVOID]` only |
 | Implement | Shell appends by the agent, following `commands/dark-factory-implement.md` | `[PATTERN]`, `[AVOID]`, `[FIX]`, `[PROVISIONAL]`, and `[INVALID: reason]` rewrites |
 
-`memory_write.py` always writes `- [AVOID] …`; it never writes `[PATTERN]`, `[FIX]` or
-`[PROVISIONAL]`. Refine therefore records both the chosen and the rejected approach as
-`[AVOID]` entries, which the refine command documents as a known tool limitation.
+`memory_write.py` writes one `- [PATTERN] …`, `- [AVOID] …` or `- [FIX] …` line per call,
+selected by `--kind {pattern,avoid,fix}` (default `avoid`; any other value exits 2 before
+anything is created or written). It never writes `[PROVISIONAL]` or `[INVALID]`, and
+reinforcing an existing line (normalized-text match) refreshes its dates without changing
+its tag. Refine passes `--kind` explicitly (`commands/dark-factory-refine.md`, Phase 5
+step 7): a decision where a trade-off was weighed is one `--kind avoid` entry whose body
+leads with `Rejected approach: … Chosen approach: …`, so the tag names the rejected
+approach; a convention with no prohibition and no rejected alternative is `--kind
+pattern`, stated positively; refine does not use `--kind fix`. The gate path passes no
+`--kind`: `gate_lib.sh::write_memory_entry()` relies on the default, so conformance and
+code-review entries stay `[AVOID]`.
+
+Reader behaviour: no script treats the three tags differently. `memory_retrieve.py`
+filters only `[PROVISIONAL]`/`[INVALID]`, expiry, source and path, and `memory_write.py`'s
+dedup, expiry and cap match all three tags, so a tag changes neither what is retrieved nor
+what is evicted. Three prompt texts do key on the tag: the AVOID rules in
+`commands/dark-factory-refine.md` and `commands/dark-factory-plan.md` ("if a memory entry
+marks an approach as AVOID …") and the architect's `[MEMORY-VIOLATION]` scan in
+`refinement-skills/architect-prompt.md`, which covers `[AVOID]` and `[FIX]` entries only. A
+refine `[PATTERN]` entry is still retrieved, and the plan command bakes `[PATTERN]` lessons
+into plan steps, but it is outside that scan and those rules; every lesson with a
+prohibition or a rejected alternative stays `[AVOID]` and inside them.
 
 ### Readers and read-only roles
 

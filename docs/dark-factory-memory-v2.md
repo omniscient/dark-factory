@@ -22,7 +22,7 @@ Paths are relative to this repo. Inside a run, the commands invoke the scripts a
 | Component | File | Role | Used by |
 |---|---|---|---|
 | Retriever | `scripts/memory_retrieve.py` | Reads area memory files for a phase + file set; emits `### Memory:` block | Refine, plan, implement (through `scripts/load_memory_context.sh`); validate (called directly) |
-| Writer | `scripts/memory_write.py` | Writes new `[AVOID]` lessons to the markdown files with dedup/reinforcement, expiry cleanup and the 30-entry cap (evicts the oldest entries by `date:` to make room); does not write `index.jsonl` | Conformance and code-review via `gate_lib.sh::write_memory_entry()`; refine directly |
+| Writer | `scripts/memory_write.py` | Writes new `[PATTERN]`/`[AVOID]`/`[FIX]` lessons (`--kind`, default `avoid`) to the markdown files with dedup/reinforcement, expiry cleanup and the 30-entry cap (evicts the oldest entries by `date:` to make room); does not write `index.jsonl` | Conformance and code-review via `gate_lib.sh::write_memory_entry()`; refine directly |
 | Index | `.archon/memory/index.jsonl` | Compact summary of entries; written only by `memory_import.py`; the retriever uses only rows that carry `id` and `source_file` | `memory_retrieve.py` |
 | Records | `.archon/memory/records/<id>.json` | Full entry content; read when an index row refers to a record | `memory_retrieve.py` |
 | Importer | `scripts/memory_import.py` | Builds `records/` and retriever-compatible index rows from the markdown files | Manual operator invocation |
@@ -33,7 +33,7 @@ Paths are relative to this repo. Inside a run, the commands invoke the scripts a
 
 | Phase | Reads | Writes |
 |---|---|---|
-| Refine | `load_memory_context.sh refine` | `memory_write.py` (`[AVOID]` only) |
+| Refine | `load_memory_context.sh refine` | `memory_write.py` (`--kind avoid` or `--kind pattern`) |
 | Plan | `load_memory_context.sh plan` | no |
 | Implement | `load_memory_context.sh implement` | Shell appends by the agent (`[PATTERN]`/`[AVOID]`/`[FIX]`/`[PROVISIONAL]`), not `memory_write.py` |
 | Validate | `memory_retrieve.py --phase validate` | no |
