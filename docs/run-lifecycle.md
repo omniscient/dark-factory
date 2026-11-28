@@ -1025,7 +1025,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:713-734
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:1159-1415`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:1162-1418`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
    validate, conformance and code-review nodes write the first three into Archon's
    per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
@@ -1103,7 +1103,12 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:713-734
    `run-records/<run_id>.pre-645.json` (written to a temporary file and hard-linked into
    place, so a failed write leaves no partial copy and the record unchanged), and the
    record is replaced through a rename. It is an operator step; `runs.jsonl` is never
-   rewritten.
+   rewritten. Both readers apply the writer's 64 MiB / 256 MiB bounds to the bytes they
+   read, plus bounds on the messages and `cost-state` lines one read keeps (#656): a file
+   over a bound is skipped whole and reported by one stderr line (`run-record: N session
+   transcript file(s) skipped (over the size bound)`) in assemble, or by the
+   `skipped_for_size` field of `backfill-usage`'s JSON; a node whose transcript was
+   skipped falls back to `transcript_messages`, `archon` or `none`.
 3. `post_cost_report` (`entrypoint.sh:658-725`): if `run-record.json` exists and has
    something to render, it renders the report (`cost-report-render --artifacts-dir`, which
    aggregates every `context-budget.<scenario>.json` of the run and the optimizers'
