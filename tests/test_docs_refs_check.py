@@ -619,3 +619,12 @@ def test_repo_citation_lock_exists_and_covers_every_commands_citation():
     }
     locked = set(d._load_lock(lock))
     assert covered and covered <= locked, sorted(covered - locked)
+
+
+def test_revise_advisory_hook_rederives_against_head():
+    # #669: the hook runs before the advisory fix is committed, so HEAD is the base whose
+    # diff is exactly the advisory edit; origin/main would double-count earlier re-derives.
+    text = (_REPO / "commands" / "dark-factory-revise-advisory.md").read_text(encoding="utf-8")
+    assert text.count("--rederive --base HEAD") == 1
+    assert "REDERIVE_BASE" not in text
+    assert "origin/main" not in text
