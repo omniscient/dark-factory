@@ -5,6 +5,7 @@ The pass/fail fixture trees under tests/fixtures/docs_refs_check/ mirror the rep
 carries exactly one broken reference per check category.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -308,12 +309,72 @@ def test_missing_entry_and_orphan_entry(tmp_path):
     assert 'lock entry commands/c.md:3 ("line 3") is no longer cited' in errors[0]
 
 
+_BLANK_CMD = _CMD.replace("line 5\n", "\n")  # commands/c.md with line 5 blank
+
+
+def test_unlocked_blank_citation_names_the_anchor_not_the_repair_command(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    errors = _content(root)
+    assert len(errors) == 1, errors
+    assert "commands/c.md:5 is blank; pick a non-blank anchor" in errors[0]
+    assert not any(s in errors[0] for s in ("run:", "--rederive", REPAIR_COMMAND))
+
+
+def test_unlocked_out_of_range_citation_is_not_reported_as_blank(tmp_path):
+    # _Targets.blank() slices, so an out-of-range range is "blank" unless guarded.
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:25`\n", encoding="utf-8")
+    errors = _content(root)
+    assert any("commands/c.md:25 has no entry" in e and e.endswith(REPAIR_COMMAND) for e in errors), errors
+    assert not any("is blank" in e for e in errors)
+
+
+def test_seed_never_locks_an_all_blank_range(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:5`\n", _BLANK_CMD)
+    assert seed([_doc(root)], root) == 1
+    lock = root / LOCK_FILE
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[3, 3]]
+
+
+def test_new_prose_never_locks_an_all_blank_range(tmp_path):
+    # Contrast test_new_prose_is_locked_without_seeded: a blank new citation gains no entry.
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    assert rederive([_doc(root)], root)[1] == []
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[3, 3]]
+
+
+def test_accept_refuses_a_blank_citation(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    before = lock.read_bytes()
+    printed, failures = accept(_doc(root), "commands/c.md:5", root)
+    assert printed == [] and len(failures) == 1
+    assert "is blank" in failures[0] and "pick a non-blank anchor" in failures[0]
+    assert lock.read_bytes() == before
+
+
 def test_crlf_and_reindented_target_lines_hash_the_same(tmp_path):
     root = _lock_tree(tmp_path, "`commands/c.md:3-4`\n")
     _seeded(root)
     crlf = _CMD.replace("line 3\n", "    line 3\t\n").replace("\n", "\r\n")
     (root / "commands" / "c.md").write_bytes(crlf.encode("utf-8"))
     assert _content(root) == []
+
+
+def test_crlf_doc_round_trips_through_rederive(tmp_path):
+    root = _lock_tree(tmp_path, "")
+    _doc(root).write_bytes(b"intro\r\n`commands/c.md:3`\r\nend\r\n")
+    _seeded(root)
+    _insert(root, 0, ["new"])
+    printed, failures = rederive([_doc(root)], root)
+    assert failures == []
+    assert _doc(root).read_bytes() == b"intro\r\n`commands/c.md:4`\r\nend\r\n"
 
 
 def test_basename_citation_is_covered(tmp_path):
@@ -399,6 +460,69 @@ def test_git_unavailable_is_ambiguous(tmp_path, monkeypatch):
     monkeypatch.setattr(docs_refs_check.subprocess, "run", no_git)
     printed, failures = rederive([_doc(root)], root, base="HEAD")
     assert printed == [] and len(failures) == 1 and "does not pick one" in failures[0]
+
+
+def test_base_starting_with_a_dash_is_refused_without_calling_git(tmp_path, monkeypatch):
+    import docs_refs_check
+
+    def no_git(*args, **kwargs):
+        raise AssertionError("git must not be called for a base starting with '-'")
+    monkeypatch.setattr(docs_refs_check, "_git", no_git)
+    pos, reason = docs_refs_check._base_position(tmp_path, "-x", "commands/c.md", 1, 1)
+    assert pos is None and reason is not None and "starts with '-'" in reason
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.parametrize("base, reason", [
+    ("no-such-ref", "could not resolve or diff --base 'no-such-ref'"),
+    ("-x", "starts with '-'"),
+])
+def test_base_resolution_failure_is_named_in_the_ambiguous_message(tmp_path, base, reason):
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    lock = root / LOCK_FILE
+    _insert(root, 0, ["new"])
+    doc_before, lock_before = _doc(root).read_bytes(), lock.read_bytes()
+    printed, failures = rederive([_doc(root)], root, base=base)
+    assert printed == [] and len(failures) == 1, failures
+    assert "ambiguous" in failures[0] and "the --base diff does not pick one" in failures[0]
+    assert reason in failures[0]
+    assert (_doc(root).read_bytes(), lock.read_bytes()) == (doc_before, lock_before)
+
+
+def _commit(root: Path, message: str) -> str:
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", message], check=True)
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _implement_then_advisory(tmp_path: Path) -> tuple[Path, str]:
+    """A: seeded lock. B: 3 lines inserted above and re-derived. Then 1 more, uncommitted."""
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    base_a = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    _insert(root, 0, ["impl 1", "impl 2", "impl 3"])
+    assert rederive([_doc(root)], root, base=base_a)[1] == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:7`\n"
+    _commit(root, "implement")
+    _insert(root, 0, ["advisory 1"])
+    return root, base_a
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_hook_base_head_relocates_after_an_earlier_rederive_and_the_branch_base_does_not(tmp_path):
+    root, _ = _implement_then_advisory(tmp_path / "head")
+    printed, failures = rederive([_doc(root)], root, base="HEAD")
+    assert failures == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:8`\n"
+
+    root, base_a = _implement_then_advisory(tmp_path / "branch-base")
+    lock = root / LOCK_FILE
+    doc_before, lock_before = _doc(root).read_bytes(), lock.read_bytes()
+    printed, failures = rederive([_doc(root)], root, base=base_a)
+    assert printed == [] and len(failures) == 1 and "ambiguous" in failures[0], failures
+    assert (_doc(root).read_bytes(), lock.read_bytes()) == (doc_before, lock_before)
 
 
 def test_hand_shifted_citation_is_rekeyed_and_keeps_seeded(tmp_path):
@@ -491,6 +615,25 @@ def test_failing_citation_alongside_a_fixable_one(tmp_path):
     assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:4` `commands/c.md:9`\n"
 
 
+def test_rederive_writes_the_lock_before_the_docs(tmp_path, monkeypatch):
+    import builtins
+    import docs_refs_check
+
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    _insert(root, 0, ["new"])
+
+    def no_doc_writes(file, mode="r", *args, **kwargs):
+        if "w" in mode:
+            raise OSError("simulated crash writing a doc")
+        return builtins.open(file, mode, *args, **kwargs)
+    monkeypatch.setattr(docs_refs_check, "open", no_doc_writes, raising=False)
+    with pytest.raises(OSError, match="simulated crash"):
+        rederive([_doc(root)], root)
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[4, 4]]
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:3`\n"
+
+
 def test_moved_content_never_lands_on_lines_locked_for_other_content(tmp_path):
     # Line 3 moves onto line 4, whose citation was edited in place: must not lock it.
     root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:4`\n")
@@ -530,6 +673,30 @@ def test_accept_adds_a_missing_entry_and_refuses_unknown_citations(tmp_path):
     printed, failures = accept(_doc(root), "commands/c.md:11", root)
     assert printed == [] and "not a commands/*.md citation in this doc" in failures[0]
     assert lock.read_text(encoding="utf-8") == before
+
+
+def test_accept_rejects_an_extra_positional_doc(tmp_path, capsys):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    before = lock.read_bytes()
+    with pytest.raises(SystemExit) as exc:
+        main(["--accept", str(_doc(root)), "commands/c.md:3", "extra.md", "--repo-root", str(root)])
+    assert exc.value.code == 2
+    assert "unexpected extra argument(s): extra.md" in capsys.readouterr().err
+    assert lock.read_bytes() == before
+
+
+def test_accept_prints_a_doc_line_of_the_citation_it_accepted(tmp_path):
+    # accept() de-duplicates parts by key, so a citation written on two doc lines prints
+    # one line per distinct part. Which of the two lines is named is not asserted.
+    root = _lock_tree(tmp_path, "`commands/c.md:12`\n\n`commands/c.md:3,9`\nagain `commands/c.md:3,9`\n")
+    _seeded(root)
+    printed, failures = accept(_doc(root), "commands/c.md:3,9", root)
+    assert failures == [] and len(printed) == 2, printed
+    for line in printed:
+        assert line.startswith(("accepted docs/notes.md:3 ", "accepted docs/notes.md:4 ")), line
+        assert "docs/notes.md:1 " not in line
+    assert sorted(line.rsplit(": ", 1)[1] for line in printed) == ["line 3 -> line 3", "line 9 -> line 9"]
 
 
 def test_insert_five_lines_then_rederive_shifts_every_citation(tmp_path):
@@ -619,3 +786,14 @@ def test_repo_citation_lock_exists_and_covers_every_commands_citation():
     }
     locked = set(d._load_lock(lock))
     assert covered and covered <= locked, sorted(covered - locked)
+
+
+def test_revise_advisory_hook_rederives_against_head():
+    # #669: the hook runs before the advisory fix is committed, so HEAD is the base whose
+    # diff is exactly the advisory edit; origin/main would double-count earlier re-derives.
+    # Scoped to the citation-rederive invocation itself: a later, unrelated step may still
+    # legitimately mention origin/main (e.g. a merge or a diff) without breaking this guard.
+    text = (_REPO / "commands" / "dark-factory-revise-advisory.md").read_text(encoding="utf-8")
+    assert text.count("--rederive --base HEAD") == 1
+    assert "REDERIVE_BASE" not in text
+    assert re.findall(r"--rederive --base (\S+)", text) == ["HEAD"]

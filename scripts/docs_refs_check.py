@@ -496,7 +496,12 @@ def _content_errors(parts: list[_Part], entries: dict[Key, _Entry], targets: _Ta
         where = f"{p.doc}:{p.lineno}: `{p.span}`: {p.target}:{_lines_text(p.first, p.last)}"
         entry = entries.get(p.key)
         if entry is None:
-            errors.append(f"{where} has no entry in {LOCK_FILE}; run: {REPAIR_COMMAND}")
+            if (targets.digest(p.target, p.first, p.last) is not None
+                    and targets.blank(p.target, p.first, p.last)):
+                errors.append(f"{where} is blank; pick a non-blank anchor "
+                              f"(a blank range is never locked, so no repair command applies)")
+            else:
+                errors.append(f"{where} has no entry in {LOCK_FILE}; run: {REPAIR_COMMAND}")
         elif targets.digest(p.target, p.first, p.last) != entry.hash:
             errors.append(
                 f'{where} no longer holds the locked content (locked: "{entry.excerpt}"); '
