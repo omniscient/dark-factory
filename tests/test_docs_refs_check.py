@@ -619,6 +619,30 @@ def test_accept_adds_a_missing_entry_and_refuses_unknown_citations(tmp_path):
     assert lock.read_text(encoding="utf-8") == before
 
 
+def test_accept_rejects_an_extra_positional_doc(tmp_path, capsys):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    before = lock.read_bytes()
+    with pytest.raises(SystemExit) as exc:
+        main(["--accept", str(_doc(root)), "commands/c.md:3", "extra.md", "--repo-root", str(root)])
+    assert exc.value.code == 2
+    assert "unexpected extra argument(s): extra.md" in capsys.readouterr().err
+    assert lock.read_bytes() == before
+
+
+def test_accept_prints_a_doc_line_of_the_citation_it_accepted(tmp_path):
+    # accept() de-duplicates parts by key, so a citation written on two doc lines prints
+    # one line per distinct part. Which of the two lines is named is not asserted.
+    root = _lock_tree(tmp_path, "`commands/c.md:12`\n\n`commands/c.md:3,9`\nagain `commands/c.md:3,9`\n")
+    _seeded(root)
+    printed, failures = accept(_doc(root), "commands/c.md:3,9", root)
+    assert failures == [] and len(printed) == 2, printed
+    for line in printed:
+        assert line.startswith(("accepted docs/notes.md:3 ", "accepted docs/notes.md:4 ")), line
+        assert "docs/notes.md:1 " not in line
+    assert sorted(line.rsplit(": ", 1)[1] for line in printed) == ["line 3 -> line 3", "line 9 -> line 9"]
+
+
 def test_insert_five_lines_then_rederive_shifts_every_citation(tmp_path):
     doc = "a `commands/c.md:3` b\nc `c.md:5-6` d `scripts/s.py:1` `:2`\n`commands/c.md:3`\n"
     root = _lock_tree(tmp_path, doc, extra={"scripts/s.py": "x\ny\n"})
