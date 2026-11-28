@@ -578,6 +578,25 @@ def test_failing_citation_alongside_a_fixable_one(tmp_path):
     assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:4` `commands/c.md:9`\n"
 
 
+def test_rederive_writes_the_lock_before_the_docs(tmp_path, monkeypatch):
+    import builtins
+    import docs_refs_check
+
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    _insert(root, 0, ["new"])
+
+    def no_doc_writes(file, mode="r", *args, **kwargs):
+        if "w" in mode:
+            raise OSError("simulated crash writing a doc")
+        return builtins.open(file, mode, *args, **kwargs)
+    monkeypatch.setattr(docs_refs_check, "open", no_doc_writes, raising=False)
+    with pytest.raises(OSError, match="simulated crash"):
+        rederive([_doc(root)], root)
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[4, 4]]
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:3`\n"
+
+
 def test_moved_content_never_lands_on_lines_locked_for_other_content(tmp_path):
     # Line 3 moves onto line 4, whose citation was edited in place: must not lock it.
     root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:4`\n")
