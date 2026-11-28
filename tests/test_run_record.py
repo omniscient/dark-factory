@@ -3610,3 +3610,165 @@ def test_hosting_location_is_cloud_only_when_the_ledger_says_so(hosting, expecte
     node = {"node_id": "plan", "cost_usd": 1.0,
             "models": [{"model": _OPUS, "input_tokens": 1, "output_tokens": 1, "cost_usd": 1.0}]}
     assert rr._with_usage_keys(node, True, None, hosting)["hosting_location"] == expected
+
+
+# ---------------------------------------------------------------------------
+# annotate-failure (#238)
+# ---------------------------------------------------------------------------
+
+def _assemble_failed(tmp_path, monkeypatch, ledger=None):
+    """A failed run abc123 with 150 tokens: failure_spend {tokens: 150, basis: whole_run}."""
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", ledger or tmp_path / "no-ledger.jsonl")
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 100, "outputTokens": 50,
+                   "costUsd": 0.01, "durationMs": 1000, "modelUsage": {}}],
+        "totals": {"costUsd": 0.01, "inputTokens": 100, "outputTokens": 50},
+    }))
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    args.status = "failed"
+    rr.cmd_assemble(args)
+    return out
+
+
+def _annotate(monkeypatch, out, sig, run_id="abc123"):
+    monkeypatch.setattr(sys, "argv", ["run_record", "annotate-failure", "--run-id", run_id,
+                                      "--out-file", str(out), "--failure-signature", sig])
+    rr.main()
+
+
+def _by_class(path):
+    return json.loads(Path(path).read_text())["harness_economics"]["failure_spend"]["by_class"]
+
+
+def _jsonl_rows(tmp_path):
+    p = tmp_path / "runs.jsonl"
+    return len(p.read_text().splitlines()) if p.exists() else 0
+
+
+def test_annotate_failure_sets_by_class_from_signature(tmp_path, monkeypatch):
+    import stat as _stat
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    before = {p: json.loads(p.read_text()) for p in (out, durable)}
+    modes = {p: _stat.S_IMODE(p.stat().st_mode) for p in (out, durable)}
+    rows_before = _jsonl_rows(tmp_path)
+
+    _annotate(monkeypatch, out, "substantive:build_failure:1")
+
+    for p in (out, durable):
+        after = json.loads(p.read_text())
+        assert after["harness_economics"]["failure_spend"]["by_class"] == {
+            "build_failure": {"tokens": 150, "basis": "whole_run"}}
+        after["harness_economics"]["failure_spend"]["by_class"] = {}
+        assert after == before[p]  # no other key changed
+        assert _stat.S_IMODE(p.stat().st_mode) == modes[p]
+    assert _jsonl_rows(tmp_path) == rows_before  # nothing appended to runs.jsonl
+
+
+def test_annotate_failure_leaves_a_bad_record_alone(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.json"
+    _annotate(monkeypatch, missing, "substantive:unknown:1")
+    assert not missing.exists()
+    for name, body in (("garbage.json", "not json{"),
+                       ("no-he.json", json.dumps({"run_id": "abc123"})),
+                       ("list.json", json.dumps([1, 2]))):
+        p = tmp_path / name
+        p.write_text(body)
+        mtime = p.stat().st_mtime_ns
+        _annotate(monkeypatch, p, "substantive:unknown:1")
+        assert p.read_text() == body and p.stat().st_mtime_ns == mtime, name
+    # Through the real CLI: exit status 0 on a missing record.
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "scripts"),
+           "SCHEDULER_STATE_DIR": str(tmp_path / "cli-state")}
+    import subprocess
+    cli = Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"
+    res = subprocess.run([sys.executable, str(cli), "run-record", "annotate-failure",
+                          "--run-id", "abc123", "--out-file", str(missing),
+                          "--failure-signature", "substantive:unknown:1"],
+                         env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+
+
+def test_annotate_failure_never_copies_one_record_onto_another(tmp_path, monkeypatch):
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    other_rec = json.loads(out.read_text())
+    other_rec["run_id"] = "other-run"
+    other = tmp_path / "other-run.json"
+    other.write_text(json.dumps(other_rec, indent=2))
+    other_bytes = other.read_bytes()
+
+    # Out-file is a symlink to another run's record: not followed; the durable copy is
+    # annotated from its own content.
+    out.unlink()
+    out.symlink_to(other)
+    _annotate(monkeypatch, out, "substantive:build_failure:1")
+    assert out.is_symlink() and os.readlink(out) == str(other)
+    assert other.read_bytes() == other_bytes
+    durable_rec = json.loads(durable.read_text())
+    assert durable_rec["run_id"] == "abc123"
+    assert _by_class(durable) == {"build_failure": {"tokens": 150, "basis": "whole_run"}}
+
+    # A regular record whose run_id is not --run-id is not rewritten.
+    stranger = tmp_path / "stranger.json"
+    stranger.write_text(json.dumps(other_rec))
+    stranger_bytes = stranger.read_bytes()
+    _annotate(monkeypatch, stranger, "substantive:test_failure:1")
+    assert stranger.read_bytes() == stranger_bytes
+
+    # A durable path that is a symlink is left alone.
+    target = tmp_path / "durable-target.json"
+    target.write_text(durable.read_text())
+    target_bytes = target.read_bytes()
+    durable.unlink()
+    durable.symlink_to(target)
+    _annotate(monkeypatch, stranger, "substantive:test_failure:1")
+    assert durable.is_symlink() and target.read_bytes() == target_bytes
+
+
+@pytest.mark.skipif(_is_root() or sys.platform == "win32",
+                    reason="chmod does not restrict root; POSIX permissions only")
+def test_annotate_failure_read_only_durable_dir_still_annotates_out_file(tmp_path, monkeypatch, capsys):
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    durable.parent.chmod(0o555)
+    try:
+        _annotate(monkeypatch, out, "substantive:build_failure:1")
+    finally:
+        durable.parent.chmod(0o755)
+    assert _by_class(out) == {"build_failure": {"tokens": 150, "basis": "whole_run"}}
+    assert _by_class(durable) == {}
+    assert not [p for p in durable.parent.iterdir() if p.name.endswith(".tmp")]
+    assert not [p for p in out.parent.iterdir() if p.name.endswith(".tmp")]
+    assert "annotate-failure could not rewrite" in capsys.readouterr().err
+
+
+def test_failure_spend_by_class_adds_ledger_request_counts(tmp_path, monkeypatch):
+    ledger = tmp_path / "request-ledger.jsonl"
+    row = {"run_id": "abc123", "status": 504, "failure_class": "timeout_idle",
+           "hosting_location": "local", "endpoint_id": "local-test",
+           "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0}
+    ledger.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, "substantive:unknown:1")
+    assert _by_class(out) == {
+        "substantive_unknown": {"tokens": 150, "basis": "whole_run"},
+        "timeout_idle": {"tokens": None, "basis": "ledger_rows", "request_count": 2},
+    }
+
+
+def test_annotate_failure_keeps_the_ledger_request_count_of_the_same_class(tmp_path, monkeypatch):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({"run_id": "abc123", "status": 504,
+                                  "failure_class": "endpoint_unreachable",
+                                  "hosting_location": "local", "endpoint_id": "local-test"}) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
+    assert _by_class(out) == {"endpoint_unreachable": {
+        "tokens": 150, "basis": "whole_run", "request_count": 1}}
