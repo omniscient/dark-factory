@@ -32,6 +32,7 @@ import argparse
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Union
 
@@ -111,54 +112,87 @@ def _check_linespec(where: str, span: str, rel: str, spec: str, n_lines: int) ->
     return errors
 
 
-def _check_path_refs(doc: str, text: str, repo_root: Path, files: set[str]) -> list[str]:
-    dirs = {"/".join(f.split("/")[:i]) for f in files for i in range(1, f.count("/") + 1)}
-    top = {f.split("/")[0] for f in files}
-    searchable = sorted(f for f in files if not f.startswith(SEARCH_EXCLUDED_PREFIXES))
+@dataclass(frozen=True)
+class _Index:
+    """The repo file set plus the lookups path resolution needs."""
+
+    files: frozenset[str]
+    dirs: frozenset[str]
+    top: frozenset[str]
+    searchable: tuple[str, ...]
+
+
+def _index(files: set[str]) -> _Index:
+    return _Index(
+        files=frozenset(files),
+        dirs=frozenset(
+            "/".join(f.split("/")[:i]) for f in files for i in range(1, f.count("/") + 1)
+        ),
+        top=frozenset(f.split("/")[0] for f in files),
+        searchable=tuple(sorted(f for f in files if not f.startswith(SEARCH_EXCLUDED_PREFIXES))),
+    )
+
+
+def _resolve(span: str, idx: _Index) -> Optional[tuple[str, Optional[str], Optional[str], Optional[str]]]:
+    """Classify one backtick span.
+
+    Returns ``None`` when the span is not a repo path, else ``(path as written, line spec,
+    resolved repo path, error)`` where exactly one of the last two is ``None``.
+    """
+    m = _REF.match(span)
+    if not m:
+        return None
+    path, spec = m["path"], m["spec"]
+    if path == WORKFLOW_ALIAS and spec:
+        rel = WORKFLOW_FILE
+    elif ".." in path or not (
+        path.endswith(PATH_EXTENSIONS) or ("/" in path and path.split("/")[0] in idx.top)
+    ):
+        return None
+    else:
+        rel = path.rstrip("/")
+    if _is_non_repo(rel):
+        return None
+    if rel in idx.files or rel in idx.dirs:
+        return path, spec, rel, None
+    matches = [f for f in idx.searchable if f.endswith("/" + rel)]
+    if len(matches) > 1:
+        return path, spec, None, (
+            f"`{span}` is ambiguous ({', '.join(matches)}); write the full repo-relative path"
+        )
+    if not matches:
+        # A bare file name with no line number that matches nothing is a run
+        # artifact or a target-repo file (`implementation.md`), not a repo path.
+        if "/" in rel or spec:
+            return path, spec, None, f"`{span}`: no such file or directory in the repo"
+        return None
+    return path, spec, matches[0], None
+
+
+def _read_lines(repo_root: Path, rel: str) -> list[str]:
+    return (repo_root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def _check_path_refs(doc: str, text: str, repo_root: Path, idx: _Index) -> list[str]:
     line_counts: dict[str, int] = {}
     errors: list[str] = []
     for lineno, line in enumerate(text.splitlines(), 1):
         where = f"{doc}:{lineno}"
         for span in _SPAN.findall(line):
-            m = _REF.match(span)
-            if not m:
+            ref = _resolve(span, idx)
+            if ref is None:
                 continue
-            path, spec = m["path"], m["spec"]
-            if path == WORKFLOW_ALIAS and spec:
-                path = WORKFLOW_FILE
-            elif ".." in path or not (
-                path.endswith(PATH_EXTENSIONS) or ("/" in path and path.split("/")[0] in top)
-            ):
+            _, spec, resolved, error = ref
+            if error:
+                errors.append(f"{where}: {error}")
                 continue
-            rel = path.rstrip("/")
-            if _is_non_repo(rel):
-                continue
-            if rel in files or rel in dirs:
-                resolved = rel
-            else:
-                matches = [f for f in searchable if f.endswith("/" + rel)]
-                if len(matches) > 1:
-                    errors.append(
-                        f"{where}: `{span}` is ambiguous ({', '.join(matches)}); "
-                        "write the full repo-relative path"
-                    )
-                    continue
-                if not matches:
-                    # A bare file name with no line number that matches nothing is a run
-                    # artifact or a target-repo file (`implementation.md`), not a repo path.
-                    if "/" in rel or spec:
-                        errors.append(f"{where}: `{span}`: no such file or directory in the repo")
-                    continue
-                resolved = matches[0]
             if not spec:
                 continue
-            if resolved in dirs:
+            if resolved in idx.dirs:
                 errors.append(f"{where}: `{span}`: {resolved} is a directory, not a file")
                 continue
             if resolved not in line_counts:
-                line_counts[resolved] = len(
-                    (repo_root / resolved).read_text(encoding="utf-8", errors="replace").splitlines()
-                )
+                line_counts[resolved] = len(_read_lines(repo_root, resolved))
             errors.extend(_check_linespec(where, span, resolved, spec, line_counts[resolved]))
     return errors
 
@@ -260,7 +294,7 @@ def check(
     root = Path(repo_root)
     config = Path(config_path) if config_path else root / "config" / "config.yaml"
     workflow = Path(workflow_path) if workflow_path else root / WORKFLOW_FILE
-    files = _repo_files(root)
+    idx = _index(_repo_files(root))
     errors: list[str] = []
     for doc_path in doc_paths:
         doc = Path(doc_path)
@@ -269,7 +303,7 @@ def check(
         except OSError as exc:
             errors.append(f"{doc}: cannot read file: {exc}")
             continue
-        errors.extend(_check_path_refs(str(doc), text, root, files))
+        errors.extend(_check_path_refs(str(doc), text, root, idx))
         if doc.name == "configuration.md":
             errors.extend(_check_config_keys(str(doc), text, config))
         if doc.name == "features.md":
