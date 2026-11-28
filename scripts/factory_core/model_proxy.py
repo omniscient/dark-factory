@@ -21,6 +21,7 @@ intent at all is still gated on #587.
 """
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import gzip
 import json
@@ -37,6 +38,8 @@ from datetime import datetime, timezone
 
 import aiohttp
 from aiohttp import web
+
+from factory_core import rotation
 
 LEDGER_PATH = pathlib.Path(
     os.environ.get("MODEL_PROXY_LEDGER_PATH", "/var/lib/dark-factory/request-ledger.jsonl")
@@ -58,7 +61,8 @@ RAW_ARTIFACT_DIR = pathlib.Path(
 UPSTREAM = os.environ.get("MODEL_PROXY_UPSTREAM", "https://api.anthropic.com")
 PORT = int(os.environ.get("MODEL_PROXY_PORT", "8787"))
 MAX_LEDGER_BYTES = int(os.environ.get("MODEL_PROXY_MAX_BYTES", str(100 * 1024 * 1024)))
-BACKUP_COUNT = int(os.environ.get("MODEL_PROXY_BACKUP_COUNT", "3"))
+# No backup count (#652 W9): rotation keeps every generation, numbered and compressed
+# (factory_core/rotation.py); pruning is a manual operator action (docs/configuration.md).
 RAW_ARTIFACT_CAPTURE = os.environ.get("RAW_ARTIFACT_CAPTURE", "false").lower() == "true"
 RAW_ARTIFACT_RETENTION_DAYS = int(os.environ.get("RAW_ARTIFACT_RETENTION_DAYS", "7"))
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
@@ -165,37 +169,41 @@ def build_ledger_row(
     }
 
 
-def _rotate_if_needed(path: pathlib.Path) -> None:
-    if not path.exists() or path.stat().st_size < MAX_LEDGER_BYTES:
-        return
-    for i in range(BACKUP_COUNT - 1, 0, -1):
-        src = path.with_suffix(path.suffix + f".{i}")
-        dst = path.with_suffix(path.suffix + f".{i + 1}")
-        if src.exists():
-            src.rename(dst)
-    oldest = path.with_suffix(path.suffix + f".{BACKUP_COUNT}")
-    if oldest.exists():
-        oldest.unlink()
-    path.rename(path.with_suffix(path.suffix + ".1"))
-
-
 def _ledger_lock_path() -> pathlib.Path:
     return LEDGER_PATH.with_suffix(LEDGER_PATH.suffix + ".lock")
 
 
-def append_ledger(row: dict) -> None:
+@contextlib.contextmanager
+def _ledger_locked():
+    """LOCK_EX on the sidecar lock, waited for without bound: append_ledger's wait (#634),
+    unchanged by #652, which also takes it briefly for the compression swap."""
+    with open(_ledger_lock_path(), "a", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+def append_ledger(row: dict) -> "int | None":
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Rotate-and-append under one lock (#634): locking LEDGER_PATH itself only covered the
     # write, so two processes could both pass the rotate check at once and clobber/misplace
     # rows. The lock file is never rotated/renamed, so it stays a stable mutex for both steps.
-    with open(_ledger_lock_path(), "a", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        try:
-            _rotate_if_needed(LEDGER_PATH)
-            with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row) + "\n")
-        finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    with _ledger_locked():
+        created = rotation.rotate_locked(LEDGER_PATH, MAX_LEDGER_BYTES)
+        with open(LEDGER_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    # #652: the generation this call rotated out, still plain. compress_ledger_generation
+    # compresses it with the lock released; _persist_ledger submits that as its own task.
+    return created
+
+
+def compress_ledger_generation(number: int) -> None:
+    """Compress ledger generation `number` and run the recovery pass (#652 W3-W5). The ledger
+    lock is held only for the brief swap. Never raises; failures are logged."""
+    rotation.compress_and_recover(LEDGER_PATH, number, threshold=MAX_LEDGER_BYTES,
+                                  lock=_ledger_locked)
 
 
 def post_seq_ledger(row: dict) -> None:
@@ -302,15 +310,25 @@ def _measure_request(body_bytes: bytes) -> dict:
     }
 
 
+# Compression tasks in flight (#652 W3): held so a pending future is not garbage-collected.
+_PENDING_COMPRESSIONS: set = set()
+
+
 async def _persist_ledger(row: dict) -> None:
     """Write the ledger row and post it to Seq off the event loop.
 
     append_ledger does blocking flock/write and post_seq_ledger does a blocking
     urlopen (timeout=5) — run both in the default thread executor so a slow
-    disk or unreachable Seq never stalls concurrent streaming requests.
+    disk or unreachable Seq never stalls concurrent streaming requests. A rotation's
+    compression (#652 W3) is its own executor task: this request does not wait for it, and
+    its failure is logged inside compress_ledger_generation, never raised here.
     """
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, append_ledger, row)
+    created = await loop.run_in_executor(None, append_ledger, row)
+    if created is not None:
+        task = loop.run_in_executor(None, compress_ledger_generation, created)
+        _PENDING_COMPRESSIONS.add(task)
+        task.add_done_callback(_PENDING_COMPRESSIONS.discard)
     await loop.run_in_executor(None, post_seq_ledger, row)
 
 

@@ -1,10 +1,15 @@
 import asyncio
 import copy
+import gzip
 import json
 import os
+import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +24,9 @@ from factory_core import model_proxy as mp
 from factory_core.providers import model_adapter as ma  # noqa: E402
 from factory_core.providers import model_endpoint as me  # noqa: E402
 from factory_core import run_record as rr  # noqa: E402
+from factory_core import rotation  # noqa: E402
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 from factory_core.providers import role_isolation as ri  # noqa: E402
 
 SENTINEL = "sk-sentinel-local-gateway-token"
@@ -149,33 +157,368 @@ def test_append_ledger_lock_follows_the_ledger_path(tmp_path, monkeypatch):
     assert (tmp_path / "request-ledger.jsonl.lock").exists()
 
 
+def _small_ledger(tmp_path, monkeypatch, max_bytes=200):
+    path = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", path)
+    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", max_bytes)
+    return path
+
+
+def _over_threshold(path, rows=3, run_id="run-1"):
+    """A live ledger already over a 200-byte threshold (and under twice it)."""
+    path.write_text("".join(json.dumps({"run_id": run_id, "old": i, "pad": "x" * 80}) + "\n"
+                            for i in range(rows)))
+
+
+def _append_and_compress(row):
+    """What the proxy does for one row: append (rotating when due), then compress."""
+    created = mp.append_ledger(row)
+    if created is not None:
+        mp.compress_ledger_generation(created)
+    return created
+
+
+def _names(directory):
+    return sorted(p.name for p in directory.iterdir())
+
+
+def _generation_bytes(path, number):
+    plain = path.with_name(f"{path.name}.{number}")
+    if plain.exists():
+        return plain.read_bytes()
+    return gzip.decompress(path.with_name(f"{path.name}.{number}.gz").read_bytes())
+
+
+@pytest.fixture
+def deadline():
+    """Fail, never hang, when an open blocks (a FIFO opened without O_NONBLOCK)."""
+    def _blocked(*_):
+        raise TimeoutError("blocked for 10 s")
+    old = signal.signal(signal.SIGALRM, _blocked)
+    signal.alarm(10)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old)
+
+
 def test_append_ledger_rotates_at_max_bytes(tmp_path, monkeypatch):
-    path = tmp_path / "request-ledger.jsonl"
-    monkeypatch.setattr(mp, "LEDGER_PATH", path)
-    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", 50)
-    monkeypatch.setattr(mp, "BACKUP_COUNT", 2)
-
-    for i in range(10):
-        mp.append_ledger({"i": i, "pad": "x" * 20})
-
+    path = _small_ledger(tmp_path, monkeypatch, max_bytes=50)
+    created = [mp.append_ledger({"i": i, "pad": "x" * 20}) for i in range(10)]
     assert path.exists()
+    # Numbered and never capped (#652): each rotation takes the next number, nothing is deleted.
+    numbers = [n for n in created if n is not None]
+    assert len(numbers) >= 3 and numbers == list(range(1, len(numbers) + 1))
+    assert all((tmp_path / f"request-ledger.jsonl.{n}").exists() for n in numbers)
+
+
+def test_rotation_logs_the_store_size(tmp_path, monkeypatch, capsys):
+    path = _small_ledger(tmp_path, monkeypatch)
+    old = tmp_path / "request-ledger.jsonl.1.gz"
+    old.write_bytes(gzip.compress(b"{}\n"))
+    _over_threshold(path)
+    expected = path.stat().st_size + old.stat().st_size
+    capsys.readouterr()
+    assert mp.append_ledger({"run_id": "run-1"}) == 2
+    assert (f"rotated request-ledger.jsonl to generation 2; store is {expected} bytes"
+            in capsys.readouterr().err)
+
+
+def test_backup_count_variable_is_ignored(tmp_path):
+    assert not hasattr(mp, "BACKUP_COUNT")
+    ledger = tmp_path / "request-ledger.jsonl"
+    env = dict(os.environ, PYTHONPATH=str(_SCRIPTS_DIR), MODEL_PROXY_LEDGER_PATH=str(ledger),
+               MODEL_PROXY_MAX_BYTES="200", MODEL_PROXY_BACKUP_COUNT="1")
+    code = (
+        "from factory_core import model_proxy as mp\n"
+        "rotations = i = 0\n"
+        "while rotations < 5:\n"
+        "    created = mp.append_ledger({'run_id': 'run-1', 'i': i, 'pad': 'x' * 80})\n"
+        "    i += 1\n"
+        "    if created is not None:\n"
+        "        mp.compress_ledger_generation(created)\n"
+        "        rotations += 1\n"
+    )
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=60, capture_output=True)
+    assert {f"request-ledger.jsonl.{n}.gz" for n in range(1, 6)} <= set(_names(tmp_path))
+
+
+@pytest.mark.parametrize("form", ["plain", "gz"])
+def test_rotation_never_replaces_an_existing_generation_name(tmp_path, monkeypatch, form):
+    path = _small_ledger(tmp_path, monkeypatch)
+    planted_rows = (json.dumps({"run_id": "planted"}) + "\n").encode()
+    planted = tmp_path / ("request-ledger.jsonl.1" + (".gz" if form == "gz" else ""))
+    planted.write_bytes(gzip.compress(planted_rows) if form == "gz" else planted_rows)
+    before = planted.read_bytes()
+    _over_threshold(path)
+    assert _append_and_compress({"run_id": "run-1"}) == 2  # the number after the planted one
+    assert _generation_bytes(path, 1) == planted_rows
+    if form == "gz":
+        assert planted.read_bytes() == before
+    assert (tmp_path / "request-ledger.jsonl.2.gz").exists()
+
+
+def test_rotation_killed_between_link_and_unlink_duplicates_no_row(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    _over_threshold(path)  # three rows
+    os.link(path, tmp_path / "request-ledger.jsonl.1")  # the killed writer's link; no unlink ran
+    rows, _ = rr._read_ledger_rows("run-1", path)
+    assert len(rows) == 3  # one inode, read once
+    assert _append_and_compress({"run_id": "run-1", "new": True}) == 1  # completed, not repeated
+    names = _names(tmp_path)
+    assert "request-ledger.jsonl.2" not in names and "request-ledger.jsonl.2.gz" not in names
+    rows, _ = rr._read_ledger_rows("run-1", path)
+    assert len(rows) == 4
+
+
+def test_two_compressors_of_one_generation_never_share_a_temporary_file(tmp_path, monkeypatch, capsys):
+    _small_ledger(tmp_path, monkeypatch)
+    content = b'{"run_id": "run-1"}\n'
+    plain = tmp_path / "request-ledger.jsonl.1"
+    plain.write_bytes(content)
+    barrier = threading.Barrier(2, timeout=10)
+    listings = []
+    original = rotation._write_gz
+
+    def meeting_write(src, dst):
+        barrier.wait()  # both compressors hold their temporary file at once ...
+        listings.append(sorted(p.name for p in tmp_path.glob("*.gz.tmp.*")))
+        barrier.wait()  # ... and both have listed before either finishes and swaps
+        original(src, dst)
+
+    monkeypatch.setattr(rotation, "_write_gz", meeting_write)
+    threads = [threading.Thread(target=mp.compress_ledger_generation, args=(1,)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    assert [len(names) for names in listings] == [2, 2]  # two distinct names
+    assert gzip.decompress((tmp_path / "request-ledger.jsonl.1.gz").read_bytes()) == content
+    assert not plain.exists() and not list(tmp_path.glob("*.gz.tmp.*"))
+
+    # A temporary name already taken is never written through (O_EXCL); that compressor steps aside.
+    monkeypatch.setattr(rotation, "_write_gz", original)
+    monkeypatch.setattr(rotation.secrets, "token_hex", lambda n: "ab" * n)
+    second = tmp_path / "request-ledger.jsonl.2"
+    second.write_bytes(content)
+    taken = tmp_path / ("request-ledger.jsonl.2.gz.tmp." + "ab" * 8)
+    taken.write_bytes(b"another compressor's half-written output")
+    capsys.readouterr()
+    mp.compress_ledger_generation(2)
+    assert taken.read_bytes() == b"another compressor's half-written output"
+    assert second.read_bytes() == content
+    assert not (tmp_path / "request-ledger.jsonl.2.gz").exists()
+    assert "is taken" in capsys.readouterr().err
+
+
+def test_compression_failure_is_logged_not_raised(tmp_path, monkeypatch, capsys):
+    path = _small_ledger(tmp_path, monkeypatch)
+    _over_threshold(path)
+    assert mp.append_ledger({"run_id": "run-1"}) == 1
+
+    def failing_write(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(rotation, "_write_gz", failing_write)
+    capsys.readouterr()
+    mp.compress_ledger_generation(1)  # must not raise
+    assert "compression of request-ledger.jsonl.1 failed" in capsys.readouterr().err
     assert (tmp_path / "request-ledger.jsonl.1").exists()
-    # rotation caps backups — no unbounded growth of rotation files
-    assert not (tmp_path / "request-ledger.jsonl.3").exists()
+    assert not list(tmp_path.glob("*.gz.tmp.*"))
+    rows, _ = rr._read_ledger_rows("run-1", path)
+    assert len(rows) == 4
 
 
-def test_append_ledger_rotation_keeps_backup_count(tmp_path, monkeypatch):
-    path = tmp_path / "request-ledger.jsonl"
-    monkeypatch.setattr(mp, "LEDGER_PATH", path)
-    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", 10)
-    monkeypatch.setattr(mp, "BACKUP_COUNT", 1)
+def test_existing_gz_is_never_replaced_by_a_second_compressor(tmp_path, monkeypatch):
+    _small_ledger(tmp_path, monkeypatch)
+    content = b'{"run_id": "run-1"}\n'
+    (tmp_path / "request-ledger.jsonl.1").write_bytes(content)
+    gz = tmp_path / "request-ledger.jsonl.1.gz"
+    first = gzip.compress(content, mtime=1)  # the other compressor's bytes (ours use mtime=0)
+    original = rotation._write_gz
 
-    for i in range(20):
-        mp.append_ledger({"i": i})
+    def write_then_lose_the_race(src, dst):
+        original(src, dst)
+        gz.write_bytes(first)  # the other compressor swapped first
 
-    assert path.exists()
-    assert (tmp_path / "request-ledger.jsonl.1").exists()
-    assert not (tmp_path / "request-ledger.jsonl.2").exists()
+    monkeypatch.setattr(rotation, "_write_gz", write_then_lose_the_race)
+    mp.compress_ledger_generation(1)
+    assert gz.read_bytes() == first
+    assert not (tmp_path / "request-ledger.jsonl.1").exists()
+    assert not list(tmp_path.glob("*.gz.tmp.*"))
+
+
+def test_stalled_generation_is_compressed_by_the_next_rotation(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    (tmp_path / "request-ledger.jsonl.1").write_text(json.dumps({"run_id": "run-1", "stalled": True}) + "\n")
+    _over_threshold(path)
+    assert _append_and_compress({"run_id": "run-1"}) == 2
+    assert _names(tmp_path) == ["request-ledger.jsonl", "request-ledger.jsonl.1.gz",
+                                "request-ledger.jsonl.2.gz", "request-ledger.jsonl.lock"]
+    rows, _ = rr._read_ledger_rows("run-1", path)
+    assert len(rows) == 5
+
+
+def test_recovery_compresses_at_most_two_generations_per_rotation(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    for n in (1, 2, 3):
+        (tmp_path / f"request-ledger.jsonl.{n}").write_text(json.dumps({"run_id": "run-1", "n": n}) + "\n")
+    _over_threshold(path)
+    assert _append_and_compress({"run_id": "run-1"}) == 4
+    names = set(_names(tmp_path))
+    assert {"request-ledger.jsonl.4.gz", "request-ledger.jsonl.3.gz", "request-ledger.jsonl.2.gz",
+            "request-ledger.jsonl.1"} <= names
+    assert not names & {"request-ledger.jsonl.1.gz", "request-ledger.jsonl.2", "request-ledger.jsonl.3"}
+
+
+def test_stale_temporary_file_is_removed_by_the_recovery_pass(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    stale = tmp_path / ("request-ledger.jsonl.7.gz.tmp." + "0" * 16)
+    fresh = tmp_path / ("request-ledger.jsonl.7.gz.tmp." + "f" * 16)
+    for temporary in (stale, fresh):
+        temporary.write_bytes(b"partial")
+    hour_ago = time.time() - 3700
+    os.utime(stale, (hour_ago, hour_ago))
+    _over_threshold(path)
+    _append_and_compress({"run_id": "run-1"})
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_planted_fifo_under_a_generation_name_never_blocks(tmp_path, monkeypatch, capsys, deadline):
+    path = _small_ledger(tmp_path, monkeypatch)
+    os.mkfifo(tmp_path / "request-ledger.jsonl.1")
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("{}\n")
+    (tmp_path / "request-ledger.jsonl.2").symlink_to(target)
+    (tmp_path / "request-ledger.jsonl.3").mkdir()
+    with open(tmp_path / "request-ledger.jsonl.4", "wb") as fh:
+        fh.truncate(2 * 200 + 1)  # over twice the threshold
+    _over_threshold(path)
+    capsys.readouterr()
+    assert _append_and_compress({"run_id": "run-1"}) == 5
+    err = capsys.readouterr().err
+    for n in (1, 2, 3, 4):
+        assert len(re.findall(rf"skipped \S*request-ledger\.jsonl\.{n}: ", err)) == 1, err
+    assert (tmp_path / "request-ledger.jsonl.5.gz").exists()
+    assert stat.S_ISFIFO(os.lstat(tmp_path / "request-ledger.jsonl.1").st_mode)
+    assert (tmp_path / "request-ledger.jsonl.2").is_symlink()
+    assert (tmp_path / "request-ledger.jsonl.3").is_dir()
+    assert target.read_text() == "{}\n"
+    rows, _ = rr._read_ledger_rows("run-1", path)  # the reader does not block on them either
+    assert len(rows) == 4
+
+
+def test_append_ledger_returns_before_compression_finishes(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(mp, "post_seq_ledger", lambda row: None)
+    _over_threshold(path)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_compress(number):
+        started.set()
+        release.wait(10)
+
+    monkeypatch.setattr(mp, "compress_ledger_generation", slow_compress)
+
+    async def scenario():
+        try:
+            await asyncio.wait_for(mp._persist_ledger({"run_id": "run-1", "new": True}), 2)
+            assert started.wait(2)  # submitted as its own executor task ...
+            assert not release.is_set()  # ... still running when the ledger step returned
+            assert json.loads(path.read_text().splitlines()[-1]) == {"run_id": "run-1", "new": True}
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
+_LEDGER_WORKER = (
+    "import sys\n"
+    "from factory_core import model_proxy as mp\n"
+    "writer, count = sys.argv[1], int(sys.argv[2])\n"
+    "for i in range(count):\n"
+    "    created = mp.append_ledger({'run_id': 'run-c', 'writer': writer, 'i': i, 'pad': 'x' * 40})\n"
+    "    if created is not None:\n"
+    "        mp.compress_ledger_generation(created)\n"
+)
+
+
+def test_rotation_keeps_every_generation(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    seen = {}
+    rows = 0
+    while len(seen) < 5 or rows < 40:
+        _append_and_compress({"run_id": "run-1", "i": rows, "pad": "x" * 60})
+        rows += 1
+        for gz in tmp_path.glob("request-ledger.jsonl.*.gz"):
+            data = gz.read_bytes()
+            assert seen.setdefault(gz.name, data) == data  # never rewritten by a later rotation
+        assert rows < 500
+    assert {f"request-ledger.jsonl.{n}.gz" for n in range(1, 6)} <= set(seen)
+    assert all(gzip.decompress(data) for data in seen.values())
+    got, _ = rr._read_ledger_rows("run-1", path)
+    assert sorted(r["i"] for r in got) == list(range(rows))
+
+
+def test_concurrent_appends_through_rotations_lose_nothing(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    env = dict(os.environ, PYTHONPATH=str(_SCRIPTS_DIR), MODEL_PROXY_LEDGER_PATH=str(ledger),
+               MODEL_PROXY_MAX_BYTES="2000")
+    writers = [subprocess.Popen([sys.executable, "-c", _LEDGER_WORKER, str(w), "400"], env=env,
+                                stderr=subprocess.DEVNULL) for w in range(8)]
+    assert [p.wait(timeout=180) for p in writers] == [0] * 8
+    rows, _ = rr._read_ledger_rows("run-c", ledger)
+    pairs = [(r["writer"], r["i"]) for r in rows]
+    assert len(pairs) == 3200 and len(set(pairs)) == 3200
+    leftovers = [n for n in _names(tmp_path)
+                 if re.fullmatch(r"request-ledger\.jsonl\.[0-9]+(\.gz\.tmp\.[0-9a-f]{16})?", n)]
+    assert leftovers == []  # no plain generation and no temporary file left
+
+
+def test_append_is_not_blocked_by_a_slow_compression(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    _over_threshold(path)
+    assert mp.append_ledger({"run_id": "run-1"}) == 1
+    compressing, release = threading.Event(), threading.Event()
+    original = rotation._write_gz
+
+    def slow_write(src, dst):
+        compressing.set()
+        release.wait(10)
+        original(src, dst)
+
+    monkeypatch.setattr(rotation, "_write_gz", slow_write)
+    compressor = threading.Thread(target=mp.compress_ledger_generation, args=(1,))
+    compressor.start()
+    try:
+        assert compressing.wait(5)
+        appender = threading.Thread(target=mp.append_ledger, args=({"run_id": "run-1", "during": True},))
+        started = time.monotonic()
+        appender.start()
+        appender.join(2)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        compressor.join(10)
+    assert not appender.is_alive() and elapsed < 1.5  # it would wait the full 10 s if compression held the lock
+    assert (tmp_path / "request-ledger.jsonl.1.gz").exists()
+
+
+def test_old_numbered_generations_are_kept_compressed_and_read(tmp_path, monkeypatch):
+    path = _small_ledger(tmp_path, monkeypatch)
+    for n in (1, 2, 3):  # left by the deleting rotation before #652
+        (tmp_path / f"request-ledger.jsonl.{n}").write_text(json.dumps({"run_id": "run-1", "legacy": n}) + "\n")
+    _over_threshold(path)
+    assert _append_and_compress({"run_id": "run-1", "i": 0}) == 4  # compresses 4, then 3 and 2
+    i = 1
+    while _append_and_compress({"run_id": "run-1", "i": i, "pad": "x" * 80}) is None:  # until 5
+        i += 1
+        assert i < 50
+    assert {f"request-ledger.jsonl.{n}.gz" for n in range(1, 6)} <= set(_names(tmp_path))
+    assert not {f"request-ledger.jsonl.{n}" for n in range(1, 6)} & set(_names(tmp_path))
+    rows, _ = rr._read_ledger_rows("run-1", path)
+    assert sorted(r["legacy"] for r in rows if "legacy" in r) == [1, 2, 3]
+    assert len([r for r in rows if "old" in r]) == 3
 
 
 def test_post_seq_ledger_is_nonfatal(monkeypatch):
