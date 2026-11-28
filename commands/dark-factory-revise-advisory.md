@@ -146,15 +146,28 @@ check will detect no changes and exit 0 cleanly).
      exit 0
    fi
    ```
-2. Stage all modified tracked files (no untracked):
+2. Re-derive doc citations the fix moved (#662). Only when the clone has
+   `docs/.citation-lock.yaml`; skipped for a clone without it (the MarketHawk instance,
+   a branch cut before #662). Fail-open: a non-zero exit is logged and the phase continues
+   to its commit. It edits only the four reference docs and the lock file, never a file
+   under `commands/`; both are tracked, so its changes ride in the `git add -u` below:
+   ```bash
+   if [ -f docs/.citation-lock.yaml ] && [ -f scripts/docs_refs_check.py ]; then
+     python3 scripts/docs_refs_check.py --rederive --base HEAD docs/run-lifecycle.md docs/scheduler.md docs/features.md docs/configuration.md \
+       || echo "revise-advisory: WARNING — citation re-derive did not pass (continuing; see its output)"
+   else
+     echo "revise-advisory: no docs/.citation-lock.yaml in this clone — citation re-derive skipped"
+   fi
+   ```
+3. Stage all modified tracked files (no untracked):
    ```bash
    git add -u
    ```
-3. Commit:
+4. Commit:
    ```bash
    git commit -m "fix(review): address ${ADVISORY_COUNT} advisory finding(s) from AI code review"
    ```
-4. Push:
+5. Push:
    ```bash
    git push origin HEAD
    ```
