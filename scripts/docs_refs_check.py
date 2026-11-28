@@ -1,4 +1,4 @@
-"""Deterministic reference checks for the reference docs (#537).
+"""Deterministic reference checks for the reference docs (#537, #662).
 
 ``docs/run-lifecycle.md``, ``docs/scheduler.md``, ``docs/features.md`` and
 ``docs/configuration.md`` cite the code heavily. PR #533 had to re-map most of those
@@ -6,19 +6,35 @@ citations after #519, #524 and #525 changed behaviour without a doc update. This
 fails CI when a reference no longer resolves:
 
   - every backtick repo path (``path``, ``path:N``, ``path:N-M``, ``path:N,M-K``) exists,
-    and every cited line is within the file's current line count (range only — whether
-    the line still says what the prose claims is not checked);
+    and every cited line is within the file's current line count;
+  - citations into ``commands/*.md`` (full path or basename form) are also checked by
+    content: ``docs/.citation-lock.yaml`` holds a sha256 of the cited lines per citation
+    part, and the check fails when a part has no entry, its lines no longer hold the
+    locked content, or an entry is no longer cited. Without a lock file this content
+    check is off and only the range is checked. Citations into any other file stay
+    range-only;
   - ``configuration.md`` only: the ``## Layer 1`` table keys and the leaf keys of
     ``config/config.yaml`` match in both directions;
   - ``features.md`` only: every id named after a "Node"/"Nodes" lead-in is a node id in
     the workflow DAG.
 
-Not checked (v1): bare continuation spans such as ``:586-591`` that carry no path.
+Not checked: bare continuation spans such as ``:586-591`` that carry no path. They are
+not locked, and ``--rederive`` does not shift them.
 
 Usage (CI)::
 
     python scripts/docs_refs_check.py docs/run-lifecycle.md docs/scheduler.md \\
         docs/features.md docs/configuration.md
+
+After a ``commands/*.md`` edit, repair moved citations (docs and lock; it never locks
+content that differs from the locked content)::
+
+    python scripts/docs_refs_check.py --rederive --base origin/main docs/run-lifecycle.md \\
+        docs/scheduler.md docs/features.md docs/configuration.md
+
+``--seed`` locks every unlocked citation part at its current content, marked
+``seeded: true``; ``--accept DOC CITATION`` locks one citation at its current content
+(the only way changed content gets into the lock); ``--lock-file`` overrides the lock path.
 
 API::
 
@@ -718,6 +734,41 @@ def rederive(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
     return printed, failures
 
 
+def accept(doc_path: PathLike, citation: str, repo_root: PathLike = ".",
+           lock_path: Optional[PathLike] = None) -> tuple[list[str], list[str]]:
+    """Lock every part of *citation* in *doc_path* at its current content."""
+    root = Path(repo_root)
+    lock = Path(lock_path) if lock_path else root / LOCK_FILE
+    citation = citation.strip("`")
+    if not lock.is_file():
+        return [], [f"{lock}: no citation lock; nothing accepted"]
+    (_, key, text), = _load_docs([doc_path], root)
+    targets, idx = _Targets(root), _index(_repo_files(root))
+    parts = [p for p in _parts(key, text, idx) if p.span == citation]
+    if not parts:
+        return [], [f"{key}: `{citation}` is not a commands/*.md citation in this doc; nothing accepted"]
+    bad = [p for p in parts if targets.digest(p.target, p.first, p.last) is None]
+    if bad:
+        return [], [f"{key}:{bad[0].lineno}: `{citation}`: line {_lines_text(bad[0].first, bad[0].last)} "
+                    f"is out of range; nothing accepted"]
+    entries = _load_lock(lock)
+    printed = []
+    for p in {p.key: p for p in parts}.values():
+        old = entries.get(p.key)
+        entries[p.key] = targets.entry(p)
+        printed.append(f"accepted {key}:{parts[0].lineno} {citation}: "
+                       f"{old.excerpt if old else '(no entry)'} -> {entries[p.key].excerpt}")
+    _write_lock(lock, entries)
+    return printed, []
+
+
+def seeded_count(lock_path: Path) -> int:
+    try:
+        return sum(e.seeded for e in _load_lock(lock_path).values())
+    except (OSError, yaml.YAMLError, ValueError):
+        return 0
+
+
 def check(
     doc_paths: Iterable[PathLike],
     repo_root: PathLike = ".",
@@ -768,19 +819,67 @@ def check(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("docs", nargs="+", metavar="DOC")
+    parser.add_argument("docs", nargs="*", metavar="DOC")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--config", default=None)
     parser.add_argument("--workflow", default=None)
+    parser.add_argument("--lock-file", default=None,
+                        help=f"citation lock (default: <repo-root>/{LOCK_FILE})")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--seed", action="store_true",
+                      help="lock every unlocked commands/*.md citation part at its current content")
+    mode.add_argument("--rederive", action="store_true",
+                      help="relocate moved citations by content; never locks changed content")
+    mode.add_argument("--accept", nargs=2, metavar=("DOC", "CITATION"),
+                      help="lock one citation (all its parts) at its current content")
+    parser.add_argument("--base", default=None, metavar="REF",
+                        help="with --rederive: git ref whose diff picks between identical candidates")
     args = parser.parse_args(argv)
+    if args.base and not args.rederive:
+        parser.error("--base requires --rederive")
+    if not args.accept and not args.docs:
+        parser.error("at least one DOC is required")
+    root = Path(args.repo_root)
+    lock = Path(args.lock_file) if args.lock_file else root / LOCK_FILE
 
-    errors = check(args.docs, args.repo_root, args.config, args.workflow)
+    if (args.accept or args.seed or args.rederive) and lock.is_file():
+        try:
+            _load_lock(lock)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            print(f"{lock}: cannot load citation lock: {exc}; restore it from git, "
+                  "do not edit it by hand", file=sys.stderr)
+            return 1
+
+    if args.accept:
+        printed, failures = accept(args.accept[0], args.accept[1], root, lock)
+        for line in printed:
+            print(line)
+        for line in failures:
+            print(line, file=sys.stderr)
+        return 1 if failures else 0
+
+    failures: list[str] = []
+    if args.seed:
+        print(f"--seed added {seed(args.docs, root, lock)} entries to {lock}")
+    elif args.rederive:
+        printed, failures = rederive(args.docs, root, lock, args.base)
+        for line in printed:
+            print(line)
+        if failures:
+            print("Citation re-derive could not repair:", file=sys.stderr)
+            for line in failures:
+                print(f"  {line}", file=sys.stderr)
+
+    errors = check(args.docs, root, args.config, args.workflow, lock_path=lock)
+    if lock.is_file() and (n := seeded_count(lock)):
+        print(f"{n} citation(s) were locked at seed and have not been read against their target")
     if errors:
         print("Docs reference check failed:", file=sys.stderr)
         for err in errors:
             print(f"  {err}", file=sys.stderr)
         return 1
-
+    if failures:
+        return 1
     print(f"Docs reference check passed for {len(args.docs)} doc(s).")
     return 0
 

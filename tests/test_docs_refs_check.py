@@ -18,7 +18,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from docs_refs_check import LOCK_FILE, REPAIR_COMMAND, check, main, rederive, seed  # noqa: E402
+from docs_refs_check import LOCK_FILE, REPAIR_COMMAND, accept, check, main, rederive, seed  # noqa: E402
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "docs_refs_check"
 
@@ -501,3 +501,93 @@ def test_moved_content_never_lands_on_lines_locked_for_other_content(tmp_path):
     printed, failures = rederive([_doc(root)], root)
     assert len(failures) == 2 and any("but those lines are locked for other content" in f for f in failures)
     assert lock.read_text(encoding="utf-8") == before
+
+
+def test_edited_range_fails_rederive_then_accept_locks_it(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3-4` and `commands/c.md:9`\n")
+    lock = _seeded(root)
+    (root / "commands" / "c.md").write_text(_CMD.replace("line 4\n", "edited\n"), encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert printed == [] and len(failures) == 1 and "the cited range was edited" in failures[0]
+    assert lock.read_text(encoding="utf-8") == before
+    printed, failures = accept(_doc(root), "commands/c.md:3-4", root)
+    assert failures == []
+    assert printed == ["accepted docs/notes.md:1 commands/c.md:3-4: line 3 -> line 3"]
+    assert _content(root) == []
+    entries = yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]
+    assert [e.get("seeded") for e in entries] == [None, True]
+
+
+def test_accept_adds_a_missing_entry_and_refuses_unknown_citations(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:9`\n", encoding="utf-8")
+    printed, failures = accept(_doc(root), "`commands/c.md:9`", root)
+    assert printed == ["accepted docs/notes.md:1 commands/c.md:9: (no entry) -> line 9"]
+    assert _content(root) == []
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = accept(_doc(root), "commands/c.md:11", root)
+    assert printed == [] and "not a commands/*.md citation in this doc" in failures[0]
+    assert lock.read_text(encoding="utf-8") == before
+
+
+def test_insert_five_lines_then_rederive_shifts_every_citation(tmp_path):
+    doc = "a `commands/c.md:3` b\nc `c.md:5-6` d `scripts/s.py:1` `:2`\n`commands/c.md:3`\n"
+    root = _lock_tree(tmp_path, doc, extra={"scripts/s.py": "x\ny\n"})
+    lock = _seeded(root)
+    _insert(root, 0, [f"top {i}" for i in range(5)])
+    errors = _content(root)
+    assert len(errors) == 3 and all(e.endswith(REPAIR_COMMAND) for e in errors)
+    # Not a git repo, but every match is unique, so --base is never consulted.
+    assert main([str(_doc(root)), "--repo-root", str(root), "--rederive", "--base", "HEAD",
+                 "--config", str(root / "none.yaml"), "--workflow", str(root / "none.yaml")]) == 0
+    assert _doc(root).read_text(encoding="utf-8") == (
+        "a `commands/c.md:8` b\nc `c.md:10-11` d `scripts/s.py:1` `:2`\n`commands/c.md:8`\n"
+    )
+    assert _content(root) == []
+    doc_after, lock_after = _doc(root).read_text(encoding="utf-8"), lock.read_text(encoding="utf-8")
+    assert rederive([_doc(root)], root) == ([], [])
+    assert (_doc(root).read_text(encoding="utf-8"), lock.read_text(encoding="utf-8")) == (doc_after, lock_after)
+    assert "seeded: true" in lock_after
+
+
+def test_cli_modes_and_exit_codes(tmp_path, capsys):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    common = ["--repo-root", str(root), "--config", str(root / "none.yaml"),
+              "--workflow", str(root / "none.yaml")]
+    doc = str(_doc(root))
+    assert main([doc, "--rederive", *common]) == 1  # no lock yet
+    assert main([doc, "--seed", *common]) == 0
+    out = capsys.readouterr().out
+    assert "1 citation(s) were locked at seed and have not been read against their target" in out
+    assert main([doc, *common]) == 0
+    _insert(root, 0, ["new"])
+    assert main([doc, *common]) == 1
+    assert REPAIR_COMMAND in capsys.readouterr().err
+    assert main([doc, "--rederive", *common]) == 0
+    assert "`commands/c.md:3` -> `commands/c.md:4`" in capsys.readouterr().out
+    assert main(["--accept", doc, "commands/c.md:99", *common]) == 1
+    assert main(["--accept", doc, "commands/c.md:4", *common]) == 0
+    assert "accepted docs/notes.md:1 commands/c.md:4: line 3 -> line 3" in capsys.readouterr().out
+    assert main([doc, *common]) == 0
+    assert "locked at seed" not in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        main([doc, "--base", "HEAD", *common])
+    with pytest.raises(SystemExit):
+        main([doc, "--seed", "--rederive", *common])
+
+
+def test_unreadable_lock_is_a_one_line_error_in_every_mode(tmp_path, capsys):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    common = ["--repo-root", str(root), "--config", str(root / "none.yaml"),
+              "--workflow", str(root / "none.yaml")]
+    doc = str(_doc(root))
+    for bad in ("entries: [1, 2\n", "entries: 5\n", "entries:\n  - doc: x\n"):
+        lock.write_text(bad, encoding="utf-8")
+        for mode in ([doc], [doc, "--seed"], [doc, "--rederive"], ["--accept", doc, "commands/c.md:3"]):
+            capsys.readouterr()
+            assert main([*mode, *common]) == 1
+            assert "cannot load citation lock" in capsys.readouterr().err
+        assert lock.read_text(encoding="utf-8") == bad
