@@ -308,6 +308,29 @@ def test_missing_entry_and_orphan_entry(tmp_path):
     assert 'lock entry commands/c.md:3 ("line 3") is no longer cited' in errors[0]
 
 
+_BLANK_CMD = _CMD.replace("line 5\n", "\n")  # commands/c.md with line 5 blank
+
+
+def test_unlocked_blank_citation_names_the_anchor_not_the_repair_command(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    errors = _content(root)
+    assert len(errors) == 1, errors
+    assert "commands/c.md:5 is blank; pick a non-blank anchor" in errors[0]
+    assert not any(s in errors[0] for s in ("run:", "--rederive", REPAIR_COMMAND))
+
+
+def test_unlocked_out_of_range_citation_is_not_reported_as_blank(tmp_path):
+    # _Targets.blank() slices, so an out-of-range range is "blank" unless guarded.
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:25`\n", encoding="utf-8")
+    errors = _content(root)
+    assert any("commands/c.md:25 has no entry" in e and e.endswith(REPAIR_COMMAND) for e in errors), errors
+    assert not any("is blank" in e for e in errors)
+
+
 def test_crlf_and_reindented_target_lines_hash_the_same(tmp_path):
     root = _lock_tree(tmp_path, "`commands/c.md:3-4`\n")
     _seeded(root)
