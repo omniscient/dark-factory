@@ -96,6 +96,9 @@ python scripts/check_command_cache_shape.py --json commands   # per-command meta
   the first bare token, or the line count + 1 if the file has none. Today's baseline is a
   snapshot (3 for most files), not a cache guarantee. R2 starts to protect something once a
   later change raises a file's number.
+  Limitation: R2 only ratchets the *line* of the first token, not `stable_prefix_bytes`. A
+  token moved earlier on the same line, or a prefix shortened by removing bytes without
+  removing a whole line, shrinks the cached prefix without tripping R2.
 - **R3 (baseline complete).** Every `commands/*.md` needs a baseline entry and every entry
   needs a file. The error message prints the exact entry to add or remove.
 
@@ -103,11 +106,13 @@ Updating the baseline:
 
 - **Adding or renaming a command file:** add, rename or remove its entry in the same commit.
   The R3 message prints the line to add.
-- **Improving a file**, for example moving its first token later: raise its number in the
-  same commit. `tests/test_check_command_cache_shape.py` asserts that the baseline equals
-  the current values exactly.
+- **Improving a file**, for example moving its first token later: raising its number is
+  optional. `tests/test_check_command_cache_shape.py` only requires that the baseline's
+  entries match the committed command files and that none of them sit above the current
+  value - it does not force an edit just because a file's number went up.
 - **Lowering a number** means a prompt now busts the cache earlier. Do it only in a reviewed
-  ticket that says why.
+  ticket that says why; both the lint and `tests/test_check_command_cache_shape.py` fail
+  until the baseline is lowered in the same commit.
 
 ## Prompt-shape metadata
 

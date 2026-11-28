@@ -199,11 +199,24 @@ def test_real_commands_pass():
 def test_baseline_matches_committed_commands():
     baseline = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))
     current = {p.stem: shape(p)["first_volatile_line"] for p in sorted(_COMMANDS_DIR.glob("*.md"))}
-    assert baseline == current, (
-        f"{DEFAULT_BASELINE.name} is out of date. A command file's first volatile line moved "
-        "(a line was added or removed above its first $TOKEN) or a command file was added or "
-        "removed. Set the baseline to these values in the same commit: "
+    assert set(baseline) == set(current), (
+        f"{DEFAULT_BASELINE.name} entries do not match commands/*.md. A command file was added "
+        "or removed. Add or remove its entry in the same commit to match: "
         + json.dumps(current, sort_keys=True)
+    )
+    # R2 is a ratchet: current may sit at or above the baseline (a stable-prefix line was
+    # added, or nothing changed) without any baseline edit. It must never sit below the
+    # baseline, since that would mean a line was removed above the first $TOKEN - a change
+    # that needs its own reviewed ticket per the R2 message, not a silent baseline bump here.
+    stale = {
+        name: {"baseline": baseline[name], "current": current[name]}
+        for name in current
+        if current[name] < baseline[name]
+    }
+    assert not stale, (
+        f"{DEFAULT_BASELINE.name} is ahead of the committed commands for: {stale}. A stable-"
+        "prefix line was removed above the first $TOKEN in each. Lower the baseline to these "
+        "values in the same commit: " + json.dumps(current, sort_keys=True)
     )
 
 

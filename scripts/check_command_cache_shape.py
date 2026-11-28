@@ -143,7 +143,11 @@ def check(
 
     files = sorted(commands_dir.glob("*.md"))
     for path in files:
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            errors.append(f"{path}: not valid UTF-8")
+            continue
         for m in BRACE_RE.finditer(text):
             errors.append(
                 f"{path}:{_line_of(text, m.start())}: R1: brace form ${{{m.group('name')} "
