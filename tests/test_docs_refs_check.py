@@ -5,6 +5,7 @@ The pass/fail fixture trees under tests/fixtures/docs_refs_check/ mirror the rep
 carries exactly one broken reference per check category.
 """
 
+import re
 import shutil
 import subprocess
 import sys
@@ -790,7 +791,9 @@ def test_repo_citation_lock_exists_and_covers_every_commands_citation():
 def test_revise_advisory_hook_rederives_against_head():
     # #669: the hook runs before the advisory fix is committed, so HEAD is the base whose
     # diff is exactly the advisory edit; origin/main would double-count earlier re-derives.
+    # Scoped to the citation-rederive invocation itself: a later, unrelated step may still
+    # legitimately mention origin/main (e.g. a merge or a diff) without breaking this guard.
     text = (_REPO / "commands" / "dark-factory-revise-advisory.md").read_text(encoding="utf-8")
     assert text.count("--rederive --base HEAD") == 1
     assert "REDERIVE_BASE" not in text
-    assert "origin/main" not in text
+    assert re.findall(r"--rederive --base (\S+)", text) == ["HEAD"]
