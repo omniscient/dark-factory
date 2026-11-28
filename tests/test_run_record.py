@@ -3772,3 +3772,72 @@ def test_annotate_failure_keeps_the_ledger_request_count_of_the_same_class(tmp_p
     _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
     assert _by_class(out) == {"endpoint_unreachable": {
         "tokens": 150, "basis": "whole_run", "request_count": 1}}
+
+
+# Spec test 8: four hybrid failures (outage, OOM/stalled stream, forbidden destination,
+# cancelled/partial stream). Each: the ledger class is one of the nine verbatim values,
+# the record reports a single local destination, the outcome is failed, and no class
+# authorizes a different destination or a fallback.
+_HYBRID_CASES = [
+    ("local_endpoint_outage", "endpoint_unreachable", "substantive:endpoint_unreachable:1"),
+    ("local_oom_stalled_stream", "timeout_idle", "substantive:unknown:1"),
+    ("forbidden_destination", "destination_policy_denial", "substantive:unknown:1"),
+    ("cancelled_partial_stream", "cancellation", "substantive:unknown:1"),
+]
+
+
+@pytest.mark.parametrize("failure_class,signature", [c[1:] for c in _HYBRID_CASES],
+                         ids=[c[0] for c in _HYBRID_CASES])
+def test_hybrid_failure_is_recorded_without_export_or_backend_switch(
+        failure_class, signature, tmp_path, monkeypatch):
+    from factory_core import failure_taxonomy as ft
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "run_id": "abc123", "status": 502, "failure_class": failure_class,
+        "hosting_location": "local", "endpoint_id": "local-test", "role": "worker",
+        "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0,
+    }) + "\n" + json.dumps({  # another run's cloud request: must never be correlated here
+        "run_id": "some-other-run", "status": 200, "failure_class": None,
+        "hosting_location": "cloud", "endpoint_id": None,
+        "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 5,
+    }) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, signature)
+
+    rec = json.loads(out.read_text())
+    result = rec["model_dispatch"]["result"]
+    assert failure_class in ft.FAILURE_CLASSES                       # (a)
+    assert result["failure_classes_seen"] == [failure_class]
+    assert result["hosting_location"] == "local"                     # (b) one, local destination
+    assert result["endpoint_id"] == "local-test"
+    assert result["request_count"] == 1                              # the cloud row is not this run's
+    assert rec["harness_economics"]["ledger_rows_correlated"] == 1
+    assert result["outcome"] == "failed"                             # (c)
+    cls = ft.FAILURE_TAXONOMY[failure_class]                          # (d)
+    assert cls.cross_endpoint_retry is False
+    assert cls.fallback_model_allowed is False and cls.fallback_phase_allowed is False
+    by_class = rec["harness_economics"]["failure_spend"]["by_class"]
+    assert by_class[failure_class]["request_count"] == 1
+    assert by_class[ft.class_for_signature(signature)]["basis"] == "whole_run"
+
+
+def test_policy_version_bump_is_additive(tmp_path, monkeypatch):
+    # A pre-1.2 record (no by_class) still rolls up and can still be annotated.
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "run_id": "old-run", "issue_number": 238, "intent": "fix", "stage": "implement",
+        "status": 200, "gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1,
+    }) + "\n")
+    record_path = tmp_path / "runs" / "old-run" / "run-record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps({
+        "run_id": "old-run", "totals": {"cost_usd": 0.5},
+        "harness_economics": {"policy_version": "1.1", "outcome": {"state": "failed"},
+                              "factory_cpm": 0.0,
+                              "failure_spend": {"tokens": 2, "basis": "whole_run"}},
+    }))
+    result = rr._build_issue_economics(238, ledger_path=ledger, artifacts_root=tmp_path / "runs")
+    entry = result["runs"]["old-run"]
+    assert (entry["outcome_state"], entry["cost_usd"], entry["factory_cpm"]) == ("failed", 0.5, 0.0)
+    _annotate(monkeypatch, record_path, "substantive:build_failure:1", run_id="old-run")
+    assert _by_class(record_path) == {"build_failure": {"tokens": 2, "basis": "whole_run"}}
