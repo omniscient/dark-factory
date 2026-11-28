@@ -153,3 +153,36 @@ def test_breaker_outcomes_are_not_taxonomy_keys():
         assert outcome not in ft.FAILURE_TAXONOMY
         assert outcome not in ft.SIGNATURE_TO_CLASS.values()
         assert outcome not in ft.FAILURE_CLASSES
+
+
+def test_model_adapter_re_exports_the_taxonomy_constants():
+    from factory_core.providers import model_adapter as ma
+    assert ma.FAILURE_CLASSES is ft.FAILURE_CLASSES
+    assert ma.FAILURE_CLASSES == _LOCAL_CLASSES_IN_ORDER
+    for name in ("ENDPOINT_UNREACHABLE", "TIMEOUT_CONNECT", "TIMEOUT_TIME_TO_FIRST_TOKEN",
+                 "TIMEOUT_IDLE", "TIMEOUT_TOTAL", "CANCELLATION", "PROTOCOL_INCOMPATIBILITY",
+                 "CAPABILITY_EVIDENCE_INVALID", "DESTINATION_POLICY_DENIAL"):
+        assert getattr(ma, name) is getattr(ft, name), name
+
+
+def _scanned_files():
+    files = [p for p in (REPO / "scripts").rglob("*")
+             if p.is_file() and p.suffix in (".py", ".sh")]
+    return files + [REPO / "scheduler.sh", REPO / "entrypoint.sh"]
+
+
+def test_nothing_reads_the_policy_fields():
+    # A later enforcement ticket has to edit this test; that is the point (spec test 3d).
+    texts = {p.relative_to(REPO).as_posix(): p.read_text(encoding="utf-8", errors="replace")
+             for p in _scanned_files()}
+    mention_module = {f for f, t in texts.items() if "failure_taxonomy" in t}
+    assert mention_module <= {
+        "scripts/factory_core/failure_taxonomy.py",
+        "scripts/factory_core/providers/model_adapter.py",
+        "scripts/factory_core/run_record.py",
+    }, mention_module
+    mention_table = {f for f, t in texts.items() if "FAILURE_TAXONOMY" in t}
+    assert mention_table <= {"scripts/factory_core/failure_taxonomy.py"}, mention_table
+    for f in ("scripts/factory_core/breaker.py", "scripts/factory_core/error_signature.py",
+              "scheduler.sh"):
+        assert "failure_taxonomy" not in texts[f] and "FAILURE_TAXONOMY" not in texts[f], f
