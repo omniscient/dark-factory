@@ -244,7 +244,10 @@ Spawn an architect subagent using the Agent tool:
    `$ARTIFACTS_DIR/architect_prompt.md` produced by step 1a
 3. Repeat until approved (max 3 cycles)
 4. If still not approved after 3 cycles:
-   - Post the plan + architect feedback as an issue comment
+   - Re-run the draft checkpoint block (end of Phase 2) unchanged, so the revised draft is
+     on the branch
+   - Post the plan + architect feedback as an issue comment, naming the draft path
+     (`$PLAN_FILE`, under `docs/superpowers/plan-drafts/`)
    - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
    - Exit cleanly
 
@@ -262,7 +265,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 2. Determine `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
 3. Set `CONFORMANCE_DIALOGUE=""`, `SHADOW_DIALOGUE=""`, and `CONFORMANCE_CYCLE=0`
-4. The artifact under review is the plan document on disk at `$PLAN_FILE` (bound in Phase 2).
+4. The artifact under review is the plan document on disk at `$PLAN_FILE` (bound in Phase 1
+   step 9 or Phase 2 — the draft under `docs/superpowers/plan-drafts/`).
 4a. Resolve the shadow model pin (Requirement 7: env explicitly set, even to empty, wins;
     unset falls back to the config default — `${VAR-default}`, not `${VAR:-default}`, so an
     explicit empty string is preserved rather than replaced):
@@ -325,6 +329,9 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 8. **Reconcile loop** (only if MATERIAL):
    a. Increment `CONFORMANCE_CYCLE`
    b. If `CONFORMANCE_CYCLE > MAX_CYCLES`:
+      - Re-run the draft checkpoint block (end of Phase 2) unchanged, so the revised draft
+        is on the branch, and name its path (`$PLAN_FILE`, under
+        `docs/superpowers/plan-drafts/`) in the comment below
       - Post the conformance dialogue as an issue comment (fetch the footer first via
         `python3 dark-factory/scripts/factory_core/cli.py marker refinement`):
         ````

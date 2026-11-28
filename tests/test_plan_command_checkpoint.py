@@ -311,3 +311,14 @@ def test_detect_block_sits_in_phase1():
     text = _text()
     assert text.index("## Phase 1: LOAD") < text.index("<!-- plan-draft-detect:begin -->")
     assert text.index("<!-- plan-draft-detect:end -->") < text.index("## Phase 2: PLAN WRITING")
+
+
+def test_checkpoint_reruns_before_both_needs_discussion_exits():
+    architect_exit = _section("4. If still not approved after 3 cycles:",
+                              '### If architect returns "Approved":')
+    conformance_exit = _section("b. If `CONFORMANCE_CYCLE > MAX_CYCLES`:",
+                                "c. Read the MATERIAL deviation descriptions")
+    for exit_text in (architect_exit, conformance_exit):
+        rerun = exit_text.find("Re-run the draft checkpoint block")
+        assert rerun != -1, exit_text
+        assert rerun < exit_text.index("--add needs-discussion"), exit_text
