@@ -728,7 +728,7 @@ the push gate takes its "clean abort" branch:
 | Issue body too short | under 20 characters (`refine.min_issue_body_length` in config) | `commands/dark-factory-refine.md:100-105` |
 | Product owner answers `UNCERTAIN:` | first occurrence | `commands/dark-factory-refine.md:143-147` |
 | Architect does not approve the plan | 3 review cycles | `commands/dark-factory-plan.md:238-252` |
-| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:329-360` |
+| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:352-389` |
 
 ### D. Implementation gates
 
@@ -792,10 +792,10 @@ conformance command does not adjudicate this gate.
 4. An `opus` reviewer subagent applies the conformance rubric
    (`.claude/skills/conformance/RUBRIC.md` in the clone, else
    `/opt/refinement-skills/conformance-reviewer-prompt.md`). A non-gating shadow reviewer
-   runs on `conformance.shadow_model` unless that is empty (`:293-332`). Both run in
+   runs on `conformance.shadow_model` unless that is empty (`:293-340`). Both run in
    the foreground (`run_in_background: false`): the agent waits for the reviewer's response
    inside its turn and never states a verdict without it (#373).
-5. **Scope remediation** (`:351-525`), when the reviewer lists `[OOS]` entries and
+5. **Scope remediation** (`:359-533`), when the reviewer lists `[OOS]` entries and
    `conformance.scope_enforcement` is true: drop entries that are documentation files;
    if `conformance.excise_out_of_scope`, revert each remaining change with a
    `revert: excise out-of-scope change…` commit; de-duplicate with
@@ -803,16 +803,16 @@ conformance command does not adjudicate this gate.
    and `conformance.backlog_label` and add it to the board, or comment on the existing
    ticket; post a "Scope enforcement: excised N…" comment on the origin issue; re-run the
    review.
-6. Verdict (`:339-349`): "Conforms" or "Minor deviations" passes. "Material divergence"
+6. Verdict (`:347-357`): "Conforms" or "Minor deviations" passes. "Material divergence"
    passes as advisory when there is no spec or `conformance.block_on_material` is false;
    otherwise it starts the reconcile loop. An unparseable verdict, error or refusal
    always starts the reconcile loop.
-7. **Reconcile loop** (`:527-578`): write a failing test, fix the code, commit
+7. **Reconcile loop** (`:535-590`): write a failing test, fix the code, commit
    `fix: align implementation with spec (conformance cycle N)`, re-review. A cycle entered
    because the reviewer call errored, timed out or returned nothing skips the fix and just
    re-spawns the reviewer; it still counts as a cycle. More than
    `conformance.max_reconcile_cycles` cycles is BLOCKED.
-8. **Artifact guard** (Phase 6, `:756-796`), last on every path: if `conformance.md` has no
+8. **Artifact guard** (Phase 6, `:781-821`), last on every path: if `conformance.md` has no
    `STATUS:` line it acts on a reviewer response it holds (Phase 4 or 5), else leaves the
    file absent and exits 1 so `conformance-gate` takes its missing-verdict path. It never
    writes a verdict itself (#373).
@@ -832,12 +832,12 @@ notices. It writes `diff-ranking.json` (`scripts/diff_rank.py:234-285,340-603`).
 
 | Result | Outcome |
 |---|---|
-| PASS (`:581-670`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
-| BLOCKED (`:672-754`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
+| PASS (`:593-688`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue, blockquoted (`> `) by `scripts/quote_dialogue.py` (#405). If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
+| BLOCKED (`:689-780`) | "Spec Conformance — Blocked" comment with the blockquoted dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
 
 **The `conformance-gate` node enforces the result** by reading `conformance.md`, because
 a command node's own `exit 1` is not relied on to stop the DAG
-(`commands/dark-factory-conformance.md:750-754`). `scripts/verdict_gate_check.sh:36-90`:
+(`commands/dark-factory-conformance.md:775-779`). `scripts/verdict_gate_check.sh:36-90`:
 
 | First `STATUS:` line | Gate |
 |---|---|
@@ -1337,7 +1337,7 @@ The scheduler-side oddities are tracked in
    (`commands/dark-factory-validate.md:91-118`, pre-#551 line numbers). The conformance and code-review commands
    both state that a command node's internal `exit 1` "does not reliably surface as node
    failure to the DAG executor", which is why `conformance-gate` and `review-gate` exist
-   (`commands/dark-factory-conformance.md:750-754`). There is no equivalent node for
+   (`commands/dark-factory-conformance.md:775-779`). There is no equivalent node for
    `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1657-1675`).
    If the exit does not surface, conformance, push, PR creation and `status-in-review`
    would proceed and move a Blocked issue to In Review. The `needs-discussion` label
@@ -1412,7 +1412,7 @@ The scheduler-side oddities are tracked in
       would say `BLOCKERS: 0` on a blocked run; `report` prints that number
       (`workflows/archon-dark-factory.yaml:1687`).
     - Conformance, PASS branch: `conformance.md` is written from `${OOS_EXCISED}` and
-      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:587-589`), but scope
+      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:602-604`), but scope
       remediation names them `EXCISED_COUNT` and `SPILLOVER_TICKETS` (`:456`, `:514`).
       `report` reads `OOS_EXCISED:`/`OOS_TICKETS:` from the file.
 
