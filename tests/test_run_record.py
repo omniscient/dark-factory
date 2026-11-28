@@ -3542,3 +3542,55 @@ def test_backfill_usage_cli(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         rr.main()
     assert exc.value.code == 2
+
+
+def test_backfill_usage_reads_the_gzipped_transcript_store(tmp_path, monkeypatch):
+    # The store written by _keep_run_transcripts holds only *.jsonl.gz files.
+    import gzip
+    path = _u_durable(monkeypatch, tmp_path, _u_old_record())
+    tx = _u_transcripts(tmp_path / "tx")
+    for f in list(tx.rglob("*.jsonl")):
+        st = f.stat()
+        gz = f.with_name(f.name + ".gz")
+        gz.write_bytes(gzip.compress(f.read_bytes()))
+        os.utime(gz, (st.st_atime, st.st_mtime))
+        f.unlink()
+    assert not list(tx.rglob("*.jsonl"))
+
+    result = rr._backfill_usage("3ff088b6", str(tx))
+
+    assert result["backfilled_nodes"] == ["code-review", "conformance"]
+    by = {n["node_id"]: n for n in json.loads(path.read_text())["nodes"]}
+    assert by["conformance"]["model"] == f"{_HAIKU},{_OPUS}"
+
+
+def test_backfill_usage_failed_backup_write_leaves_no_partial_copy(tmp_path, monkeypatch):
+    path = _u_durable(monkeypatch, tmp_path, _u_old_record())
+    original = path.read_bytes()
+    tx = _u_transcripts(tmp_path / "tx")
+    real_write_bytes = Path.write_bytes
+
+    def disk_full(self, data):
+        if self.name.endswith(".pre-645.json.tmp"):
+            real_write_bytes(self, data[:10])   # truncated, then the write fails
+            raise OSError(28, "No space left on device")
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", disk_full)
+    with pytest.raises(OSError):
+        rr._backfill_usage("3ff088b6", str(tx))
+    assert path.read_bytes() == original              # record not replaced
+    assert not path.with_name("3ff088b6.pre-645.json").exists()
+    assert not path.with_name(".3ff088b6.pre-645.json.tmp").exists()
+
+    monkeypatch.setattr(Path, "write_bytes", real_write_bytes)
+    assert rr._backfill_usage("3ff088b6", str(tx))["backfilled_nodes"]
+    assert path.with_name("3ff088b6.pre-645.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("hosting, expected",
+                         [("cloud", "cloud"), (None, None), ("local", "local")])
+def test_hosting_location_is_cloud_only_when_the_ledger_says_so(hosting, expected):
+    node = {"node_id": "plan", "cost_usd": 1.0,
+            "models": [{"model": _OPUS, "input_tokens": 1, "output_tokens": 1, "cost_usd": 1.0}]}
+    assert rr._with_usage_keys(node, True, None, hosting)["hosting_location"] == expected

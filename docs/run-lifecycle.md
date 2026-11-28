@@ -1039,7 +1039,9 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:713-734
    (`archon`), or from nothing (`none`). A node that called a model then carries `models`
    (one entry per model, full IDs), `model` (those IDs joined with `,`, still a string),
    `gen_ai.usage.cache_read_input_tokens` and `gen_ai.usage.cache_creation_input_tokens`,
-   `usage_reconciled`, `hosting_location` and, from `cost-state`, `cost_usd_session_delta`.
+   `usage_reconciled`, `hosting_location` (`local` or `cloud` from the run's ledger rows,
+   `null` when the ledger has no rows or mixes endpoints) and, from `cost-state`,
+   `cost_usd_session_delta`.
    The run record adds `unattributed_sessions` (sessions no node owns, such as Archon's
    title generation; added to no node and no total), `factory_instance`, `target_repo`,
    `harness` and the two cache totals. No existing key changes value or meaning except
@@ -1063,7 +1065,9 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:713-734
    `run-record backfill-usage --transcripts-dir <dir> --run-id <id>` applies the capture to
    an existing durable record from retained transcripts: the record has no Archon log, so
    each node is matched to the transcript whose `cost-state` total equals its recorded
-   `cost_usd`, the original is first copied to `run-records/<run_id>.pre-645.json`, and the
+   `cost_usd` (the gzipped store is read as is), the original is first copied to
+   `run-records/<run_id>.pre-645.json` (written to a temporary file and hard-linked into
+   place, so a failed write leaves no partial copy and the record unchanged), and the
    record is replaced through a rename. It is an operator step; `runs.jsonl` is never
    rewritten.
 3. `post_cost_report` (`entrypoint.sh:658-725`): if `run-record.json` exists and has
