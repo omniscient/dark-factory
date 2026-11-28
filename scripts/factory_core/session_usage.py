@@ -35,6 +35,14 @@ _STARTED, _COMPLETED = "dag_node_started", "dag_node_completed"
 # AI, bash or script node fails; when present it ends the node's window (requirement 2).
 _FAILED = "dag_node_failed"
 MAX_LINE_BYTES = 8 * 1024 * 1024
+# #656: bounds on one load_transcripts() call. The two byte bounds equal the writer-side
+# limits of entrypoint.sh's _keep_run_transcripts, so a kept store never trips them; a
+# line counts as at least LINE_CHARGE_FLOOR bytes, which bounds the number of lines.
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_CALL_BYTES = 256 * 1024 * 1024
+LINE_CHARGE_FLOOR = 64
+MAX_CALL_MESSAGES = 262144
+MAX_CALL_COST_STATE_BYTES = 4 * 1024 * 1024
 COST_EPSILON = 0.000001
 ARCHON_COST_EPSILON = 0.01
 FIRST_PROMPT_CHARS = 60
@@ -90,9 +98,36 @@ def _regular_file(path) -> bool:
         return False
 
 
-def _iter_lines(path):
+class _OverBound(Exception):
+    """A load_transcripts() bound was exceeded (#656); call_level: later files are
+    skipped too."""
+
+    def __init__(self, call_level: bool):
+        super().__init__()
+        self.call_level = call_level
+
+
+class _Budget:
+    """The bytes one load_transcripts() call has read, in all and from its current file."""
+
+    def __init__(self):
+        self.call = 0
+        self.file = 0
+
+    def charge(self, n: int) -> None:
+        n = max(n, LINE_CHARGE_FLOOR)
+        self.call += n
+        self.file += n
+        if self.call > MAX_CALL_BYTES:
+            raise _OverBound(call_level=True)
+        if self.file > MAX_FILE_BYTES:
+            raise _OverBound(call_level=False)
+
+
+def _iter_lines(path, budget=None):
     """Each line of a regular file as bytes; a line longer than MAX_LINE_BYTES is skipped
-    whole without ever being held in memory. A ``.gz`` path is read through gzip."""
+    whole without ever being held in memory. A ``.gz`` path is read through gzip. With a
+    budget, every readline result is charged to it, a skipped line's included."""
     cap = MAX_LINE_BYTES
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rb") as fh:
@@ -100,22 +135,32 @@ def _iter_lines(path):
             line = fh.readline(cap + 1)
             if not line:
                 return
+            if budget is not None:
+                budget.charge(len(line))
             if len(line) > cap and not line.endswith(b"\n"):
                 while line and not line.endswith(b"\n"):
                     line = fh.readline(cap + 1)
+                    if line and budget is not None:
+                        budget.charge(len(line))
                 continue
             yield line
 
 
-def _json_objects(path):
-    """The JSON objects of a file, one per line; any other line is skipped."""
-    for raw in _iter_lines(path):
+def _json_lines(path, budget=None):
+    """(raw line, object) for each line of a file that is a JSON object."""
+    for raw in _iter_lines(path, budget):
         try:
             obj = json.loads(raw)
         except (ValueError, RecursionError):
             continue
         if isinstance(obj, dict):
-            yield obj
+            yield raw, obj
+
+
+def _json_objects(path):
+    """The JSON objects of a file, one per line; any other line is skipped."""
+    for _raw, obj in _json_lines(path):
+        yield obj
 
 
 def read_node_windows(log_file, node_ids) -> dict:
@@ -218,68 +263,107 @@ def _message_usage(usage) -> dict:
     return {k: usage[k] if _is_int(usage.get(k)) and usage[k] >= 0 else 0 for k in TOKEN_KEYS}
 
 
+def _read_transcript(path, rel: str, budget: _Budget, pairs: int) -> tuple:
+    """One file's contribution, read to its end before anything is merged (#656):
+    (info, {message_id: record without "files"}, its version Counter, the length of the
+    cost-state line it keeps). pairs: the (file, message) pairs already merged. Raises
+    _OverBound past a bound."""
+    info = {"ids": [], "cost_state": None, "first_ts": None, "first_user": None,
+            "assistant_lines": 0, "sidechain_lines": 0}
+    staged: dict = {}
+    versions: Counter = Counter()
+    cost_state_len = 0
+    for lineno, (raw, obj) in enumerate(_json_lines(path, budget)):
+        ts = iso_to_ms(obj.get("timestamp"))
+        if ts is not None and (info["first_ts"] is None or ts < info["first_ts"]):
+            info["first_ts"] = ts
+        kind = obj.get("type")
+        if kind == "cost-state":
+            info["cost_state"], cost_state_len = obj, len(raw)
+            continue
+        if kind == "user":
+            if info["first_user"] is None:
+                text = _user_text(obj)
+                if text:
+                    info["first_user"] = (ts, text)
+            continue
+        msg = obj.get("message") if kind == "assistant" else None
+        if not isinstance(msg, dict) or msg.get("model") == SYNTHETIC_MODEL:
+            continue
+        if isinstance(obj.get("version"), str):
+            versions[obj["version"]] += 1
+        side = obj.get("isSidechain") is True
+        info["assistant_lines"] += 1
+        info["sidechain_lines"] += side
+        mid = msg.get("id")
+        if not isinstance(mid, str) or not mid:
+            mid = f"\x00{rel}#{lineno}"
+        rec = staged.get(mid)
+        if rec is None:
+            info["ids"].append(mid)
+            if pairs + len(info["ids"]) > MAX_CALL_MESSAGES:
+                raise _OverBound(call_level=True)
+            model = msg.get("model")
+            staged[mid] = {"ts": ts, "model": model if isinstance(model, str) else "",
+                           "usage": _message_usage(msg.get("usage")), "sidechain": side}
+        elif ts is not None and (rec["ts"] is None or ts < rec["ts"]):
+            rec["ts"] = ts
+    return info, staged, versions, cost_state_len
+
+
 def load_transcripts(root, started_at=None) -> dict:
     """Read every transcript of requirement 3's input set under root.
 
-    Returns {"files": {rel: info}, "messages": {message_id: record}, "harness_version"}.
-    A message is kept once per message.id across all files (its earliest timestamp, its
-    model, its usage, the files it appears in); a line with no message.id is its own
-    record. harness_version is the most common CLI `version` on assistant lines, or None.
+    Returns {"files": {rel: info}, "messages": {message_id: record}, "harness_version",
+    "skipped_for_size"}. A message is kept once per message.id across all files (its
+    earliest timestamp, its model, its usage, the files it appears in); a line with no
+    message.id is its own record. harness_version is the most common CLI `version` on
+    assistant lines, or None. A file is merged only once read to its end, so nothing of a
+    skipped file is kept (#656): an unreadable one is left out; one over MAX_FILE_BYTES,
+    or the one during which MAX_CALL_BYTES, MAX_CALL_MESSAGES or MAX_CALL_COST_STATE_BYTES
+    is exceeded and every later file (never opened), is listed in skipped_for_size, the
+    sorted relative paths only.
     """
     root = pathlib.Path(root)
     files: dict = {}
     messages: dict = {}
     versions: Counter = Counter()
+    skipped: list = []
+    budget = _Budget()
+    pairs = cost_state_bytes = 0
+    exhausted = False
     for path in _transcript_files(root, started_at):
         rel = path.relative_to(root).as_posix()
-        info = {"ids": [], "cost_state": None, "first_ts": None, "first_user": None,
-                "assistant_lines": 0, "sidechain_lines": 0}
-        seen: set = set()
+        if exhausted:
+            skipped.append(rel)
+            continue
+        budget.file = 0
         try:
-            for lineno, obj in enumerate(_json_objects(path)):
-                ts = iso_to_ms(obj.get("timestamp"))
-                if ts is not None and (info["first_ts"] is None or ts < info["first_ts"]):
-                    info["first_ts"] = ts
-                kind = obj.get("type")
-                if kind == "cost-state":
-                    info["cost_state"] = obj
-                    continue
-                if kind == "user":
-                    if info["first_user"] is None:
-                        text = _user_text(obj)
-                        if text:
-                            info["first_user"] = (ts, text)
-                    continue
-                msg = obj.get("message") if kind == "assistant" else None
-                if not isinstance(msg, dict) or msg.get("model") == SYNTHETIC_MODEL:
-                    continue
-                if isinstance(obj.get("version"), str):
-                    versions[obj["version"]] += 1
-                side = obj.get("isSidechain") is True
-                info["assistant_lines"] += 1
-                info["sidechain_lines"] += side
-                mid = msg.get("id")
-                if not isinstance(mid, str) or not mid:
-                    mid = f"\x00{rel}#{lineno}"
-                rec = messages.get(mid)
-                if rec is None:
-                    model = msg.get("model")
-                    rec = messages[mid] = {
-                        "ts": ts, "model": model if isinstance(model, str) else "",
-                        "usage": _message_usage(msg.get("usage")), "sidechain": side,
-                        "files": set(),
-                    }
-                elif ts is not None and (rec["ts"] is None or ts < rec["ts"]):
-                    rec["ts"] = ts
-                rec["files"].add(rel)
-                if mid not in seen:
-                    seen.add(mid)
-                    info["ids"].append(mid)
+            info, staged, file_versions, cost_state_len = _read_transcript(
+                path, rel, budget, pairs)
+            if cost_state_bytes + cost_state_len > MAX_CALL_COST_STATE_BYTES:
+                raise _OverBound(call_level=True)
         except (OSError, EOFError, zlib.error):
             continue
+        except _OverBound as over:
+            skipped.append(rel)
+            exhausted = over.call_level
+            continue
+        for mid in info["ids"]:
+            new = staged[mid]
+            rec = messages.get(mid)
+            if rec is None:
+                rec = messages[mid] = dict(new, files=set())
+            elif new["ts"] is not None and (rec["ts"] is None or new["ts"] < rec["ts"]):
+                rec["ts"] = new["ts"]
+            rec["files"].add(rel)
         files[rel] = info
+        versions.update(file_versions)
+        pairs += len(info["ids"])
+        cost_state_bytes += cost_state_len
     version = versions.most_common(1)[0][0] if versions else None
-    return {"files": files, "messages": messages, "harness_version": version}
+    return {"files": files, "messages": messages, "harness_version": version,
+            "skipped_for_size": sorted(skipped)}
 
 
 def _is_subagent_file(info: dict) -> bool:

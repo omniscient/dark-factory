@@ -1,9 +1,11 @@
 """factory_core.session_usage (#645): node windows from Archon's log, per-node usage from
 Claude Code session transcripts, cost-state figures and reconciliation."""
+import gzip
 import json
 import os
 import signal
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -361,3 +363,216 @@ def test_backfill_matches_file_by_cost(tmp_path):
     assert set(res) == {"conformance", "code-review"}
     assert res["code-review"]["cost_usd_session_delta"] == pytest.approx(1.1)
     assert res["code-review"]["usage_reconciled"] is True
+
+
+# --- #656: bounds on one load_transcripts() call ----------------------------------------
+
+def test_bound_constants():
+    assert su.MAX_FILE_BYTES == 67108864
+    assert su.MAX_CALL_BYTES == 268435456
+    assert su.LINE_CHARGE_FLOOR == 64
+    assert su.MAX_CALL_MESSAGES == 262144
+    assert su.MAX_CALL_COST_STATE_BYTES == 4194304
+
+
+def test_node_windows_are_not_counted(monkeypatch):
+    before = su.read_node_windows(_REAL_LOG, _REAL_NODES)
+    monkeypatch.setattr(su, "MAX_FILE_BYTES", 64)    # far below the log's size
+    monkeypatch.setattr(su, "MAX_CALL_BYTES", 64)
+    assert su.read_node_windows(_REAL_LOG, _REAL_NODES) == before != {}
+
+
+def _gzip(path):
+    """path's bytes as path + ".gz" (fixed header mtime); the plain file is removed."""
+    gz = path.with_name(path.name + ".gz")
+    gz.write_bytes(gzip.compress(path.read_bytes(), mtime=0))
+    path.unlink()
+    return gz
+
+
+def _padded(mid, ms, pad):
+    """An assistant line with pad extra bytes in an ignored key, far under the line cap."""
+    return dict(_a(mid, ms), pad="x" * pad)
+
+
+def _rel(root, path):
+    return path.relative_to(root).as_posix()
+
+
+def _assert_consistent(t):
+    """Every file a record names was kept: what _chains needs not to raise KeyError."""
+    for rec in t["messages"].values():
+        assert rec["files"] <= set(t["files"])
+
+
+@pytest.mark.parametrize("compress", [True, False], ids=["gz", "plain"])
+def test_file_over_the_file_bound_is_skipped_and_later_files_load(tmp_path, monkeypatch,
+                                                                  compress):
+    monkeypatch.setattr(su, "MAX_FILE_BYTES", 4096)
+    big = _write(tmp_path, "p/a.jsonl", [_padded(f"a{i}", T0 + i, 500) for i in range(20)])
+    small = _write(tmp_path, "p/b.jsonl", [_a("b1", T0 + 100)])
+    if compress:
+        big, small = _gzip(big), _gzip(small)
+    t = _load(tmp_path)
+    assert list(t["files"]) == [_rel(tmp_path, small)]
+    assert t["skipped_for_size"] == [_rel(tmp_path, big)]
+    assert list(t["messages"]) == ["b1"]
+    _assert_consistent(t)
+
+
+def _readable_b(root):
+    """p/b.jsonl: message s1 at T0 + 500 and the cost-state line backfill matches on. A
+    skipped p/a.* (sorted first) that also holds s1, at T0, must leave no trace."""
+    _write(root, "p/b.jsonl", [_a("s1", T0 + 500), _cs(T0, 1.0, {OPUS: _mu(10, 100, 0, 0, 1.0)})])
+
+
+def _assert_only_b_kept(t):
+    assert list(t["files"]) == ["p/b.jsonl"]
+    assert t["messages"]["s1"]["files"] == {"p/b.jsonl"}
+    assert t["messages"]["s1"]["ts"] == T0 + 500
+    _assert_consistent(t)
+    su.attribute(t, {"n": (T0 - 1, T0 + 1000)}, {"n": (10, 100)}, {"n": 1.0})   # no KeyError
+    assert set(su.backfill(t, {"n": {"cost_usd": 1.0, "tokens": (10, 100)}})) == {"n"}
+
+
+def test_size_skipped_file_leaves_nothing_in_the_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(su, "MAX_FILE_BYTES", 4096)
+    _write(tmp_path, "p/a.jsonl",
+           [_a("s1", T0)] + [_padded(f"a{i}", T0 + i, 500) for i in range(20)])
+    _readable_b(tmp_path)
+    t = _load(tmp_path)
+    assert t["skipped_for_size"] == ["p/a.jsonl"]
+    _assert_only_b_kept(t)
+
+
+@pytest.mark.parametrize("how", ["truncated", "corrupted"])
+def test_unreadable_gz_sharing_a_message_leaves_nothing_in_the_result(tmp_path, how):
+    # Regression (#656): on the old code the shared record kept a.jsonl.gz in its files
+    # and its earlier ts, and _chains raised KeyError.
+    plain = _write(tmp_path, "p/a.jsonl",
+                   [_a("s1", T0)] + [_padded(f"a{i}", T0 + i, 200) for i in range(2000)])
+    data = bytearray(gzip.compress(plain.read_bytes(), mtime=0))
+    plain.unlink()
+    if how == "truncated":
+        data = data[: len(data) // 2]
+    else:
+        data[len(data) // 2] ^= 0xFF
+    gz = tmp_path / "p" / "a.jsonl.gz"
+    gz.write_bytes(bytes(data))
+    lines = su._iter_lines(gz)
+    assert b'"s1"' in next(lines)   # the shared line is read before the stream fails
+    lines.close()
+    with pytest.raises((OSError, EOFError, zlib.error)):
+        list(su._iter_lines(gz))
+    _readable_b(tmp_path)
+    t = _load(tmp_path)
+    _assert_only_b_kept(t)   # first: on the old code this is the KeyError in _chains
+    assert t["skipped_for_size"] == []
+
+
+def _record_opens(monkeypatch):
+    opened = []
+    real = su._iter_lines
+
+    def spy(path, *args, **kwargs):
+        opened.append(Path(path).name)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(su, "_iter_lines", spy)
+    return opened
+
+
+def test_call_byte_bound_skips_the_crossing_file_and_never_opens_later_ones(tmp_path,
+                                                                           monkeypatch):
+    paths = [_write(tmp_path, f"p/{n}.jsonl", [_padded(f"{n}{i}", T0 + i, 400) for i in range(5)])
+             for n in "abcd"]
+    sizes = [p.stat().st_size for p in paths]   # every line is over the floor: bytes = size
+    monkeypatch.setattr(su, "MAX_CALL_BYTES", sizes[0] + sizes[1] // 2)
+    opened = _record_opens(monkeypatch)
+    t = _load(tmp_path)
+    assert list(t["files"]) == ["p/a.jsonl"]
+    assert t["skipped_for_size"] == ["p/b.jsonl", "p/c.jsonl", "p/d.jsonl"]
+    assert opened == ["a.jsonl", "b.jsonl"]
+    assert sorted(t["messages"]) == [f"a{i}" for i in range(5)]
+
+
+def test_message_pair_bound_counts_pairs_not_distinct_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(su, "MAX_CALL_MESSAGES", 7)   # 3 distinct ids, 3 pairs per file
+    for n in "abcd":
+        _write(tmp_path, f"p/{n}.jsonl", [_a(f"m{i}", T0 + i) for i in range(3)])
+    opened = _record_opens(monkeypatch)
+    t = _load(tmp_path)
+    assert list(t["files"]) == ["p/a.jsonl", "p/b.jsonl"]
+    assert t["skipped_for_size"] == ["p/c.jsonl", "p/d.jsonl"]
+    assert opened == ["a.jsonl", "b.jsonl", "c.jsonl"]
+    assert all(rec["files"] == {"p/a.jsonl", "p/b.jsonl"} for rec in t["messages"].values())
+
+
+def test_cost_state_bound_counts_only_the_line_each_file_keeps(tmp_path, monkeypatch):
+    monkeypatch.setattr(su, "MAX_CALL_COST_STATE_BYTES", 1000)
+    short = _cs(T0, 1.0, {OPUS: _mu(1, 1, 0, 0, 1.0)})
+    long_ = dict(short, pad="x" * 5000)
+    _write(tmp_path, "p/a.jsonl", [_a("a1", T0), long_, short])   # keeps the short one
+    _write(tmp_path, "p/b.jsonl", [_a("b1", T0), long_])
+    _write(tmp_path, "p/c.jsonl", [_a("c1", T0), short])
+    opened = _record_opens(monkeypatch)
+    t = _load(tmp_path)
+    assert list(t["files"]) == ["p/a.jsonl"]
+    assert t["files"]["p/a.jsonl"]["cost_state"] == short
+    assert t["skipped_for_size"] == ["p/b.jsonl", "p/c.jsonl"]
+    assert opened == ["a.jsonl", "b.jsonl"]
+
+
+def test_line_floor_bounds_a_file_of_empty_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(su, "MAX_FILE_BYTES", 100 * su.LINE_CHARGE_FLOOR)
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "over.jsonl").write_text("\n" * 101)    # 101 bytes, charged 6464
+    (tmp_path / "p" / "under.jsonl").write_text("\n" * 100)   # charged exactly the bound
+    t = _load(tmp_path)
+    assert list(t["files"]) == ["p/under.jsonl"]
+    assert t["skipped_for_size"] == ["p/over.jsonl"]
+
+
+def test_compression_bomb_is_skipped_at_the_shipped_bounds(tmp_path):
+    (tmp_path / "p").mkdir()
+    with gzip.open(tmp_path / "p" / "bomb.jsonl.gz", "wb") as fh:   # ~70 MiB of blank lines
+        for _ in range(1120):
+            fh.write(b" " * 65535 + b"\n")
+    assert (tmp_path / "p" / "bomb.jsonl.gz").stat().st_size < 1024 * 1024
+    _write(tmp_path, "p/ok.jsonl", [_a("ok", T0)])
+    previous = signal.signal(signal.SIGALRM,
+                             lambda *_: (_ for _ in ()).throw(TimeoutError()))
+    signal.alarm(60)
+    try:
+        t = _load(tmp_path)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert t["skipped_for_size"] == ["p/bomb.jsonl.gz"]
+    assert list(t["files"]) == ["p/ok.jsonl"]
+    assert list(t["messages"]) == ["ok"]
+
+
+def _without_gz(t):
+    strip = lambda rel: rel[:-3] if rel.endswith(".gz") else rel
+    return {"files": {strip(r): info for r, info in t["files"].items()},
+            "messages": {m: dict(rec, files={strip(r) for r in rec["files"]})
+                         for m, rec in t["messages"].items()},
+            "harness_version": t["harness_version"]}
+
+
+@pytest.mark.parametrize("fixture", ["plan-run", "subagent-run", "resumed"])
+def test_normal_gzipped_store_reads_like_the_plain_files(tmp_path, fixture):
+    import shutil
+    plain = tmp_path / "plain"
+    if fixture == "resumed":
+        _resumed_chain(plain, last_cost_state=True)
+    else:
+        shutil.copytree(FIXTURES / fixture, plain)
+    store = tmp_path / "store"
+    shutil.copytree(plain, store)
+    for f in list(store.rglob("*.jsonl")):
+        _gzip(f)
+    want, got = _load(plain), _load(store)
+    assert want["skipped_for_size"] == got["skipped_for_size"] == []
+    assert got["files"] and _without_gz(got) == _without_gz(want)
