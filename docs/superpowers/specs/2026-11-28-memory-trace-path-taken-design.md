@@ -50,6 +50,16 @@ The mechanism label itself, `retrieval_mechanism: "flatfile-pathtag"` (`:616`), 
 label stays correct regardless of which path ran. This is a precision fix to the
 trace's provenance and count sub-fields, not a relabeling.
 
+**The index path is dormant in this repo today.** `scripts/memory_write.py` does not
+write `index.jsonl` (`:5`, `:241-245`); only `scripts/memory_import.py` produces rows
+the retriever accepts, and it has no caller (`docs/features.md:135`, `:203-204`;
+`docs/dark-factory-memory-v2.md:48`). `.archon/memory/` holds three `.md` files and no
+index, so every factory run takes the markdown branch. In practice this change
+therefore (a) adds `path_taken: "markdown"` to every production trace and (b) makes
+the trace correct ahead of any future activation of the index (a manual
+`memory_import.py` run, or a target repo that carries one). Consequences 1 and 2 above
+are reproducible only with a fixture index, which is why the tests must build one.
+
 ---
 
 ## Requirements
@@ -73,9 +83,12 @@ trace's provenance and count sub-fields, not a relabeling.
    exactly as today.
 5. `retrieval_mechanism` stays the literal `"flatfile-pathtag"` for both paths. No new
    mechanism value is introduced.
-6. No change to `memory-trace.json`'s consumption: `run_record.py::cmd_assemble`
-   already folds the file in verbatim with no schema check, so the new field and the
-   corrected semantics of existing fields are backward compatible by construction.
+6. No change to `memory-trace.json`'s consumption. There are two consumers:
+   `run_record.py::cmd_assemble` (`scripts/factory_core/run_record.py:1345-1350`) folds
+   the file in verbatim with no schema check, and `scripts/context_budget.py:296-306`
+   reads only `entries_selected_total`, `entries_dropped_by_cap_total` and
+   `uncapped_tokens`, none of which this change touches. Every existing field keeps
+   its name and JSON type; `schema_version` stays `1`; `path_taken` is purely additive.
 7. Existing tests pinning the markdown path's `emit_memory_trace()` behavior
    (`tests/test_memory_retrieve.py` ~line 854 class) must keep passing unmodified —
    this fix must not change markdown-path output.
@@ -84,7 +97,34 @@ trace's provenance and count sub-fields, not a relabeling.
    False`, and correct `files_loaded` counts. A second new test covers an
    `index.jsonl` that exists but whose every row gets filtered out for the current
    phase/files (expect `path_taken == "markdown"`, since `retrieve_memory()` falls
-   through to the markdown branch in that case today and continues to).
+   through to the markdown branch in that case today and continues to). A third new
+   test builds an index **and** `.md` files that disagree (different entry counts for
+   the same `source_file`, plus an area `.md` file with no index rows) and asserts the
+   trace's `files_loaded` carries the index counts and omits the unindexed file. The
+   fixture includes one `invalid` row, one expired row and one row whose `source_file`
+   is outside `area_files`, asserting `entries_total` counts the first two and not the
+   third. All new tests go in `tests/test_memory_retrieve.py` (pytest, already in CI:
+   no new `tests/test_*.sh`, no `.github/workflows/ci.yml` change).
+9. **Retrieval output is byte-identical.** This ticket is observability only: stdout of
+   `memory_retrieve.py` (what the agent sees) and its exit code must not change for any
+   input, on either path. One new test pins this for the index path: it calls
+   `scan_index()` with and without `_counts_out` on the same fixture and asserts the
+   returned candidate lists are equal. `scan_index()`'s filter order is **not**
+   changed (see Approach section 1). No change to which entries are retrieved, to
+   ranking, caps, `context_budget.py`, `budget_gate.sh`, gates, breaker, tool lists or
+   `deploy/**`.
+10. **Trace emission stays best-effort.** All new trace logic lives inside
+    `emit_memory_trace()`'s existing `try/except Exception: pass`; the accumulator code
+    in `scan_index()` is limited to dict operations on a string key that cannot raise.
+    A trace write failure never fails retrieval (the existing
+    `tests/test_memory_retrieve.py` ~line 937 test keeps passing).
+11. **Shifted doc line citation.** `docs/configuration.md:332` cites
+    `scripts/memory_retrieve.py:157-160,474`; `474` (`top_k = _get_memory_max_entries`
+    in `format_index_output()`) sits below `scan_index()` and moves when lines are
+    added there. Update that single-line citation to the new line in the same PR (the
+    reference checker validates ranges only and will not flag it). Citations at or
+    above `:365` (`:5`-`:6`, `:78-79`, `:110-130`, `:157-160`, `:163-190`, `:365`) do
+    not move. This is the only doc edit in scope.
 
 ---
 
@@ -96,14 +136,20 @@ not a separate source — it is never edited directly.
 
 ### 1. `scan_index()` gains an optional counts accumulator
 
-`scan_index()` (`:365-432`) already filters strictly by `source_file in area_set`
-before any other check runs (today at `:393-395`). Move that check to the top of the
-loop body (ahead of the `status`/`is_expired` checks it currently follows), and add an
-optional `_counts_out` dict param that tracks, per `source_file`, how many rows were
-considered (`total`) vs. survived every filter and were actually appended as a
-candidate (`included`). Reordering the checks does not change which candidates are
-returned — all the filters are ANDed — it only changes when per-file bookkeeping can
-be attributed to a `source_file` bucket.
+`scan_index()` (`:365-432`) filters by `status`/expiry (`:388-391`) and then by
+`source_file in area_set` (`:393-395`). Add an optional `_counts_out` dict param that
+tracks, per `source_file`, how many rows were considered (`total`) vs. survived every
+filter and were actually appended as a candidate (`included`).
+
+**The existing filter checks keep their current order.** Only the *read* of
+`source_file` is hoisted above the `status`/expiry checks so `total` can be attributed
+before a row is dropped; the `source_file not in area_set` guard itself stays where it
+is. Reordering the guards would not be behavior-preserving: `retrieve_memory()` only
+catches `OSError`/`ValueError` (`:540`), so a row that is `invalid`/expired *and*
+carries an unhashable `source_file` (e.g. a JSON list) is skipped today but would raise
+an uncaught `TypeError` from `in area_set` if that guard ran first: a retrieval crash
+introduced by an observability ticket. The counting line is guarded by
+`isinstance(source_file, str)` for the same reason.
 
 ```python
 def scan_index(memory_dir, area_files, files, allowed_sources, _counts_out=None):
@@ -117,17 +163,19 @@ def scan_index(memory_dir, area_files, files, allowed_sources, _counts_out=None)
         except json.JSONDecodeError:
             continue
 
-        source_file = entry.get("source_file", "")
-        if source_file not in area_set:
-            continue
-        counts = _counts_out.setdefault(source_file, {"total": 0, "included": 0}) \
-            if _counts_out is not None else None
-        if counts is not None:
+        source_file = entry.get("source_file", "")   # read hoisted; guard below unmoved
+        counts = None
+        if (_counts_out is not None and isinstance(source_file, str)
+                and source_file in area_set):
+            counts = _counts_out.setdefault(source_file, {"total": 0, "included": 0})
             counts["total"] += 1
 
         if entry.get("status") in ("provisional", "invalid"):
             continue
         if is_expired(entry.get("expires_at", ""), today):
+            continue
+
+        if source_file not in area_set:
             continue
 
         path_prefixes = entry.get("path_prefixes") or []
@@ -269,6 +317,11 @@ the key — this preserves the existing direct-call unit tests
 `allowed_sources` by hand and never go through `retrieve_memory()`, so they never see
 `cap_counts["path_taken"]`.
 
+On the index branch, `files_loaded[].path` keeps its existing type and shape
+(`str(memory_dir / fname)`): it names the `source_file` bucket the index rows belong
+to, not a file that was read (the `.md` file may not exist). `path_taken == "index"`
+is what tells a reader to interpret it that way.
+
 On the index branch, a `fname` with no entry in `index_counts` (zero rows for that
 `source_file` existed in `index.jsonl`) is simply omitted from `files_loaded` — it is
 not treated as a fallback condition. That concept (a specific area file's `.md` being
@@ -302,10 +355,13 @@ always populated when a non-`None` dict is passed in, on both paths).
   ticket only changes what the trace *reports*; it does not touch
   `memory_import.py`/`memory_maintain.py` or attempt to keep the two corpora in sync.
 - **No `docs/dark-factory-memory-v2.md` / `docs/dark-factory-memory-contract.md`
-  update is required by this spec** — neither doc currently documents the trace's
-  internal schema (only the CLI flags and the retrieval dual-path), so there is no
-  existing claim this change makes stale. Documenting the trace schema for the first
-  time is a nice-to-have left to the implementer's judgment, not a requirement.
+  update** — neither doc documents the trace's internal schema (only the CLI flags and
+  the retrieval dual-path), so there is no existing claim this change makes stale.
+  Documenting the trace schema for the first time is out of scope. The only doc edit
+  is the shifted line citation in Requirement 11.
+- **The index path is not activated.** Nothing here runs `memory_import.py`, writes
+  `index.jsonl`, or changes `memory_write.py` (sibling ticket #38 adds a `--kind`
+  argument there; no file overlap with this ticket).
 
 ---
 
@@ -352,10 +408,8 @@ always populated when a non-`None` dict is passed in, on both paths).
 - `cap_counts` is always a fresh, per-invocation dict (`main()` creates `cap_counts: dict
   = {}` once per CLI call, `:706`) — there is no cross-call state leakage to account
   for when reading `cap_counts.get("path_taken", ...)`.
-- The reordering inside `scan_index()` (moving the `source_file`/`area_set` check ahead
-  of the `status`/`is_expired` checks) is behavior-preserving for the returned
-  `candidates` list — verified by inspection (all checks are independent `continue`
-  guards ANDed together; reordering independent AND-ed guards cannot change which rows
-  survive all of them). The existing `TestScanIndex` test class in
-  `tests/test_memory_retrieve.py` is the regression guard for this during
-  implementation.
+- `scan_index()`'s guards are not reordered, so its returned `candidates` list and its
+  exception behavior are unchanged by construction; `_counts_out=None` (the default)
+  executes no new statements beyond the hoisted `entry.get("source_file", "")` read.
+  The existing `TestScanIndex` class plus the Requirement 9 equality test are the
+  regression guard.
