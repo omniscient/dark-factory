@@ -967,7 +967,10 @@ and status `PASS`, and a PR exists (`:37-56`). Then it posts "Addressing N advis
 finding(s) from code review...", has a subagent (inherited model) edit the files, and if
 the tree changed commits `fix(review): address N advisory finding(s) from AI code review`
 with `git add -u`, pushes, posts an "Advisory Findings Addressed" PR review comment and
-writes `revise_advisory.md` (`:60-189`). These changes are pushed after validation,
+writes `revise_advisory.md` (`:60-202`). Before staging, when the clone has
+`docs/.citation-lock.yaml`, it runs `scripts/docs_refs_check.py --rederive --base HEAD` on
+the four reference docs (fail-open) so `commands/*.md` citations the fix moved are
+re-derived in the same commit. These changes are pushed after validation,
 conformance and code review have run; nothing re-runs those on the revised code.
 
 ### E. Close
