@@ -363,7 +363,8 @@ Each row cites the test that pins the behaviour: `proxy` is `tests/test_factory_
 classifies only `502`/`503`/`504`. A `500` from the runtime, which is how an out-of-memory or
 full-disk load failure is likely to surface, is forwarded with no failure class. It is still never
 retried and never sent to the cloud. This runbook does not fix it: the classification is #558's to
-extend and #238's taxonomy to rename. It is a candidate spillover ticket.
+extend (#238's taxonomy kept the adapter's class names and adds none for it). It is a candidate
+spillover ticket.
 
 ## Enable / disable / rollback
 

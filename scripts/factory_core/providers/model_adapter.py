@@ -15,6 +15,13 @@ import uuid
 from types import MappingProxyType
 
 from factory_core.providers import model_endpoint
+# Contract §4.6's failure classes: owned (with their declared policy) by
+# factory_core/failure_taxonomy.py (#238); re-exported here, values and order unchanged.
+from factory_core.failure_taxonomy import (  # noqa: F401
+    CANCELLATION, CAPABILITY_EVIDENCE_INVALID, DESTINATION_POLICY_DENIAL, ENDPOINT_UNREACHABLE,
+    FAILURE_CLASSES, PROTOCOL_INCOMPATIBILITY, TIMEOUT_CONNECT, TIMEOUT_IDLE,
+    TIMEOUT_TIME_TO_FIRST_TOKEN, TIMEOUT_TOTAL,
+)
 
 CORRELATION_HEADER = "X-Factory-Correlation"
 REFUSAL_TYPE = "factory_model_adapter_refused"
@@ -29,23 +36,6 @@ DEFERRED_TOOL_FIELD = "defer_loading"
 STRUCTURED_OUTPUT_FIELDS = ("output_config", "output_format")
 # A local upstream answering one of these is not ready: forwarded unchanged, never retried.
 NOT_READY_STATUSES = (502, 503, 504)
-
-# Contract §4.6's interim failure classes; #238's names supersede these when it ships.
-ENDPOINT_UNREACHABLE = "endpoint_unreachable"
-TIMEOUT_CONNECT = "timeout_connect"
-TIMEOUT_TIME_TO_FIRST_TOKEN = "timeout_time_to_first_token"
-TIMEOUT_IDLE = "timeout_idle"
-TIMEOUT_TOTAL = "timeout_total"
-CANCELLATION = "cancellation"
-PROTOCOL_INCOMPATIBILITY = "protocol_incompatibility"
-# Startup-only: evidence problems fail load_verified_entry(), never a request (spec Req. 14).
-CAPABILITY_EVIDENCE_INVALID = "capability_evidence_invalid"
-DESTINATION_POLICY_DENIAL = "destination_policy_denial"
-FAILURE_CLASSES = (
-    ENDPOINT_UNREACHABLE, TIMEOUT_CONNECT, TIMEOUT_TIME_TO_FIRST_TOKEN, TIMEOUT_IDLE,
-    TIMEOUT_TOTAL, CANCELLATION, PROTOCOL_INCOMPATIBILITY, CAPABILITY_EVIDENCE_INVALID,
-    DESTINATION_POLICY_DENIAL,
-)
 
 _MESSAGE_STOP_RE = re.compile(rb'"type"\s*:\s*"message_stop"')
 

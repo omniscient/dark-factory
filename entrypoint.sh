@@ -522,14 +522,18 @@ _failure_phase_for_intent() {
 
 # Classifies the current failure and drops the signature file the scheduler reads back on
 # its next poll (mirrors _handle_session_window_pause's sentinel-file pattern). Called from
-# two places: (1) the main archon-workflow loop's real-failure branch, with the captured
-# transcript — the functionally load-bearing call, since that is where a real task failure
-# (test_failure, build_failure, oos_files) is actually observed; (2) both branches of
-# on_failure() (the ERR trap), with no transcript, covering early/setup-phase crashes before
-# the main loop ever runs — these classify as environmental:delivery_failure by construction
-# (fast, zero commits, no artifact), which is the correct, conservative outcome.
+# two places: (1) both branches of on_failure() (the ERR trap). On an ordinary workflow
+# failure this is the call that runs, with the workflow's captured transcript: bash fires
+# ERR on the failed pipeline and on_failure's own `set -e` ends the shell when it returns
+# (#238). A crash before the workflow has no transcript and classifies as
+# environmental:delivery_failure by construction (fast, zero commits, no artifact).
+# (2) The workflow loop's failure branch, reached only when on_failure returned for a
+# session-window pause and the loop's own pause check then disagrees.
+# Sets ERROR_SIGNATURE_WRITTEN to the signature written, or "" (#238). Call it as a plain
+# command, never in $(…): errexit must still apply inside it.
 _write_error_signature() {
   local phase="$1" exit_code="$2" text_file="${3:-}"
+  ERROR_SIGNATURE_WRITTEN=""
   [ -z "${ISSUE_NUM:-}" ] && return 0
   local elapsed_seconds=0
   if [ -n "${RUN_STARTED_AT:-}" ]; then
@@ -589,14 +593,29 @@ _write_error_signature() {
   # substantive:endpoint_unreachable failure; the flag is passed only on local (default argv
   # unchanged, as in _handle_session_window_pause). #633: on local, a clone cli.py that
   # rejects the flag falls back to the baked copy, flag intact; its output is discarded.
+  local es_out=""
   if [ "${DF_ENDPOINT_HOSTING:-cloud}" = "local" ]; then
-    _cli_with_hosting_fallback "${es_args[@]}" --hosting-location local >/dev/null 2>&1 || true
+    es_out=$(_cli_with_hosting_fallback "${es_args[@]}" --hosting-location local 2>/dev/null) || true
   else
     # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
     # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${es_args[@]}" \
-      2>/dev/null || true
+    es_out=$(python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" "${es_args[@]}" \
+      2>/dev/null) || true
+    # Printed to the container log as before; the local path discards it, as before.
+    [ -z "$es_out" ] || printf '%s\n' "$es_out"
   fi
+  # #238: the verb prints `signature=<sig>` after a successful write (cli.py:214) as the
+  # last thing it writes; no such line means nothing was written. Anchored on the actual
+  # last line of $es_out (not "the last line anywhere that matches the pattern"): on the
+  # local path, _cli_with_hosting_fallback merges the CLI's stderr into $es_out via its own
+  # internal `2>&1`, so an unrelated stderr line that happened to start with `signature=`
+  # would otherwise be taken as the written signature if it sorted after the real one.
+  local _es_last_line
+  _es_last_line=$(printf '%s\n' "$es_out" | tail -n 1)
+  case "$_es_last_line" in
+    signature=*) ERROR_SIGNATURE_WRITTEN="${_es_last_line#signature=}" ;;
+    *) ERROR_SIGNATURE_WRITTEN="" ;;
+  esac
 }
 
 # --- Keep this run's Claude Code session transcripts (#645 requirement 7) ---
@@ -822,6 +841,10 @@ ${SUMMARY_LINE}"
   [ -n "${LEDGER_WRITE_WARNING:-}" ] && LEDGER_NOTE="
 
 > ⚠️ ${LEDGER_WRITE_WARNING}"
+  # #238: set by _write_error_signature below; read by the annotate step at the end. Reset
+  # here as well as in the function: the issue-less and close paths never call it and must
+  # not reuse a stale value.
+  ERROR_SIGNATURE_WRITTEN=""
   if [ -n "${ISSUE_NUM:-}" ] && [ "$INTENT" != "close" ]; then
     if [ "$INTENT" = "refine" ] || [ "$INTENT" = "plan" ] || [ "$INTENT" = "deconflict" ]; then
       # No board status change here — the scheduler's trip_to_blocked() handles the
@@ -870,6 +893,15 @@ ${LEDGER_NOTE}
 ---
 ${FOOTER}"
     fi
+  fi
+  # #238: add the written signature's failure class to the record assembled above. Last
+  # before the cost report and bounded: nothing new may stand between a failure and its
+  # board move and comment. Any exit status is ignored; a clone cli.py that predates the
+  # verb only loses the annotation. TARGET-PATH: as above.
+  if [ -n "${ERROR_SIGNATURE_WRITTEN:-}" ] && [ -n "${ARTIFACTS_DIR:-}" ]; then
+    timeout -k 5 20 python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record annotate-failure \
+      --run-id "${RUN_ID:-unknown}" --out-file "$ARTIFACTS_DIR/run-record.json" \
+      --failure-signature "$ERROR_SIGNATURE_WRITTEN" >/dev/null 2>&1 || true
   fi
   # Cost report runs LAST and is non-fatal: a failure here (missing dependency,
   # cost-JSON schema drift) must never abort the trap before the Blocked transition

@@ -904,7 +904,7 @@ def test_assemble_attaches_harness_economics_ungated(tmp_path, monkeypatch):
     assert he["ledger_rows_correlated"] == 0
     assert he["ledger_mechanics"] is None
     assert he["retry_spend"] == {"tokens": None, "request_count": None}
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_assemble_harness_economics_delivered_clean_with_cost(tmp_path, monkeypatch):
@@ -989,7 +989,7 @@ def test_assemble_harness_economics_failure_spend_whole_run_when_blocked(tmp_pat
     rec = json.loads(out.read_text())
     he = rec["harness_economics"]
     assert he["outcome"]["state"] == "blocked"
-    assert he["failure_spend"] == {"tokens": 150, "basis": "whole_run"}
+    assert he["failure_spend"] == {"tokens": 150, "basis": "whole_run", "by_class": {}}
 
 
 def test_assemble_harness_economics_with_ledger_rows(tmp_path, monkeypatch):
@@ -1509,8 +1509,8 @@ _CHECK_SILENT_DEATH = {"artifact_present": False, "needs_discussion": False, "la
 _CHECK_LOOKUP_ERROR = {"artifact_present": False, "needs_discussion": False, "label_lookup": "error"}
 
 
-def test_policy_version_is_1_1():
-    assert rr.POLICY_VERSION == "1.1"
+def test_policy_version_is_1_2():
+    assert rr.POLICY_VERSION == "1.2"
 
 
 def test_outcome_artifact_present_stays_produced_ungated():
@@ -1580,24 +1580,24 @@ def _economics(tmp_path, artifact_check=None, **overrides):
 
 def test_harness_economics_clean_abort_keeps_retry_only_failure_spend(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_CLEAN_ABORT)
-    assert he["policy_version"] == "1.1"
+    assert he["policy_version"] == "1.2"
     assert he["outcome"]["state"] == "clean_abort"
     assert he["factory_cpm"] == 0.0
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_harness_economics_artifactless_failed_is_whole_run_spend(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_SILENT_DEATH)
     assert he["outcome"]["state"] == "failed"
     assert he["factory_cpm"] == 0.0
-    assert he["failure_spend"] == {"tokens": 500, "basis": "whole_run"}
+    assert he["failure_spend"] == {"tokens": 500, "basis": "whole_run", "by_class": {}}
 
 
 def test_harness_economics_artifact_present_scores_like_legacy(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_PRESENT)
     assert he["outcome"]["state"] == "produced_ungated"
     assert he["factory_cpm"] == pytest.approx(2000.0)  # 1.0 * 1e6 / 500 tokens
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_harness_economics_without_artifact_check_unchanged(tmp_path):
@@ -1605,7 +1605,28 @@ def test_harness_economics_without_artifact_check_unchanged(tmp_path):
     assert he["outcome"]["state"] == "produced_ungated"
     assert "artifact_check" not in he["outcome"]["evidence"]
     assert he["factory_cpm"] == pytest.approx(2000.0)
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
+
+
+def test_failure_spend_by_class_counts_ledger_failure_rows(tmp_path):
+    rows = [
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle",
+         "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 5},
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle",
+         "gen_ai.usage.input_tokens": 10},
+        {"run_id": "run-447", "status": 200, "failure_class": None,
+         "gen_ai.usage.input_tokens": 999, "gen_ai.usage.output_tokens": 999},
+        {"run_id": "run-447", "status": 403, "failure_class": "destination_policy_denial"},
+    ]
+    he = _economics(tmp_path, ledger=(rows, True))
+    # Per-class tokens are summed from the rows' own usage, like retry_spend; a row
+    # without usage fields counts as 0.
+    assert he["failure_spend"]["by_class"] == {
+        "timeout_idle": {"tokens": 45, "basis": "ledger_rows", "request_count": 2},
+        "destination_policy_denial": {"tokens": 0, "basis": "ledger_rows", "request_count": 1},
+    }
+    # No ledger: an empty dict, never a missing key.
+    assert _economics(tmp_path)["failure_spend"]["by_class"] == {}
 
 
 class _FakeCompleted:
@@ -2404,7 +2425,7 @@ def test_backfill_keeps_failed_verdict_for_artifactless_refine(tmp_path, monkeyp
     updated = json.loads(path.read_text())
     assert updated["artifact_check"] == _CHECK_SILENT_DEATH
     he = updated["harness_economics"]
-    assert he["policy_version"] == "1.1"
+    assert he["policy_version"] == "1.2"
     assert he["outcome"]["state"] == "failed"
     assert he["outcome"]["score"] == 0.0
 
@@ -3594,3 +3615,245 @@ def test_hosting_location_is_cloud_only_when_the_ledger_says_so(hosting, expecte
     node = {"node_id": "plan", "cost_usd": 1.0,
             "models": [{"model": _OPUS, "input_tokens": 1, "output_tokens": 1, "cost_usd": 1.0}]}
     assert rr._with_usage_keys(node, True, None, hosting)["hosting_location"] == expected
+
+
+# ---------------------------------------------------------------------------
+# annotate-failure (#238)
+# ---------------------------------------------------------------------------
+
+def _assemble_failed(tmp_path, monkeypatch, ledger=None):
+    """A failed run abc123 with 150 tokens: failure_spend {tokens: 150, basis: whole_run}."""
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    monkeypatch.setattr(rr, "LEDGER_PATH", ledger or tmp_path / "no-ledger.jsonl")
+    cost_json = tmp_path / "cost.json"
+    cost_json.write_text(json.dumps({
+        "runId": "abc123",
+        "nodes": [{"nodeId": "implement", "inputTokens": 100, "outputTokens": 50,
+                   "costUsd": 0.01, "durationMs": 1000, "modelUsage": {}}],
+        "totals": {"costUsd": 0.01, "inputTokens": 100, "outputTokens": 50},
+    }))
+    out = tmp_path / "run-record.json"
+    args = _AssembleArgs(tmp_path, out)
+    args.archon_cost_json = str(cost_json)
+    args.status = "failed"
+    rr.cmd_assemble(args)
+    return out
+
+
+def _annotate(monkeypatch, out, sig, run_id="abc123"):
+    monkeypatch.setattr(sys, "argv", ["run_record", "annotate-failure", "--run-id", run_id,
+                                      "--out-file", str(out), "--failure-signature", sig])
+    rr.main()
+
+
+def _by_class(path):
+    return json.loads(Path(path).read_text())["harness_economics"]["failure_spend"]["by_class"]
+
+
+def _jsonl_rows(tmp_path):
+    p = tmp_path / "runs.jsonl"
+    return len(p.read_text().splitlines()) if p.exists() else 0
+
+
+def test_annotate_failure_sets_by_class_from_signature(tmp_path, monkeypatch):
+    import stat as _stat
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    before = {p: json.loads(p.read_text()) for p in (out, durable)}
+    modes = {p: _stat.S_IMODE(p.stat().st_mode) for p in (out, durable)}
+    rows_before = _jsonl_rows(tmp_path)
+
+    _annotate(monkeypatch, out, "substantive:build_failure:1")
+
+    for p in (out, durable):
+        after = json.loads(p.read_text())
+        assert after["harness_economics"]["failure_spend"]["by_class"] == {
+            "build_failure": {"tokens": 150, "basis": "whole_run"}}
+        after["harness_economics"]["failure_spend"]["by_class"] = {}
+        assert after == before[p]  # no other key changed
+        assert _stat.S_IMODE(p.stat().st_mode) == modes[p]
+    assert _jsonl_rows(tmp_path) == rows_before  # nothing appended to runs.jsonl
+
+
+def test_annotate_failure_leaves_a_bad_record_alone(tmp_path, monkeypatch):
+    missing = tmp_path / "missing.json"
+    _annotate(monkeypatch, missing, "substantive:unknown:1")
+    assert not missing.exists()
+    for name, body in (("garbage.json", "not json{"),
+                       ("no-he.json", json.dumps({"run_id": "abc123"})),
+                       ("list.json", json.dumps([1, 2]))):
+        p = tmp_path / name
+        p.write_text(body)
+        mtime = p.stat().st_mtime_ns
+        _annotate(monkeypatch, p, "substantive:unknown:1")
+        assert p.read_text() == body and p.stat().st_mtime_ns == mtime, name
+    # Through the real CLI: exit status 0 on a missing record.
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "scripts"),
+           "SCHEDULER_STATE_DIR": str(tmp_path / "cli-state")}
+    import subprocess
+    cli = Path(__file__).resolve().parents[1] / "scripts" / "factory_core" / "cli.py"
+    res = subprocess.run([sys.executable, str(cli), "run-record", "annotate-failure",
+                          "--run-id", "abc123", "--out-file", str(missing),
+                          "--failure-signature", "substantive:unknown:1"],
+                         env=env, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+
+
+def test_annotate_failure_never_copies_one_record_onto_another(tmp_path, monkeypatch):
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    other_rec = json.loads(out.read_text())
+    other_rec["run_id"] = "other-run"
+    other = tmp_path / "other-run.json"
+    other.write_text(json.dumps(other_rec, indent=2))
+    other_bytes = other.read_bytes()
+
+    # Out-file is a symlink to another run's record: not followed; the durable copy is
+    # annotated from its own content.
+    out.unlink()
+    out.symlink_to(other)
+    _annotate(monkeypatch, out, "substantive:build_failure:1")
+    assert out.is_symlink() and os.readlink(out) == str(other)
+    assert other.read_bytes() == other_bytes
+    durable_rec = json.loads(durable.read_text())
+    assert durable_rec["run_id"] == "abc123"
+    assert _by_class(durable) == {"build_failure": {"tokens": 150, "basis": "whole_run"}}
+
+    # A regular record whose run_id is not --run-id is not rewritten.
+    stranger = tmp_path / "stranger.json"
+    stranger.write_text(json.dumps(other_rec))
+    stranger_bytes = stranger.read_bytes()
+    _annotate(monkeypatch, stranger, "substantive:test_failure:1")
+    assert stranger.read_bytes() == stranger_bytes
+
+    # A durable path that is a symlink is left alone.
+    target = tmp_path / "durable-target.json"
+    target.write_text(durable.read_text())
+    target_bytes = target.read_bytes()
+    durable.unlink()
+    durable.symlink_to(target)
+    _annotate(monkeypatch, stranger, "substantive:test_failure:1")
+    assert durable.is_symlink() and target.read_bytes() == target_bytes
+
+
+@pytest.mark.skipif(_is_root() or sys.platform == "win32",
+                    reason="chmod does not restrict root; POSIX permissions only")
+def test_annotate_failure_read_only_durable_dir_still_annotates_out_file(tmp_path, monkeypatch, capsys):
+    out = _assemble_failed(tmp_path, monkeypatch)
+    durable = rr._durable_run_record_path("abc123")
+    durable.parent.chmod(0o555)
+    try:
+        _annotate(monkeypatch, out, "substantive:build_failure:1")
+    finally:
+        durable.parent.chmod(0o755)
+    assert _by_class(out) == {"build_failure": {"tokens": 150, "basis": "whole_run"}}
+    assert _by_class(durable) == {}
+    assert not [p for p in durable.parent.iterdir() if p.name.endswith(".tmp")]
+    assert not [p for p in out.parent.iterdir() if p.name.endswith(".tmp")]
+    assert "annotate-failure could not rewrite" in capsys.readouterr().err
+
+
+def test_failure_spend_by_class_adds_ledger_request_counts(tmp_path, monkeypatch):
+    ledger = tmp_path / "request-ledger.jsonl"
+    row = {"run_id": "abc123", "status": 504, "failure_class": "timeout_idle",
+           "hosting_location": "local", "endpoint_id": "local-test",
+           "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0}
+    ledger.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, "substantive:unknown:1")
+    assert _by_class(out) == {
+        "substantive_unknown": {"tokens": 150, "basis": "whole_run"},
+        "timeout_idle": {"tokens": 0, "basis": "ledger_rows", "request_count": 2},
+    }
+
+
+def test_annotate_failure_keeps_the_ledger_request_count_of_the_same_class(tmp_path, monkeypatch):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({"run_id": "abc123", "status": 504,
+                                  "failure_class": "endpoint_unreachable",
+                                  "hosting_location": "local", "endpoint_id": "local-test",
+                                  "gen_ai.usage.input_tokens": 7}) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
+    # The phase-level spend takes the flat keys; the ledger part moves under "ledger", so
+    # a whole_run token total never sits next to a count of ledger requests.
+    expected = {"endpoint_unreachable": {
+        "tokens": 150, "basis": "whole_run",
+        "ledger": {"tokens": 7, "basis": "ledger_rows", "request_count": 1}}}
+    assert _by_class(out) == expected
+    # Annotating again does not nest the ledger part a second time.
+    _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
+    assert _by_class(out) == expected
+
+
+# Spec test 8: four hybrid failures (outage, OOM/stalled stream, forbidden destination,
+# cancelled/partial stream). Each: the ledger class is one of the nine verbatim values,
+# the record reports a single local destination, the outcome is failed, and no class
+# authorizes a different destination or a fallback.
+_HYBRID_CASES = [
+    ("local_endpoint_outage", "endpoint_unreachable", "substantive:endpoint_unreachable:1"),
+    ("local_oom_stalled_stream", "timeout_idle", "substantive:unknown:1"),
+    ("forbidden_destination", "destination_policy_denial", "substantive:unknown:1"),
+    ("cancelled_partial_stream", "cancellation", "substantive:unknown:1"),
+]
+
+
+@pytest.mark.parametrize("failure_class,signature", [c[1:] for c in _HYBRID_CASES],
+                         ids=[c[0] for c in _HYBRID_CASES])
+def test_hybrid_failure_is_recorded_without_export_or_backend_switch(
+        failure_class, signature, tmp_path, monkeypatch):
+    from factory_core import failure_taxonomy as ft
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "run_id": "abc123", "status": 502, "failure_class": failure_class,
+        "hosting_location": "local", "endpoint_id": "local-test", "role": "worker",
+        "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0,
+    }) + "\n" + json.dumps({  # another run's cloud request: must never be correlated here
+        "run_id": "some-other-run", "status": 200, "failure_class": None,
+        "hosting_location": "cloud", "endpoint_id": None,
+        "gen_ai.usage.input_tokens": 5, "gen_ai.usage.output_tokens": 5,
+    }) + "\n")
+    out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
+    _annotate(monkeypatch, out, signature)
+
+    rec = json.loads(out.read_text())
+    result = rec["model_dispatch"]["result"]
+    assert failure_class in ft.FAILURE_CLASSES                       # (a)
+    assert result["failure_classes_seen"] == [failure_class]
+    assert result["hosting_location"] == "local"                     # (b) one, local destination
+    assert result["endpoint_id"] == "local-test"
+    assert result["request_count"] == 1                              # the cloud row is not this run's
+    assert rec["harness_economics"]["ledger_rows_correlated"] == 1
+    assert result["outcome"] == "failed"                             # (c)
+    cls = ft.FAILURE_TAXONOMY[failure_class]                          # (d)
+    assert cls.cross_endpoint_retry is False
+    assert cls.fallback_model_allowed is False and cls.fallback_phase_allowed is False
+    by_class = rec["harness_economics"]["failure_spend"]["by_class"]
+    ledger_part = by_class[failure_class]
+    if failure_class == ft.class_for_signature(signature):  # same class: nested apart
+        ledger_part = ledger_part["ledger"]
+    assert ledger_part == {"tokens": 0, "basis": "ledger_rows", "request_count": 1}
+    assert by_class[ft.class_for_signature(signature)]["basis"] == "whole_run"
+
+
+def test_policy_version_bump_is_additive(tmp_path, monkeypatch):
+    # A pre-1.2 record (no by_class) still rolls up and can still be annotated.
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "run_id": "old-run", "issue_number": 238, "intent": "fix", "stage": "implement",
+        "status": 200, "gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1,
+    }) + "\n")
+    record_path = tmp_path / "runs" / "old-run" / "run-record.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps({
+        "run_id": "old-run", "totals": {"cost_usd": 0.5},
+        "harness_economics": {"policy_version": "1.1", "outcome": {"state": "failed"},
+                              "factory_cpm": 0.0,
+                              "failure_spend": {"tokens": 2, "basis": "whole_run"}},
+    }))
+    result = rr._build_issue_economics(238, ledger_path=ledger, artifacts_root=tmp_path / "runs")
+    entry = result["runs"]["old-run"]
+    assert (entry["outcome_state"], entry["cost_usd"], entry["factory_cpm"]) == ("failed", 0.5, 0.0)
+    _annotate(monkeypatch, record_path, "substantive:build_failure:1", run_id="old-run")
+    assert _by_class(record_path) == {"build_failure": {"tokens": 2, "basis": "whole_run"}}

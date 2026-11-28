@@ -13,8 +13,10 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import traceback
 import urllib.error
 import urllib.request
@@ -23,12 +25,13 @@ from datetime import datetime, timezone
 from . import model_proxy
 from . import session_usage
 from . import verdict as _verdict
+from .failure_taxonomy import class_for_signature
 
 SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/lib/dark-factory"))
 JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
-POLICY_VERSION = "1.1"
+POLICY_VERSION = "1.2"
 GATE_STAGE_NAMES = ("validation", "conformance", "review")
 _BLOCKING_VERDICTS = {
     "validation": {"FAIL"},
@@ -1006,6 +1009,21 @@ def _compute_harness_economics(
         failure_spend = {"tokens": tokens_per_task, "basis": "whole_run"}
     else:
         failure_spend = {"tokens": retry_spend["tokens"] or 0, "basis": "retry_only"}
+    # #238 (policy 1.2): failure spend per failure class. Ledger rows count requests and
+    # sum their input+output tokens per adapter class here (as _compute_retry_spend does);
+    # `run-record annotate-failure` adds the run's own phase-level class (from its error
+    # signature) to the assembled record afterwards. Observed spend only: a class's
+    # declared token_budget_multiplier lives in failure_taxonomy, never here.
+    by_class: dict = {}
+    if ledger_available:
+        for row in rows:
+            rc = row.get("failure_class")
+            if not rc:
+                continue
+            entry = by_class.setdefault(rc, {"tokens": 0, "basis": "ledger_rows", "request_count": 0})
+            entry["tokens"] += row.get("gen_ai.usage.input_tokens", 0) + row.get("gen_ai.usage.output_tokens", 0)
+            entry["request_count"] += 1
+    failure_spend["by_class"] = by_class
 
     return {
         "policy_version": POLICY_VERSION,
@@ -1397,6 +1415,90 @@ def cmd_assemble(args) -> None:
             print(f"run-record: failed to write durable record {durable_path}: {exc}", file=sys.stderr)
 
 
+def _annotate_failure_class(path: "pathlib.Path | None", run_id: str, failure_class: str) -> None:
+    """Set failure_spend.by_class[failure_class] from this record's own failure_spend (#238).
+
+    Skips, without writing, anything that is not a regular file (a symlink is never
+    followed), does not parse to a JSON object for run_id, or has no failure_spend dict.
+    Rewrites through a temp file in the same directory and os.replace, keeping the file's
+    mode; an OSError leaves the file as it was and removes the temp file.
+    """
+    if path is None:
+        return
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # fstat the fd we actually have open, not a separate lstat(path) call: that would
+        # leave a window where a regular file swapped for something else between the two
+        # calls is read anyway, with the stale lstat's mode later applied to the rewrite.
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = None  # fdopen now owns the fd; avoid closing it twice
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if not isinstance(record, dict) or record.get("run_id") != run_id:
+        return
+    he = record.get("harness_economics")
+    fs = he.get("failure_spend") if isinstance(he, dict) else None
+    if not isinstance(fs, dict):
+        return
+    by_class = fs.get("by_class")
+    if not isinstance(by_class, dict):
+        by_class = fs["by_class"] = {}
+    entry = by_class.get(failure_class)
+    if not isinstance(entry, dict):
+        entry = by_class[failure_class] = {}
+    elif entry.get("basis") == "ledger_rows":
+        # The ledger part already counted this class: keep it apart under "ledger", so the
+        # record's tokens/basis below never sit next to a count of ledger requests.
+        entry = by_class[failure_class] = {"ledger": entry}
+    # The record's failure_spend tokens/basis (fs["basis"] can be "whole_run" or
+    # "retry_only", not always "the run's whole-run spend").
+    entry.update({"tokens": fs.get("tokens"), "basis": fs.get("basis")})
+    tmp = None
+    try:
+        tmp_fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, indent=2))
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        os.replace(tmp, path)
+    except OSError as exc:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        print(f"run-record: annotate-failure could not rewrite {path}: {exc}", file=sys.stderr)
+
+
+def cmd_annotate_failure(args) -> None:
+    """Record the failure signature's class on this run's assembled record (#238).
+
+    Called by entrypoint.sh's on_failure after the signature write, which runs after
+    `assemble`. The out-file and the durable copy are each annotated from their own content;
+    one is never copied onto the other. Appends nothing to runs.jsonl, posts nothing to Seq
+    (assembling again would do both) and always exits 0. Consequence: runs.jsonl rows and
+    the Seq event already emitted by `assemble` for this run never carry this run's own
+    phase-level failure class — only run-record.json and its durable copy do. A consumer
+    that reads runs.jsonl/Seq instead of the run record will not see it.
+    """
+    failure_class = class_for_signature(args.failure_signature)
+    for path in (pathlib.Path(args.out_file), _durable_run_record_path(args.run_id)):
+        try:
+            _annotate_failure_class(path, args.run_id, failure_class)
+        except Exception as exc:  # never fail the ERR trap that calls this
+            print(f"run-record: annotate-failure skipped {path}: {exc}", file=sys.stderr)
+
+
 def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, artifacts_root: pathlib.Path) -> dict:
     """Read-only rollup over request-ledger.jsonl, grouped by run/issue/phase.
 
@@ -1613,6 +1715,12 @@ def main() -> None:
     be.add_argument("--artifacts-root", required=True)
     be.add_argument("--ledger-path", default=None)
 
+    af = sub.add_parser("annotate-failure",
+                        help="Add the failure signature's class to an assembled record (#238)")
+    af.add_argument("--run-id", required=True)
+    af.add_argument("--out-file", required=True)
+    af.add_argument("--failure-signature", required=True)
+
     bu = sub.add_parser("backfill-usage",
                         help="Add model/cache usage to a durable run record from retained transcripts")
     bu.add_argument("--run-id", required=True)
@@ -1635,6 +1743,8 @@ def main() -> None:
         cmd_backfill_economics(parsed)
     elif parsed.cmd == "backfill-usage":
         cmd_backfill_usage(parsed)
+    elif parsed.cmd == "annotate-failure":
+        cmd_annotate_failure(parsed)
 
 
 if __name__ == "__main__":
