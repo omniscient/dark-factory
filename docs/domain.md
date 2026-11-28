@@ -28,7 +28,7 @@ Single-context repo:
 └── tests/
 ```
 
-Note: `docs/superpowers/specs/` holds **in-flight** feature specifications; `docs/superpowers/plans/` holds **in-flight** implementation plans. Both are write-once artifacts — shipped specs/plans are archived to `docs/archive/` automatically when an implementation PR is created. These are *not* ADRs; ADRs record architectural decisions and their rationale.
+Note: `docs/superpowers/specs/` holds **in-flight** feature specifications; `docs/superpowers/plans/` holds **in-flight** implementation plans. `docs/superpowers/plan-drafts/` holds plan drafts under review on a refine branch; a draft is moved into `plans/` when the plan is published and is never present on `main`. Specs and plans are write-once artifacts — shipped specs/plans are archived to `docs/archive/` automatically when an implementation PR is created. These are *not* ADRs; ADRs record architectural decisions and their rationale.
 
 ## Use the glossary's vocabulary
 

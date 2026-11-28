@@ -543,23 +543,40 @@ The command does not push. `refine-push` does.
 
 ### `dark-factory-plan`
 
-- **Scope**: may only write under `docs/superpowers/plans/` (`commands/dark-factory-plan.md:44-50`).
-- **Load** (`:54-89`): `issue.json`, the architect prompt, the spec, memory.
-- **Plan** (`:91-112`): `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`, with an
-  `**Issue:** #N` line, a file-structure table and TDD task steps.
-- **Architect review** (`:114-168`): an `opus` subagent reviews plan against spec.
+- **Scope**: may only write under `docs/superpowers/plans/`, and under its sibling
+  `plan-drafts/` for the draft (`commands/dark-factory-plan.md:44-52`).
+- **Load** (`:56-133`): `issue.json`, the architect prompt, the spec, memory. Then looks for
+  a draft that an earlier, killed run checkpointed (`push_gate_check.sh` with the
+  `plan-drafts/` prefix). A non-empty draft whose last commit descends from
+  the spec's last commit is resumed: plan writing is skipped, feedback posted on the issue is
+  applied to the draft, and architect review, plan-vs-spec conformance and publish run in
+  full with fresh cycle counters. An empty or stale draft is rewritten at the same path. A
+  finished plan already under `docs/superpowers/plans/` is not a resume signal.
+- **Plan** (`:135-196`): `plan-drafts/YYYY-MM-DD-<feature>.md`, with an
+  `**Issue:** #N` line, a file-structure table and TDD task steps. Before the first
+  architect spawn the command commits the draft and pushes the branch (`timeout 30`); a
+  failed push prints a warning and the run continues on the local commit. The checkpoint is
+  re-run before each `needs-discussion` exit below, so a capped plan leaves its revised
+  draft on the branch and no file under `docs/superpowers/plans/`.
+- **Architect review** (`:198-255`): an `opus` subagent reviews plan against spec.
   "Issues Found" means fix and re-review, at most 3 cycles; still unapproved means post
   the plan and feedback, add `needs-discussion`, exit cleanly.
-- **Plan-vs-spec conformance** (`:170-286`): skipped when `conformance.enabled` is false.
+- **Plan-vs-spec conformance** (`:257-378`): skipped when `conformance.enabled` is false.
   An `opus` reviewer applies the conformance rubric; a material divergence, an
   unparseable verdict or a reviewer error starts a reconcile cycle. More than
   `conformance.max_reconcile_cycles` cycles posts "Spec Conformance — Blocked (Plan)",
   adds `needs-discussion` and exits cleanly. A second, non-gating "shadow" reviewer runs
   on `conformance.shadow_model` unless that is set empty.
-- **Publish** (`:288-378`): out-of-scope gate (allowlist: plans, specs, memory), commit,
+- **Publish** (`:380-502`): moves the draft into `docs/superpowers/plans/` with `git mv` in
+  one commit (reusing the path of an earlier plan for the issue on the branch, if any). This
+  runs before the out-of-scope gate, so the draft path nets out of the diff the gate judges.
+  Then out-of-scope gate (allowlist: plans, specs, memory), commit,
   post "Refinement Pipeline — Plan Generated" with the review dialogue, write
   `refinement-status.md` with `STATUS: PLAN_COMPLETE`. The comment tells the human to
   move the issue to **Ready** to approve.
+
+The command pushes only the draft checkpoint. `plan-push-and-advance` pushes the published
+plan and applies `plan-pending-review`.
 
 ### `dark-factory-implement`
 
@@ -673,6 +690,8 @@ that this branch changed relative to `origin/main` and that belongs to the issue
 issue number appears in the file name, or `#<N>` appears in the committed content, or
 (second pass) a commit on the branch whose subject mentions `#<N>` touched that file. It
 prints nothing if there is none, and always exits 0 (`scripts/push_gate_check.sh:56-115`).
+A draft plan under `plan-drafts/` is not an artifact for this gate: a plan
+run that ends with only a draft takes the "No artifact" rows below.
 
 | Situation | Outcome (`workflows/archon-dark-factory.yaml:495-588`, plan mirror `:612-705`) |
 |---|---|
@@ -706,8 +725,8 @@ the push gate takes its "clean abort" branch:
 |---|---|---|
 | Issue body too short | under 20 characters (`refine.min_issue_body_length` in config) | `commands/dark-factory-refine.md:100-105` |
 | Product owner answers `UNCERTAIN:` | first occurrence | `commands/dark-factory-refine.md:143-147` |
-| Architect does not approve the plan | 3 review cycles | `commands/dark-factory-plan.md:154-165` |
-| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:240-268` |
+| Architect does not approve the plan | 3 review cycles | `commands/dark-factory-plan.md:238-252` |
+| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:329-360` |
 
 ### D. Implementation gates
 

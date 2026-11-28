@@ -45,6 +45,8 @@ You are running with no human attached; an ended turn ends the process.
 
 This command's only authorized file outputs are:
 - Documents under `docs/superpowers/plans/` (the plan file)
+- Documents under `docs/superpowers/plan-drafts/` (the draft plan: checkpointed before
+  review, moved into `docs/superpowers/plans/` by Phase 4)
 
 Do NOT create or modify any other files. Do NOT implement code, write tests, or edit configuration.
 Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` branch.
@@ -88,21 +90,78 @@ MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh"
    about the `__init__.py` import requirement, the plan's "add model" task must explicitly
    include an `__init__.py` import step.
 
+9. Detect a draft plan checkpointed by an earlier run of this phase (Phase 2's draft
+   checkpoint). Drafts live under `docs/superpowers/plan-drafts/`, never under
+   `docs/superpowers/plans/`, so nothing that looks for a plan can find one.
+   `push_gate_check.sh` is reused unchanged as the lookup, with the drafts prefix. Bind
+   `SPEC_FILE` (step 6a) in the same Bash call; the block stops if it is unbound, and falls
+   back to `git rev-parse` and `issue.json` for `REPO_ROOT` and `ISSUE_NUM`:
+
+<!-- plan-draft-detect:begin -->
+```bash
+: "${SPEC_FILE:?bind SPEC_FILE (Phase 1 step 6a) in this Bash call}"
+REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel)}
+ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+RESUMING_DRAFT=false
+DRAFT_FILE=$(bash "${REPO_ROOT}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plan-drafts/" "$ISSUE_NUM")  # TARGET-PATH
+if [ -n "$DRAFT_FILE" ]; then
+  PLAN_FILE="$DRAFT_FILE"
+  # Stale-draft guard: a draft written against an older spec is not resumed.
+  DRAFT_SHA=$(git log -1 --format=%H -- "$DRAFT_FILE")
+  if git ls-files --error-unmatch -- "$SPEC_FILE" >/dev/null 2>&1; then
+    SPEC_SHA=$(git log -1 --format=%H -- "$SPEC_FILE")
+  else
+    SPEC_SHA=""  # untracked (e.g. the context-pack copy under $ARTIFACTS_DIR) — not newer by definition
+  fi
+  if [ -s "$DRAFT_FILE" ] && { [ -z "$SPEC_SHA" ] || git merge-base --is-ancestor "$SPEC_SHA" "$DRAFT_SHA"; }; then
+    RESUMING_DRAFT=true
+  fi
+fi
+echo "RESUMING_DRAFT=$RESUMING_DRAFT PLAN_FILE=${PLAN_FILE:-<unset>}"
+```
+<!-- plan-draft-detect:end -->
+
+   - `RESUMING_DRAFT=true`: resume. Phase 2 does not write a new plan (see its first
+     paragraph) and `PLAN_FILE` stays bound to the draft. Only plan writing is skipped:
+     Phase 3, Phase 3.5 and Phase 4 always run in full, with their cycle counters starting
+     at 0. No verdict or cycle count from the earlier run is carried over.
+   - Draft found, `RESUMING_DRAFT=false` (the draft is empty, or the spec has a commit the
+     draft does not descend from — it was re-refined or amended after the checkpoint): run
+     Phase 2 in full and write the new draft to the same path (`$PLAN_FILE`), so the branch
+     never carries two drafts. `SPEC_SHA` is empty when the spec came from the context pack;
+     that counts as "not newer".
+   - No draft (`PLAN_FILE` unset): run Phase 2 in full.
+
+   A finished plan already under `docs/superpowers/plans/` (for example a rejected plan
+   awaiting revision) is not a resume signal: it keeps today's behavior, a rewrite from
+   Phase 2.
+
 ## Phase 2: PLAN WRITING
 
-Write a full implementation plan following these conventions:
-- Save to `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`, and bind that path to `PLAN_FILE`
+If Phase 1 set `RESUMING_DRAFT=true`, do not write a new plan. Read `$PLAN_FILE` (the draft),
+then read the comments in `$ARTIFACTS_DIR/issue.json` and apply to the draft (edit
+`$PLAN_FILE` in place) any human feedback, and any architect or conformance feedback an
+earlier run posted when it parked on `needs-discussion`. A fresh rewrite picks that feedback
+up implicitly; without this step a parked draft would be re-reviewed unchanged. Then run the
+draft checkpoint at the end of this phase and continue to Phase 3.
+
+Otherwise, write a full implementation plan following these conventions:
+- Save to `docs/superpowers/plan-drafts/YYYY-MM-DD-<feature>.md` (or, when Phase 1 step 9
+  bound `PLAN_FILE` to a stale draft, that same path), and bind that path to `PLAN_FILE`
   — used by Phase 3's and Phase 3.5's `render-prompt` calls below
   (`--set PLAN_CONTENT=@"$PLAN_FILE"`). Because `PLAN_FILE` points at the on-disk file rather
   than a copy, every later revision (an architect "Issues Found" fix, or a conformance
   reconcile-loop edit) is automatically picked up by the next `render-prompt` call with no
   separate re-copy step — just re-run the same `render-prompt` invocation after saving the
-  revised plan.
+  revised plan. The plan stays under `docs/superpowers/plan-drafts/` through Phases 3 and
+  3.5; nothing under `docs/superpowers/plans/` is created or modified before Phase 4 moves
+  the reviewed draft there.
 - A `**Issue:** #<num>` line directly under the title, before the standard plan
   header (Goal, Architecture, Tech Stack) — required (#382) so the content-only
   `grep -rl "#${ISSUE}"` call sites elsewhere in the DAG (budget telemetry, the
   PR-push archive step) can find this artifact even when the push gate itself
-  associates it via commit subject instead
+  associates it via commit subject instead. It is also what lets Phase 1 step 9 find the
+  draft on a resume
 - Include a File Structure table
 - Break into bite-sized tasks (each step is one 2-5 minute action)
 - Every task has: Files list, TDD steps (write failing test → verify fail → implement → verify pass → commit)
@@ -110,6 +169,47 @@ Write a full implementation plan following these conventions:
 - Exact commands with expected output
 - Self-review before publishing: confirm the issue-number line is present, alongside
   the existing no-placeholders check
+
+### Draft checkpoint
+
+After self-review (or, on a resume, after applying feedback) and before the first architect
+spawn, commit the draft and push this run's branch, so a kill during Phase 3, 3.5 or 4 (a
+session-window pause) leaves a resumable draft instead of nothing. The commit touches
+`$PLAN_FILE` only. A push failure is a warning, not an error: proceed into Phase 3 on the
+locally committed draft, with no retry loop — the checkpoint must never become a new way to
+lose a run. Bind `PLAN_FILE` in the same Bash call; the block stops if it is unbound or
+missing, and falls back to `issue.json` for `ISSUE_NUM`:
+
+<!-- plan-draft-checkpoint:begin -->
+```bash
+[ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ] || { echo "checkpoint: PLAN_FILE is unbound or missing — bind it in this Bash call"; exit 1; }
+ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+BRANCH=$(git branch --show-current)
+git add -- "$PLAN_FILE"
+if ! git diff --cached --quiet -- "$PLAN_FILE"; then
+  git commit -m "docs(#${ISSUE_NUM}): checkpoint draft plan" -- "$PLAN_FILE" \
+    || echo "WARN: draft plan checkpoint commit failed for #${ISSUE_NUM} (hook rejection or git identity not configured?) — proceeding without a new checkpoint commit."
+fi
+if ! timeout 30 git push -u origin "$BRANCH"; then
+  echo "WARN: draft plan checkpoint push failed for #${ISSUE_NUM} — proceeding on the locally committed draft; this run is not kill-durable until a later push succeeds."
+fi
+```
+<!-- plan-draft-checkpoint:end -->
+
+Re-run this block unchanged immediately before each `needs-discussion` exit (Phase 3 step 4
+under "Issues Found", Phase 3.5 step 8b), so the revised draft — not the pre-review one — is
+what the operator sees and what the next dispatch resumes. On an unchanged draft the commit is
+a no-op. The block never applies a label: `plan-pending-review` is applied only by the
+`plan-push-and-advance` node, and only to a file under `docs/superpowers/plans/`.
+
+If the issue is instead sent back to refine after this checkpoint (for example, the spec is
+amended), refine's own OOS gate — scoped to `docs/superpowers/specs/` and `.archon/memory/`
+(#293) — does not treat `docs/superpowers/plan-drafts/` as in scope for refine, so it deletes
+the checkpointed draft and records it in `out-of-scope.md` as spillover (pinned by
+`test_refine_oos_gate_excises_a_draft`). This is intentional, not a gap: a draft written
+against the pre-amendment spec must not silently survive the amendment, and Phase 1 step 9's
+stale-draft guard would discard it on the next plan run anyway once the spec moves. The
+drafts prefix is deliberately left out of refine's allowlist rather than added to it.
 
 ## Phase 3: ARCHITECT REVIEW
 
@@ -160,7 +260,10 @@ Spawn an architect subagent using the Agent tool:
    `$ARTIFACTS_DIR/architect_prompt.md` produced by step 1a
 3. Repeat until approved (max 3 cycles)
 4. If still not approved after 3 cycles:
-   - Post the plan + architect feedback as an issue comment
+   - Re-run the draft checkpoint block (end of Phase 2) unchanged, so the revised draft is
+     on the branch
+   - Post the plan + architect feedback as an issue comment, naming the draft path
+     (`$PLAN_FILE`, under `docs/superpowers/plan-drafts/`)
    - Add `needs-discussion` label: `python3 dark-factory/scripts/factory_core/providers/cli.py tracker label --id $ISSUE_NUM --add needs-discussion`
    - Exit cleanly
 
@@ -178,7 +281,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    file is absent. Store the resolved text as `RUBRIC_CONTENT`.
 2. Determine `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)
 3. Set `CONFORMANCE_DIALOGUE=""`, `SHADOW_DIALOGUE=""`, and `CONFORMANCE_CYCLE=0`
-4. The artifact under review is the plan document on disk at `$PLAN_FILE` (bound in Phase 2).
+4. The artifact under review is the plan document on disk at `$PLAN_FILE` (bound in Phase 1
+   step 9 or Phase 2 — the draft under `docs/superpowers/plan-drafts/`).
 4a. Resolve the shadow model pin (Requirement 7: env explicitly set, even to empty, wins;
     unset falls back to the config default — `${VAR-default}`, not `${VAR:-default}`, so an
     explicit empty string is preserved rather than replaced):
@@ -241,6 +345,9 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 8. **Reconcile loop** (only if MATERIAL):
    a. Increment `CONFORMANCE_CYCLE`
    b. If `CONFORMANCE_CYCLE > MAX_CYCLES`:
+      - Re-run the draft checkpoint block (end of Phase 2) unchanged, so the revised draft
+        is on the branch, and name its path (`$PLAN_FILE`, under
+        `docs/superpowers/plan-drafts/`) in the comment below
       - Post the conformance dialogue as an issue comment (fetch the footer first via
         `python3 dark-factory/scripts/factory_core/cli.py marker refinement`):
         ````
@@ -291,6 +398,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 1. Determine the current branch name: `BRANCH=$(git branch --show-current)`
 2. Build GitHub links:
    - Plan link: `https://github.com/${FACTORY_REPO_SLUG}/blob/$BRANCH/<plan-file-path>`
+     (`<plan-file-path>` is the final path under `docs/superpowers/plans/` bound by step 4)
    - Branch link: `https://github.com/${FACTORY_REPO_SLUG}/tree/$BRANCH`
 3. Check if the issue carries the `direct-to-pr` label:
    ```bash
@@ -300,16 +408,49 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    ```
    If `IS_DIRECT_TO_PR=yes`, prepend the following note to the "### Next Steps" section of the comment (replacing `$PLAN_GRACE` with the actual value):
    > ⏩ **Auto-advancing in ~`$PLAN_GRACE` min** unless you comment — the scheduler will move this to **Ready** automatically. Leave a comment to re-run the plan or redirect.
-4. Run the OOS gate — detect and revert any files committed outside the plan
+4. Promote the draft into `docs/superpowers/plans/` — **before** the OOS gate (step 5). The
+   plan path first exists in the commit that carries the reviewed content, and the draft
+   path ceases to exist in that same commit. `FINAL_FILE` reuses the path of an earlier
+   finished plan for this issue when one is on the branch (a rejected plan being revised),
+   so the branch ends with one plan file; `git rm -r` removes any other draft left on the
+   branch. Order matters: `oos_excise.sh` judges the committed diff `origin/main...HEAD`, so
+   run before this step it would excise the draft and report it as spillover; run after
+   it, the draft path nets out of the diff. The OOS allowlist is not widened. Bind
+   `PLAN_FILE` to the draft in the same Bash call. The block stops before touching anything
+   if `PLAN_FILE` is unbound or missing, and stops before `git rm -r` if the move fails, so a
+   mistake here can never delete the reviewed draft:
+   <!-- plan-draft-promote:begin -->
+   ```bash
+   [ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ] || { echo "promote: PLAN_FILE is unbound or missing — bind it to the draft in this Bash call"; exit 1; }
+   REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel)}
+   ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+   FINAL_FILE=$(bash "${REPO_ROOT}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plans/" "$ISSUE_NUM")  # TARGET-PATH
+   [ -n "$FINAL_FILE" ] || FINAL_FILE="docs/superpowers/plans/$(basename -- "$PLAN_FILE")"
+   mkdir -p docs/superpowers/plans
+   git add -- "$PLAN_FILE"
+   git mv -f -- "$PLAN_FILE" "$FINAL_FILE" || exit 1
+   git rm -r -q --ignore-unmatch -- docs/superpowers/plan-drafts/
+   COMMIT_PATHS=("$FINAL_FILE")
+   git diff --cached --quiet -- docs/superpowers/plan-drafts/ || COMMIT_PATHS+=("docs/superpowers/plan-drafts/")
+   git commit -m "docs(#${ISSUE_NUM}): add implementation plan" -- "${COMMIT_PATHS[@]}" || exit 1
+   PLAN_FILE="$FINAL_FILE"
+   echo "PLAN_FILE=$PLAN_FILE"
+   ```
+   <!-- plan-draft-promote:end -->
+   From here on `PLAN_FILE` is the final path; the summary comment (step 7) and
+   `refinement-status.md` (step 8) use it.
+5. Run the OOS gate — detect and revert any files committed outside the plan
    allowlist. `docs/superpowers/specs/` and `.archon/memory/` are included because
    the refine phase legitimately commits to those prefixes earlier on this same
-   branch (#293); they remain outside this command's own `SCOPE BOUNDARY`, which is
-   still only `docs/superpowers/plans/`:
+   branch (#293); they remain outside this command's own `SCOPE BOUNDARY`
+   (`docs/superpowers/plans/`, plus `docs/superpowers/plan-drafts/`, which step 4 has
+   already emptied):
    ```bash
    OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/ docs/superpowers/specs/ .archon/memory/" plan)  # TARGET-PATH
    ```
-5. Commit the plan
-6. Post a summary comment on the issue:
+6. Commit any remaining change to `$PLAN_FILE` (normally none — step 4 committed the
+   reviewed plan)
+7. Post a summary comment on the issue:
    ```
    ## Refinement Pipeline — Plan Generated
 
