@@ -90,9 +90,58 @@ MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh"
    about the `__init__.py` import requirement, the plan's "add model" task must explicitly
    include an `__init__.py` import step.
 
+9. Detect a draft plan checkpointed by an earlier run of this phase (Phase 2's draft
+   checkpoint). Drafts live under `docs/superpowers/plan-drafts/`, never under
+   `docs/superpowers/plans/`, so nothing that looks for a plan can find one.
+   `push_gate_check.sh` is reused unchanged as the lookup, with the drafts prefix. Bind
+   `SPEC_FILE` (step 6a) in the same Bash call; the block stops if it is unbound, and falls
+   back to `git rev-parse` and `issue.json` for `REPO_ROOT` and `ISSUE_NUM`:
+
+<!-- plan-draft-detect:begin -->
+```bash
+: "${SPEC_FILE:?bind SPEC_FILE (Phase 1 step 6a) in this Bash call}"
+REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel)}
+ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+RESUMING_DRAFT=false
+DRAFT_FILE=$(bash "${REPO_ROOT}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plan-drafts/" "$ISSUE_NUM")  # TARGET-PATH
+if [ -n "$DRAFT_FILE" ]; then
+  PLAN_FILE="$DRAFT_FILE"
+  # Stale-draft guard: a draft written against an older spec is not resumed.
+  DRAFT_SHA=$(git log -1 --format=%H -- "$DRAFT_FILE")
+  SPEC_SHA=$(git log -1 --format=%H -- "$SPEC_FILE" 2>/dev/null || true)
+  if [ -s "$DRAFT_FILE" ] && { [ -z "$SPEC_SHA" ] || git merge-base --is-ancestor "$SPEC_SHA" "$DRAFT_SHA"; }; then
+    RESUMING_DRAFT=true
+  fi
+fi
+echo "RESUMING_DRAFT=$RESUMING_DRAFT PLAN_FILE=${PLAN_FILE:-<unset>}"
+```
+<!-- plan-draft-detect:end -->
+
+   - `RESUMING_DRAFT=true`: resume. Phase 2 does not write a new plan (see its first
+     paragraph) and `PLAN_FILE` stays bound to the draft. Only plan writing is skipped:
+     Phase 3, Phase 3.5 and Phase 4 always run in full, with their cycle counters starting
+     at 0. No verdict or cycle count from the earlier run is carried over.
+   - Draft found, `RESUMING_DRAFT=false` (the draft is empty, or the spec has a commit the
+     draft does not descend from — it was re-refined or amended after the checkpoint): run
+     Phase 2 in full and write the new draft to the same path (`$PLAN_FILE`), so the branch
+     never carries two drafts. `SPEC_SHA` is empty when the spec came from the context pack;
+     that counts as "not newer".
+   - No draft (`PLAN_FILE` unset): run Phase 2 in full.
+
+   A finished plan already under `docs/superpowers/plans/` (for example a rejected plan
+   awaiting revision) is not a resume signal: it keeps today's behavior, a rewrite from
+   Phase 2.
+
 ## Phase 2: PLAN WRITING
 
-Write a full implementation plan following these conventions:
+If Phase 1 set `RESUMING_DRAFT=true`, do not write a new plan. Read `$PLAN_FILE` (the draft),
+then read the comments in `$ARTIFACTS_DIR/issue.json` and apply to the draft (edit
+`$PLAN_FILE` in place) any human feedback, and any architect or conformance feedback an
+earlier run posted when it parked on `needs-discussion`. A fresh rewrite picks that feedback
+up implicitly; without this step a parked draft would be re-reviewed unchanged. Then run the
+draft checkpoint at the end of this phase and continue to Phase 3.
+
+Otherwise, write a full implementation plan following these conventions:
 - Save to `docs/superpowers/plan-drafts/YYYY-MM-DD-<feature>.md` (or, when Phase 1 step 9
   bound `PLAN_FILE` to a stale draft, that same path), and bind that path to `PLAN_FILE`
   — used by Phase 3's and Phase 3.5's `render-prompt` calls below

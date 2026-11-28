@@ -227,3 +227,87 @@ def test_checkpoint_is_defined_once_before_phase3():
     text = _text()
     assert text.count("<!-- plan-draft-checkpoint:begin -->") == 1
     assert text.index("<!-- plan-draft-checkpoint:end -->") < text.index("## Phase 3: ARCHITECT REVIEW")
+
+
+# ── Phase 1: detect ──────────────────────────────────────────────────────────
+
+
+@_posix
+def test_detect_resumes_a_committed_draft(env):
+    _commit(env["work"], _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+
+    result, out = _run(env, "detect", SPEC_FILE=_SPEC)
+
+    assert out["rc"] == "0", result.stderr
+    assert (out["RESUMING_DRAFT"], out["PLAN_FILE"]) == ("true", _DRAFT)
+
+
+@_posix
+def test_detect_rewrites_in_place_when_spec_is_newer(env):
+    work = env["work"]
+    _commit(work, _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+    _commit(work, _SPEC, f"# Spec v2\n\n**Issue:** #{_ISSUE}\n", f"docs(#{_ISSUE}): amend spec")
+
+    _, out = _run(env, "detect", SPEC_FILE=_SPEC)
+
+    assert (out["RESUMING_DRAFT"], out["PLAN_FILE"]) == ("false", _DRAFT)
+
+
+@_posix
+def test_detect_does_not_resume_an_empty_draft(env):
+    # Found via push_gate_check.sh's commit-subject pass: the file itself names no issue.
+    _commit(env["work"], _DRAFT, "", f"docs(#{_ISSUE}): checkpoint draft plan")
+
+    _, out = _run(env, "detect", SPEC_FILE=_SPEC)
+
+    assert (out["RESUMING_DRAFT"], out["PLAN_FILE"]) == ("false", _DRAFT)
+
+
+@_posix
+def test_detect_without_a_draft_leaves_plan_file_unset(env):
+    _, out = _run(env, "detect", SPEC_FILE=_SPEC)
+
+    assert (out["RESUMING_DRAFT"], out["PLAN_FILE"]) == ("false", "<unset>")
+
+
+@_posix
+def test_detect_without_spec_file_stops(env):
+    _commit(env["work"], _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+
+    result, out = _run(env, "detect")
+
+    assert result.returncode != 0
+    assert "bind SPEC_FILE" in result.stderr
+    assert out == {}
+
+
+@_posix
+def test_detect_treats_a_context_pack_spec_as_not_newer(env):
+    _commit(env["work"], _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+    pack_spec = env["artifacts"] / "spec_content.md"
+    pack_spec.write_text("# Spec from the context pack\n")
+
+    _, out = _run(env, "detect", SPEC_FILE=str(pack_spec))
+
+    assert out["RESUMING_DRAFT"] == "true"
+
+
+@_posix
+def test_detect_ignores_a_finished_plan(env):
+    _commit(env["work"], _OLD_PLAN, _plan(), f"docs(#{_ISSUE}): add implementation plan")
+
+    _, out = _run(env, "detect", SPEC_FILE=_SPEC)
+
+    assert (out["RESUMING_DRAFT"], out["PLAN_FILE"]) == ("false", "<unset>")
+
+
+def test_resume_still_runs_review_and_publish():
+    text = " ".join(_section("## Phase 1: LOAD", "## Phase 3: ARCHITECT REVIEW").split())
+    assert "Phase 3, Phase 3.5 and Phase 4 always run in full" in text
+    assert "cycle counters starting at 0" in text
+
+
+def test_detect_block_sits_in_phase1():
+    text = _text()
+    assert text.index("## Phase 1: LOAD") < text.index("<!-- plan-draft-detect:begin -->")
+    assert text.index("<!-- plan-draft-detect:end -->") < text.index("## Phase 2: PLAN WRITING")
