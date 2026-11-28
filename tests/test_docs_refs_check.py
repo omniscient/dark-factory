@@ -331,6 +331,33 @@ def test_unlocked_out_of_range_citation_is_not_reported_as_blank(tmp_path):
     assert not any("is blank" in e for e in errors)
 
 
+def test_seed_never_locks_an_all_blank_range(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:5`\n", _BLANK_CMD)
+    assert seed([_doc(root)], root) == 1
+    lock = root / LOCK_FILE
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[3, 3]]
+
+
+def test_new_prose_never_locks_an_all_blank_range(tmp_path):
+    # Contrast test_new_prose_is_locked_without_seeded: a blank new citation gains no entry.
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    assert rederive([_doc(root)], root)[1] == []
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[3, 3]]
+
+
+def test_accept_refuses_a_blank_citation(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n", _BLANK_CMD)
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:5`\n", encoding="utf-8")
+    before = lock.read_bytes()
+    printed, failures = accept(_doc(root), "commands/c.md:5", root)
+    assert printed == [] and len(failures) == 1
+    assert "is blank" in failures[0] and "pick a non-blank anchor" in failures[0]
+    assert lock.read_bytes() == before
+
+
 def test_crlf_and_reindented_target_lines_hash_the_same(tmp_path):
     root = _lock_tree(tmp_path, "`commands/c.md:3-4`\n")
     _seeded(root)
