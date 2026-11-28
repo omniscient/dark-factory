@@ -96,6 +96,71 @@ _LOCAL_ROWS = {
 }
 
 
+def _native(*, retryable=True, max_attempts=None, requires_human=False,
+            state_transition="continue", multiplier=1.0, detector="error_signature",
+            enforced_today=_CEILING_AND_STUCK, enforced=False):
+    return _row(retryable=retryable, max_attempts=max_attempts, requires_human=requires_human,
+                state_transition=state_transition, multiplier=multiplier, detector=detector,
+                enforced_today=enforced_today, enforced=enforced)
+
+
+# Spec §2b: classes error_signature.classify() produces (its strings stay byte-identical).
+# build_failure / verdict_missing / test_failure keep the classifier's own names (not the
+# issue's adapter_contract_error / output_truncated / test_timeout). model_timeout,
+# tool_timeout and github_rate_limit are the issue's names and have no detector yet.
+_NATIVE_ROWS = {
+    "delivery_failure": _native(multiplier=0.5, enforced_today=(
+        "scheduler.sh:579-596 retry_or_skip_delivery_failure: not counted against the retry "
+        "key; a shadow <key>:delivery counter trips at the phase ceiling")),
+    "model_rate_limit": _native(multiplier=0.5, enforced_today=f"{_CEILING} only"),
+    "preview_infra": _native(multiplier=0.5, enforced_today=f"{_CEILING} only"),
+    "session_window_pause": _native(multiplier=None, enforced=True, enforced_today=(
+        "scheduler.sh:551-560 rollback_paused_retry un-counts the paused attempt, and the "
+        "session-window-paused sentinel holds dispatch until its resume time")),
+    "verdict_missing": _native(),
+    "scope_spillover": _native(retryable=False, max_attempts=0, enforced_today=(
+        f"{_CEILING_AND_STUCK}: the scheduler has no case for this signature and redispatches "
+        "it like any other substantive failure; scripts/oos_excise.sh excises files inside a "
+        "run, it does not stop a retry")),
+    "build_failure": _native(),
+    "test_failure": _native(),
+    "substantive_unknown": _native(),
+    "model_timeout": _native(retryable=False, max_attempts=0, requires_human=True,
+                             state_transition="abstain_escalate", detector="none_yet",
+                             enforced_today="none"),
+    "tool_timeout": _native(retryable=False, max_attempts=0, requires_human=True,
+                            state_transition="abstain_escalate", detector="none_yet",
+                            enforced_today="none"),
+    "github_rate_limit": _native(multiplier=0.5, detector="none_yet", enforced_today=(
+        f"{_CEILING} only, as for model_rate_limit: both sign environmental:rate_limit today")),
+}
+
+DEFAULT_CLASS = "substantive_unknown"
+# Keyed on a signature's first two colon-separated fields: classify() appends :<exit_code>
+# to oos_files, build_failure, test_failure, unknown and endpoint_unreachable.
+SIGNATURE_TO_CLASS = MappingProxyType({
+    "environmental:delivery_failure": "delivery_failure",
+    "environmental:rate_limit": "model_rate_limit",
+    "environmental:preview_infra": "preview_infra",
+    "environmental:session_window_pause": "session_window_pause",
+    "substantive:verdict_missing": "verdict_missing",
+    "substantive:oos_files": "scope_spillover",
+    "substantive:build_failure": "build_failure",
+    "substantive:test_failure": "test_failure",
+    "substantive:unknown": DEFAULT_CLASS,
+    "substantive:endpoint_unreachable": ENDPOINT_UNREACHABLE,
+})
+
+
+def class_for_signature(sig: str) -> str:
+    """The FAILURE_TAXONOMY key for an error_signature string; DEFAULT_CLASS if unmapped."""
+    if not isinstance(sig, str):
+        return DEFAULT_CLASS
+    parts = sig.split(":")
+    key = ":".join(parts[:2]) if len(parts) >= 2 else sig
+    return SIGNATURE_TO_CLASS.get(key, DEFAULT_CLASS)
+
+
 def _merge(*groups):
     merged = {}
     for group in groups:
@@ -107,4 +172,4 @@ def _merge(*groups):
 
 
 # The single source of truth: no other module redeclares these fields.
-FAILURE_TAXONOMY = _merge(_LOCAL_ROWS)
+FAILURE_TAXONOMY = _merge(_LOCAL_ROWS, _NATIVE_ROWS)
