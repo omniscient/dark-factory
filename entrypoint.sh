@@ -351,13 +351,16 @@ run_post_mortem() {
   post_or_update_comment "$DF_POST_MORTEM_MARKER" "$comment_body" || true
 }
 
-# Verified-local runs only (#633). Deliberately broad: ANY exit code 2 from the clone's cli.py
+# Verified-local runs (#633), and both `run-record assemble` calls on every run (#645).
+# Deliberately broad: ANY exit code 2 from the clone's cli.py
 # triggers the fallback, not only a rejected --hosting-location. Exit code 2 is what CPython
 # returns for an argparse unknown flag, an argparse unknown subcommand, or a script file that
 # does not exist — all three mean the clone's copy cannot serve this call (a real failure of
 # either subcommand exits 1 or 3), so all three fall back with the flag intact. Then the baked
 # copy runs with the identical argv: never a retry without the flag. Only the output of the
-# attempt whose status is returned is printed, stderr merged into stdout.
+# attempt whose status is returned is printed, stderr merged into stdout. #645: a target's
+# older clone copy rejects assemble's --transcripts-dir with exit 2; the baked copy must
+# then write the record.
 _cli_with_hosting_fallback() {
   local out rc=0
   # TARGET-PATH: the clone's copy first, as at every other cli.py call site.
@@ -596,6 +599,62 @@ _write_error_signature() {
   fi
 }
 
+# --- Keep this run's Claude Code session transcripts (#645 requirement 7) ---
+# run-record assemble reads them inside this --rm container (--transcripts-dir); the
+# backfill and any later re-derivation need them afterwards. Every *.jsonl under
+# ~/.claude/projects modified since RUN_STARTED_AT is gzip-copied to
+# $SCHEDULER_STATE_DIR/transcripts/<run_id>/, path kept relative to ~/.claude/projects,
+# dirs 0700, files 0600. Never overwrites, never deletes, never changes the caller's exit
+# status (any failure logs one WARNING line). Transcripts hold tool output: they are never
+# posted, logged or added to a run record. The store grows without bound until an
+# operator prunes it (docs/configuration.md); its size is logged once per run, guarded by
+# _RUN_TRANSCRIPTS_KEPT because several exit paths call this. find -newermt keeps files
+# strictly newer than RUN_STARTED_AT where session_usage reads "at or after"; at one-second
+# resolution the two sets differ only for a file written in the run's first instant.
+_keep_run_transcripts() {
+  [ -n "${_RUN_TRANSCRIPTS_KEPT:-}" ] && return 0
+  _RUN_TRANSCRIPTS_KEPT=1
+  local src="${HOME}/.claude/projects"
+  local store="${SCHEDULER_STATE_DIR:-/var/lib/dark-factory}/transcripts"
+  local dest="${store}/${RUN_ID:-unknown}"
+  [ -d "$src" ] || return 0
+  # Bounds (plan review): the agent can write any file under ~/.claude/projects, and the
+  # store shares a volume with scheduler-state.json. A file over 64 MiB, or anything past
+  # 256 MiB of source per run, is skipped and reported by the WARNING line; each gzip is
+  # time-bounded. The largest retained real run holds 4.2 MiB.
+  local file_max=67108864 run_max=268435456
+  if ! (
+    set +e
+    umask 077
+    # A link planted at the store or at this run's directory is refused, never followed.
+    [ ! -L "$store" ] && mkdir -p "$dest" && [ ! -L "$dest" ] && chmod 700 "$store" "$dest" || exit 1
+    rc=0
+    total=0
+    while IFS= read -r -d '' f; do
+      size=$(stat -c %s -- "$f" 2>/dev/null) || { rc=1; continue; }
+      if [ "$size" -gt "$file_max" ] || [ $((total + size)) -gt "$run_max" ]; then
+        rc=1
+        continue
+      fi
+      total=$((total + size))
+      out="${dest}/${f#"$src"/}.gz"
+      { [ -e "$out" ] || [ -L "$out" ]; } && continue
+      if mkdir -p "${out%/*}" && timeout 120 gzip -c -- "$f" > "${out}.tmp.$$" \
+          && chmod 600 "${out}.tmp.$$" && mv -n -- "${out}.tmp.$$" "$out"; then
+        :
+      else
+        rc=1
+      fi
+      rm -f -- "${out}.tmp.$$"
+    done < <(find "$src" -type f -name '*.jsonl' -newermt "${RUN_STARTED_AT:-1970-01-01T00:00:00Z}" -print0 2>/dev/null)
+    exit "$rc"
+  ); then
+    echo "WARNING: could not keep every session transcript of run ${RUN_ID:-unknown} under ${dest}" >&2
+  fi
+  echo "Session transcripts store: $(du -sk "$store" 2>/dev/null | cut -f1) KiB under ${store}"
+  return 0
+}
+
 post_cost_report() {
   if [ -z "${ISSUE_NUM:-}" ]; then return; fi
   local RUN_RECORD_FILE="${ARTIFACTS_DIR:-}/run-record.json"
@@ -695,6 +754,7 @@ Claude session window exhausted mid-run. Dispatch resumes automatically at \`${R
 no action needed.
 ${SUMMARY_LINE}"
     fi
+    _keep_run_transcripts || true
     post_cost_report || true
     return
   fi
@@ -708,6 +768,7 @@ ${SUMMARY_LINE}"
   # failure path below runs unchanged. Only while the workflow's own output file exists
   # (as for the pause above): a failure before or after the workflow is never a hold.
   if [ -n "${TMP_OUT:-}" ] && [ -f "$TMP_OUT" ] && _handle_blast_hold; then
+    _keep_run_transcripts || true
     rm -f "${TMP_OUT:-}" 2>/dev/null || true
     exit 0
   fi
@@ -734,7 +795,7 @@ ${SUMMARY_LINE}"
     archon workflow cost --last --json --quiet > "$FAIL_COST_JSON" 2>"$FAIL_COST_STDERR"
     FAIL_COST_RC=$?
     set -e
-    python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
+    _cli_with_hosting_fallback run-record assemble \
       --run-id "${RUN_ID:-unknown}" \
       --issue "${ISSUE_NUM:-0}" \
       --intent "${INTENT:-unknown}" \
@@ -746,11 +807,14 @@ ${SUMMARY_LINE}"
       --status failed \
       --out-file "$ARTIFACTS_DIR/run-record.json" \
       --archon-log-file "${TMP_OUT:-}" \
+      --transcripts-dir "${HOME}/.claude/projects" \
       --clone-dir "${CLONE_DIR:-.}" \
       --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
       --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" || true
     rm -f "$FAIL_COST_JSON" "$FAIL_COST_STDERR"
   fi
+  # #645: only once the workflow ran (TMP_OUT is set by the run loop).
+  if [ -n "${TMP_OUT:-}" ]; then _keep_run_transcripts || true; fi
   # #395: thread the ledger-writability warning into whichever failure comment below
   # actually fires, mirroring _handle_session_window_pause's SESSION_WINDOW_MATCHED_PATTERN
   # -> SUMMARY_LINE pattern (helper sets a global, the comment builder reads it back).
@@ -1212,10 +1276,12 @@ while true; do
 
   if [ "$EXIT_CODE" -ne 0 ]; then
     if _handle_session_window_pause "$TMP_OUT"; then
+      _keep_run_transcripts || true
       rm -f "$TMP_OUT"
       exit 0
     fi
     if _handle_blast_hold; then
+      _keep_run_transcripts || true
       rm -f "$TMP_OUT"
       exit 0
     fi
@@ -1278,7 +1344,7 @@ set -e
 
 # TARGET-PATH: cli.py resolves under dark-factory/ in the clone — target's own copy until
 # P3 cleanup, baked self-contained fallback copy afterwards (df#14)
-python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assemble \
+_cli_with_hosting_fallback run-record assemble \
   --run-id "${RUN_ID:-unknown}" \
   --issue "$ISSUE_NUM" \
   --intent "$INTENT" \
@@ -1288,11 +1354,13 @@ python3 "$CLONE_DIR/dark-factory/scripts/factory_core/cli.py" run-record assembl
   --archon-cost-exit-code "$ARCHON_COST_RC" \
   --archon-cost-stderr-file "$ARCHON_COST_STDERR" \
   --archon-log-file "$TMP_OUT" \
+  --transcripts-dir "${HOME}/.claude/projects" \
   --out-file "$ARTIFACTS_DIR/run-record.json" \
   --side-effect-level "${FACTORY_SIDE_EFFECT_LEVEL:-1}" \
   --side-effect-profile "${FACTORY_SIDE_EFFECT_PROFILE_VERSION:-unknown}" \
   --clone-dir "$CLONE_DIR" || true
 
+_keep_run_transcripts || true
 rm -f "$ARCHON_COST_JSON" "$ARCHON_COST_STDERR" "$TMP_OUT"
 
 # --- Post cost report to GitHub issue (success path) — non-fatal ---

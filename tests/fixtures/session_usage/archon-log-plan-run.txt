@@ -1,0 +1,18 @@
+Running workflow: archon-dark-factory
+{"level":30,"time":1795810393677,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","workflowName":"archon-dark-factory","nodeCount":49,"layerCount":29,"hasIssueContext":false,"issueContextLength":0,"msg":"dag_workflow_starting"}
+{"level":30,"time":1795810393681,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"parse-intent","provider":"claude","msg":"dag_node_started"}
+[parse-intent] Started
+{"level":20,"time":1795810397201,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"parse-intent","streamingMode":"batch","msg":"dag.structured_output_override"}
+{"level":30,"time":1795810397203,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"parse-intent","durationMs":3522,"msg":"dag_node_completed"}
+[parse-intent] Completed (3.5s)
+{"level":30,"time":1795810397206,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"fetch-issue","type":"bash","msg":"dag_node_started"}
+[fetch-issue] Started
+{"level":30,"time":1795810398811,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"fetch-issue","durationMs":1605,"msg":"dag_node_completed"}
+[fetch-issue] Completed (1.6s)
+{"level":30,"time":1795810398816,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"digest-comments","when":"$parse-intent.output.intent == 'continue'","msg":"dag_node_skipped_condition"}
+{"level":30,"time":1795810398816,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"setup-refine-branch","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":1795810398816,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"bench-mode-probe","type":"bash","msg":"dag_node_started"}
+{"level":30,"time":1795810398833,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"bench-mode-probe","durationMs":16,"msg":"dag_node_completed"}
+{"level":40,"time":1795810399225,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"setup-refine-branch","stderr":"scrubbed","msg":"bash_node_stderr"}
+{"level":30,"time":1795810399228,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"setup-refine-branch","durationMs":412,"msg":"dag_node_completed"}
+{"level":30,"time":1795810399585,"pid":195,"hostname":"scrubbed","module":"workflow.dag-executor","nodeId":"plan","provider":"claude","msg":"dag_node_started"}

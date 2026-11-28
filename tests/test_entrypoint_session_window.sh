@@ -49,6 +49,10 @@ SOURCE_TIME_RUN_ID="$RUN_ID"
 
 trap - ERR
 set +e; set +u; set +o pipefail
+# #645: on_failure keeps the run's session transcripts from $HOME/.claude/projects. This
+# harness is not about that (tests/test_entrypoint_cost_capture_log_thread.sh is) and must
+# never copy the machine's own transcripts, so the copy is a no-op here.
+_keep_run_transcripts() { :; }
 
 # _handle_session_window_pause resolves cli.py at "$CLONE_DIR/dark-factory/scripts/..."
 # (the TARGET-PATH convention — see entrypoint.sh's existing on_failure/post_cost_report
