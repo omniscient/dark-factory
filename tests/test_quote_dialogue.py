@@ -334,3 +334,24 @@ def test_no_bash_write_interpolates_raw_dialogue(path):
                 continue
             for tok in _RAW_TOKENS:
                 assert tok not in s, (path.name, s)
+def test_plan_comment_templates_paste_quoted_files_only():
+    text = _PLAN.read_text(encoding="utf-8")
+    blocked = text[text.index("## Spec Conformance — Blocked (Plan)"):]
+    blocked = blocked[:blocked.index("````")]
+    publish = text[text.index("## Refinement Pipeline — Plan Generated"):]
+    publish = publish[:publish.index("### Next Steps")]
+    for section in (blocked, publish):
+        for tok in _RAW_TOKENS:
+            assert tok not in section, tok
+        assert "conformance_dialogue.quoted.md" in section
+        assert "shadow_dialogue.quoted.md" in section
+    assert text.count('quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md"') == 2
+    assert text.count('quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md"') == 2
+
+
+def test_dialogue_files_are_saved_with_the_write_tool():
+    for path in (_CONF, _PLAN):
+        text = path.read_text(encoding="utf-8")
+        assert text.count("`$ARTIFACTS_DIR/conformance_dialogue.md`") >= 2, path.name
+        assert text.count("`$ARTIFACTS_DIR/shadow_dialogue.md`") >= 2, path.name
+        assert "never write it with `echo`, `printf` or a here-document" in text, path.name

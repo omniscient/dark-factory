@@ -317,7 +317,12 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    - `description`: "Conformance review: plan vs spec (cycle N)"
    - `model`: `claude-opus-5-5` (passed to the Agent tool as its `opus` alias — the tool's `model` enum is alias-only; on the current image's CLI 2.1.282 `opus` resolves to `claude-opus-5-5`, so the pin fixes the tier, not the exact snapshot) — pin and read access (Glob/Grep/Read) per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s checker-invocation contract (applies to every reconcile re-spawn too)
    - `prompt`: the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
-6. Append the subagent's output to `CONFORMANCE_DIALOGUE`
+6. Append the subagent's output to `CONFORMANCE_DIALOGUE`, then save the whole accumulated
+   `CONFORMANCE_DIALOGUE`, verbatim, with the Write tool to
+   `$ARTIFACTS_DIR/conformance_dialogue.md` (overwrite it with the full accumulated text each
+   time; never write it with `echo`, `printf` or a here-document). The comments in step 8b
+   and Phase 4 embed that file only through `scripts/quote_dialogue.py` (#405); the
+   `CONFORMANCE_DIALOGUE` working value stays raw for the verdict parse in step 7.
 6a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
     after, with the identical rubric/input the Opus spawn just saw:
    - `description`: "Conformance shadow (fable): plan vs spec (cycle N)"
@@ -330,7 +335,9 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    - Derive `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY` from the
      response per `/opt/refinement-skills/VERIFIER-CONTRACT.md`'s shadow verdict mapping.
    - Append the raw response to `SHADOW_DIALOGUE` (separate from `CONFORMANCE_DIALOGUE` —
-     never merged; `CONFORMANCE_DIALOGUE` alone drives the verdict check in step 7).
+     never merged; `CONFORMANCE_DIALOGUE` alone drives the verdict check in step 7), then
+     save the whole accumulated `SHADOW_DIALOGUE`, verbatim, with the Write tool to
+     `$ARTIFACTS_DIR/shadow_dialogue.md` (same rule as step 6).
    If `$SHADOW_MODEL_PIN` is empty, skip this step entirely — no `SHADOW_*` fields, no
    `SHADOW_DIALOGUE` append, for this cycle.
 7. Parse the **Verdict** line from the step-5 (Opus) output:
@@ -348,6 +355,12 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
       - Re-run the draft checkpoint block (end of Phase 2) unchanged, so the revised draft
         is on the branch, and name its path (`$PLAN_FILE`, under
         `docs/superpowers/plan-drafts/`) in the comment below
+      - Quote the saved dialogues for the comment (#405) in one self-contained Bash call; it
+        reads only files, so no reviewer text passes through shell quoting:
+        ```bash
+        { python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md" || printf '> (dialogue could not be quoted)\n'; } > "$ARTIFACTS_DIR/conformance_dialogue.quoted.md"  # TARGET-PATH
+        { python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md" || printf '> (dialogue could not be quoted)\n'; } > "$ARTIFACTS_DIR/shadow_dialogue.quoted.md"  # TARGET-PATH
+        ```
       - Post the conformance dialogue as an issue comment (fetch the footer first via
         `python3 dark-factory/scripts/factory_core/cli.py marker refinement`):
         ````
@@ -355,7 +368,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 
         The plan has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
 
-        $CONFORMANCE_DIALOGUE
+        <contents of $ARTIFACTS_DIR/conformance_dialogue.quoted.md, pasted verbatim>
 
         <!-- If $SHADOW_MODEL_PIN was non-empty for this run, insert this subsection here so the shadow data survives a BLOCKED plan too (Requirement 5): -->
         ### Shadow (Fable) Review
@@ -367,7 +380,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
         SHADOW_SEVERITY: <value>
         ```
 
-        <full $SHADOW_DIALOGUE, with the same Cycle N: headers as $CONFORMANCE_DIALOGUE above>
+        <contents of $ARTIFACTS_DIR/shadow_dialogue.quoted.md, pasted verbatim (it keeps the same Cycle N: headers as the conformance dialogue above)>
 
         ---
         <fetched footer text>
@@ -382,7 +395,9 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
        to 4b.
    e. Re-spawn the conformance reviewer subagent with the verbatim contents of
       `$ARTIFACTS_DIR/conformance_prompt.md` produced by step d2
-   f. Append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator and `Cycle N:` header
+   f. Append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator and `Cycle N:` header,
+      then re-save the whole accumulated `CONFORMANCE_DIALOGUE` to
+      `$ARTIFACTS_DIR/conformance_dialogue.md` with the Write tool, per step 6
    f2. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (step 8e's shadow
        counterpart — prompt is the verbatim contents of `$ARTIFACTS_DIR/conformance_prompt.md`
        produced by step d2, identical to step 6a but for this reconcile cycle). Append its
@@ -391,6 +406,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
        a shadow cycle always pairs with the Opus cycle that produced the same-numbered plan
        revision. Update `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/
        `SHADOW_SEVERITY` from this cycle's response (best-effort `UNCERTAIN` on any error).
+       Then re-save the whole accumulated `SHADOW_DIALOGUE` to
+       `$ARTIFACTS_DIR/shadow_dialogue.md` with the Write tool, per step 6a.
    g. Parse verdict again → loop back to step 7
 
 ## Phase 4: PUBLISH
@@ -450,7 +467,15 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    ```
 6. Commit any remaining change to `$PLAN_FILE` (normally none — step 4 committed the
    reviewed plan)
-7. Post a summary comment on the issue:
+7. Post a summary comment on the issue. Unless `CONFORMANCE_SKIPPED=true`, first quote the
+   saved dialogues (#405) in one self-contained Bash call; it reads only files, so no
+   reviewer text passes through shell quoting:
+   ```bash
+   { python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md" || printf '> (dialogue could not be quoted)\n'; } > "$ARTIFACTS_DIR/conformance_dialogue.quoted.md"  # TARGET-PATH
+   { python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md" || printf '> (dialogue could not be quoted)\n'; } > "$ARTIFACTS_DIR/shadow_dialogue.quoted.md"  # TARGET-PATH
+   ```
+
+   Then compose the comment:
    ```
    ## Refinement Pipeline — Plan Generated
 
@@ -478,7 +503,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 
    (If Phase 3.5 was skipped because `conformance.enabled: false`, write: _Conformance check disabled._)
 
-   (Otherwise, include the full conformance reviewer output from Phase 3.5 — the final attestation table and verdict. If a reconcile loop ran, include the full dialogue with cycle headers.)
+   (Otherwise, paste the contents of `$ARTIFACTS_DIR/conformance_dialogue.quoted.md` verbatim — the full conformance reviewer output from Phase 3.5, blockquoted, including the final attestation table and verdict and, if a reconcile loop ran, every cycle with its header. Never paste the raw `CONFORMANCE_DIALOGUE`.)
 
    (If `$SHADOW_MODEL_PIN` was non-empty for this run, append a subsection:)
 
@@ -491,8 +516,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    SHADOW_SEVERITY: <value>
    ```
 
-   <full $SHADOW_DIALOGUE, with the same Cycle N: headers as the Architect/Conformance
-   sections above>
+   <contents of $ARTIFACTS_DIR/shadow_dialogue.quoted.md, pasted verbatim (same Cycle N:
+   headers as the Architect/Conformance sections above)>
 
    ### Next Steps
 
