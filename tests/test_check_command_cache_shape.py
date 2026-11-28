@@ -15,7 +15,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from check_command_cache_shape import DEFAULT_BASELINE, check, shape  # noqa: E402
+from check_command_cache_shape import DEFAULT_BASELINE, check, main, shape  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_DIR = _REPO_ROOT / "commands"
@@ -205,3 +205,27 @@ def test_baseline_matches_committed_commands():
         "removed. Set the baseline to these values in the same commit: "
         + json.dumps(current, sort_keys=True)
     )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def test_main_json_emits_metadata(tmp_path, capsys):
+    commands, baseline = _setup(tmp_path, {"a": "x\n$ARTIFACTS_DIR\n"}, {"a": 2})
+    assert main(["--json", "--baseline", str(baseline), str(commands)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [m["command"] for m in out] == ["a"]
+    assert out[0]["first_volatile_line"] == 2
+    assert out[0]["cache_busting_fields"] == [{"name": "ARTIFACTS_DIR", "count": 1, "first_line": 2}]
+
+
+def test_main_returns_1_on_violation(tmp_path, capsys):
+    commands, baseline = _setup(tmp_path, {"a": "${ARTIFACTS_DIR}\n"}, {"a": 2})
+    assert main(["--baseline", str(baseline), str(commands)]) == 1
+    assert "R1" in capsys.readouterr().err
+
+
+def test_main_passes_on_real_tree(capsys):
+    assert main([str(_COMMANDS_DIR)]) == 0
+    assert "passed" in capsys.readouterr().out

@@ -172,3 +172,32 @@ def check(
             "remove the entry in the same commit"
         )
     return errors
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Lint the prompt cache shape of Archon phase command files."
+    )
+    parser.add_argument("commands_dir")
+    parser.add_argument("--baseline", default=None, help="baseline JSON (default: next to this script)")
+    parser.add_argument("--json", action="store_true", help="print per-command prompt-shape metadata")
+    args = parser.parse_args(argv)
+
+    if args.json and Path(args.commands_dir).is_dir():
+        metadata = [shape(p) for p in sorted(Path(args.commands_dir).glob("*.md"))]
+        print(json.dumps(metadata, indent=2))
+
+    errors = check(args.commands_dir, args.baseline)
+    if errors:
+        print("Command cache-shape lint failed:", file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        return 1
+
+    if not args.json:
+        print(f"Command cache-shape lint passed for {args.commands_dir}.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
