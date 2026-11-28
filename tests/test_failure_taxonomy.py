@@ -106,3 +106,50 @@ def test_issue_names_without_a_detector_are_never_produced():
     for name in ("github_rate_limit", "model_timeout", "tool_timeout"):
         assert ft.FAILURE_TAXONOMY[name].detector == "none_yet"
         assert name not in ft.SIGNATURE_TO_CLASS.values()
+
+
+_FILE_TOKEN_RE = re.compile(r"(?:[\w.-]+/)*[\w-]+\.(?:py|sh|yaml|yml|md)\b")
+
+
+def test_enforced_rows_declare_no_unenforced_policy():
+    enforced = {k for k, v in ft.FAILURE_TAXONOMY.items() if v.enforced}
+    assert enforced == {"session_window_pause"}
+    for key, row in ft.FAILURE_TAXONOMY.items():
+        if row.enforced:
+            assert row.max_attempts is None, key
+            assert row.token_budget_multiplier is None, key
+        assert row.cross_endpoint_retry is False, key
+        assert row.fallback_model_allowed is False, key
+        assert row.fallback_phase_allowed is False, key
+        assert row.token_budget_multiplier != 0.0, key
+        assert row.state_transition in ft.STATE_TRANSITIONS, key
+        assert row.detector in ft.DETECTORS, key
+        assert row.enforced_today, key
+        for token in _FILE_TOKEN_RE.findall(row.enforced_today):
+            assert (REPO / token).is_file(), f"{key}: enforced_today names missing file {token}"
+
+
+def test_preview_helper_classes_are_declared():
+    from factory_core import preview_helper
+    assert ft.PREVIEW_ENTRY_FAILURE_CLASSES == preview_helper.ENTRY_FAILURE_CLASSES
+    assert ft.PREVIEW_SCHEDULER_FAILURE_CLASSES == preview_helper.SCHEDULER_FAILURE_CLASSES
+    for cls in preview_helper.ENTRY_FAILURE_CLASSES + preview_helper.SCHEDULER_FAILURE_CLASSES:
+        assert cls in ft.FAILURE_TAXONOMY, cls
+        assert ft.FAILURE_TAXONOMY[cls].state_transition == "abstain_escalate"
+
+
+def test_tagging_only_gate_classes_are_declared_and_not_enforced():
+    for name in ("ci_red", "main_red", "merge_conflict", "context_overflow", "budget_exceeded",
+                 "conformance_block", "security_block", "missing_secret"):
+        row = ft.FAILURE_TAXONOMY[name]
+        assert row.enforced is False and row.detector == "none_yet", name
+        assert name not in ft.SIGNATURE_TO_CLASS.values(), name
+
+
+def test_breaker_outcomes_are_not_taxonomy_keys():
+    assert ft.BREAKER_OUTCOME_REPEAT_LOOP == "repeat_tool_call_loop"
+    assert ft.BREAKER_OUTCOME_HUMAN_REQUIRED == "human_required"
+    for outcome in (ft.BREAKER_OUTCOME_REPEAT_LOOP, ft.BREAKER_OUTCOME_HUMAN_REQUIRED):
+        assert outcome not in ft.FAILURE_TAXONOMY
+        assert outcome not in ft.SIGNATURE_TO_CLASS.values()
+        assert outcome not in ft.FAILURE_CLASSES

@@ -135,6 +135,70 @@ _NATIVE_ROWS = {
         f"{_CEILING} only, as for model_rate_limit: both sign environmental:rate_limit today")),
 }
 
+def _tag(*, requires_human, state_transition, enforced_today):
+    # Neutral placeholders, not statements about the gates (spec §2c): every row is
+    # enforced=False because the gate owns its own halt and was not matched to this record.
+    return _row(retryable=False, max_attempts=None, requires_human=requires_human,
+                state_transition=state_transition, multiplier=None, detector="none_yet",
+                enforced_today=enforced_today)
+
+
+# Spec §2c: tagging-only names for failures a gate or sentinel already handles.
+_TAG_ROWS = {
+    "ci_red": _tag(requires_human=False, state_transition="continue", enforced_today=(
+        "scheduler.sh:1114-1124 stage_ci_gate moves the ticket to Blocked; it is then retried "
+        f"up to {_CEILING}")),
+    "main_red": _tag(requires_human=False, state_transition="continue", enforced_today=(
+        "the main-is-red sentinel pauses implementation dispatch; main_red_recheck_check "
+        "clears it; main_red_fixer_check is off by default (scheduler.sh:188)")),
+    "merge_conflict": _tag(requires_human=True, state_transition="trip_to_blocked",
+                           enforced_today=(
+        "scripts/factory_core/deconflict.py tiers 1-3 own their escalation; the declared halt "
+        "was not verified against them")),
+    "context_overflow": _tag(requires_human=False, state_transition="continue",
+                             enforced_today="scripts/budget_enforce.py (a warning, no halt)"),
+    "budget_exceeded": _tag(requires_human=False, state_transition="continue", enforced_today=(
+        "scripts/budget_gate.sh in enforce mode writes context caps to token-opt-caps.env; it "
+        "does not stop the run")),
+    "conformance_block": _tag(requires_human=False, state_transition="continue",
+                              enforced_today=(
+        "the conformance/docs-conformance reconcile loop owns STATUS: BLOCKED; not verified "
+        "against the code")),
+    "security_block": _tag(requires_human=False, state_transition="continue", enforced_today=(
+        "the code-review gate owns a SEVERITY: critical finding; not verified against the code")),
+    "missing_secret": _tag(requires_human=True, state_transition="trip_to_blocked",
+                           enforced_today=(
+        "preflight fails the run at startup; the run then takes the ordinary failure path "
+        "(typically environmental:delivery_failure), not a direct trip")),
+}
+
+# Spec §4: preview_helper.py's two closed enums (#642), verbatim and in order. It is not
+# imported here; tests/test_failure_taxonomy.py pins these tuples against it.
+PREVIEW_ENTRY_FAILURE_CLASSES = ("preflight_refused", "missing_input", "input_too_large",
+                                 "local_timeout_total", "model_call_failed", "schema_invalid")
+PREVIEW_SCHEDULER_FAILURE_CLASSES = (
+    "registry_stage_failed", "endpoint_not_resolved", "proxy_start_failed", "dispatch_failed",
+    "wall_clock_exceeded", "kill_switch", "helper_result_missing", "helper_result_invalid",
+    "ledger_row_missing", "ledger_unavailable", "ledger_identity_mismatch",
+    "unclassified_failure",
+)
+# Restates #642's design: every helper failure abstains, is never retried for the same head
+# SHA and never retried on cloud. #587's lane enforces it and must update this record.
+_PREVIEW_HELPER_ROW = _row(
+    retryable=False, max_attempts=0, requires_human=False, state_transition="abstain_escalate",
+    multiplier=None, detector="none_yet",
+    enforced_today="none: preview_helper is not dispatched on main (#642); #587's lane will "
+                   "own its own stop")
+_PREVIEW_ROWS = {c: _PREVIEW_HELPER_ROW
+                 for c in PREVIEW_ENTRY_FAILURE_CLASSES + PREVIEW_SCHEDULER_FAILURE_CLASSES}
+
+# Spec §2d: what the breaker decides across attempts, never what failed on one attempt.
+# Not FAILURE_TAXONOMY keys and never a SIGNATURE_TO_CLASS value; for tagging a run's
+# terminal outcome only. "Repeated identical failures" is detected at phase-attempt
+# granularity (breaker.py:330, #373), not per tool call.
+BREAKER_OUTCOME_REPEAT_LOOP = "repeat_tool_call_loop"
+BREAKER_OUTCOME_HUMAN_REQUIRED = "human_required"  # trip_to_blocked() adds needs-discussion
+
 DEFAULT_CLASS = "substantive_unknown"
 # Keyed on a signature's first two colon-separated fields: classify() appends :<exit_code>
 # to oos_files, build_failure, test_failure, unknown and endpoint_unreachable.
@@ -172,4 +236,4 @@ def _merge(*groups):
 
 
 # The single source of truth: no other module redeclares these fields.
-FAILURE_TAXONOMY = _merge(_LOCAL_ROWS, _NATIVE_ROWS)
+FAILURE_TAXONOMY = _merge(_LOCAL_ROWS, _NATIVE_ROWS, _TAG_ROWS, _PREVIEW_ROWS)
