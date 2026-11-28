@@ -208,7 +208,8 @@ class TestSingleHeaderUnchanged:
     def test_crlf_unchanged(self, env):
         (code, body, err), (legacy_code, legacy_body, _) = _run_both(
             env, _CONF_PASS.replace("\n", "\r\n"), _REVIEW_PASS.replace("\n", "\r\n"))
-        assert code == legacy_code, err
+        assert code == legacy_code == 0, err
+        assert "--body=## Dark Factory Run" in body, body
         assert body == legacy_body
 
 
@@ -259,8 +260,8 @@ class TestConfinement:
         assert all(_legacy(w) == b for b, w in changed), changed
 
 
-def test_dag_validators_pass():
-    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+def test_dag_validators_pass(monkeypatch):
+    monkeypatch.syspath_prepend(str(_REPO_ROOT / "scripts"))
     from check_workflow_dag import check as check_dag  # noqa: PLC0415
     assert check_dag(_WORKFLOW) == []
     for script in ("check_workflow_dag.py", "check_workflow_when.py"):
