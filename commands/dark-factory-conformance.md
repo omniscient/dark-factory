@@ -580,7 +580,10 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
 
 ## Phase 4: PASS — Write attestation
 
-Write the attestation to `$ARTIFACTS_DIR/conformance.md`:
+Write the attestation to `$ARTIFACTS_DIR/conformance.md`. The dialogue is blockquoted from
+the files saved in Step 3.1/Phase 3.5 (#405), so no reviewer line can start at column 0 and
+be read as a header field. Do not check for, or wait on, those files first: a missing file
+still gets a quoted placeholder, and the header lines are always written:
 
 ```bash
 {
@@ -588,7 +591,8 @@ Write the attestation to `$ARTIFACTS_DIR/conformance.md`:
   printf "VERDICT: %s\nCYCLES: %s\nNO_SPEC: %s\nOOS_EXCISED: %s\nOOS_TICKETS: %s\n" \
     "${CONFORMANCE_VERDICT:-UNKNOWN}" "${CONFORMANCE_CYCLE:-0}" "${NO_SPEC:-false}" \
     "${OOS_EXCISED:-0}" "${OOS_TICKETS:-}"
-  printf "\n---\n\n%s\n" "${CONFORMANCE_DIALOGUE}"
+  printf "\n---\n\n"
+  python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md" || printf '> (dialogue could not be quoted)\n'  # TARGET-PATH
 } > "$ARTIFACTS_DIR/conformance.md"
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -598,7 +602,8 @@ if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
   {
     printf "SHADOW_MODEL: %s\nSHADOW_STATUS: %s\nSHADOW_FINDINGS_COUNT: %s\nSHADOW_SEVERITY: %s\n" \
       "${SHADOW_MODEL_PIN}" "${SHADOW_STATUS:-UNCERTAIN}" "${SHADOW_FINDINGS_COUNT:-0}" "${SHADOW_SEVERITY:-none}"
-    printf "\n---\n\n## Shadow (Fable) Review\n\n%s\n" "${SHADOW_DIALOGUE}"
+    printf "\n---\n\n## Shadow (Fable) Review\n\n"
+    python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md" || printf '> (dialogue could not be quoted)\n'  # TARGET-PATH
   } >> "$ARTIFACTS_DIR/conformance.md"
 
   SHADOW_BODY="## Shadow (Fable) Review — conformance
@@ -732,7 +737,8 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    {
      emit_verdict "conformance" "BLOCKED" "${MATERIAL_COUNT:-0}" "critical"
      printf "VERDICT: MATERIAL\nCYCLES: %s\n" "${CONFORMANCE_CYCLE:-0}"
-     printf "\n---\n\n%s\n" "${CONFORMANCE_DIALOGUE}"
+     printf "\n---\n\n"
+     python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md" || printf '> (dialogue could not be quoted)\n'  # TARGET-PATH
    } > "$ARTIFACTS_DIR/conformance.md"
 
    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -742,7 +748,8 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
      {
        printf "SHADOW_MODEL: %s\nSHADOW_STATUS: %s\nSHADOW_FINDINGS_COUNT: %s\nSHADOW_SEVERITY: %s\n" \
          "${SHADOW_MODEL_PIN}" "${SHADOW_STATUS:-UNCERTAIN}" "${SHADOW_FINDINGS_COUNT:-0}" "${SHADOW_SEVERITY:-none}"
-       printf "\n---\n\n## Shadow (Fable) Review\n\n%s\n" "${SHADOW_DIALOGUE}"
+       printf "\n---\n\n## Shadow (Fable) Review\n\n"
+       python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md" || printf '> (dialogue could not be quoted)\n'  # TARGET-PATH
      } >> "$ARTIFACTS_DIR/conformance.md"
    fi
    ```
