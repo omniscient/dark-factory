@@ -493,7 +493,7 @@ containers (`run-compose.yml:31-47`).
 | Variable | Default | Reader | File |
 |---|---|---|---|
 | `FACTORY_MODEL_PROXY_ENABLED` | `false` | `scheduler.sh:392` (adds the `factory-model-proxy` compose profile) | `instance.env` |
-| `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:51`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
+| `RAW_ARTIFACT_CAPTURE` | `false` | `scripts/factory_core/model_proxy.py:66`; compose passes it in (`run-compose.yml:83`) | `instance.env` |
 | `BENCH_MODE` | unset (`stub`, `full`) | `workflows/archon-dark-factory.yaml:826,940,1354` (stubs preview and PR creation) | `.archon/.env` / bench harness |
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:56` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
@@ -524,7 +524,7 @@ containers (`run-compose.yml:31-47`).
 | `FACTORY_BLAST_HOLD_FILE` | `$ARTIFACTS_DIR/blast-hold.json` (the entrypoint's own run directory) | `entrypoint.sh` (export, `_handle_blast_hold`), `scripts/blast_gate_check.sh` | hold marker handoff across Archon's per-node `ARTIFACTS_DIR` (#551); never set by hand |
 | `IDENTITY_SH`, `FACTORY_CONFIG_PATH`, `FACTORY_SCRIPTS_DIR`, `BLAST_GATE_BAKED_DIR` | baked paths | `entrypoint.sh:5,72-73`; `gate_blast_radius.py:82,91`; `scripts/blast_gate_check.sh` | "never set in the image"; test seams |
 | `SCHEDULER_SOURCE_ONLY`, `ENTRYPOINT_SOURCE_ONLY` | `0` | `scheduler.sh:1477`, `entrypoint.sh:100,853` | tests only |
-| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3, ..., 7 days | `scripts/factory_core/model_proxy.py:37-53`; `run_record.py:29,739` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's |
+| `MODEL_PROXY_PORT` `MODEL_PROXY_UPSTREAM` `MODEL_PROXY_LEDGER_PATH` `MODEL_PROXY_CURRENT_RUN_PATH` `MODEL_PROXY_MAX_BYTES` `MODEL_PROXY_BACKUP_COUNT` `RAW_ARTIFACT_DIR` `RAW_ARTIFACT_RETENTION_DAYS` `CURRENT_RUN_DIR` `SEQ_URL` | `8787`, Anthropic API, `/var/lib/dark-factory/...`, 100 MiB, 3 (ignored), ..., 7 days | `scripts/factory_core/model_proxy.py:44-68`; `run_record.py:35,902` | proxy and ledger; `run-compose.yml:79-85` sets the proxy's. `MODEL_PROXY_BACKUP_COUNT` is **ignored** since #652: no ledger generation is deleted (see "Ledger and cost-log generations" below) |
 | `FACTORY_EDITS_LABEL`, `FACTORY_REGRESSION_LABEL`, `FACTORY_EMAIL` | `merged-with-edits`, `factory-regression`, `factory@<repo>` | `scripts/fetch_scorecard.py:26-28` | scorecard tooling |
 | `MEM0_SPIKE_STORE_PATH`, `AGENTMEMORY_*` | none | `scripts/mem0_retrieve_adapter.py:46`, `scripts/eval_agentmemory.sh` | memory spike tooling, not part of runs |
 
@@ -539,6 +539,24 @@ containers (`run-compose.yml:31-47`).
 | `BUILDKIT_HOST`, `BUILDKIT_PORT` | `buildkit`, `1234` | `workflows/archon-dark-factory.yaml:1001`; set via `run-compose.yml:56-57` | `instance.env` |
 | `FACTORY_BUILD_NETWORK` | `<instance>_dark-factory-net` | `run-compose.yml:186` | `instance.env` |
 | `RUN_ID`, `RUN_STARTED_AT`, `ISSUE_NUM`, `INTENT` | per run | `entrypoint.sh` internal | not operator-settable |
+
+### Ledger and cost-log generations (#652)
+
+The model-proxy request ledger `request-ledger.jsonl` (`scripts/factory_core/model_proxy.py`) and the GraphQL cost log `graphql-costs.jsonl` (`scripts/factory_core/cost_log.py`) rotate the same way (`scripts/factory_core/rotation.py`). For a live file `<name>`:
+
+| Name | What it is |
+|---|---|
+| `<name>` | the live file |
+| `<name>.lock` | the sidecar lock; never rotated, renamed or removed |
+| `<name>.<N>` | plain generation `N`, until it is compressed |
+| `<name>.<N>.gz` | compressed generation `N`; never rewritten, renamed or removed by any code |
+| `<name>.<N>.gz.tmp.<16 hex>` | a compression in progress; a leftover is removed by a rotation once it is an hour old |
+
+- **When:** the ledger rotates at `MODEL_PROXY_MAX_BYTES` (100 MiB), the cost log at about 1 MiB. The new generation takes one more than the highest number present, and numbers only grow.
+- **Growth is unbounded by design.** No generation is deleted or overwritten; `MODEL_PROXY_BACKUP_COUNT` is ignored. Each rotation logs one `factory-rotation:` line on the writer's stderr with the store's total size (the live file plus every generation). Nothing stops the store at a size: when the state volume is full, a ledger append fails with `ENOSPC` (that row is not recorded), a compression that cannot finish is logged and leaves its plain generation in place, and the cost log drops the line. Watch the size line and prune.
+- **Older generations** (`request-ledger.jsonl.1`–`.3` and `graphql-costs.jsonl.1`, left by the rotation before #652) keep their names and are compressed by later rotations. Among themselves their numbers do not mean "higher is newer".
+- **Readers:** `run-record assemble`, `backfill-economics`, `issue-economics` and the preview helper read the live file and every generation, plain or `.gz`. Per-run reads skip generations last modified before the run started. `scripts/reconcile_cost_reports.py` still reads only the live ledger.
+- **Pruning is a manual operator action** and the only way the store shrinks. Delete whole `<name>.<N>.gz` files, oldest first by modification time (`ls -ltr`). Never delete the live file, the `.lock` file, or a plain `<name>.<N>` that is not yet compressed. Rows in a deleted generation are gone from every report above.
 
 ### Model endpoint registry (#557)
 
@@ -753,7 +771,7 @@ back to defaults on any error.
 | `components` | ARCHITECTURE.md slicing map (replaced when declared) | `scripts/architecture_slice.py:28-41` |
 | `memory_routing` | glob to memory-file routing | `scripts/gate_lib.sh:19` |
 | `deconflict.models_init`, `deconflict.migrations_dir`, `deconflict.alembic_ini` | Tier-1 conflict resolution file paths; the alembic.ini whose directory the post-Tier-1 multi-head check runs in (not a file: check skipped, unless a migration file is conflicted, which escalates) | `scripts/factory_core/deconflict.py:22-55` |
-| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:1295` |
+| `loops` | adapter-declared loops, validated; consumed by the handoff and run-record code | `handoff.py:437`, `run_record.py:1426` |
 
 Everything else in Layer 1 (all scheduler policy, conformance, code review, blast radius,
 dispatch ceiling, side-effect levels, main-red autofix) is **not** adapter-overridable. The

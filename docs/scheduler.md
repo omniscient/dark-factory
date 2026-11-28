@@ -446,7 +446,7 @@ the named volume `<FACTORY_INSTANCE>-scheduler-state` mounted into both the sche
 | `preview-helper/` (`input.json`, `current-run.json`, `result.json`) | Scheduler (first two), helper container (`result.json`) | Helper, `preview-helper-proxy` (pointer), scheduler | The helper's one writable directory; emptied after every dispatch |
 | `autopilot-state.json` | `epic_autopilot.py` in the scheduler process | Same | Daily advance count, cached verdicts |
 | `runs.jsonl` | Run containers (`entrypoint.sh`); scheduler appends a `stop_condition` row when `evaluate_stop` reports a stop (`breaker.py` `_append_stop_audit_row`) | Reporting | Run ledger |
-| `graphql-costs.jsonl` (rotates to `.1`) | Scheduler and run containers via `factory_core/cost_log.py` — **only when `SCHEDULER_STATE_DIR` is set in the child's environment** (unset in CI's pytest job, which asserts this dir stays empty) | Operator (manual tailing; no factory code reads it) | One JSONL line per measured GraphQL call (`board_items`, `issue_states`): `ts`, `source` (`scheduler` or a run id, via `DARK_FACTORY_COST_SOURCE`), `context`, `cost`, `remaining`, `reset_at`. Size rotation at ~1 MiB, one retained generation. Fail-soft by design (#607) |
+| `graphql-costs.jsonl` (numbered `.N.gz` generations, never deleted) | Scheduler and run containers via `factory_core/cost_log.py` — **only when `SCHEDULER_STATE_DIR` is set in the child's environment** (unset in CI's pytest job, which asserts this dir stays empty) | Operator (manual tailing; no factory code reads it) | One JSONL line per measured GraphQL call (`board_items`, `issue_states`): `ts`, `source` (`scheduler` or a run id, via `DARK_FACTORY_COST_SOURCE`), `context`, `cost`, `remaining`, `reset_at`. Size rotation at ~1 MiB into numbered, gzip-compressed generations under the sidecar lock `graphql-costs.jsonl.lock` (bounded 1 s wait; nothing is deleted, see [configuration.md](configuration.md) "Ledger and cost-log generations", #652). Fail-soft by design (#607) |
 
 Because retry state is on the volume, counters survive a scheduler restart
 (`scheduler.sh:1611-1615`).
@@ -1020,7 +1020,7 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     The board fetch query and the batched `tracker states` query each select
     `rateLimit { cost remaining resetAt }` (1 point, no extra round trip), and each call
     appends one line to `$SCHEDULER_STATE_DIR/graphql-costs.jsonl`
-    (`factory_core/cost_log.py` `log_call`, `:21`): `ts`, `source` (`scheduler` —
+    (`factory_core/cost_log.py` `log_call`, `:45`): `ts`, `source` (`scheduler` —
     exported at `scheduler.sh:16` — or a run id, `entrypoint.sh:117`), `context`, and the
     call's own `cost`/`remaining`/`reset_at`. The write happens **only when
     `SCHEDULER_STATE_DIR` is set in the child's environment** (no default) — CI's pytest
