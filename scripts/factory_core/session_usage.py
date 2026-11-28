@@ -25,6 +25,7 @@ import os
 import pathlib
 import stat
 import unicodedata
+import zlib
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -274,7 +275,7 @@ def load_transcripts(root, started_at=None) -> dict:
                 if mid not in seen:
                     seen.add(mid)
                     info["ids"].append(mid)
-        except OSError:
+        except (OSError, EOFError, zlib.error):
             continue
         files[rel] = info
     version = versions.most_common(1)[0][0] if versions else None
@@ -517,7 +518,7 @@ def backfill(transcripts: dict, nodes: dict) -> dict:
     files, messages = transcripts["files"], transcripts["messages"]
     chain_of = {rel: c for c in _chains(files, messages) if not c["subagent"]
                 for rel in _main_files(c, files)}
-    results = {}
+    candidates: dict = {}
     for node, info in nodes.items():
         cost = info.get("cost_usd")
         if not _is_num(cost) or cost <= 0:
@@ -527,12 +528,22 @@ def backfill(transcripts: dict, nodes: dict) -> dict:
                 and abs(files[rel]["cost_state"]["totalCostUSD"] - cost) <= COST_EPSILON]
         if len(hits) != 1:
             continue
-        rel = hits[0]
+        candidates[node] = hits[0]
+    by_file: dict = {}
+    for node, rel in candidates.items():
+        by_file.setdefault(rel, []).append(node)
+    results = {}
+    for node, rel in candidates.items():
+        if len(by_file[rel]) != 1:
+            # Several nodes share this recorded cost and all matched the same file —
+            # ambiguous, so none of them get it.
+            continue
+        info = nodes[node]
         prev = _prev_file(chain_of[rel], files, rel)
         earlier = set(files[prev]["ids"]) if prev else set()
         own = [m for m in files[rel]["ids"] if m not in earlier]
         matched = _token_pair(messages, own) == tuple(info.get("tokens") or (None, None))
-        fig = _figures(files, messages, rel, prev, own, matched, cost)
+        fig = _figures(files, messages, rel, prev, own, matched, info.get("cost_usd"))
         if fig is not None:
             results[node] = fig
     return results

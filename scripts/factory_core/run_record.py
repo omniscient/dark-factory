@@ -653,7 +653,7 @@ def _with_usage_keys(node: dict, called: bool, figures: "dict | None", hosting) 
     else:
         node.pop("models", None)
     for key in _USAGE_CACHE_KEYS:
-        values = [m[key] for m in models if isinstance(m.get(key), int)]
+        values = [m[key] for m in models if session_usage._is_int(m.get(key))]
         if values:
             node[f"gen_ai.usage.{key}"] = sum(values)
     node["usage_source"] = source
@@ -676,9 +676,12 @@ def _apply_session_usage(nodes: list, totals: dict, *, transcripts_dir, started_
     node_types = maps[0] if maps else None
     all_windows: dict = {}
     transcripts = None
-    try:   # never lose the record over the log or the transcripts
+    try:   # never lose the record over the log
         all_windows = session_usage.read_node_windows(
             archon_log_file, [n.get("node_id") for n in nodes])
+    except Exception as exc:
+        print(f"run-record: session usage not read ({type(exc).__name__})", file=sys.stderr)
+    try:   # never lose the record over the transcripts
         if transcripts_dir:
             transcripts = session_usage.load_transcripts(transcripts_dir, started_at)
     except Exception as exc:
@@ -1266,7 +1269,7 @@ def cmd_assemble(args) -> None:
         started_at=args.started_at,
         archon_log_file=getattr(args, "archon_log_file", None),
         clone_dir=getattr(args, "clone_dir", None) or ".",
-        hosting=model_dispatch["result"]["hosting_location"],
+        hosting="local" if local_run else model_dispatch["result"]["hosting_location"],
     )
 
     from . import adapter
