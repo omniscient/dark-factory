@@ -73,7 +73,8 @@ only reaches this phase after `blast-gate` passed. Your own Phase 5 writes of
 11. Determine `ISSUE_NUM` from `$ARTIFACTS_DIR/issue.json`; only fall back to `git branch --show-current | grep -oP 'issue-\K\d+'` if the artifact is missing or invalid.
 12. Resolve the shadow model pin (Requirement 7 — explicit-empty-wins-over-unset):
     ```bash
-    SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('.claude/skills/refinement/config.yaml')); print(d.get('conformance',{}).get('shadow_model','claude-fable-5-1'))" 2>/dev/null || echo "claude-fable-5-1")
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('$ROOT/.claude/skills/refinement/config.yaml')) or {}; v=(d.get('conformance') or {}).get('shadow_model','claude-fable-5-1'); print(v if v else '')" 2>/dev/null || echo "claude-fable-5-1")
     SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
     ```
 
@@ -590,6 +591,9 @@ Write the attestation to `$ARTIFACTS_DIR/conformance.md`:
   printf "\n---\n\n%s\n" "${CONFORMANCE_DIALOGUE}"
 } > "$ARTIFACTS_DIR/conformance.md"
 
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('$ROOT/.claude/skills/refinement/config.yaml')) or {}; v=(d.get('conformance') or {}).get('shadow_model','claude-fable-5-1'); print(v if v else '')" 2>/dev/null || echo "claude-fable-5-1")
+SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
 if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
   {
     printf "SHADOW_MODEL: %s\nSHADOW_STATUS: %s\nSHADOW_FINDINGS_COUNT: %s\nSHADOW_SEVERITY: %s\n" \
@@ -683,6 +687,9 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    # Requirements 4/5: a real shell guard, not a prose note inside the body string — when
    # the shadow never ran (SHADOW_MODEL_PIN empty) nothing is posted, so an empty
    # SHADOW_MODEL: line can never masquerade as an UNCERTAIN shadow verdict.
+   ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+   SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('$ROOT/.claude/skills/refinement/config.yaml')) or {}; v=(d.get('conformance') or {}).get('shadow_model','claude-fable-5-1'); print(v if v else '')" 2>/dev/null || echo "claude-fable-5-1")
+   SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
    SHADOW_BLOCK=""
    if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
      SHADOW_BLOCK="## Shadow (Fable) Review — conformance
@@ -736,6 +743,9 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
      printf "\n---\n\n%s\n" "${CONFORMANCE_DIALOGUE}"
    } > "$ARTIFACTS_DIR/conformance.md"
 
+   ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+   SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('$ROOT/.claude/skills/refinement/config.yaml')) or {}; v=(d.get('conformance') or {}).get('shadow_model','claude-fable-5-1'); print(v if v else '')" 2>/dev/null || echo "claude-fable-5-1")
+   SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
    if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
      {
        printf "SHADOW_MODEL: %s\nSHADOW_STATUS: %s\nSHADOW_FINDINGS_COUNT: %s\nSHADOW_SEVERITY: %s\n" \

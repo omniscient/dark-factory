@@ -183,7 +183,8 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
     unset falls back to the config default — `${VAR-default}`, not `${VAR:-default}`, so an
     explicit empty string is preserved rather than replaced):
     ```bash
-    SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('.claude/skills/refinement/config.yaml')); print(d.get('conformance',{}).get('shadow_model','claude-fable-5-1'))" 2>/dev/null || echo "claude-fable-5-1")
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+    SHADOW_MODEL_DEFAULT=$(python3 -c "import yaml; d=yaml.safe_load(open('$ROOT/.claude/skills/refinement/config.yaml')) or {}; v=(d.get('conformance') or {}).get('shadow_model','claude-fable-5-1'); print(v if v else '')" 2>/dev/null || echo "claude-fable-5-1")
     SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
     ```
 4b. Render the conformance prompt. `RUBRIC_CONTENT` (step 1) is prose, not a shell variable —
