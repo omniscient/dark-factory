@@ -15,7 +15,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from check_command_cache_shape import shape  # noqa: E402
+from check_command_cache_shape import check, shape  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_DIR = _REPO_ROOT / "commands"
@@ -108,3 +108,81 @@ def test_file_with_no_token_is_all_prefix(tmp_path):
     assert meta["volatile_tail_bytes"] == 0
     assert meta["cache_busting_fields"] == []
     assert meta["prefix_hash"] == hashlib.sha256(b"one\ntwo\n").hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# R1: brace form
+# ---------------------------------------------------------------------------
+
+def test_r1_brace_form_fails(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "x\n${ARTIFACTS_DIR}/issue.json\n"}, {"a": 3})
+    errors = check(commands, baseline)
+    assert len(errors) == 1
+    assert "R1" in errors[0] and "a.md:2" in errors[0]
+
+
+def test_r1_brace_form_with_default_fails(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "x\n${ARTIFACTS_DIR:-x}\n"}, {"a": 3})
+    errors = check(commands, baseline)
+    assert len(errors) == 1 and "R1" in errors[0]
+
+
+def test_r1_unrelated_brace_variables_pass(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "${OTHER} ${CONTEXT_PACK}\n"}, {"a": 2})
+    assert check(commands, baseline) == []
+
+
+# ---------------------------------------------------------------------------
+# R2: prefix ratchet
+# ---------------------------------------------------------------------------
+
+def test_r2_token_earlier_than_baseline_fails(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "one\n$ARTIFACTS_DIR\n"}, {"a": 3})
+    errors = check(commands, baseline)
+    assert len(errors) == 1
+    assert "R2" in errors[0] and "line 2" in errors[0] and "line 3" in errors[0]
+
+
+def test_r2_token_at_baseline_passes(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "one\ntwo\n$ARTIFACTS_DIR\n"}, {"a": 3})
+    assert check(commands, baseline) == []
+
+
+def test_r2_token_later_than_baseline_passes(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "one\ntwo\nthree\n$WORKFLOW_ID\n"}, {"a": 3})
+    assert check(commands, baseline) == []
+
+
+def test_r2_file_with_no_token_passes(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "one\ntwo\n"}, {"a": 3})
+    assert check(commands, baseline) == []
+
+
+# ---------------------------------------------------------------------------
+# R3: baseline complete
+# ---------------------------------------------------------------------------
+
+def test_r3_missing_entry_fails_and_names_fix(tmp_path):
+    commands, baseline = _setup(
+        tmp_path, {"a": "x\n", "new-cmd": "one\n$ARTIFACTS_DIR\n"}, {"a": 2}
+    )
+    errors = check(commands, baseline)
+    assert len(errors) == 1
+    assert "R3" in errors[0]
+    assert str(baseline) in errors[0]
+    assert '"new-cmd": 2' in errors[0]
+
+
+def test_r3_orphan_entry_fails(tmp_path):
+    commands, baseline = _setup(tmp_path, {"a": "x\n"}, {"a": 2, "gone": 3})
+    errors = check(commands, baseline)
+    assert len(errors) == 1
+    assert "R3" in errors[0] and '"gone"' in errors[0] and str(baseline) in errors[0]
+
+
+def test_unreadable_baseline_fails(tmp_path):
+    commands, _ = _setup(tmp_path, {"a": "x\n"}, {})
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert check(commands, bad) != []
+    assert check(commands, tmp_path / "missing.json") != []

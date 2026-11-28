@@ -108,3 +108,67 @@ def shape(path: Union[str, Path]) -> dict:
         "first_volatile_line": first_volatile_line,
         "cache_busting_fields": list(fields.values()),
     }
+
+
+def _load_baseline(baseline: Path) -> tuple[dict[str, int], list[str]]:
+    try:
+        data = json.loads(baseline.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return {}, [f"{baseline}: cannot read baseline: {exc}"]
+    except json.JSONDecodeError as exc:
+        return {}, [f"{baseline}: invalid JSON: {exc}"]
+    if not isinstance(data, dict) or not all(
+        isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+        for k, v in data.items()
+    ):
+        return {}, [f"{baseline}: must be a JSON object mapping command name to line number"]
+    return data, []
+
+
+def check(
+    commands_dir: Union[str, Path], baseline_path: Optional[Union[str, Path]] = None
+) -> list[str]:
+    """Apply R1-R3 to every ``*.md`` in *commands_dir*.
+
+    Returns a (possibly empty) list of human-readable error strings.
+    Returns ``[]`` when every file passes.
+    """
+    commands_dir = Path(commands_dir)
+    baseline = Path(baseline_path) if baseline_path is not None else DEFAULT_BASELINE
+    if not commands_dir.is_dir():
+        return [f"{commands_dir}: not a directory"]
+    floors, errors = _load_baseline(baseline)
+    if errors:
+        return errors
+
+    files = sorted(commands_dir.glob("*.md"))
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for m in BRACE_RE.finditer(text):
+            errors.append(
+                f"{path}:{_line_of(text, m.start())}: R1: brace form ${{{m.group('name')} "
+                f"is forbidden - Archon substitutes only the bare ${m.group('name')}; the "
+                "brace form reaches the agent unsubstituted and resolves to the wrong "
+                "directory in its shell (see docs/prompt-cache-shape.md)"
+            )
+        first = shape(path)["first_volatile_line"]
+        name = path.stem
+        if name not in floors:
+            errors.append(
+                f"{path}: R3: no entry in {baseline} - add \"{name}\": {first} to "
+                f"{baseline} in the same commit"
+            )
+        elif first < floors[name]:
+            errors.append(
+                f"{path}: R2: first volatile token is on line {first}, earlier than the "
+                f"baseline line {floors[name]} in {baseline} - move the token back below "
+                "the stable prefix (lowering the baseline needs its own reviewed ticket)"
+            )
+
+    names = {p.stem for p in files}
+    for orphan in sorted(set(floors) - names):
+        errors.append(
+            f"{baseline}: R3: entry \"{orphan}\" has no {commands_dir}/{orphan}.md - "
+            "remove the entry in the same commit"
+        )
+    return errors
