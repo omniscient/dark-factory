@@ -36,7 +36,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PCLI="${SCRIPT_DIR}/factory_core/providers/cli.py"
 _PCLI_FACTORY_CORE="${SCRIPT_DIR}/factory_core/cli.py"
 
-_FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker "$FOOTER_KIND" 2>/dev/null || echo "")
+_FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker "$FOOTER_KIND" 2>/dev/null) \
+  || { echo "post_marker_comment.sh: unknown footer-kind '$FOOTER_KIND'" >&2; _FOOTER=""; }
 _FULL_BODY="${MARKER_TAG}
 ${BODY}
 
