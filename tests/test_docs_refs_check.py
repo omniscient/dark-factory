@@ -488,6 +488,42 @@ def test_base_resolution_failure_is_named_in_the_ambiguous_message(tmp_path, bas
     assert (_doc(root).read_bytes(), lock.read_bytes()) == (doc_before, lock_before)
 
 
+def _commit(root: Path, message: str) -> str:
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", message], check=True)
+    return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _implement_then_advisory(tmp_path: Path) -> tuple[Path, str]:
+    """A: seeded lock. B: 3 lines inserted above and re-derived. Then 1 more, uncommitted."""
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    base_a = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    _insert(root, 0, ["impl 1", "impl 2", "impl 3"])
+    assert rederive([_doc(root)], root, base=base_a)[1] == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:7`\n"
+    _commit(root, "implement")
+    _insert(root, 0, ["advisory 1"])
+    return root, base_a
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_hook_base_head_relocates_after_an_earlier_rederive_and_the_branch_base_does_not(tmp_path):
+    root, _ = _implement_then_advisory(tmp_path / "head")
+    printed, failures = rederive([_doc(root)], root, base="HEAD")
+    assert failures == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:8`\n"
+
+    root, base_a = _implement_then_advisory(tmp_path / "branch-base")
+    lock = root / LOCK_FILE
+    doc_before, lock_before = _doc(root).read_bytes(), lock.read_bytes()
+    printed, failures = rederive([_doc(root)], root, base=base_a)
+    assert printed == [] and len(failures) == 1 and "ambiguous" in failures[0], failures
+    assert (_doc(root).read_bytes(), lock.read_bytes()) == (doc_before, lock_before)
+
+
 def test_hand_shifted_citation_is_rekeyed_and_keeps_seeded(tmp_path):
     root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:5`\n")
     lock = _seeded(root)
