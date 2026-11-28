@@ -604,9 +604,18 @@ _write_error_signature() {
     # Printed to the container log as before; the local path discards it, as before.
     [ -z "$es_out" ] || printf '%s\n' "$es_out"
   fi
-  # #238: the verb prints `signature=<sig>` after a successful write (cli.py:214); no such
-  # line means nothing was written.
-  ERROR_SIGNATURE_WRITTEN=$(printf '%s\n' "$es_out" | sed -n 's/^signature=//p' | tail -n 1)
+  # #238: the verb prints `signature=<sig>` after a successful write (cli.py:214) as the
+  # last thing it writes; no such line means nothing was written. Anchored on the actual
+  # last line of $es_out (not "the last line anywhere that matches the pattern"): on the
+  # local path, _cli_with_hosting_fallback merges the CLI's stderr into $es_out via its own
+  # internal `2>&1`, so an unrelated stderr line that happened to start with `signature=`
+  # would otherwise be taken as the written signature if it sorted after the real one.
+  local _es_last_line
+  _es_last_line=$(printf '%s\n' "$es_out" | tail -n 1)
+  case "$_es_last_line" in
+    signature=*) ERROR_SIGNATURE_WRITTEN="${_es_last_line#signature=}" ;;
+    *) ERROR_SIGNATURE_WRITTEN="" ;;
+  esac
 }
 
 # --- Keep this run's Claude Code session transcripts (#645 requirement 7) ---

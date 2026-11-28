@@ -1,4 +1,4 @@
-Files with blast score ≥ 5.0  (11 found)
+Files with blast score ≥ 5.0  (12 found)
 
     12.5  scripts/factory_core/adapter_defaults.py  (8d / 9t)  152 loc
     12.0  scripts/factory_core/adapter.py  (8d / 8t)  331 loc
@@ -7,7 +7,8 @@ Files with blast score ≥ 5.0  (11 found)
      9.5  scripts/factory_core/verifier.py  (2d / 15t)  232 loc
      8.0  scripts/factory_core/providers/__init__.py  (5d / 6t)  102 loc
      6.5  scripts/factory_core/board.py  (4d / 5t)  167 loc
-     5.5  scripts/factory_core/run_record.py  (3d / 5t)  1639 loc
+     5.5  scripts/factory_core/run_record.py  (3d / 5t)  1732 loc
+     5.0  scripts/factory_core/failure_taxonomy.py  (1d / 8t)  240 loc
      5.0  scripts/factory_core/model_proxy.py  (1d / 8t)  681 loc
-     5.0  scripts/factory_core/session_usage.py  (1d / 8t)  539 loc
+     5.0  scripts/factory_core/session_usage.py  (1d / 8t)  550 loc
      5.0  scripts/token_estimate.py  (5d / 0t)  51 loc

@@ -1423,15 +1423,26 @@ def _annotate_failure_class(path: "pathlib.Path | None", run_id: str, failure_cl
     """
     if path is None:
         return
+    fd = None
     try:
-        st = os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # fstat the fd we actually have open, not a separate lstat(path) call: that would
+        # leave a window where a regular file swapped for something else between the two
+        # calls is read anyway, with the stale lstat's mode later applied to the rewrite.
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = None  # fdopen now owns the fd; avoid closing it twice
             record = json.load(fh)
     except (OSError, ValueError):
         return
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     if not isinstance(record, dict) or record.get("run_id") != run_id:
         return
     he = record.get("harness_economics")
@@ -1444,8 +1455,10 @@ def _annotate_failure_class(path: "pathlib.Path | None", run_id: str, failure_cl
     entry = by_class.get(failure_class)
     if not isinstance(entry, dict):
         entry = by_class[failure_class] = {}
-    # tokens/basis are the run's whole-run spend; a request_count the ledger part already
-    # counted for the same class (ledger requests, not whole-run) is kept alongside.
+    # The record's failure_spend tokens/basis (fs["basis"] can be "whole_run" or
+    # "retry_only", not always "the run's whole-run spend"); a request_count the ledger
+    # part already counted for the same class (ledger requests, not whole-run) is kept
+    # alongside.
     entry.update({"tokens": fs.get("tokens"), "basis": fs.get("basis")})
     tmp = None
     try:
@@ -1469,7 +1482,10 @@ def cmd_annotate_failure(args) -> None:
     Called by entrypoint.sh's on_failure after the signature write, which runs after
     `assemble`. The out-file and the durable copy are each annotated from their own content;
     one is never copied onto the other. Appends nothing to runs.jsonl, posts nothing to Seq
-    (assembling again would do both) and always exits 0.
+    (assembling again would do both) and always exits 0. Consequence: runs.jsonl rows and
+    the Seq event already emitted by `assemble` for this run never carry this run's own
+    phase-level failure class — only run-record.json and its durable copy do. A consumer
+    that reads runs.jsonl/Seq instead of the run record will not see it.
     """
     failure_class = class_for_signature(args.failure_signature)
     for path in (pathlib.Path(args.out_file), _durable_run_record_path(args.run_id)):

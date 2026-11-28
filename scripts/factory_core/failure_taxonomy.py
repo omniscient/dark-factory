@@ -47,8 +47,10 @@ def _row(*, retryable, max_attempts, requires_human, state_transition, multiplie
 
 
 _BREAKER = "scripts/factory_core/breaker.py"
-_CEILING = f"{_BREAKER}:168 evaluate_stop_condition (flat ceiling)"
-_CEILING_AND_STUCK = f"{_CEILING} + {_BREAKER}:330 record_failure_signature (#373 stuck)"
+# Function names only, not line numbers: those drift out of sync with the defs they cite
+# (test_enforced_rows_declare_no_unenforced_policy only checks that the file exists).
+_CEILING = f"{_BREAKER} evaluate_stop_condition (flat ceiling)"
+_CEILING_AND_STUCK = f"{_CEILING} + {_BREAKER} record_failure_signature (#373 stuck)"
 
 # Contract §4.6's local-endpoint classes, persisted verbatim in the request ledger's
 # failure_class column. Values and FAILURE_CLASSES' order are load-bearing:
@@ -110,12 +112,12 @@ def _native(*, retryable=True, max_attempts=None, requires_human=False,
 # tool_timeout and github_rate_limit are the issue's names and have no detector yet.
 _NATIVE_ROWS = {
     "delivery_failure": _native(multiplier=0.5, enforced_today=(
-        "scheduler.sh:579-596 retry_or_skip_delivery_failure: not counted against the retry "
+        "scheduler.sh retry_or_skip_delivery_failure: not counted against the retry "
         "key; a shadow <key>:delivery counter trips at the phase ceiling")),
     "model_rate_limit": _native(multiplier=0.5, enforced_today=f"{_CEILING} only"),
     "preview_infra": _native(multiplier=0.5, enforced_today=f"{_CEILING} only"),
     "session_window_pause": _native(multiplier=None, enforced=True, enforced_today=(
-        "scheduler.sh:551-560 rollback_paused_retry un-counts the paused attempt, and the "
+        "scheduler.sh rollback_paused_retry un-counts the paused attempt, and the "
         "session-window-paused sentinel holds dispatch until its resume time")),
     "verdict_missing": _native(),
     "scope_spillover": _native(retryable=False, max_attempts=0, enforced_today=(
