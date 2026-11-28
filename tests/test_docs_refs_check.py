@@ -591,3 +591,31 @@ def test_unreadable_lock_is_a_one_line_error_in_every_mode(tmp_path, capsys):
             assert main([*mode, *common]) == 1
             assert "cannot load citation lock" in capsys.readouterr().err
         assert lock.read_text(encoding="utf-8") == bad
+
+
+# ---------------------------------------------------------------------------
+# This repo's own docs and lock (#662 requirement 9)
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parents[1]
+_REFERENCE_DOCS = [_REPO / d for d in
+                   ("docs/run-lifecycle.md", "docs/scheduler.md", "docs/features.md", "docs/configuration.md")]
+
+
+def test_repo_docs_pass_the_reference_check_with_the_citation_lock():
+    errors = check(_REFERENCE_DOCS, _REPO)
+    assert errors == [], "\n".join(errors)
+
+
+def test_repo_citation_lock_exists_and_covers_every_commands_citation():
+    import docs_refs_check as d
+
+    lock = _REPO / LOCK_FILE
+    assert lock.is_file(), f"{LOCK_FILE} is missing: the commands/*.md content check is off"
+    idx = d._index(d._repo_files(_REPO))
+    covered = {
+        p.key for doc in _REFERENCE_DOCS
+        for p in d._parts(d._doc_key(doc, _REPO), doc.read_text(encoding="utf-8"), idx)
+    }
+    locked = set(d._load_lock(lock))
+    assert covered and covered <= locked, sorted(covered - locked)
