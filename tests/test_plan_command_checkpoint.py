@@ -322,3 +322,121 @@ def test_checkpoint_reruns_before_both_needs_discussion_exits():
         rerun = exit_text.find("Re-run the draft checkpoint block")
         assert rerun != -1, exit_text
         assert rerun < exit_text.index("--add needs-discussion"), exit_text
+
+
+# ── Phase 4: promote ─────────────────────────────────────────────────────────
+
+
+def _assert_promoted(env, base, final, content):
+    work = env["work"]
+    assert git("rev-list", "--count", f"{base}..HEAD", cwd=work).stdout.strip() == "1"
+    assert _tracked(work, "docs/superpowers/plans/") == [final]
+    assert (work / final).read_text() == content
+    assert _tracked(work, "docs/superpowers/plan-drafts/") == []
+    changed = git("diff", "--name-only", "origin/main...HEAD", cwd=work).stdout.split()
+    assert changed and all(
+        p.startswith(("docs/superpowers/specs/", "docs/superpowers/plans/")) for p in changed
+    ), changed
+    assert _oos(env, _PLAN_ALLOWLIST, "plan") == "", "the plan OOS gate must excise nothing"
+
+
+@_posix
+def test_promote_moves_the_edited_draft_into_plans(env):
+    work = env["work"]
+    _commit(work, _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+    base = _head(work)
+    _write(work, _DRAFT, _plan("v2 after review"))  # uncommitted reviewer fixes
+
+    result, out = _run(env, "promote", PLAN_FILE=_DRAFT)
+
+    assert out["rc"] == "0", result.stderr
+    assert out["PLAN_FILE"] == _FINAL
+    _assert_promoted(env, base, _FINAL, _plan("v2 after review"))
+
+
+@_posix
+def test_promote_works_when_the_checkpoint_commit_never_happened(env):
+    work = env["work"]
+    base = _head(work)
+    _write(work, _DRAFT, _plan("never committed"))
+
+    result, out = _run(env, "promote", PLAN_FILE=_DRAFT)
+
+    assert out["rc"] == "0", result.stderr
+    _assert_promoted(env, base, _FINAL, _plan("never committed"))
+
+
+@_posix
+def test_promote_reuses_an_earlier_plan_path(env):
+    work = env["work"]
+    _commit(work, _OLD_PLAN, _plan("rejected"), f"docs(#{_ISSUE}): add implementation plan")
+    _commit(work, _DRAFT, _plan("revised"), f"docs(#{_ISSUE}): checkpoint draft plan")
+    base = _head(work)
+
+    result, out = _run(env, "promote", PLAN_FILE=_DRAFT)
+
+    assert out["rc"] == "0", result.stderr
+    assert out["PLAN_FILE"] == _OLD_PLAN
+    _assert_promoted(env, base, _OLD_PLAN, _plan("revised"))
+
+
+@_posix
+def test_promote_without_plan_file_deletes_nothing(env):
+    # Unedited draft: the case where an unguarded `git rm -r` would delete it (#409 review).
+    work = env["work"]
+    _commit(work, _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+    base = _head(work)
+
+    result, _ = _run(env, "promote")
+
+    assert result.returncode != 0
+    assert "PLAN_FILE is unbound or missing" in result.stdout
+    assert _head(work) == base
+    assert _tracked(work, "docs/superpowers/plan-drafts/") == [_DRAFT]
+    assert _tracked(work, "docs/superpowers/plans/") == []
+
+
+@_posix
+def test_promote_stops_before_git_rm_when_the_move_fails(env):
+    work = env["work"]
+    _commit(work, _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+    base = _head(work)
+    # A file where the plans directory should be makes `git mv` fail.
+    (work / "docs" / "superpowers" / "plans").write_text("not a directory\n")
+
+    result, _ = _run(env, "promote", PLAN_FILE=_DRAFT)
+
+    assert result.returncode != 0
+    assert _head(work) == base
+    assert _tracked(work, "docs/superpowers/plan-drafts/") == [_DRAFT]
+
+
+@_posix
+def test_gate_lookups_tell_a_draft_from_an_earlier_plan(env):
+    work = env["work"]
+    _commit(work, _OLD_PLAN, _plan("rejected"), f"docs(#{_ISSUE}): add implementation plan")
+    _commit(work, _DRAFT, _plan("revised"), f"docs(#{_ISSUE}): checkpoint draft plan")
+
+    assert _gate(env, "docs/superpowers/plan-drafts/") == _DRAFT
+    assert _gate(env, "docs/superpowers/plans/") == _OLD_PLAN
+
+
+@_posix
+def test_refine_oos_gate_excises_a_draft(env):
+    work = env["work"]
+    _commit(work, _DRAFT, _plan(), f"docs(#{_ISSUE}): checkpoint draft plan")
+
+    assert _oos(env, _REFINE_ALLOWLIST, "refine") == _DRAFT
+    assert _tracked(work, "docs/superpowers/plan-drafts/") == []
+
+
+def test_promote_precedes_the_oos_gate():
+    phase4 = _section("## Phase 4: PUBLISH")
+    oos_line = next(l for l in phase4.splitlines() if "oos_excise.sh" in l and "# TARGET-PATH" in l)
+    assert phase4.index("<!-- plan-draft-promote:end -->") < phase4.index(oos_line)
+
+
+def test_oos_allowlist_is_not_widened():
+    oos_line = next(l for l in _text().splitlines() if "oos_excise.sh" in l and "# TARGET-PATH" in l)
+    match = re.search(r'oos_excise\.sh"\s+"([^"]*)"', oos_line)
+    assert match and set(match.group(1).split()) == set(_PLAN_ALLOWLIST.split())

@@ -382,6 +382,7 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
 1. Determine the current branch name: `BRANCH=$(git branch --show-current)`
 2. Build GitHub links:
    - Plan link: `https://github.com/${FACTORY_REPO_SLUG}/blob/$BRANCH/<plan-file-path>`
+     (`<plan-file-path>` is the final path under `docs/superpowers/plans/` bound by step 4)
    - Branch link: `https://github.com/${FACTORY_REPO_SLUG}/tree/$BRANCH`
 3. Check if the issue carries the `direct-to-pr` label:
    ```bash
@@ -391,16 +392,47 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    ```
    If `IS_DIRECT_TO_PR=yes`, prepend the following note to the "### Next Steps" section of the comment (replacing `$PLAN_GRACE` with the actual value):
    > ⏩ **Auto-advancing in ~`$PLAN_GRACE` min** unless you comment — the scheduler will move this to **Ready** automatically. Leave a comment to re-run the plan or redirect.
-4. Run the OOS gate — detect and revert any files committed outside the plan
+4. Promote the draft into `docs/superpowers/plans/` — **before** the OOS gate (step 5). The
+   plan path first exists in the commit that carries the reviewed content, and the draft
+   path ceases to exist in that same commit. `FINAL_FILE` reuses the path of an earlier
+   finished plan for this issue when one is on the branch (a rejected plan being revised),
+   so the branch ends with one plan file; `git rm -r` removes any other draft left on the
+   branch. Order matters: `oos_excise.sh` judges the committed diff `origin/main...HEAD`, so
+   run before this step it would excise the draft and report it as spillover; run after
+   it, the draft path nets out of the diff. The OOS allowlist is not widened. Bind
+   `PLAN_FILE` to the draft in the same Bash call. The block stops before touching anything
+   if `PLAN_FILE` is unbound or missing, and stops before `git rm -r` if the move fails, so a
+   mistake here can never delete the reviewed draft:
+   <!-- plan-draft-promote:begin -->
+   ```bash
+   [ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ] || { echo "promote: PLAN_FILE is unbound or missing — bind it to the draft in this Bash call"; exit 1; }
+   REPO_ROOT=${REPO_ROOT:-$(git rev-parse --show-toplevel)}
+   ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+   FINAL_FILE=$(bash "${REPO_ROOT}/dark-factory/scripts/push_gate_check.sh" "docs/superpowers/plans/" "$ISSUE_NUM")  # TARGET-PATH
+   [ -n "$FINAL_FILE" ] || FINAL_FILE="docs/superpowers/plans/$(basename -- "$PLAN_FILE")"
+   mkdir -p docs/superpowers/plans
+   git add -- "$PLAN_FILE"
+   git mv -f -- "$PLAN_FILE" "$FINAL_FILE" || exit 1
+   git rm -r -q --ignore-unmatch -- docs/superpowers/plan-drafts/
+   git commit -m "docs(#${ISSUE_NUM}): add implementation plan"
+   PLAN_FILE="$FINAL_FILE"
+   echo "PLAN_FILE=$PLAN_FILE"
+   ```
+   <!-- plan-draft-promote:end -->
+   From here on `PLAN_FILE` is the final path; the summary comment (step 7) and
+   `refinement-status.md` (step 8) use it.
+5. Run the OOS gate — detect and revert any files committed outside the plan
    allowlist. `docs/superpowers/specs/` and `.archon/memory/` are included because
    the refine phase legitimately commits to those prefixes earlier on this same
-   branch (#293); they remain outside this command's own `SCOPE BOUNDARY`, which is
-   still only `docs/superpowers/plans/`:
+   branch (#293); they remain outside this command's own `SCOPE BOUNDARY`
+   (`docs/superpowers/plans/`, plus `docs/superpowers/plan-drafts/`, which step 4 has
+   already emptied):
    ```bash
    OOS_FILES=$(bash "${REPO_ROOT}/dark-factory/scripts/oos_excise.sh" "docs/superpowers/plans/ docs/superpowers/specs/ .archon/memory/" plan)  # TARGET-PATH
    ```
-5. Commit the plan
-6. Post a summary comment on the issue:
+6. Commit any remaining change to `$PLAN_FILE` (normally none — step 4 committed the
+   reviewed plan)
+7. Post a summary comment on the issue:
    ```
    ## Refinement Pipeline — Plan Generated
 
