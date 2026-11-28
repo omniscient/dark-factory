@@ -15,7 +15,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from check_command_cache_shape import check, shape  # noqa: E402
+from check_command_cache_shape import DEFAULT_BASELINE, check, shape  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _COMMANDS_DIR = _REPO_ROOT / "commands"
@@ -186,3 +186,22 @@ def test_unreadable_baseline_fails(tmp_path):
     bad.write_text("{not json", encoding="utf-8")
     assert check(commands, bad) != []
     assert check(commands, tmp_path / "missing.json") != []
+
+
+# ---------------------------------------------------------------------------
+# Real tree
+# ---------------------------------------------------------------------------
+
+def test_real_commands_pass():
+    assert check(_COMMANDS_DIR) == []
+
+
+def test_baseline_matches_committed_commands():
+    baseline = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))
+    current = {p.stem: shape(p)["first_volatile_line"] for p in sorted(_COMMANDS_DIR.glob("*.md"))}
+    assert baseline == current, (
+        f"{DEFAULT_BASELINE.name} is out of date. A command file's first volatile line moved "
+        "(a line was added or removed above its first $TOKEN) or a command file was added or "
+        "removed. Set the baseline to these values in the same commit: "
+        + json.dumps(current, sort_keys=True)
+    )
