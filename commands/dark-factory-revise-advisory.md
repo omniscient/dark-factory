@@ -153,7 +153,12 @@ check will detect no changes and exit 0 cleanly).
    under `commands/`; both are tracked, so its changes ride in the `git add -u` below:
    ```bash
    if [ -f docs/.citation-lock.yaml ] && [ -f scripts/docs_refs_check.py ]; then
-     python3 scripts/docs_refs_check.py --rederive --base HEAD docs/run-lifecycle.md docs/scheduler.md docs/features.md docs/configuration.md \
+     if git rev-parse --verify origin/main >/dev/null 2>&1; then
+       REDERIVE_BASE=origin/main
+     else
+       REDERIVE_BASE=HEAD
+     fi
+     python3 scripts/docs_refs_check.py --rederive --base "$REDERIVE_BASE" docs/run-lifecycle.md docs/scheduler.md docs/features.md docs/configuration.md \
        || echo "revise-advisory: WARNING — citation re-derive did not pass (continuing; see its output)"
    else
      echo "revise-advisory: no docs/.citation-lock.yaml in this clone — citation re-derive skipped"

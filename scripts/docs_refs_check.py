@@ -375,6 +375,12 @@ def _digest(lines: list[str]) -> str:
     return hashlib.sha256("\n".join(line.strip() for line in lines).encode("utf-8")).hexdigest()
 
 
+def _all_blank(lines: list[str]) -> bool:
+    """True when every line is empty once stripped (a blank range hashes like any other
+    blank range of the same length, so locking it would silently match any blank lines)."""
+    return all(not line.strip() for line in lines)
+
+
 class _Targets:
     """Cached lines of cited target files, with hash lookups."""
 
@@ -392,6 +398,9 @@ class _Targets:
         if not 1 <= first <= last <= len(lines):
             return None
         return _digest(lines[first - 1:last])
+
+    def blank(self, rel: str, first: int, last: int) -> bool:
+        return _all_blank(self.lines(rel)[first - 1:last])
 
     def excerpt(self, rel: str, first: int) -> str:
         return self.lines(rel)[first - 1].strip()[:EXCERPT_CHARS]
@@ -507,7 +516,11 @@ def _load_docs(doc_paths: Iterable[PathLike], repo_root: Path) -> list[tuple[Pat
     docs = []
     for doc_path in doc_paths:
         doc = Path(doc_path)
-        docs.append((doc, _doc_key(doc, repo_root), doc.read_text(encoding="utf-8")))
+        # newline="" disables universal-newline translation so a rewrite (see rederive())
+        # round-trips a doc's original line endings instead of silently flattening CRLF to LF.
+        with open(doc, "r", encoding="utf-8", newline="") as f:
+            text = f.read()
+        docs.append((doc, _doc_key(doc, repo_root), text))
     return docs
 
 
@@ -521,9 +534,14 @@ def seed(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
     added = 0
     for _, key, text in _load_docs(doc_paths, root):
         for p in _parts(key, text, idx):
-            if p.key not in entries and targets.digest(p.target, p.first, p.last) is not None:
-                entries[p.key] = targets.entry(p, seeded=True)
-                added += 1
+            if p.key in entries or targets.digest(p.target, p.first, p.last) is None:
+                continue
+            if targets.blank(p.target, p.first, p.last):
+                # An all-blank range hashes like any other blank range; locking it would
+                # match any blank line in the target, so the content check does nothing.
+                continue
+            entries[p.key] = targets.entry(p, seeded=True)
+            added += 1
     _write_lock(lock, entries)
     return added
 
@@ -534,16 +552,25 @@ def _git(repo_root: Path, *args: str) -> str:
     ).stdout
 
 
-def _base_position(repo_root: Path, base: str, target: str, first: int, last: int) -> Optional[int]:
+def _base_position(
+    repo_root: Path, base: str, target: str, first: int, last: int,
+) -> tuple[Optional[int], Optional[str]]:
     """Where lines *first*-*last* of *target* at ``merge-base(base, HEAD)`` are now.
 
-    ``None`` when git or the base is unavailable or a hunk touches the range.
+    Returns ``(None, None)`` when a hunk touches the range (legitimately ambiguous), or
+    ``(None, reason)`` when *base* itself could not be resolved or diffed -- a real
+    failure, not mere ambiguity -- else ``(new first line, None)``.
     """
+    if base.startswith("-"):
+        # Never hand a value that looks like a git option to merge-base/diff.
+        return None, f"refusing to treat {base!r} as a git ref (starts with '-')"
     try:
         merge_base = _git(repo_root, "merge-base", base, "HEAD").strip()
         diff = _git(repo_root, "diff", "-U0", "--no-color", "--no-ext-diff", merge_base, "--", target)
-    except (OSError, subprocess.CalledProcessError):
-        return None
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return None, f"could not resolve or diff --base {base!r}: {exc}"
+    except UnicodeDecodeError as exc:
+        return None, f"could not decode git output for --base {base!r}: {exc}"
     delta = 0
     for m in _HUNK.finditer(diff):
         start = int(m[1])
@@ -553,14 +580,14 @@ def _base_position(repo_root: Path, base: str, target: str, first: int, last: in
             if start >= last:
                 continue
             if start >= first:
-                return None
+                return None, None
         else:
             if start > last:
                 continue
             if start + old_count - 1 >= first:
-                return None
+                return None, None
         delta += new_count - old_count
-    return first + delta
+    return first + delta, None
 
 
 def _whereabouts(entry: _Entry, targets: _Targets) -> str:
@@ -620,8 +647,9 @@ def _rederive(docs: list[tuple[Path, str, str]], entries: dict[Key, _Entry], tar
         count = entry.last - entry.first + 1
         found = targets.find(entry.target, entry.hash, count)
         pos = found[0] if len(found) == 1 else None
+        base_error: Optional[str] = None
         if pos is None and len(found) > 1 and base:
-            shifted = _base_position(repo_root, base, entry.target, entry.first, entry.last)
+            shifted, base_error = _base_position(repo_root, base, entry.target, entry.first, entry.last)
             pos = shifted if shifted in found else None
         if pos is not None:
             moved[key] = replace(entry, first=pos, last=pos + count - 1)
@@ -632,7 +660,12 @@ def _rederive(docs: list[tuple[Path, str, str]], entries: dict[Key, _Entry], tar
                             f"{entry.target} and correct the citation, or lock it with --accept")
         else:
             at = ", ".join(_lines_text(f, f + count - 1) for f in found)
-            why = "the --base diff does not pick one" if base else "pass --base REF to pick one"
+            if base:
+                why = "the --base diff does not pick one"
+                if base_error:
+                    why += f" ({base_error})"
+            else:
+                why = "pass --base REF to pick one"
             failures.append(f"{where}: ambiguous, the locked content occurs at "
                             f"{entry.target}:{at}; {why}")
 
@@ -699,7 +732,8 @@ def _rederive(docs: list[tuple[Path, str, str]], entries: dict[Key, _Entry], tar
                 failures.append(msg)
             continue
         for key in unlocked:  # new prose
-            if targets.digest(target, key[2], key[3]) is not None:
+            if (targets.digest(target, key[2], key[3]) is not None
+                    and not targets.blank(target, key[2], key[3])):
                 result[key] = targets.entry(cited_after[key])
         for key in orphans:  # removed prose
             del result[key]
@@ -727,10 +761,15 @@ def rederive(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
     idx = _index(_repo_files(root))
     docs = _load_docs(doc_paths, root)
     result, texts, printed, failures = _rederive(docs, entries, _Targets(root), idx, root, base)
-    for path, text in texts.items():
-        path.write_text(text, encoding="utf-8")
+    # Write the lock before the docs: if a crash lands between the two writes, the lock
+    # already matches the intended new positions and a re-run (or the next check()) will
+    # surface any doc that didn't get rewritten, instead of leaving stale lock entries that
+    # silently pass against a doc that has already moved on.
     if _write_lock(lock, result):
         printed.append(f"{LOCK_FILE}: updated")
+    for path, text in texts.items():
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
     return printed, failures
 
 
@@ -742,7 +781,10 @@ def accept(doc_path: PathLike, citation: str, repo_root: PathLike = ".",
     citation = citation.strip("`")
     if not lock.is_file():
         return [], [f"{lock}: no citation lock; nothing accepted"]
-    (_, key, text), = _load_docs([doc_path], root)
+    try:
+        (_, key, text), = _load_docs([doc_path], root)
+    except OSError as exc:
+        return [], [f"{doc_path}: cannot read file: {exc}; nothing accepted"]
     targets, idx = _Targets(root), _index(_repo_files(root))
     parts = [p for p in _parts(key, text, idx) if p.span == citation]
     if not parts:
@@ -751,12 +793,17 @@ def accept(doc_path: PathLike, citation: str, repo_root: PathLike = ".",
     if bad:
         return [], [f"{key}:{bad[0].lineno}: `{citation}`: line {_lines_text(bad[0].first, bad[0].last)} "
                     f"is out of range; nothing accepted"]
+    blank = [p for p in parts if targets.blank(p.target, p.first, p.last)]
+    if blank:
+        return [], [f"{key}:{blank[0].lineno}: `{citation}`: line "
+                    f"{_lines_text(blank[0].first, blank[0].last)} is blank; pick a non-blank "
+                    f"anchor, nothing accepted"]
     entries = _load_lock(lock)
     printed = []
     for p in {p.key: p for p in parts}.values():
         old = entries.get(p.key)
         entries[p.key] = targets.entry(p)
-        printed.append(f"accepted {key}:{parts[0].lineno} {citation}: "
+        printed.append(f"accepted {key}:{p.lineno} {citation}: "
                        f"{old.excerpt if old else '(no entry)'} -> {entries[p.key].excerpt}")
     _write_lock(lock, entries)
     return printed, []
@@ -839,6 +886,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--base requires --rederive")
     if not args.accept and not args.docs:
         parser.error("at least one DOC is required")
+    if args.accept and args.docs:
+        parser.error(f"--accept takes its DOC as part of --accept DOC CITATION; "
+                      f"unexpected extra argument(s): {' '.join(args.docs)}")
     root = Path(args.repo_root)
     lock = Path(args.lock_file) if args.lock_file else root / LOCK_FILE
 

@@ -243,9 +243,9 @@ entries:
     seeded: true
   - doc: "docs/features.md"
     target: "commands/dark-factory-conformance.md"
-    lines: [277, 277]
-    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    excerpt: ""
+    lines: [278, 278]
+    hash: "c51c1384d6d4891e232aa78106c0a2e9cc7555ba3c1679793a37a75630847543"
+    excerpt: "if [ -f \".claude/skills/conformance/RUBRIC.md\" ]; then"
     seeded: true
   - doc: "docs/features.md"
     target: "commands/dark-factory-conformance.md"
@@ -255,9 +255,9 @@ entries:
     seeded: true
   - doc: "docs/features.md"
     target: "commands/dark-factory-conformance.md"
-    lines: [312, 312]
-    hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    excerpt: ""
+    lines: [313, 313]
+    hash: "043851cbed8eb482148cc655c3652aa51c40fd47fe4db2a3fa5ad9b93474755f"
+    excerpt: "5a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent imm"
     seeded: true
   - doc: "docs/features.md"
     target: "commands/dark-factory-conformance.md"
