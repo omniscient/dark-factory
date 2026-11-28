@@ -41,6 +41,18 @@ def test_block_shape():
     assert '"$ARTIFACTS_DIR/issue.json"' in block
 
 
+def test_heredoc_terminator_has_no_leading_whitespace_in_raw_markdown():
+    """The raw Markdown — not the dedented copy _block() returns — is what an agent
+    pastes and runs. A terminator indented even one space breaks `<<'LESSON'`
+    (bash requires an exact, unindented match), so check the un-dedented text."""
+    raw_body = _step_7a().split("```bash\n", 1)[1].split("```", 1)[0]
+    terminator_lines = [l for l in raw_body.splitlines() if l.strip() == "LESSON"]
+    assert terminator_lines == ["LESSON"], (
+        f"heredoc terminator line must be exactly 'LESSON' with no leading "
+        f"whitespace in the raw Markdown, got {terminator_lines!r}"
+    )
+
+
 def test_tool_limitation_note_removed():
     assert "Tool limitation (#652)" not in _REFINE.read_text(encoding="utf-8")
 

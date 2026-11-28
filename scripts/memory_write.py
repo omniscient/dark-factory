@@ -176,7 +176,19 @@ def main():
         if not _ENTRY_RE.match(line):
             continue
         if _normalize(_extract_body(line)) == candidate_norm:
-            # REINFORCE: update date: and expires: in-place; one-line diff
+            # REINFORCE: update date: and expires: in-place; one-line diff.
+            # The dedup key is body-only (tag not included), so a write with a
+            # different --kind than the stored entry still reinforces rather than
+            # duplicating. Warn rather than silently retagging, so the mismatch is
+            # visible without changing the stored tag out from under other readers.
+            stored_tag = _ENTRY_RE.match(line).group(1)
+            if stored_tag != args.kind.upper():
+                print(
+                    f"memory-write: warning: reinforced entry tagged [{stored_tag}] in "
+                    f"{target} differs from requested --kind {args.kind} "
+                    f"([{args.kind.upper()}]); tag left unchanged",
+                    file=sys.stderr,
+                )
             updated = re.sub(r"date:\d{4}-\d{2}-\d{2}", f"date:{today_str}", line)
             updated = re.sub(r"expires:\d{4}-\d{2}-\d{2}", f"expires:{expires_str}", updated)
             # Handle legacy/manually added entries that have no date:/expires: tags:
