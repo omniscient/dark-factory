@@ -199,7 +199,8 @@ registry afterwards. Any problem exits non-zero before the server binds. For a
   `idle_seconds` bounds every later wait between chunks. Both share one rolling deadline.
   aiohttp's `sock_read` is not used on this path: it also runs before the first byte, so it
   would cap time-to-first-token at the idle bound.
-- **Failure classes** (contract §4.6 interim enumeration; #238's names supersede these):
+- **Failure classes** (contract §4.6; #238 adopted these names verbatim and declares their
+  policy in `scripts/factory_core/failure_taxonomy.py`, which `model_adapter.py` re-exports):
   `endpoint_unreachable`, `timeout_connect`, `timeout_time_to_first_token`, `timeout_idle`,
   `timeout_total`, `cancellation`, `protocol_incompatibility`, `capability_evidence_invalid`
   (startup only) and `destination_policy_denial`. Refusals use the error envelope

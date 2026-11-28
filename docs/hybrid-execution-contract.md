@@ -505,7 +505,10 @@ least these local-endpoint outcomes: endpoint unreachable; timeout (connect,
 time-to-first-token, idle, total); cancellation; protocol incompatibility; capability evidence
 missing, expired or mismatched; destination-policy denial. None of them is retryable against a
 different endpoint. When #238 ships its own class names, #558's interim enumeration is
-superseded by them, not duplicated alongside them.
+superseded by them, not duplicated alongside them. **#238 shipped:** it kept the nine
+interim names verbatim (they are persisted in the request ledger) and declares each one's
+policy in `scripts/factory_core/failure_taxonomy.py`, which
+`scripts/factory_core/providers/model_adapter.py` now re-exports.
 
 ### 4.7 Versioned contracts and ledger extension
 

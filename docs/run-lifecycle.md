@@ -1218,7 +1218,8 @@ this repository; see [oddity 5](#open-questions-and-oddities).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see
-[oddity 6](#open-questions-and-oddities) for what that leaves out.
+[oddity 6](#open-questions-and-oddities) for what that leaves out, and for #238's
+measurement that contradicts it.
 
 ### Entrypoint failure (`on_failure`, the `ERR` trap)
 
@@ -1235,7 +1236,13 @@ deconflict path. `on_failure` (`:576-721`):
    board to **Blocked**, and posts "Dark Factory Run — Failed" (marker
    `df-factory-failure`) saying so (`:691-715`).
 4. For `close` or runs without an issue number: no comment.
-5. Posts the cost report.
+5. If step 2 or 3 wrote a signature, records its failure class
+   (`scripts/factory_core/failure_taxonomy.py`) on the assembled record:
+   `run-record annotate-failure` sets `harness_economics.failure_spend.by_class[<class>]`
+   to the run's whole-run failure spend in `run-record.json` and its durable copy, and
+   appends nothing to `runs.jsonl`. Bounded by `timeout -k 5 20`; any failure is ignored
+   (#238).
+6. Posts the cost report.
 
 ### Refusal on an invalid adapter
 
@@ -1349,6 +1356,12 @@ The scheduler-side oddities are tracked in
    comment above `_write_error_signature` (`:431-438`) calls this the load-bearing call
    site, so it may be intended that the scheduler owns the board here, but the failure
    bookkeeping in `on_failure` (`:622-660`) is then only reached by setup-time failures.
+   **#238 measured the opposite** in the factory image, with the entrypoint's shell
+   options and trap: `ERR` fires on the failed `archon … | tee` pipeline even under
+   `set +e`, `on_failure` runs, and its own `set -e` ends the shell with archon's exit code
+   when it returns. The loop's failure branch is reached only after `on_failure` returned
+   for a session-window pause. `_write_error_signature`'s comment (`entrypoint.sh:523-533`)
+   now says so, and `tests/test_entrypoint_failure_signature.sh` pins it (case A).
 
 7. **The "Paused (session window)" issue comment looks unreachable.** It is posted only
    inside `on_failure`, when `TMP_OUT` exists and the pause check matches
