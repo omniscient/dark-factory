@@ -18,7 +18,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from docs_refs_check import LOCK_FILE, REPAIR_COMMAND, check, main, seed  # noqa: E402
+from docs_refs_check import LOCK_FILE, REPAIR_COMMAND, check, main, rederive, seed  # noqa: E402
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "docs_refs_check"
 
@@ -336,3 +336,168 @@ def test_non_commands_citations_stay_range_only(tmp_path):
     for rel in files:
         _insert(root, 0, ["new"], rel)
     assert _content(root) == []
+
+
+def test_comma_chain_locked_and_rewritten_per_part(tmp_path):
+    root = _lock_tree(tmp_path, "see `commands/c.md:3,7-8,12`\n")
+    lock = _seeded(root)
+    assert len(yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]) == 3
+    (root / "commands" / "c.md").write_text(
+        _CMD.replace("line 10\n", "line 10\nnew a\nnew b\n"), encoding="utf-8")
+    assert len(_content(root)) == 1
+    printed, failures = rederive([_doc(root)], root)
+    assert failures == []
+    assert _doc(root).read_text(encoding="utf-8") == "see `commands/c.md:3,7-8,14`\n"
+    assert printed[0] == "docs/notes.md:1: `commands/c.md:3,7-8,12` -> `commands/c.md:3,7-8,14`"
+
+
+def _git_tree(tmp_path: Path, doc: str, cmd: str) -> Path:
+    root = _lock_tree(tmp_path, doc, cmd)
+    _seeded(root)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "base"], check=True)
+    return root
+
+
+_BRACES = "a\n{\nb\n{\nc\n{\nd\n"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_repeated_line_is_ambiguous_without_base_and_relocated_with_it(tmp_path):
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    lock = root / LOCK_FILE
+    _insert(root, 0, ["new"])  # the cited `{` is now one of lines 3, 5 and 7
+    doc_before, lock_before = _doc(root).read_text(encoding="utf-8"), lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert printed == [] and len(failures) == 1
+    assert "ambiguous, the locked content occurs at commands/c.md:3, 5, 7" in failures[0]
+    assert (_doc(root).read_text(encoding="utf-8"), lock.read_text(encoding="utf-8")) == (doc_before, lock_before)
+    printed, failures = rederive([_doc(root)], root, base="HEAD")
+    assert failures == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:5`\n"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_base_diff_touching_the_range_is_ambiguous(tmp_path):
+    root = _git_tree(tmp_path, "`commands/c.md:4-5`\n", "a\n{\nx\n{\nx\n{\nx\n")
+    # Edit line 5: the locked pair still occurs at 2-3 and 6-7, but the hunk touches 4-5.
+    (root / "commands" / "c.md").write_text("a\n{\nx\n{\ny\n{\nx\n", encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root, base="HEAD")
+    assert printed == [] and len(failures) == 1 and "the --base diff does not pick one" in failures[0]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_git_unavailable_is_ambiguous(tmp_path, monkeypatch):
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    _insert(root, 0, ["new"])
+    import docs_refs_check
+
+    def no_git(*args, **kwargs):
+        raise OSError("git not found")
+    monkeypatch.setattr(docs_refs_check.subprocess, "run", no_git)
+    printed, failures = rederive([_doc(root)], root, base="HEAD")
+    assert printed == [] and len(failures) == 1 and "does not pick one" in failures[0]
+
+
+def test_hand_shifted_citation_is_rekeyed_and_keeps_seeded(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:5`\n")
+    lock = _seeded(root)
+    _insert(root, 0, ["new"])
+    # Citation 3 was shifted by hand, correctly; citation 5 was not touched.
+    _doc(root).write_text("`commands/c.md:4` `commands/c.md:5`\n", encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert failures == [] and _content(root) == []
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:4` `commands/c.md:6`\n"
+    entries = yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]
+    assert [(e["lines"], e.get("seeded")) for e in entries] == [([4, 4], True), ([6, 6], True)]
+
+
+def test_new_prose_is_locked_without_seeded(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3` `commands/c.md:12`\n", encoding="utf-8")
+    assert rederive([_doc(root)], root)[1] == []
+    assert _content(root) == []
+    entries = {tuple(e["lines"]): e for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]}
+    assert entries[(3, 3)].get("seeded") is True and "seeded" not in entries[(12, 12)]
+
+
+def test_removed_prose_alone_removes_the_orphan(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:5`\n")
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:3`\n", encoding="utf-8")
+    assert rederive([_doc(root)], root)[1] == []
+    assert [e["lines"] for e in yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]] == [[3, 3]]
+
+
+def test_mixed_group_fails_and_writes_nothing(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    _doc(root).write_text("`commands/c.md:9`\n", encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert printed == [] and len(failures) == 1
+    assert "commands/c.md:9 is not the locked content" in failures[0]
+    assert "locked content is now at commands/c.md:3" in failures[0]
+    assert lock.read_text(encoding="utf-8") == before
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:9`\n"
+
+
+def test_wrong_hand_delta_reports_correct_lines_and_locks_nothing(tmp_path):
+    # Tonight's case: five citations, 16 lines inserted above, doc shifted by 15 instead.
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `:x` `commands/c.md:5` `commands/c.md:7-8`\n"
+                                "`commands/c.md:10` `commands/c.md:12`\n")
+    lock = _seeded(root)
+    _insert(root, 0, [f"inserted {i}" for i in range(16)])
+    wrong = "`commands/c.md:18` `:x` `commands/c.md:20` `commands/c.md:22-23`\n`commands/c.md:25` `commands/c.md:27`\n"
+    _doc(root).write_text(wrong, encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert printed == [] and len(failures) == 5
+    for now in ("19", "21", "23-24", "26", "28"):
+        assert any(f"locked content is now at commands/c.md:{now}" in f for f in failures), now
+    assert lock.read_text(encoding="utf-8") == before
+    assert _doc(root).read_text(encoding="utf-8") == wrong
+
+
+def test_zero_matches_fails_and_changes_nothing(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\n")
+    lock = _seeded(root)
+    (root / "commands" / "c.md").write_text(_CMD.replace("line 3\n", ""), encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert printed == [] and len(failures) == 1 and lock.read_text(encoding="utf-8") == before
+
+
+def test_same_citation_twice_in_one_doc(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3`\nagain `commands/c.md:3`\n")
+    lock = _seeded(root)
+    assert len(yaml.safe_load(lock.read_text(encoding="utf-8"))["entries"]) == 1
+    _insert(root, 0, ["new"])
+    assert len(_content(root)) == 2
+    printed, failures = rederive([_doc(root)], root)
+    assert failures == [] and len(printed) == 3  # two rewrites + lock updated
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:4`\nagain `commands/c.md:4`\n"
+
+
+def test_failing_citation_alongside_a_fixable_one(tmp_path):
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:9`\n")
+    _seeded(root)
+    (root / "commands" / "c.md").write_text("new\n" + _CMD.replace("line 9\n", "edited\n"), encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert len(failures) == 1 and "commands/c.md:9" in failures[0]
+    assert _doc(root).read_text(encoding="utf-8") == "`commands/c.md:4` `commands/c.md:9`\n"
+
+
+def test_moved_content_never_lands_on_lines_locked_for_other_content(tmp_path):
+    # Line 3 moves onto line 4, whose citation was edited in place: must not lock it.
+    root = _lock_tree(tmp_path, "`commands/c.md:3` `commands/c.md:4`\n")
+    lock = _seeded(root)
+    (root / "commands" / "c.md").write_text(_CMD.replace("line 4\n", "").replace("line 3\n", "x\nline 3\n"),
+                                            encoding="utf-8")
+    before = lock.read_text(encoding="utf-8")
+    printed, failures = rederive([_doc(root)], root)
+    assert len(failures) == 2 and any("but those lines are locked for other content" in f for f in failures)
+    assert lock.read_text(encoding="utf-8") == before

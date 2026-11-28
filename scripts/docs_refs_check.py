@@ -34,7 +34,8 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import zip_longest
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Union
 
@@ -509,6 +510,212 @@ def seed(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
                 added += 1
     _write_lock(lock, entries)
     return added
+
+
+def _git(repo_root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo_root), *args], capture_output=True, text=True, check=True,
+    ).stdout
+
+
+def _base_position(repo_root: Path, base: str, target: str, first: int, last: int) -> Optional[int]:
+    """Where lines *first*-*last* of *target* at ``merge-base(base, HEAD)`` are now.
+
+    ``None`` when git or the base is unavailable or a hunk touches the range.
+    """
+    try:
+        merge_base = _git(repo_root, "merge-base", base, "HEAD").strip()
+        diff = _git(repo_root, "diff", "-U0", "--no-color", "--no-ext-diff", merge_base, "--", target)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    delta = 0
+    for m in _HUNK.finditer(diff):
+        start = int(m[1])
+        old_count = int(m[2]) if m[2] is not None else 1
+        new_count = int(m[3]) if m[3] is not None else 1
+        if old_count == 0:  # pure insertion after old line `start`
+            if start >= last:
+                continue
+            if start >= first:
+                return None
+        else:
+            if start > last:
+                continue
+            if start + old_count - 1 >= first:
+                return None
+        delta += new_count - old_count
+    return first + delta
+
+
+def _whereabouts(entry: _Entry, targets: _Targets) -> str:
+    count = entry.last - entry.first + 1
+    found = targets.find(entry.target, entry.hash, count)
+    if len(found) == 1:
+        return f"locked content is now at {entry.target}:{_lines_text(found[0], found[0] + count - 1)}"
+    if not found:
+        return f"the locked content is no longer in {entry.target} unchanged; re-read the sentence"
+    return f"the locked content occurs {len(found)} times in {entry.target}"
+
+
+def _rewrite(text: str, moves: dict[tuple[str, int, int], tuple[int, int]],
+             idx: _Index) -> tuple[str, list[tuple[int, str, str]]]:
+    """Apply *moves* ``{(target, first, last): (first, last)}`` to every citation in *text*."""
+    changes: list[tuple[int, str, str]] = []
+    out: list[str] = []
+    for lineno, line in enumerate(text.splitlines(keepends=True), 1):
+        def repl(m: re.Match) -> str:
+            span = m[1]
+            ref = _resolve(span, idx)
+            if ref is None or ref[3] or not ref[1] or not _COVERED.fullmatch(ref[2] or ""):
+                return m[0]
+            path, spec, target, _ = ref
+            new = []
+            for raw, first, last in _spec_parts(spec):
+                if (target, first, last) not in moves:
+                    new.append(raw)
+                    continue
+                nfirst, nlast = moves[(target, first, last)]
+                new.append(f"{nfirst}-{nlast}" if "-" in raw else str(nfirst))
+            new_span = f"{path}:{','.join(new)}"
+            if new_span == span:
+                return m[0]
+            changes.append((lineno, span, new_span))
+            return f"`{new_span}`"
+        out.append(_SPAN.sub(repl, line))
+    return "".join(out), changes
+
+
+def _rederive(docs: list[tuple[Path, str, str]], entries: dict[Key, _Entry], targets: _Targets,
+              idx: _Index, repo_root: Path, base: Optional[str]):
+    """Decide every repair. Returns ``(new entries, {doc path: new text}, printed, failures)``."""
+    parts = [p for _, key, text in docs for p in _parts(key, text, idx)]
+    first_part: dict[Key, _Part] = {}
+    for p in parts:
+        first_part.setdefault(p.key, p)
+    failures: list[str] = []
+
+    # Moved, unchanged: a cited entry whose lines no longer hold its hash.
+    moved: dict[Key, _Entry] = {}
+    for key in sorted(first_part):
+        entry = entries.get(key)
+        if entry is None or targets.digest(entry.target, entry.first, entry.last) == entry.hash:
+            continue
+        p = first_part[key]
+        count = entry.last - entry.first + 1
+        found = targets.find(entry.target, entry.hash, count)
+        pos = found[0] if len(found) == 1 else None
+        if pos is None and len(found) > 1 and base:
+            shifted = _base_position(repo_root, base, entry.target, entry.first, entry.last)
+            pos = shifted if shifted in found else None
+        if pos is not None:
+            moved[key] = replace(entry, first=pos, last=pos + count - 1)
+            continue
+        where = f'{p.doc}:{p.lineno}: `{p.span}` ("{entry.excerpt}")'
+        if not found:
+            failures.append(f"{where}: the cited range was edited; re-read the sentence against "
+                            f"{entry.target} and correct the citation, or lock it with --accept")
+        else:
+            at = ", ".join(_lines_text(f, f + count - 1) for f in found)
+            why = "the --base diff does not pick one" if base else "pass --base REF to pick one"
+            failures.append(f"{where}: ambiguous, the locked content occurs at "
+                            f"{entry.target}:{at}; {why}")
+
+    # Moved entries may not land on lines locked for other content (cascade until stable).
+    while True:
+        result = {k: e for k, e in entries.items() if k not in moved}
+        clash = None
+        for old_key, entry in sorted(moved.items()):
+            prev = result.get(entry.key)
+            if prev is not None and prev.hash != entry.hash:
+                clash = old_key
+                break
+            if prev is not None:  # same content: keep `seeded` if either side has it
+                entry = replace(entry, seeded=entry.seeded or prev.seeded)
+            result[entry.key] = entry
+        if clash is None:
+            break
+        p, entry = first_part[clash], moved.pop(clash)
+        failures.append(f'{p.doc}:{p.lineno}: `{p.span}` ("{entries[clash].excerpt}"): locked '
+                        f"content is now at {entry.target}:{_lines_text(entry.first, entry.last)}, "
+                        "but those lines are locked for other content")
+
+    moves: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {}
+    for old_key, entry in moved.items():
+        moves.setdefault(old_key[0], {})[old_key[1:]] = (entry.first, entry.last)
+
+    # Group what is still unlocked or uncited by (doc, target).
+    doc_keys = {key for _, key, _ in docs}
+    cited_after: dict[Key, _Part] = {}
+    for p in parts:
+        nfirst, nlast = moves.get(p.doc, {}).get((p.target, p.first, p.last), (p.first, p.last))
+        cited_after.setdefault((p.doc, p.target, nfirst, nlast), p)
+    groups: dict[tuple[str, str], tuple[list[Key], list[Key]]] = {}
+    for key in sorted(cited_after):
+        if key not in result:
+            groups.setdefault(key[:2], ([], []))[0].append(key)
+    for key in sorted(result):
+        if key[0] in doc_keys and key not in cited_after:
+            groups.setdefault(key[:2], ([], []))[1].append(key)
+
+    for (doc, target), (unlocked, orphans) in sorted(groups.items()):
+        # Hand-shifted: an orphan whose hash is the content now cited.
+        for key in list(unlocked):
+            digest = targets.digest(target, key[2], key[3])
+            match = next((o for o in orphans if result[o].hash == digest), None)
+            if match is not None:
+                result[key] = replace(result.pop(match), first=key[2], last=key[3])
+                orphans.remove(match)
+                unlocked.remove(key)
+        if unlocked and orphans:
+            for u, o in zip_longest(unlocked, orphans):
+                if u is None:
+                    e = result[o]
+                    failures.append(f'{doc}: lock entry {target}:{_lines_text(e.first, e.last)} '
+                                    f'("{e.excerpt}") is no longer cited; {_whereabouts(e, targets)}')
+                    continue
+                p = cited_after[u]
+                msg = (f"{p.doc}:{p.lineno}: `{p.span}`: {target}:{_lines_text(u[2], u[3])} "
+                       "is not the locked content")
+                if o is not None:
+                    e = result[o]
+                    msg += (f' (locked: "{e.excerpt}" at {target}:{_lines_text(e.first, e.last)}); '
+                            f"{_whereabouts(e, targets)}")
+                failures.append(msg)
+            continue
+        for key in unlocked:  # new prose
+            if targets.digest(target, key[2], key[3]) is not None:
+                result[key] = targets.entry(cited_after[key])
+        for key in orphans:  # removed prose
+            del result[key]
+
+    texts: dict[Path, str] = {}
+    printed: list[str] = []
+    for path, key, text in docs:
+        if key not in moves:
+            continue
+        new_text, changes = _rewrite(text, moves[key], idx)
+        if new_text != text:
+            texts[path] = new_text
+        printed.extend(f"{key}:{lineno}: `{old}` -> `{new}`" for lineno, old, new in changes)
+    return result, texts, printed, failures
+
+
+def rederive(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
+             lock_path: Optional[PathLike] = None, base: Optional[str] = None) -> tuple[list[str], list[str]]:
+    """Repair moved citations in place. Returns ``(printed changes, failures)``."""
+    root = Path(repo_root)
+    lock = Path(lock_path) if lock_path else root / LOCK_FILE
+    if not lock.is_file():
+        return [], [f"{lock}: no citation lock; nothing to re-derive (run --seed to create one)"]
+    entries = _load_lock(lock)
+    idx = _index(_repo_files(root))
+    docs = _load_docs(doc_paths, root)
+    result, texts, printed, failures = _rederive(docs, entries, _Targets(root), idx, root, base)
+    for path, text in texts.items():
+        path.write_text(text, encoding="utf-8")
+    if _write_lock(lock, result):
+        printed.append(f"{LOCK_FILE}: updated")
+    return printed, failures
 
 
 def check(
