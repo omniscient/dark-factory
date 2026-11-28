@@ -786,6 +786,42 @@ def test_ledger_directory_oversized_or_bad_backup_is_unavailable(tmp_path, runs,
     assert no_shared_read == []
 
 
+def test_record_outcome_bounds_the_ledger_scan(tmp_path, runs, monkeypatch):
+    ledger = _ledger(tmp_path, CLEAN_ROW)
+    now = time.time()
+    old = tmp_path / "request-ledger.jsonl.1"
+    old.write_text(json.dumps(_ledger_row(**HELLO)) + "\n", encoding="utf-8")
+    os.utime(old, (now - 7200, now - 7200))  # last written two hours ago
+    recent = tmp_path / "request-ledger.jsonl.2"
+    recent.write_text(json.dumps(_ledger_row(**HELLO)) + "\n", encoding="utf-8")
+    bounds = []
+    original = run_record._read_ledger_rows
+    monkeypatch.setattr(run_record, "_read_ledger_rows",
+                        lambda *a, **k: bounds.append(k.get("since_epoch")) or original(*a, **k))
+    rec = _record(tmp_path, ledger)
+    assert rec["detail"]["cli_preflight_rows"] == 1  # .2 read; .1 is older than the window
+    assert len(bounds) == 1
+    assert now - ph.LEDGER_SCAN_WINDOW_SECONDS - 5 <= bounds[0] <= time.time() - ph.LEDGER_SCAN_WINDOW_SECONDS
+    assert ph.LEDGER_SCAN_WINDOW_SECONDS == 3600 + 60
+
+
+@pytest.mark.parametrize("planted", ["fifo", "dev_zero_link", "directory"])
+def test_ledger_files_ok_rejects_a_planted_lock_file(tmp_path, deadline, planted):
+    ledger = _ledger(tmp_path, CLEAN_ROW)
+    lock = tmp_path / "request-ledger.jsonl.lock"
+    assert ph.ledger_files_ok(ledger) is True  # no lock file yet
+    lock.write_text("")
+    assert ph.ledger_files_ok(ledger) is True  # a regular lock file
+    lock.unlink()
+    if planted == "fifo":
+        os.mkfifo(lock)
+    elif planted == "dev_zero_link":
+        lock.symlink_to("/dev/zero")
+    else:
+        lock.mkdir()
+    assert ph.ledger_files_ok(ledger) is False
+
+
 def test_record_outcome_requires_ledger_path(tmp_path):
     proc = _run("record-outcome", "--run-id", RUN_ID, "--issue", "7", "--head-sha", SHA,
                 "--result-file", str(tmp_path / "result.json"))

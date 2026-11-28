@@ -48,10 +48,14 @@ DAY_KEY_RE = re.compile(r"preview_helper:day:([0-9]{4}-[0-9]{2}-[0-9]{2})")
 # The proxy rotates its ledger at model_proxy.MAX_LEDGER_BYTES (100 MiB by default) before an
 # append, so a live file or a backup is at most that plus one row.
 MAX_LEDGER_FILE_BYTES = 128 * 1024 * 1024
-# Bound on the shared ledger reader (which opens plainly, no O_NONBLOCK): a gated container
-# that replaces a ledger file with a FIFO between ledger_files_ok()'s check and this read
-# would otherwise block record-outcome forever (#642).
+# Bound on the shared ledger reader (#642): a gated container can replace a ledger file
+# between ledger_files_ok()'s check and the read, and a store kept forever (#652) is large.
+# record-outcome must not wait past this.
 LEDGER_READ_TIMEOUT_SECONDS = 5
+# The ledger scan's window (#652 R7): the lane's limit ceiling (3600 s) plus a margin. Older
+# generations cannot hold this run's rows, and scanning months of them would exceed
+# LEDGER_READ_TIMEOUT_SECONDS and turn every outcome into ledger_unavailable.
+LEDGER_SCAN_WINDOW_SECONDS = 3600 + 60
 ARTIFACT_NAMES = ("input.json", "result.json", "current-run.json")
 CATEGORIES = ("code", "docs", "config", "tests", "ci", "mixed")
 # What the entry script may report; record-outcome accepts nothing else from result.json.
@@ -549,16 +553,18 @@ def constrained_dispatch(dispatch):
     }
 
 
-def ledger_files_ok(ledger_path):
-    """True when the live ledger and each rotation backup that exists is a regular file itself
-    (not a link, FIFO, device or directory) no larger than MAX_LEDGER_FILE_BYTES. The shared
-    reader opens these paths plainly, so they are checked first; an absent live ledger is
+def ledger_files_ok(ledger_path, since_epoch=None):
+    """True when the live ledger, each generation run_record._iter_ledger_paths yields for
+    since_epoch, and the sidecar lock file (#652 R7) are each, where they exist, a regular
+    file itself (not a link, FIFO, device or directory) no larger than MAX_LEDGER_FILE_BYTES.
+    These paths are checked before the shared reader opens them. An absent live ledger is
     left to the shared reader, which reports it as unavailable."""
-    from factory_core import run_record
+    from factory_core import rotation, run_record
     try:
-        paths = list(run_record._iter_ledger_paths(Path(ledger_path)))
+        paths = list(run_record._iter_ledger_paths(Path(ledger_path), since_epoch=since_epoch))
     except OSError:
         return False
+    paths.append(rotation.lock_path(ledger_path))
     for path in paths:
         try:
             info = os.lstat(path)
@@ -571,17 +577,19 @@ def ledger_files_ok(ledger_path):
     return True
 
 
-def _read_ledger_rows_bounded(run_id, ledger_path, timeout_seconds=LEDGER_READ_TIMEOUT_SECONDS):
-    """run_record._read_ledger_rows (unchanged, shared with the main harness), run in a thread
-    and bounded: a path that passed ledger_files_ok() can still be swapped for a FIFO before
-    the shared reader's plain open() reaches it, which would otherwise block forever (#642).
-    A timeout reads as no rows / unavailable, same as the ledger not being there at all."""
+def _read_ledger_rows_bounded(run_id, ledger_path, timeout_seconds=LEDGER_READ_TIMEOUT_SECONDS,
+                              since_epoch=None):
+    """run_record._read_ledger_rows (shared with the main harness), run in a thread and
+    bounded. A path that passed ledger_files_ok() can still be swapped before the shared
+    reader reaches it, and a long-kept store is large (#642, #652). A timeout reads as no
+    rows / unavailable, the same as the ledger not being there at all."""
     from factory_core import run_record
     outcome = {}
 
     def _target():
         try:
-            outcome["value"] = run_record._read_ledger_rows(run_id, ledger_path)
+            outcome["value"] = run_record._read_ledger_rows(run_id, ledger_path,
+                                                            since_epoch=since_epoch)
         except Exception as exc:  # noqa: BLE001 — re-raised on the caller's thread below
             outcome["error"] = exc
 
@@ -600,8 +608,10 @@ def record_outcome(*, run_id, issue, head_sha, result_file, ledger_path, forced_
     from factory_core import run_record
     result_state, result = read_result(result_file)
     try:
-        if ledger_files_ok(ledger_path):
-            rows, available = _read_ledger_rows_bounded(run_id, Path(ledger_path))
+        since_epoch = time.time() - LEDGER_SCAN_WINDOW_SECONDS
+        if ledger_files_ok(ledger_path, since_epoch=since_epoch):
+            rows, available = _read_ledger_rows_bounded(run_id, Path(ledger_path),
+                                                        since_epoch=since_epoch)
         else:
             rows, available = [], False  # not read at all: ledger_unavailable
         model_rows = [r for r in rows if not _is_cli_preflight(r)]
