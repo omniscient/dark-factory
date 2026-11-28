@@ -96,6 +96,8 @@ def test_cli_missing_file_prints_placeholder_and_exits_0(tmp_path):
                           capture_output=True)
     assert proc.returncode == 0
     assert proc.stdout == b"> (no reviewer output was recorded)\n"
+
+
 # ---------------------------------------------------------------------------
 # 2. End to end: the extracted artifact-write blocks
 # ---------------------------------------------------------------------------
@@ -245,7 +247,7 @@ def test_missing_script_still_gets_header(tmp_path, needle, status, sev, cycles)
 
 
 # ---------------------------------------------------------------------------
-# 4. Gate differential: conformance-gate reads exactly what it reads on main
+# 3. Gate differential: conformance-gate reads exactly what it reads on main
 # ---------------------------------------------------------------------------
 
 # Main's writer, reproduced: the dialogue passes through bash ("$(cat FILE)" drops NUL,
@@ -302,6 +304,8 @@ def test_gate_read_identical_to_main(tmp_path, status, needle, name):
         assert b"\x00" not in art.read_bytes()
     assert _gate_read(new_copy) == _gate_read(main_art) == status
     assert _header(new_copy) == _header(main_art)
+
+
 def test_phase_5_blocked_comment_is_quoted(tmp_path):
     root = _clone(tmp_path)
     _run_block(tmp_path, root, _BLOCKED_COMMENT, dialogue=_hostile("\r", "PASS"),
@@ -315,7 +319,7 @@ def test_phase_5_blocked_comment_is_quoted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Static: no write embeds the raw dialogue variables
+# 4. Static: no write embeds the raw dialogue variables
 # ---------------------------------------------------------------------------
 
 _RAW_TOKENS = ("${CONFORMANCE_DIALOGUE}", "$CONFORMANCE_DIALOGUE",
@@ -334,6 +338,8 @@ def test_no_bash_write_interpolates_raw_dialogue(path):
                 continue
             for tok in _RAW_TOKENS:
                 assert tok not in s, (path.name, s)
+
+
 def test_plan_comment_templates_paste_quoted_files_only():
     text = _PLAN.read_text(encoding="utf-8")
     blocked = text[text.index("## Spec Conformance — Blocked (Plan)"):]

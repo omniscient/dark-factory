@@ -8,7 +8,8 @@ uses, so the "> " prefix lands after every boundary that reader recognises (LF, 
 CR, VT, FF, 0x1c-0x1e, NEL, U+2028, U+2029), not only after LF. NUL bytes are dropped (bash
 drops them from a variable today; one NUL makes GNU grep treat the whole artifact as
 binary). Never prints an unquoted line and always exits 0: a missing or unreadable FILE
-prints a quoted placeholder.
+prints a quoted placeholder on stdout and a diagnostic on stderr (distinct for a missing/
+unreadable file vs. an internal bug in quote()).
 """
 import sys
 
@@ -26,9 +27,16 @@ def main(argv: list) -> int:
                 data = fh.read()
         else:
             data = sys.stdin.buffer.read()
-        out = quote(data)
-    except Exception:
+    except OSError as exc:
+        print(f"quote_dialogue.py: warning: dialogue file missing or unreadable — "
+              f"reviewer output not persisted ({exc})", file=sys.stderr)
         out = b"> (no reviewer output was recorded)\n"
+    else:
+        try:
+            out = quote(data)
+        except Exception as exc:  # pragma: no cover - defensive: a real bug in quote()
+            print(f"quote_dialogue.py: internal error: {exc}", file=sys.stderr)
+            out = b"> (dialogue could not be quoted due to an internal error)\n"
     sys.stdout.buffer.write(out)
     return 0
 
