@@ -29,6 +29,8 @@ API::
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -284,18 +286,258 @@ def _check_feature_nodes(doc: str, text: str, workflow_path: Path) -> list[str]:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Citation lock: content check for citations into commands/*.md (#662)
+# ---------------------------------------------------------------------------
+
+LOCK_FILE = "docs/.citation-lock.yaml"
+REFERENCE_DOCS = (
+    "docs/run-lifecycle.md",
+    "docs/scheduler.md",
+    "docs/features.md",
+    "docs/configuration.md",
+)
+REPAIR_COMMAND = (
+    "python scripts/docs_refs_check.py --rederive --base origin/main " + " ".join(REFERENCE_DOCS)
+)
+EXCERPT_CHARS = 80
+_COVERED = re.compile(r"commands/[^/]+\.md")
+_LOCK_HEADER = (
+    "# Citation lock for commands/*.md line citations (#662). Written by\n"
+    "# scripts/docs_refs_check.py --seed / --rederive / --accept only; do not edit by hand.\n"
+)
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@", re.M)
+
+Key = tuple[str, str, int, int]  # (doc, target, first line, last line)
+
+
+@dataclass(frozen=True)
+class _Part:
+    """One part of a citation into commands/*.md (a comma chain has one part per item)."""
+
+    doc: str
+    lineno: int
+    span: str
+    target: str
+    first: int
+    last: int
+
+    @property
+    def key(self) -> Key:
+        return (self.doc, self.target, self.first, self.last)
+
+
+@dataclass(frozen=True)
+class _Entry:
+    doc: str
+    target: str
+    first: int
+    last: int
+    hash: str
+    excerpt: str
+    seeded: bool = False
+
+    @property
+    def key(self) -> Key:
+        return (self.doc, self.target, self.first, self.last)
+
+
+def _lines_text(first: int, last: int) -> str:
+    return str(first) if first == last else f"{first}-{last}"
+
+
+def _spec_parts(spec: str) -> list[tuple[str, int, int]]:
+    out = []
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        out.append((part, int(lo), int(hi or lo)))
+    return out
+
+
+def _digest(lines: list[str]) -> str:
+    return hashlib.sha256("\n".join(line.strip() for line in lines).encode("utf-8")).hexdigest()
+
+
+class _Targets:
+    """Cached lines of cited target files, with hash lookups."""
+
+    def __init__(self, repo_root: Path) -> None:
+        self.root = repo_root
+        self._lines: dict[str, list[str]] = {}
+
+    def lines(self, rel: str) -> list[str]:
+        if rel not in self._lines:
+            self._lines[rel] = _read_lines(self.root, rel)
+        return self._lines[rel]
+
+    def digest(self, rel: str, first: int, last: int) -> Optional[str]:
+        lines = self.lines(rel)
+        if not 1 <= first <= last <= len(lines):
+            return None
+        return _digest(lines[first - 1:last])
+
+    def excerpt(self, rel: str, first: int) -> str:
+        return self.lines(rel)[first - 1].strip()[:EXCERPT_CHARS]
+
+    def find(self, rel: str, digest: str, count: int) -> list[int]:
+        """First lines of every *count*-line window of *rel* whose hash is *digest*."""
+        lines = self.lines(rel)
+        return [
+            i + 1 for i in range(len(lines) - count + 1)
+            if _digest(lines[i:i + count]) == digest
+        ]
+
+    def entry(self, part: _Part, seeded: bool = False) -> _Entry:
+        digest = self.digest(part.target, part.first, part.last)
+        assert digest is not None, part
+        return _Entry(part.doc, part.target, part.first, part.last, digest,
+                      self.excerpt(part.target, part.first), seeded)
+
+
+def _doc_key(doc: Path, repo_root: Path) -> str:
+    try:
+        return doc.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return doc.as_posix()
+
+
+def _parts(doc_key: str, text: str, idx: _Index) -> list[_Part]:
+    """Every part of every citation into commands/*.md in *text*, in doc order."""
+    parts: list[_Part] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for span in _SPAN.findall(line):
+            ref = _resolve(span, idx)
+            if ref is None:
+                continue
+            _, spec, target, error = ref
+            if error or not spec or not _COVERED.fullmatch(target or ""):
+                continue
+            parts.extend(
+                _Part(doc_key, lineno, span, target, first, last)
+                for _, first, last in _spec_parts(spec)
+            )
+    return parts
+
+
+def _load_lock(path: Path) -> dict[Key, _Entry]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raise ValueError("'entries' is not a list")
+    entries: dict[Key, _Entry] = {}
+    for item in raw:
+        try:
+            first, last = item["lines"]
+            entry = _Entry(str(item["doc"]), str(item["target"]), int(first), int(last),
+                           str(item["hash"]), str(item.get("excerpt", "")),
+                           item.get("seeded") is True)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed entry {item!r}") from exc
+        entries[entry.key] = entry
+    return entries
+
+
+def _dump_lock(entries: dict[Key, _Entry]) -> str:
+    ordered = sorted(entries.values(), key=lambda e: e.key)
+    if not ordered:
+        return _LOCK_HEADER + "entries: []\n"
+    out = [_LOCK_HEADER, "entries:\n"]
+    for e in ordered:
+        out.append(f"  - doc: {json.dumps(e.doc, ensure_ascii=False)}\n")
+        out.append(f"    target: {json.dumps(e.target, ensure_ascii=False)}\n")
+        out.append(f"    lines: [{e.first}, {e.last}]\n")
+        out.append(f"    hash: {json.dumps(e.hash)}\n")
+        out.append(f"    excerpt: {json.dumps(e.excerpt, ensure_ascii=False)}\n")
+        if e.seeded:
+            out.append("    seeded: true\n")
+    return "".join(out)
+
+
+def _write_lock(path: Path, entries: dict[Key, _Entry]) -> bool:
+    """Write *entries* to *path*; returns whether the bytes changed."""
+    text = _dump_lock(entries)
+    if path.is_file() and path.read_text(encoding="utf-8") == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
+def _content_errors(parts: list[_Part], entries: dict[Key, _Entry], targets: _Targets,
+                    doc_keys: set[str]) -> list[str]:
+    errors: list[str] = []
+    for p in parts:
+        where = f"{p.doc}:{p.lineno}: `{p.span}`: {p.target}:{_lines_text(p.first, p.last)}"
+        entry = entries.get(p.key)
+        if entry is None:
+            errors.append(f"{where} has no entry in {LOCK_FILE}; run: {REPAIR_COMMAND}")
+        elif targets.digest(p.target, p.first, p.last) != entry.hash:
+            errors.append(
+                f'{where} no longer holds the locked content (locked: "{entry.excerpt}"); '
+                f"run: {REPAIR_COMMAND}"
+            )
+    cited = {p.key for p in parts}
+    for e in sorted(entries.values(), key=lambda e: e.key):
+        if e.doc in doc_keys and e.key not in cited:
+            errors.append(
+                f'{e.doc}: lock entry {e.target}:{_lines_text(e.first, e.last)} ("{e.excerpt}") '
+                f"is no longer cited; run: {REPAIR_COMMAND}"
+            )
+    return errors
+
+
+def _load_docs(doc_paths: Iterable[PathLike], repo_root: Path) -> list[tuple[Path, str, str]]:
+    docs = []
+    for doc_path in doc_paths:
+        doc = Path(doc_path)
+        docs.append((doc, _doc_key(doc, repo_root), doc.read_text(encoding="utf-8")))
+    return docs
+
+
+def seed(doc_paths: Iterable[PathLike], repo_root: PathLike = ".",
+         lock_path: Optional[PathLike] = None) -> int:
+    """Lock every unlocked citation part at its current content. Returns entries added."""
+    root = Path(repo_root)
+    lock = Path(lock_path) if lock_path else root / LOCK_FILE
+    entries = _load_lock(lock) if lock.is_file() else {}
+    targets, idx = _Targets(root), _index(_repo_files(root))
+    added = 0
+    for _, key, text in _load_docs(doc_paths, root):
+        for p in _parts(key, text, idx):
+            if p.key not in entries and targets.digest(p.target, p.first, p.last) is not None:
+                entries[p.key] = targets.entry(p, seeded=True)
+                added += 1
+    _write_lock(lock, entries)
+    return added
+
+
 def check(
     doc_paths: Iterable[PathLike],
     repo_root: PathLike = ".",
     config_path: Optional[PathLike] = None,
     workflow_path: Optional[PathLike] = None,
+    *,
+    lock_path: Optional[PathLike] = None,
 ) -> list[str]:
-    """Check every reference in *doc_paths*. Returns ``[]`` when all resolve."""
+    """Check every reference in *doc_paths*. Returns ``[]`` when all resolve.
+
+    The ``commands/*.md`` content check runs only when the lock file (default
+    ``<repo_root>/docs/.citation-lock.yaml``) exists.
+    """
     root = Path(repo_root)
     config = Path(config_path) if config_path else root / "config" / "config.yaml"
     workflow = Path(workflow_path) if workflow_path else root / WORKFLOW_FILE
+    lock = Path(lock_path) if lock_path else root / LOCK_FILE
     idx = _index(_repo_files(root))
     errors: list[str] = []
+    entries: Optional[dict[Key, _Entry]] = None
+    if lock.is_file():
+        try:
+            entries = _load_lock(lock)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            errors.append(f"{lock}: cannot load citation lock: {exc}")
+    parts: list[_Part] = []
+    doc_keys: set[str] = set()
     for doc_path in doc_paths:
         doc = Path(doc_path)
         try:
@@ -308,6 +550,12 @@ def check(
             errors.extend(_check_config_keys(str(doc), text, config))
         if doc.name == "features.md":
             errors.extend(_check_feature_nodes(str(doc), text, workflow))
+        if entries is not None:
+            key = _doc_key(doc, root)
+            doc_keys.add(key)
+            parts.extend(_parts(key, text, idx))
+    if entries is not None:
+        errors.extend(_content_errors(parts, entries, _Targets(root), doc_keys))
     return errors
 
 
