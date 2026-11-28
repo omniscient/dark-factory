@@ -1,12 +1,20 @@
+import fcntl
+import gzip
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from factory_core import run_record as rr
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def _is_root() -> bool:
@@ -595,6 +603,220 @@ def test_compute_retry_spend_counts_failed_rows_only():
     assert spend == {"tokens": 10, "request_count": 1}
 
 
+def _write_generation(directory, name, rows, mtime=None):
+    """A ledger generation file: gzip-compressed when the name says .gz (or .gz.tmp.*)."""
+    path = directory / name
+    data = "".join(json.dumps(r) + "\n" for r in rows).encode()
+    if name.endswith(".gz") or ".gz.tmp." in name:
+        data = gzip.compress(data)
+    path.write_bytes(data)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_temporary_file_is_not_a_generation(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    gz = _write_generation(tmp_path, "request-ledger.jsonl.1.gz", [_ledger_row("run-1", in_tok=2)])
+    _write_generation(tmp_path, "request-ledger.jsonl.2.gz.tmp.0123456789abcdef",
+                      [_ledger_row("run-1", in_tok=9)])
+    assert list(rr._iter_ledger_paths(ledger)) == [ledger, gz]
+
+
+def test_plain_preferred_when_both_forms_exist(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    plain = _write_generation(tmp_path, "request-ledger.jsonl.1", [_ledger_row("run-1", in_tok=2)])
+    _write_generation(tmp_path, "request-ledger.jsonl.1.gz",
+                      [_ledger_row("run-1", in_tok=2), _ledger_row("run-1", in_tok=7)])
+    assert list(rr._iter_ledger_paths(ledger)) == [ledger, plain]
+    rows, _ = rr._read_ledger_rows("run-1", ledger)
+    assert [r["gen_ai.usage.input_tokens"] for r in rows] == [1, 2]
+
+
+def test_reader_finds_rows_in_live_plain_and_gz(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    _write_generation(tmp_path, "request-ledger.jsonl.3", [_ledger_row("run-1", in_tok=2)])
+    _write_generation(tmp_path, "request-ledger.jsonl.2.gz", [_ledger_row("run-1", in_tok=3)])
+    _write_generation(tmp_path, "request-ledger.jsonl.1.gz", [_ledger_row("run-1", in_tok=4),
+                                                              _ledger_row("run-2", in_tok=99)])
+    rows, available = rr._read_ledger_rows("run-1", ledger)
+    assert available is True
+    assert [r["gen_ai.usage.input_tokens"] for r in rows] == [1, 2, 3, 4]
+
+
+def test_generations_older_than_the_run_are_not_opened(tmp_path, monkeypatch):
+    from factory_core import rotation
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    started = time.time() - 600
+    old = _write_generation(tmp_path, "request-ledger.jsonl.1.gz", [_ledger_row("run-1", in_tok=2)],
+                            mtime=started - 3600)
+    _write_generation(tmp_path, "request-ledger.jsonl.2", [_ledger_row("run-1", in_tok=3)],
+                      mtime=started + 60)
+    opened = []
+    original = rotation.open_regular
+    monkeypatch.setattr(rotation, "open_regular",
+                        lambda path, *a, **k: opened.append(Path(path)) or original(path, *a, **k))
+    rows, _ = rr._read_ledger_rows("run-1", ledger, since_epoch=started)
+    assert sorted(r["gen_ai.usage.input_tokens"] for r in rows) == [1, 3]
+    assert old not in opened
+
+
+def test_oversized_gz_is_abandoned(tmp_path, monkeypatch, capsys):
+    import tracemalloc
+    from factory_core import model_proxy as mp
+    monkeypatch.setattr(mp, "MAX_LEDGER_BYTES", 100_000)  # bound: 200,000 decompressed bytes
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1", in_tok=1)) + "\n")
+    _write_generation(tmp_path, "request-ledger.jsonl.2", [_ledger_row("run-1", in_tok=2)])
+    forged = tmp_path / "request-ledger.jsonl.1.gz"
+    with gzip.open(forged, "wb") as fh:
+        fh.write((json.dumps(_ledger_row("run-1", in_tok=3)) + "\n").encode())
+        chunk = b"0" * (1 << 20)
+        for _ in range(50):  # 50 MiB in one line, about 50 KB compressed
+            fh.write(chunk)
+    assert forged.stat().st_size < 200_000  # passes the open-time size check: R3 must stop it
+    capsys.readouterr()
+    tracemalloc.start()
+    try:
+        rows, available = rr._read_ledger_rows("run-1", ledger)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert available is True
+    assert sorted(r["gen_ai.usage.input_tokens"] for r in rows) == [1, 2]  # the forged one adds nothing
+    assert peak < 5 * 1024 * 1024
+    assert capsys.readouterr().err.count("factory-rotation: abandoned ") == 1
+
+
+@pytest.mark.parametrize("where", ["gz", "plain", "live"])
+def test_a_line_over_the_cap_abandons_the_file(tmp_path, monkeypatch, capsys, where):
+    # R3 with the DEFAULT threshold: the decompressed-bytes bound alone is 200 MiB, and one
+    # line may fill it. The line cap keeps the reader's memory flat whatever the threshold.
+    import tracemalloc
+    monkeypatch.setattr(rr, "MAX_LEDGER_LINE_BYTES", 64 * 1024)
+    ledger = tmp_path / "request-ledger.jsonl"
+    good = (json.dumps(_ledger_row("run-1", in_tok=1)) + "\n").encode()
+    long_line = good + b"0" * (8 * 1024 * 1024)  # one valid row, then 8 MiB with no newline
+    if where == "live":
+        ledger.write_bytes(long_line)
+        _write_generation(tmp_path, "request-ledger.jsonl.1", [_ledger_row("run-1", in_tok=2)])
+    else:
+        ledger.write_bytes(good)
+        name = "request-ledger.jsonl.1" + (".gz" if where == "gz" else "")
+        (tmp_path / name).write_bytes(gzip.compress(long_line) if where == "gz" else long_line)
+        _write_generation(tmp_path, "request-ledger.jsonl.2", [_ledger_row("run-1", in_tok=2)])
+    capsys.readouterr()
+    tracemalloc.start()
+    try:
+        rows, available = rr._read_ledger_rows("run-1", ledger)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert available is True
+    # The file with the long line is read whole or not at all; the other file still counts.
+    assert [r["gen_ai.usage.input_tokens"] for r in rows] == ([2] if where == "live" else [1, 2])
+    assert peak < 2 * 1024 * 1024
+    assert capsys.readouterr().err.count("factory-rotation: abandoned ") == 1
+
+
+def test_append_is_not_blocked_while_a_reader_reads(tmp_path, monkeypatch):
+    from factory_core import model_proxy as mp
+    ledger = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(mp, "LEDGER_PATH", ledger)
+    mp.append_ledger(_ledger_row("run-1"))  # also creates request-ledger.jsonl.lock
+    reading, release = threading.Event(), threading.Event()
+    original = rr._ledger_lines
+
+    def slow_lines(*args):
+        reading.set()
+        release.wait(10)
+        yield from original(*args)
+
+    monkeypatch.setattr(rr, "_ledger_lines", slow_lines)
+    result = {}
+    reader = threading.Thread(target=lambda: result.update(read=rr._read_ledger_rows("run-1", ledger)))
+    reader.start()
+    try:
+        assert reading.wait(5)
+        writer = threading.Thread(target=mp.append_ledger, args=(_ledger_row("run-1"),))
+        started = time.monotonic()
+        writer.start()
+        writer.join(2)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        reader.join(10)
+    assert not writer.is_alive() and elapsed < 1.5  # it would wait the full 10 s if the read held the lock
+    assert len(result["read"][0]) == 1  # the snapshot predates the second append
+
+
+def test_reader_does_not_create_the_lock_file(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1")) + "\n")
+    rows, available = rr._read_ledger_rows("run-1", ledger)
+    assert (len(rows), available) == (1, True)
+    assert not (tmp_path / "request-ledger.jsonl.lock").exists()
+
+
+def test_reader_proceeds_when_the_lock_is_held(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1")) + "\n")
+    expected = rr._read_ledger_rows("run-1", ledger)
+    with open(tmp_path / "request-ledger.jsonl.lock", "a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        started = time.monotonic()
+        result = rr._read_ledger_rows("run-1", ledger)
+        elapsed = time.monotonic() - started
+    assert result == expected
+    assert elapsed < 3
+
+
+_ROTATING_WRITER = (
+    "import sys, time\n"
+    "from factory_core import model_proxy as mp\n"
+    "writer, count = sys.argv[1], int(sys.argv[2])\n"
+    "for i in range(count):\n"
+    "    created = mp.append_ledger({'run_id': 'run-c', 'writer': writer, 'i': i, 'pad': 'x' * 20})\n"
+    "    if created is not None:\n"
+    "        mp.compress_ledger_generation(created)\n"
+    "    time.sleep(0.002)\n"
+)
+
+
+def test_concurrent_read_is_consistent(tmp_path):
+    # Writers rotate about every 25 rows; every read must be a snapshot: per writer, the
+    # rows 0..k with none missing and none repeated. The writers sleep 2 ms between rows so
+    # the reader's LOCK_SH|LOCK_NB polling is not starved past READ_LOCK_WAIT_SECONDS (which
+    # would drop it to the unlocked R5 path). On a failure here, check for starvation first.
+    ledger = tmp_path / "request-ledger.jsonl"
+    env = dict(os.environ, PYTHONPATH=str(_SCRIPTS_DIR), MODEL_PROXY_LEDGER_PATH=str(ledger),
+               MODEL_PROXY_MAX_BYTES="2000")
+    writers = [subprocess.Popen([sys.executable, "-c", _ROTATING_WRITER, str(w), "300"], env=env,
+                                stderr=subprocess.DEVNULL) for w in range(4)]
+    reads = 0
+    try:
+        while any(p.poll() is None for p in writers):
+            rows, _ = rr._read_ledger_rows("run-c", ledger)
+            by_writer = {}
+            for row in rows:
+                by_writer.setdefault(row["writer"], []).append(row["i"])
+            for writer, seen in by_writer.items():
+                assert sorted(seen) == list(range(len(seen))), (
+                    f"read {reads}: writer {writer} has a missing or repeated row")
+            reads += 1
+    finally:
+        for p in writers:
+            p.wait(timeout=120)
+    assert [p.returncode for p in writers] == [0] * 4
+    assert reads >= 10
+    rows, _ = rr._read_ledger_rows("run-c", ledger)
+    assert len(rows) == 1200
+
+
 def test_compute_retry_spend_zero_when_no_failures():
     rows = [_ledger_row(status=200)]
     assert rr._compute_retry_spend(rows) == {"tokens": 0, "request_count": 0}
@@ -1155,6 +1377,59 @@ def test_assemble_picks_up_memory_trace(tmp_path, monkeypatch):
     assert "memory_trace" in rec
     assert rec["memory_trace"]["schema_version"] == 1
     assert rec["memory_trace"]["retrieval_mechanism"] == "flatfile-pathtag"
+
+
+def test_issue_economics_reads_gz_generations(tmp_path):
+    ledger = tmp_path / "request-ledger.jsonl"
+    row = {"issue_number": 235, "intent": "implement", "stage": "implement", "status": 200,
+           "gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1}
+    ledger.write_text(json.dumps(dict(row, run_id="run-1")) + "\n")
+    _write_generation(tmp_path, "request-ledger.jsonl.1.gz", [dict(row, run_id="run-2")])
+    result = rr._build_issue_economics(235, ledger_path=ledger, artifacts_root=tmp_path / "runs")
+    assert set(result["runs"]) == {"run-1", "run-2"}
+
+
+def _backfill_with_generations(tmp_path, started_at):
+    """A retained run-1 record plus a ledger: one live row, three rows in a generation from an
+    hour before 2026-06-12T04:00:00Z, one row in a generation from a minute after it."""
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run-record.json").write_text(json.dumps({
+        "run_id": "run-1", "status": "completed",
+        "started_at": started_at, "completed_at": "2026-06-12T04:01:00Z",
+        "stages": [], "totals": {"gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1},
+    }))
+    epoch = datetime(2026, 6, 12, 4, 0, 0, tzinfo=timezone.utc).timestamp()
+    ledger = tmp_path / "request-ledger.jsonl"
+    ledger.write_text(json.dumps(_ledger_row("run-1")) + "\n")
+    _write_generation(tmp_path, "request-ledger.jsonl.1", [_ledger_row("run-1")] * 3, mtime=epoch - 3600)
+    _write_generation(tmp_path, "request-ledger.jsonl.2", [_ledger_row("run-1")], mtime=epoch + 60)
+    assert rr._backfill_run_economics("run-1", artifacts_root=tmp_path / "runs", ledger_path=ledger)
+    return json.loads((run_dir / "run-record.json").read_text())["harness_economics"]
+
+
+def test_backfill_read_is_bounded_by_started_at(tmp_path):
+    economics = _backfill_with_generations(tmp_path, "2026-06-12T04:00:00Z")
+    assert economics["ledger_rows_correlated"] == 2  # live + .2; .1 ended before the run began
+
+
+def test_unparseable_started_at_means_a_full_scan(tmp_path):
+    economics = _backfill_with_generations(tmp_path, "not-a-timestamp")
+    assert economics["ledger_rows_correlated"] == 5
+
+
+def test_assemble_read_is_bounded_by_started_at(tmp_path, monkeypatch):
+    # cmd_assemble passes the run's started_at (2026-06-12T04:00:00Z in _AssembleArgs) (R6).
+    monkeypatch.setattr(rr, "JSONL_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rr, "_post_seq", lambda r: None)
+    ledger = tmp_path / "request-ledger.jsonl"
+    monkeypatch.setattr(rr, "LEDGER_PATH", ledger)
+    epoch = datetime(2026, 6, 12, 4, 0, 0, tzinfo=timezone.utc).timestamp()
+    ledger.write_text(json.dumps(_ledger_row("abc123")) + "\n")
+    _write_generation(tmp_path, "request-ledger.jsonl.1", [_ledger_row("abc123")] * 3, mtime=epoch - 3600)
+    out = tmp_path / "run-record.json"
+    rr.cmd_assemble(_AssembleArgs(tmp_path, out))
+    assert json.loads(out.read_text())["harness_economics"]["ledger_rows_correlated"] == 1
 
 
 def test_assemble_no_memory_trace_key_when_absent(tmp_path, monkeypatch):
@@ -3165,7 +3440,8 @@ def test_assemble_without_a_ledger_has_unknown_model_dispatch(tmp_path, monkeypa
 def test_assemble_reads_the_ledger_once(tmp_path, monkeypatch):
     reads = []
     real = rr._read_ledger_rows
-    monkeypatch.setattr(rr, "_read_ledger_rows", lambda run_id, path: reads.append(run_id) or real(run_id, path))
+    monkeypatch.setattr(rr, "_read_ledger_rows",
+                        lambda run_id, path, **kw: reads.append(run_id) or real(run_id, path, **kw))
     _assemble_with_ledger(tmp_path, monkeypatch, [_dispatch_row()], [])
     assert reads == ["abc123"]
 

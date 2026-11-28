@@ -9,6 +9,7 @@ Two subcommands:
 
 import argparse
 import fcntl
+import gzip
 import json
 import os
 import pathlib
@@ -20,9 +21,11 @@ import tempfile
 import traceback
 import urllib.error
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 
 from . import model_proxy
+from . import rotation
 from . import session_usage
 from . import verdict as _verdict
 from .failure_taxonomy import class_for_signature
@@ -910,42 +913,168 @@ def _wall_clock_seconds(started_at: str, completed_at: str) -> int:
         return 0
 
 
-def _iter_ledger_paths(ledger_path: pathlib.Path):
+def _started_epoch(started_at) -> "float | None":
+    """started_at ("%Y-%m-%dT%H:%M:%SZ", UTC) as epoch seconds; None (a full ledger scan) when it
+    does not parse (#652 R6)."""
+    try:
+        return datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _iter_ledger_paths(ledger_path: pathlib.Path, since_epoch: "float | None" = None):
+    """The live ledger, then its generations by descending number (#652 R1, R2).
+
+    Generations are found by whole suffix (rotation.generations): `.N` and `.N.gz`, never a
+    `.N.gz.tmp.*` compression in progress. When both forms of one number exist only the plain
+    file is yielded. With since_epoch, a generation last modified (lstat) before it is not
+    yielded, because none of its rows can be newer. The live file is always yielded, present
+    or not. This is the one reader-side source of generation paths:
+    preview_helper.ledger_files_ok and every ledger reader here use it, and it is importable
+    for scripts/reconcile_cost_reports.py, which still reads only the live ledger (#652 R8)."""
+    ledger_path = pathlib.Path(ledger_path)
     yield ledger_path
-    for i in range(1, model_proxy.BACKUP_COUNT + 1):
-        backup = ledger_path.with_suffix(ledger_path.suffix + f".{i}")
-        if backup.exists():
-            yield backup
+    found = rotation.generations(ledger_path)
+    for number in sorted(found, reverse=True):
+        path = found[number].get("plain") or found[number]["gz"]
+        if since_epoch is not None:
+            try:
+                if os.lstat(path).st_mtime < since_epoch:
+                    continue
+            except OSError:
+                continue
+        yield path
 
 
-def _read_ledger_rows(run_id: str, ledger_path: pathlib.Path) -> tuple:
-    """Scan the live ledger plus rotation backups for rows matching run_id.
+READ_LOCK_WAIT_SECONDS = 2.0
+# The longest ledger line the reader will hold (#652 R3). model_proxy's rows are a few
+# kilobytes; a file with a longer line is abandoned, like an archive over its bound.
+MAX_LEDGER_LINE_BYTES = 1024 * 1024
 
-    Returns (rows, ledger_available) — ledger_available distinguishes "the ledger
-    exists and genuinely has zero rows for this run" from "no ledger data at all"
-    (opt-in model-proxy was never enabled). See the spec's "Graceful degradation"
-    section.
-    """
-    rows = []
-    available = False
-    for path in _iter_ledger_paths(ledger_path):
-        if not path.exists():
-            continue
-        available = True
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
+
+class _AbandonedGeneration(Exception):
+    """A .gz generation decompressed past its bound (#652 R3)."""
+
+
+def _generation_bound() -> int:
+    # A real generation is at most the rotation threshold plus one row (#652 R3, W6).
+    return 2 * model_proxy.MAX_LEDGER_BYTES
+
+
+def _open_ledger_snapshot(ledger_path: pathlib.Path, since_epoch) -> list:
+    """[(path, fd, size_limit, is_gz)] for every file the read will use (#652 R4, R5).
+
+    Listing and opening happen under LOCK_SH on <ledger>.lock, which is opened without O_CREAT
+    and given up after READ_LOCK_WAIT_SECONDS. In that case (R5) the read proceeds unlocked
+    with the same result shape. The live file's size is noted under the lock and the read
+    stops there. An open descriptor survives the rename and the removal of a plain
+    generation, so the set is a consistent snapshot and the read itself holds no writer back.
+    A generation on the live file's own inode (a rotation interrupted between link and
+    unlink, W2) is not read twice."""
+    opened, seen = [], set()
+    try:
+        with rotation.locked(rotation.lock_path(ledger_path), timeout=READ_LOCK_WAIT_SECONDS,
+                             shared=True, create=False):
+            for index, path in enumerate(_iter_ledger_paths(ledger_path, since_epoch)):
+                is_live = index == 0
+                result = rotation.open_regular(path, None if is_live else _generation_bound())
+                if result is None:
+                    continue
+                fd, info = result
+                if (info.st_dev, info.st_ino) in seen:
+                    os.close(fd)
+                    continue
+                seen.add((info.st_dev, info.st_ino))
+                opened.append((path, fd, info.st_size if is_live else None,
+                               path.name.endswith(".gz")))
+    except BaseException:
+        for entry in opened:
+            os.close(entry[1])
+        raise
+    return opened
+
+
+def _ledger_lines(path, fd, size_limit, is_gz):
+    """The lines of one opened ledger file. A plain file is read from its descriptor; the live
+    file only up to size_limit. A .gz is decompressed as a stream, never loaded whole, and
+    abandoned once more than _generation_bound() decompressed bytes have been read (R3), so
+    a forged archive cannot exhaust memory."""
+    def capped(line):
+        # A row is a few kilobytes. A "line" that fills the cap without ending is not a row:
+        # reading on would hold up to the whole file in memory (one 1 GiB line in a 5 MB
+        # forged .gz cost 444 MiB with the default threshold before this cap).
+        if len(line) > MAX_LEDGER_LINE_BYTES:
+            raise _AbandonedGeneration(f"a line over {MAX_LEDGER_LINE_BYTES} bytes")
+        return line
+
+    with os.fdopen(fd, "rb", closefd=False) as raw:
+        if not is_gz:
+            remaining = size_limit
+            while remaining is None or remaining > 0:
+                step = MAX_LEDGER_LINE_BYTES + 1
+                line = raw.readline(step if remaining is None else min(step, remaining))
                 if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if row.get("run_id") == run_id:
-                    rows.append(row)
-        except OSError:
-            continue
-    return rows, available
+                    return
+                if remaining is not None:
+                    remaining -= len(line)
+                yield capped(line)
+            return
+        bound = _generation_bound()
+        budget = bound
+        with gzip.GzipFile(fileobj=raw, mode="rb") as stream:
+            while True:
+                line = stream.readline(min(budget, MAX_LEDGER_LINE_BYTES) + 1)
+                if not line:
+                    return
+                budget -= len(line)
+                if budget < 0:
+                    raise _AbandonedGeneration(f"over {bound} decompressed bytes")
+                yield capped(line)
+
+
+def _read_ledger(ledger_path, since_epoch, keep) -> tuple:
+    """(rows for which keep(row) is true, ledger_available) over the live ledger and every
+    generation _iter_ledger_paths yields. ledger_available is True when at least one file was
+    opened. A generation is read whole or not at all: an unreadable or abandoned one
+    contributes no row and logs one line. keep() is deliberately unguarded: a forged row it
+    raises on propagates, as before #652 (preview_helper.record_outcome relies on that)."""
+    opened = _open_ledger_snapshot(pathlib.Path(ledger_path), since_epoch)
+    rows = []
+    try:
+        for path, fd, size_limit, is_gz in opened:
+            found = []
+            try:
+                for line in _ledger_lines(path, fd, size_limit, is_gz):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if keep(row):
+                        found.append(row)
+            except (_AbandonedGeneration, OSError, EOFError, zlib.error) as exc:
+                rotation.log(f"abandoned {path}: {exc}")
+                continue
+            rows.extend(found)
+    finally:
+        for _, fd, _, _ in opened:
+            os.close(fd)
+    return rows, bool(opened)
+
+
+def _read_ledger_rows(run_id: str, ledger_path: pathlib.Path,
+                      since_epoch: "float | None" = None) -> tuple:
+    """Scan the live ledger plus every rotated generation for rows matching run_id.
+
+    Returns (rows, ledger_available). ledger_available distinguishes "the ledger exists and
+    genuinely has zero rows for this run" from "no ledger data at all" (the opt-in
+    model-proxy was never enabled). See the spec's "Graceful degradation" section. With
+    since_epoch (the run's start), generations last modified before it are not opened
+    (#652 R1, R6)."""
+    return _read_ledger(ledger_path, since_epoch, lambda row: row.get("run_id") == run_id)
 
 
 def _compute_retry_spend(rows: list) -> dict:
@@ -997,7 +1126,8 @@ def _compute_harness_economics(
     )
 
     # cmd_assemble passes the rows it already read (#558); backfill reads them here.
-    rows, ledger_available = ledger if ledger is not None else _read_ledger_rows(run_id, ledger_path)
+    rows, ledger_available = ledger if ledger is not None else _read_ledger_rows(
+        run_id, ledger_path, since_epoch=_started_epoch(started_at))
     if ledger_available:
         retry_spend = _compute_retry_spend(rows)
         ledger_mechanics = _compute_ledger_mechanics(rows)
@@ -1258,7 +1388,8 @@ def cmd_assemble(args) -> None:
     # The request ledger, read once (#558): it decides the local-run cost override below and
     # feeds harness_economics and model_dispatch.
     ledger_path = pathlib.Path(args.ledger_path) if args.ledger_path else LEDGER_PATH
-    ledger_rows, ledger_available = _read_ledger_rows(args.run_id, ledger_path)
+    ledger_rows, ledger_available = _read_ledger_rows(
+        args.run_id, ledger_path, since_epoch=_started_epoch(args.started_at))
     local_run = any(r.get("hosting_location") == "local" for r in ledger_rows)
 
     # Capture failed -> totals null, not zero (df#300); otherwise classify every node's
@@ -1507,29 +1638,17 @@ def _build_issue_economics(issue_number: int, *, ledger_path: pathlib.Path, arti
     no new persisted file.
     """
     runs: dict = {}
-    for path in _iter_ledger_paths(ledger_path):
-        if not path.exists():
-            continue
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if int(row.get("issue_number") or 0) != issue_number:
-                    continue
-                run_id = row.get("run_id", "unknown")
-                bucket = runs.setdefault(run_id, {
-                    "intent": row.get("intent", "unknown"),
-                    "stage": row.get("stage", "unknown"),
-                    "rows": [],
-                })
-                bucket["rows"].append(row)
-        except OSError:
-            continue
+    # The full-history reader (#652 R6): no since_epoch, the same lock rule, .gz through R3.
+    rows, _ = _read_ledger(ledger_path, None,
+                           lambda row: int(row.get("issue_number") or 0) == issue_number)
+    for row in rows:
+        run_id = row.get("run_id", "unknown")
+        bucket = runs.setdefault(run_id, {
+            "intent": row.get("intent", "unknown"),
+            "stage": row.get("stage", "unknown"),
+            "rows": [],
+        })
+        bucket["rows"].append(row)
 
     result_runs = {}
     for run_id, bucket in runs.items():
