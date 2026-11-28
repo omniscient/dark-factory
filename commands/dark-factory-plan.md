@@ -45,6 +45,8 @@ You are running with no human attached; an ended turn ends the process.
 
 This command's only authorized file outputs are:
 - Documents under `docs/superpowers/plans/` (the plan file)
+- Documents under `docs/superpowers/plan-drafts/` (the draft plan: checkpointed before
+  review, moved into `docs/superpowers/plans/` by Phase 4)
 
 Do NOT create or modify any other files. Do NOT implement code, write tests, or edit configuration.
 Implementation belongs to the `Fix issue #N` workflow on a `feat/issue-N-*` branch.
@@ -91,18 +93,22 @@ MEMORY_CONTEXT=$(bash "${REPO_ROOT}/dark-factory/scripts/load_memory_context.sh"
 ## Phase 2: PLAN WRITING
 
 Write a full implementation plan following these conventions:
-- Save to `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`, and bind that path to `PLAN_FILE`
+- Save to `docs/superpowers/plan-drafts/YYYY-MM-DD-<feature>.md` (or, when Phase 1 step 9
+  bound `PLAN_FILE` to a stale draft, that same path), and bind that path to `PLAN_FILE`
   — used by Phase 3's and Phase 3.5's `render-prompt` calls below
   (`--set PLAN_CONTENT=@"$PLAN_FILE"`). Because `PLAN_FILE` points at the on-disk file rather
   than a copy, every later revision (an architect "Issues Found" fix, or a conformance
   reconcile-loop edit) is automatically picked up by the next `render-prompt` call with no
   separate re-copy step — just re-run the same `render-prompt` invocation after saving the
-  revised plan.
+  revised plan. The plan stays under `docs/superpowers/plan-drafts/` through Phases 3 and
+  3.5; nothing under `docs/superpowers/plans/` is created or modified before Phase 4 moves
+  the reviewed draft there.
 - A `**Issue:** #<num>` line directly under the title, before the standard plan
   header (Goal, Architecture, Tech Stack) — required (#382) so the content-only
   `grep -rl "#${ISSUE}"` call sites elsewhere in the DAG (budget telemetry, the
   PR-push archive step) can find this artifact even when the push gate itself
-  associates it via commit subject instead
+  associates it via commit subject instead. It is also what lets Phase 1 step 9 find the
+  draft on a resume
 - Include a File Structure table
 - Break into bite-sized tasks (each step is one 2-5 minute action)
 - Every task has: Files list, TDD steps (write failing test → verify fail → implement → verify pass → commit)
@@ -110,6 +116,35 @@ Write a full implementation plan following these conventions:
 - Exact commands with expected output
 - Self-review before publishing: confirm the issue-number line is present, alongside
   the existing no-placeholders check
+
+### Draft checkpoint
+
+After self-review (or, on a resume, after applying feedback) and before the first architect
+spawn, commit the draft and push this run's branch, so a kill during Phase 3, 3.5 or 4 (a
+session-window pause) leaves a resumable draft instead of nothing. The commit touches
+`$PLAN_FILE` only. A push failure is a warning, not an error: proceed into Phase 3 on the
+locally committed draft, with no retry loop — the checkpoint must never become a new way to
+lose a run. Bind `PLAN_FILE` in the same Bash call; the block stops if it is unbound or
+missing, and falls back to `issue.json` for `ISSUE_NUM`:
+
+<!-- plan-draft-checkpoint:begin -->
+```bash
+[ -n "${PLAN_FILE:-}" ] && [ -f "$PLAN_FILE" ] || { echo "checkpoint: PLAN_FILE is unbound or missing — bind it in this Bash call"; exit 1; }
+ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
+BRANCH=$(git branch --show-current)
+git add -- "$PLAN_FILE"
+git commit -m "docs(#${ISSUE_NUM}): checkpoint draft plan" -- "$PLAN_FILE" || true
+if ! timeout 30 git push -u origin "$BRANCH"; then
+  echo "WARN: draft plan checkpoint push failed for #${ISSUE_NUM} — proceeding on the locally committed draft; this run is not kill-durable until a later push succeeds."
+fi
+```
+<!-- plan-draft-checkpoint:end -->
+
+Re-run this block unchanged immediately before each `needs-discussion` exit (Phase 3 step 4
+under "Issues Found", Phase 3.5 step 8b), so the revised draft — not the pre-review one — is
+what the operator sees and what the next dispatch resumes. On an unchanged draft the commit is
+a no-op. The block never applies a label: `plan-pending-review` is applied only by the
+`plan-push-and-advance` node, and only to a file under `docs/superpowers/plans/`.
 
 ## Phase 3: ARCHITECT REVIEW
 
