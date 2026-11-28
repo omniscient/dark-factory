@@ -687,6 +687,9 @@ def _apply_session_usage(nodes: list, totals: dict, *, transcripts_dir, started_
     try:   # never lose the record over the transcripts
         if transcripts_dir:
             transcripts = session_usage.load_transcripts(transcripts_dir, started_at)
+            if transcripts["skipped_for_size"]:
+                print(f"run-record: {len(transcripts['skipped_for_size'])} session transcript "
+                      "file(s) skipped (over the size bound)", file=sys.stderr)
     except Exception as exc:
         print(f"run-record: session usage not read ({type(exc).__name__})", file=sys.stderr)
     called = {n.get("node_id") for n in nodes if _called_model(n, node_types, all_windows)}
@@ -1609,15 +1612,17 @@ def _backfill_usage(run_id: str, transcripts_dir) -> dict:
     original = path.read_bytes()
     record = json.loads(original)
     nodes = record.get("nodes") or []
+    transcripts = session_usage.load_transcripts(transcripts_dir)
     found = session_usage.backfill(
-        session_usage.load_transcripts(transcripts_dir),
+        transcripts,
         {n["node_id"]: {"cost_usd": n.get("cost_usd"),
                         "tokens": (n.get("gen_ai.usage.input_tokens"),
                                    n.get("gen_ai.usage.output_tokens"))}
          for n in nodes if isinstance(n.get("node_id"), str)},
     )
     if not found:
-        return {"run_id": run_id, "backfilled_nodes": [], "reason": "no_match"}
+        return {"run_id": run_id, "backfilled_nodes": [], "reason": "no_match",
+                "skipped_for_size": transcripts["skipped_for_size"]}
     hosting = ((record.get("model_dispatch") or {}).get("result") or {}).get("hosting_location")
     record["nodes"] = [
         dict(_with_usage_keys(n, True, found[n["node_id"]], hosting), backfilled=True)
@@ -1639,7 +1644,8 @@ def _backfill_usage(run_id: str, transcripts_dir) -> dict:
     tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     os.utime(path, (stat_before.st_atime, stat_before.st_mtime))
-    return {"run_id": run_id, "backfilled_nodes": sorted(found)}
+    return {"run_id": run_id, "backfilled_nodes": sorted(found),
+            "skipped_for_size": transcripts["skipped_for_size"]}
 
 
 def cmd_backfill_usage(args) -> None:

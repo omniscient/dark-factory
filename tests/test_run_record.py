@@ -3585,6 +3585,55 @@ def test_backfill_usage_reads_the_gzipped_transcript_store(tmp_path, monkeypatch
     assert by["conformance"]["model"] == f"{_HAIKU},{_OPUS}"
 
 
+def _u_oversized(tx, monkeypatch):
+    """A transcript under tx over a monkeypatched MAX_FILE_BYTES (#656); the fixture files
+    of _u_transcripts are each far under it."""
+    from factory_core import session_usage
+    monkeypatch.setattr(session_usage, "MAX_FILE_BYTES", 8192)
+    _u_write(tx / "-workspace-target" / "zz-oversized.jsonl",
+             [dict(_u_assistant(f"z{i}", _U_T0 + i, _OPUS, 1, 1), pad="x" * 500)
+              for i in range(40)])
+    return "-workspace-target/zz-oversized.jsonl"
+
+
+def test_apply_session_usage_reports_size_skips_without_paths(tmp_path, monkeypatch, capsys):
+    tx = _u_transcripts(tmp_path / "tx")
+    kw = dict(transcripts_dir=str(tx), started_at=None, archon_log_file=None,
+              clone_dir=str(tmp_path), hosting=None)
+    rr._apply_session_usage([], {}, **kw)
+    assert "over the size bound" not in capsys.readouterr().err
+    _u_oversized(tx, monkeypatch)
+    rr._apply_session_usage([], {}, **kw)
+    err = capsys.readouterr().err
+    assert ("run-record: 1 session transcript file(s) skipped (over the size bound)\n"
+            in err)
+    assert "zz-oversized" not in err
+
+
+def test_backfill_usage_reports_files_skipped_for_size(tmp_path, monkeypatch, capsys):
+    _u_durable(monkeypatch, tmp_path, _u_old_record())
+    tx = _u_transcripts(tmp_path / "tx")
+    rel = _u_oversized(tx, monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["run_record", "backfill-usage", "--run-id", "3ff088b6",
+                                      "--transcripts-dir", str(tx)])
+    rr.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["backfilled_nodes"] == ["code-review", "conformance"]
+    assert report["skipped_for_size"] == [rel]
+
+
+def test_backfill_usage_skipped_for_size_on_no_match_not_on_no_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "SCHEDULER_STATE_DIR", tmp_path / "state")
+    assert "skipped_for_size" not in rr._backfill_usage("nope", str(tmp_path))
+    record = _u_old_record()
+    for n in record["nodes"]:
+        n["cost_usd"] = 42.0
+    _u_durable(monkeypatch, tmp_path, record)
+    result = rr._backfill_usage("3ff088b6", str(_u_transcripts(tmp_path / "tx")))
+    assert result["reason"] == "no_match"
+    assert result["skipped_for_size"] == []
+
+
 def test_backfill_usage_failed_backup_write_leaves_no_partial_copy(tmp_path, monkeypatch):
     path = _u_durable(monkeypatch, tmp_path, _u_old_record())
     original = path.read_bytes()
