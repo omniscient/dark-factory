@@ -705,8 +705,10 @@ In the three no-label cases the node still exits 0, so the run itself succeeds. 
 comments state that the item "remains eligible for automatic retry"; retry counting and
 its limit are the scheduler's ([scheduler.md](scheduler.md), `scheduler.max_retries`).
 The marker comments posted through `scripts/post_marker_comment.sh` use the scheduler
-footer on purpose, so they do not reset the `direct-to-pr` grace clock
-(`scripts/post_marker_comment.sh:16-20`).
+footer by default (its optional fourth argument, `footer-kind`, selects another
+`factory_core/identity.py` footer; the conformance PASS-path shadow comment passes
+`factory`), so they do not reset the `direct-to-pr` grace clock, which only the
+`refinement` footer moves (`scripts/post_marker_comment.sh:20-24`).
 
 What the labels mean for auto-advance is in [triage-labels.md](triage-labels.md) and
 [scheduler.md](scheduler.md) (`direct_to_pr.*`).
@@ -810,7 +812,7 @@ conformance command does not adjudicate this gate.
    because the reviewer call errored, timed out or returned nothing skips the fix and just
    re-spawns the reviewer; it still counts as a cycle. More than
    `conformance.max_reconcile_cycles` cycles is BLOCKED.
-8. **Artifact guard** (Phase 6, `:754-794`), last on every path: if `conformance.md` has no
+8. **Artifact guard** (Phase 6, `:756-796`), last on every path: if `conformance.md` has no
    `STATUS:` line it acts on a reviewer response it holds (Phase 4 or 5), else leaves the
    file absent and exits 1 so `conformance-gate` takes its missing-verdict path. It never
    writes a verdict itself (#373).
@@ -830,12 +832,12 @@ notices. It writes `diff-ranking.json` (`scripts/diff_rank.py:234-285,340-603`).
 
 | Result | Outcome |
 |---|---|
-| PASS (`:580-674`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
-| BLOCKED (`:676-752`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
+| PASS (`:581-670`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
+| BLOCKED (`:672-754`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
 
 **The `conformance-gate` node enforces the result** by reading `conformance.md`, because
 a command node's own `exit 1` is not relied on to stop the DAG
-(`commands/dark-factory-conformance.md:748-752`). `scripts/verdict_gate_check.sh:36-90`:
+(`commands/dark-factory-conformance.md:750-754`). `scripts/verdict_gate_check.sh:36-90`:
 
 | First `STATUS:` line | Gate |
 |---|---|
@@ -1335,7 +1337,7 @@ The scheduler-side oddities are tracked in
    (`commands/dark-factory-validate.md:91-118`, pre-#551 line numbers). The conformance and code-review commands
    both state that a command node's internal `exit 1` "does not reliably surface as node
    failure to the DAG executor", which is why `conformance-gate` and `review-gate` exist
-   (`commands/dark-factory-conformance.md:748-752`). There is no equivalent node for
+   (`commands/dark-factory-conformance.md:750-754`). There is no equivalent node for
    `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1657-1675`).
    If the exit does not surface, conformance, push, PR creation and `status-in-review`
    would proceed and move a Blocked issue to In Review. The `needs-discussion` label

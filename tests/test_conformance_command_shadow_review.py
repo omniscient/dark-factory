@@ -43,8 +43,15 @@ def test_phase_4_pass_emits_shadow_fields_and_marker_comment():
     section = text[phase4_idx:phase5_idx]
     assert "SHADOW_MODEL" in section
     assert "df-shadow-review" in section
+    # #404: posted through the shared helper with the factory footer, not an inlined copy
+    assert "post_marker_comment.sh" in section
     # Requirement 3: the advisory PASS-path comment must never block a PASS
-    assert '--body-file "$TMPFILE" || true' in section
+    assert '"$SHADOW_BODY" factory || true' in section
+    assert "mktemp" not in section, "inlined mktemp/tracker-comment block crept back"
+    assert "## Shadow (Fable) Review — conformance" in section
+    # the marker is the call's argument only; a second copy would mean it is also left in
+    # SHADOW_BODY and posted twice
+    assert section.count("<!-- df-shadow-review -->") == 1
 
 
 def test_phase_5_blocked_folds_shadow_block():

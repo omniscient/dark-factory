@@ -4,7 +4,7 @@
 # where the mktemp/printf/tracker-comment/rm sequence was duplicated verbatim between the
 # spec-pending-review and plan-pending-review gate-label-failure warnings.
 #
-# Usage: post_marker_comment.sh <issue-number> <marker-tag> <body>
+# Usage: post_marker_comment.sh <issue-number> <marker-tag> <body> [footer-kind]
 #   <issue-number>  numeric tracker item id
 #   <marker-tag>    idempotency marker, e.g. "<!-- df-gate-label-failure -->" — passed
 #                    both as the leading line of the posted body and as the
@@ -12,26 +12,32 @@
 #                    rather than appending a new comment.
 #   <body>          markdown body text, WITHOUT the marker-tag line or footer — both
 #                    are added by this script.
+#   [footer-kind]   footer to append: a factory_core/identity.py::_MARKERS key, passed
+#                    to `factory_core/cli.py marker`, which validates it. Default
+#                    `scheduler`. An unknown kind yields an empty footer; the comment
+#                    still posts.
 #
-# Uses `marker scheduler` (not `marker refinement`) for the footer deliberately: the
-# scheduler's elapsed_minutes_since_marker (scheduler_lib.sh) anchors the direct-to-pr
-# grace clock on the *last* comment matching the "Refinement Pipeline" marker, so a
-# footer using that marker here would reset the grace clock every time this script
-# posts (issue #358 review).
+# The default is `scheduler` (not `refinement`) deliberately: the scheduler's
+# elapsed_minutes_since_marker (scheduler_lib.sh) anchors the direct-to-pr grace clock
+# on the *last* comment matching the "Refinement Pipeline" marker, so a caller must
+# never pass `refinement` for a comment that should not reset the grace clock (issue
+# #358 review). `scheduler` and `factory` do not match that pattern.
 #
 # Exit: propagates the tracker CLI's exit code (non-zero on a failed post/update);
 # callers that want this to stay advisory-only append `|| true` at the call site.
 set -uo pipefail
 
-ISSUE_NUM="${1:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body>}"
-MARKER_TAG="${2:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body>}"
-BODY="${3:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body>}"
+ISSUE_NUM="${1:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body> [footer-kind]}"
+MARKER_TAG="${2:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body> [footer-kind]}"
+BODY="${3:?Usage: post_marker_comment.sh <issue-number> <marker-tag> <body> [footer-kind]}"
+FOOTER_KIND="${4:-scheduler}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PCLI="${SCRIPT_DIR}/factory_core/providers/cli.py"
 _PCLI_FACTORY_CORE="${SCRIPT_DIR}/factory_core/cli.py"
 
-_FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker scheduler 2>/dev/null || echo "")
+_FOOTER=$(python3 "$_PCLI_FACTORY_CORE" marker "$FOOTER_KIND" 2>/dev/null) \
+  || { echo "post_marker_comment.sh: unknown footer-kind '$FOOTER_KIND'" >&2; _FOOTER=""; }
 _FULL_BODY="${MARKER_TAG}
 ${BODY}
 

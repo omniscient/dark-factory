@@ -601,9 +601,7 @@ if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
     printf "\n---\n\n## Shadow (Fable) Review\n\n%s\n" "${SHADOW_DIALOGUE}"
   } >> "$ARTIFACTS_DIR/conformance.md"
 
-  FOOTER=$(python3 dark-factory/scripts/factory_core/cli.py marker factory)  # TARGET-PATH
-  SHADOW_BODY="<!-- df-shadow-review -->
-## Shadow (Fable) Review — conformance
+  SHADOW_BODY="## Shadow (Fable) Review — conformance
 
 ${SHADOW_VERDICT_LINE:-**Verdict:** (unparseable — SHADOW_STATUS: UNCERTAIN)}
 
@@ -612,15 +610,9 @@ SHADOW_MODEL: ${SHADOW_MODEL_PIN}
 SHADOW_STATUS: ${SHADOW_STATUS:-UNCERTAIN}
 SHADOW_FINDINGS_COUNT: ${SHADOW_FINDINGS_COUNT:-0}
 SHADOW_SEVERITY: ${SHADOW_SEVERITY:-none}
-\`\`\`
-
----
-$FOOTER"
-  TMPFILE=$(mktemp /tmp/df-shadow-review-XXXXXX.md)
-  printf '%s' "$SHADOW_BODY" > "$TMPFILE"
-  python3 dark-factory/scripts/factory_core/providers/cli.py tracker comment \
-    --id "$ISSUE_NUM" --marker "<!-- df-shadow-review -->" --body-file "$TMPFILE" || true  # TARGET-PATH — advisory post, never blocks PASS (Requirement 3)
-  rm -f "$TMPFILE"
+\`\`\`"
+  bash dark-factory/scripts/post_marker_comment.sh "$ISSUE_NUM" "<!-- df-shadow-review -->" \
+    "$SHADOW_BODY" factory || true  # TARGET-PATH — advisory post, never blocks PASS (Requirement 3)
 fi
 ```
 (This is the new durable PASS-path comment Requirement 5 calls for — Phase 4 PASS today
