@@ -3,6 +3,7 @@ Unit tests for memory_write.py — markdown write pipeline.
 Tests are pure filesystem: no mocking, no network.
 Run from repo root: pytest tests/test_memory_write.py -v
 """
+import os
 import re
 import shutil
 import subprocess
@@ -484,3 +485,110 @@ class TestSanitization:
         assert comment_part.count("-->") == 1, (
             f"comment was closed early; found {comment_part.count('-->')} occurrences: {comment_part!r}"
         )
+
+
+# ── --kind tag selection (#38) ──────────────────────────────────────────────
+
+def _entry_lines(md):
+    """Authoritative [PATTERN]/[AVOID]/[FIX] lines of *md*, in file order."""
+    return [l for l in md.read_text().splitlines()
+            if re.match(r"^- \[(PATTERN|AVOID|FIX)\] ", l)]
+
+
+_KIND_ARGS = ("--path-prefix", "backend/app/", "--text", "prefer fixtures over mocks",
+              "--source", "refine", "--issue", "38")
+
+
+class TestKind:
+    @pytest.mark.parametrize("kind,tag", [("pattern", "PATTERN"), ("fix", "FIX"),
+                                          ("avoid", "AVOID")])
+    def test_kind_selects_tag_with_unchanged_metadata(self, md_empty, kind, tag):
+        result = run("--target", str(md_empty), *_KIND_ARGS, "--kind", kind)
+        assert result.returncode == 0, result.stderr
+        [line] = _entry_lines(md_empty)
+        today = date.today().strftime("%Y-%m-%d")
+        assert line.startswith(
+            f"- [{tag}] prefer fixtures over mocks <!-- issue:#38 date:{today} expires:")
+        assert line.endswith(
+            " source:refine agent:refine scope:backend path:backend/app/ -->")
+
+    def test_omitted_kind_is_byte_identical_to_kind_avoid(self, tmp_path):
+        seed = "# Backend Patterns\n\n---\n<!-- PROVISIONAL -->\n"
+        default_md = tmp_path / "default" / "backend-patterns.md"
+        explicit_md = tmp_path / "explicit" / "backend-patterns.md"
+        for md in (default_md, explicit_md):
+            md.parent.mkdir()
+            md.write_text(seed)
+        assert run("--target", str(default_md), *_KIND_ARGS).returncode == 0
+        assert run("--target", str(explicit_md), *_KIND_ARGS,
+                   "--kind", "avoid").returncode == 0
+        assert default_md.read_bytes() == explicit_md.read_bytes()
+        [line] = _entry_lines(default_md)
+        assert line.startswith("- [AVOID] prefer fixtures over mocks <!-- ")
+
+    @pytest.mark.parametrize("bad", ["AVOID] injected", "AVOID", "provisional", ""])
+    def test_invalid_kind_exits_2_and_leaves_target_untouched(self, md_empty, bad):
+        before = md_empty.read_bytes()
+        result = run("--target", str(md_empty), *_KIND_ARGS, "--kind", bad)
+        assert result.returncode == 2
+        assert "invalid choice" in result.stderr
+        assert md_empty.read_bytes() == before
+
+    def test_invalid_kind_creates_no_directory(self, tmp_path):
+        mem_dir = tmp_path / "fresh" / ".archon" / "memory"
+        result = run("--target", str(mem_dir / "backend-patterns.md"), *_KIND_ARGS,
+                     "--kind", "AVOID] injected")
+        assert result.returncode == 2
+        assert not (tmp_path / "fresh").exists()
+
+    def test_pattern_write_reinforces_existing_avoid_without_retagging(self, md_empty):
+        assert run("--target", str(md_empty), *_KIND_ARGS,
+                   "--kind", "avoid").returncode == 0
+        content = re.sub(r"date:\d{4}-\d{2}-\d{2}", "date:2025-01-01",
+                         md_empty.read_text())
+        md_empty.write_text(content)
+        result = run("--target", str(md_empty), "--path-prefix", "backend/app/",
+                     "--text", "Prefer  Fixtures over MOCKS.", "--source", "refine",
+                     "--issue", "39", "--kind", "pattern")
+        assert result.returncode == 0, result.stderr
+        assert "reinforced existing entry" in result.stdout
+        [line] = _entry_lines(md_empty)
+        assert line.startswith("- [AVOID] prefer fixtures over mocks <!-- issue:#38 ")
+        assert f"date:{date.today().strftime('%Y-%m-%d')}" in line
+
+    def test_cap_evicts_oldest_by_date_regardless_of_kind(self, tmp_path):
+        md = tmp_path / "architecture.md"
+        kinds = ("PATTERN", "AVOID", "FIX")
+        lines = ["# Architecture\n\n"]
+        for i in range(30):
+            day = "2025-12-31" if i == 12 else f"2026-03-{i + 1:02d}"
+            lines.append(f"- [{kinds[i % 3]}] Old {i:02d} "
+                         f"<!-- issue:#1 date:{day} expires:2027-01-01 source:refine -->\n")
+        lines.append("---\n<!-- PROVISIONAL -->\n")
+        md.write_text("".join(lines))
+        result = run("--target", str(md), "--path-prefix", "docs/", "--text", "new fix",
+                     "--source", "refine", "--issue", "38", "--kind", "fix")
+        assert result.returncode == 0, result.stderr
+        entries = _entry_lines(md)
+        assert len(entries) == 30
+        assert not any("Old 12 " in l for l in entries)  # the oldest, a [PATTERN] line
+        assert sum(l.startswith("- [FIX] new fix <!-- ") for l in entries) == 1
+        assert sum(l.startswith("- [PATTERN] ") for l in entries) == 9
+        assert sum(l.startswith("- [AVOID] ") for l in entries) == 10
+
+
+def test_gate_lib_write_memory_entry_still_writes_avoid(md_empty):
+    """gate_lib.sh passes no --kind; the default must keep the gate path [AVOID]."""
+    if os.name != "posix" or shutil.which("bash") is None:
+        pytest.skip("needs a POSIX host with bash")
+    gate_lib = SCRIPT.parent / "gate_lib.sh"
+    proc = subprocess.run(
+        ["bash", "-c",
+         'source "$1" && write_memory_entry "$2" dark-factory/scripts/ '
+         '"avoid bad pattern" conformance 38',
+         "bash", str(gate_lib), str(md_empty)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    [line] = _entry_lines(md_empty)
+    assert line.startswith("- [AVOID] avoid bad pattern <!-- issue:#38 ")

@@ -11,11 +11,14 @@ Usage:
         --path-prefix <e.g. dark-factory/scripts/>              \\
         --text        <core lesson text (no tag prefix)>         \\
         --source      <conformance|code-review|refine|implement> \\
-        --issue       <issue number>
+        --issue       <issue number>                            \\
+        [--kind       <pattern|avoid|fix>]   (default: avoid)
 
 Exit 0: write succeeded, or intentionally skipped (dedup/reinforcement). At the
 30-entry cap the oldest authoritative entries are evicted to make room.
 Exit 1: markdown I/O error.
+Exit 2: invalid arguments (argparse), e.g. --kind outside pattern|avoid|fix;
+        nothing is created or written.
 """
 import argparse
 import calendar
@@ -97,6 +100,11 @@ def _parse_args():
     p.add_argument("--text", required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--issue", required=True, type=int)
+    # Closed allowlist: the tag is derived from the validated choice only, so no
+    # caller text reaches the tag position. Default avoid keeps callers that omit
+    # the flag (gate_lib.sh::write_memory_entry) byte-identical to the old output.
+    p.add_argument("--kind", choices=["pattern", "avoid", "fix"], default="avoid",
+                   help="entry tag: pattern -> [PATTERN], avoid -> [AVOID], fix -> [FIX]")
     return p.parse_args()
 
 
@@ -168,7 +176,19 @@ def main():
         if not _ENTRY_RE.match(line):
             continue
         if _normalize(_extract_body(line)) == candidate_norm:
-            # REINFORCE: update date: and expires: in-place; one-line diff
+            # REINFORCE: update date: and expires: in-place; one-line diff.
+            # The dedup key is body-only (tag not included), so a write with a
+            # different --kind than the stored entry still reinforces rather than
+            # duplicating. Warn rather than silently retagging, so the mismatch is
+            # visible without changing the stored tag out from under other readers.
+            stored_tag = _ENTRY_RE.match(line).group(1)
+            if stored_tag != args.kind.upper():
+                print(
+                    f"memory-write: warning: reinforced entry tagged [{stored_tag}] in "
+                    f"{target} differs from requested --kind {args.kind} "
+                    f"([{args.kind.upper()}]); tag left unchanged",
+                    file=sys.stderr,
+                )
             updated = re.sub(r"date:\d{4}-\d{2}-\d{2}", f"date:{today_str}", line)
             updated = re.sub(r"expires:\d{4}-\d{2}-\d{2}", f"expires:{expires_str}", updated)
             # Handle legacy/manually added entries that have no date:/expires: tags:
@@ -192,7 +212,7 @@ def main():
         safe_source = args.source.replace("-->", "").replace("\n", "").replace("\r", "")
         safe_path = args.path_prefix.replace("-->", "").replace("\n", "").replace("\r", "")
         entry = (
-            f"- [AVOID] {args.text} "
+            f"- [{args.kind.upper()}] {args.text} "
             f"<!-- issue:#{args.issue} date:{today_str} expires:{expires_str} "
             f"source:{safe_source} agent:{safe_source} scope:{scope} "
             f"path:{safe_path} -->"

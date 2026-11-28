@@ -113,7 +113,7 @@ def _commit_artifact(work, prefix):
     git("commit", "-m", f"docs: artifact (#{_ISSUE})", cwd=work)
 
 
-def _run_node(env, node_id):
+def _run_node(env, node_id, prelude=_PRELUDE):
     run_env = dict(os.environ)
     run_env.update({
         "CLONE_DIR": str(env["clone"]),
@@ -122,7 +122,7 @@ def _run_node(env, node_id):
         "FACTORY_REPO_SLUG": "test/repo",
     })
     result = subprocess.run(
-        ["bash", "-c", _PRELUDE + _node_bash(node_id)],
+        ["bash", "-c", prelude + _node_bash(node_id)],
         cwd=str(env["work"]), env=run_env, capture_output=True, text=True, timeout=120,
     )
     log = env["log"].read_text() if env["log"].exists() else ""
@@ -216,3 +216,41 @@ class TestPushVerification:
         assert "--marker <!-- df-push-failure -->" in log, \
             "the marker comment must survive a multibyte push error"
         assert push_result is not None and push_result["pushed"] is False
+
+
+# #409: the plan command checkpoints a draft under docs/superpowers/plan-drafts/ before
+# architect review. The node is unchanged; these pin that a branch whose only plan-related
+# commit is such a draft takes the node's existing "no artifact" path.
+_DRAFT_PREFIX = "docs/superpowers/plan-drafts/"
+_PRELUDE_NEEDS_DISCUSSION = _PRELUDE.replace(
+    '{"labels":[]}', '{"labels":[{"name":"needs-discussion"}]}')
+
+
+def _remote_branch(env):
+    return git("ls-remote", "--heads", str(env["bare"]), f"refine/issue-{_ISSUE}-test",
+               cwd=env["work"]).stdout.strip()
+
+
+class TestDraftOnlyBranch:
+    def test_draft_only_posts_failure_comment_and_no_label(self, env):
+        _commit_artifact(env["work"], _DRAFT_PREFIX)
+
+        result, log, push_result = _run_node(env, "plan-push-and-advance")
+
+        assert result.returncode == 0, result.stderr
+        assert _label_calls(log) == [], log
+        assert push_result is None
+        assert "--marker <!-- df-refine-failure -->" in log
+        assert _remote_branch(env) == "", "the node must not push a draft-only branch"
+
+    def test_draft_only_with_needs_discussion_is_silent(self, env):
+        _commit_artifact(env["work"], _DRAFT_PREFIX)
+
+        result, log, push_result = _run_node(env, "plan-push-and-advance",
+                                             prelude=_PRELUDE_NEEDS_DISCUSSION)
+
+        assert result.returncode == 0, result.stderr
+        assert _label_calls(log) == [], log
+        assert [l for l in log.splitlines() if "tracker comment" in l] == [], log
+        assert push_result is None
+        assert _remote_branch(env) == ""

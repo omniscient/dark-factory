@@ -533,8 +533,8 @@ context from `issue.json`, not from the chat.
 - **Spec** (`:152-174`): written to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
   with an `**Issue:** #N` line; then the out-of-scope gate (`oos_excise.sh`,
   [gate C2](#c-refine-and-plan)); then commit.
-- **Memory** (`:176-219`): optional entries through `scripts/memory_write.py`.
-- **Publish** (`:221-287`): posts "Refinement Pipeline — Spec Generated" with the full
+- **Memory** (`:176-230`): optional entries through `scripts/memory_write.py`.
+- **Publish** (`:232-298`): posts "Refinement Pipeline — Spec Generated" with the full
   Q&A, and writes `refinement-status.md` with `STATUS: SPEC_COMPLETE`. The comment tells
   the human to move the issue to **Refined** to approve; for `direct-to-pr` issues it
   announces auto-advance after `direct_to_pr.spec_grace_minutes`.
@@ -543,23 +543,40 @@ The command does not push. `refine-push` does.
 
 ### `dark-factory-plan`
 
-- **Scope**: may only write under `docs/superpowers/plans/` (`commands/dark-factory-plan.md:44-50`).
-- **Load** (`:54-89`): `issue.json`, the architect prompt, the spec, memory.
-- **Plan** (`:91-112`): `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`, with an
-  `**Issue:** #N` line, a file-structure table and TDD task steps.
-- **Architect review** (`:114-168`): an `opus` subagent reviews plan against spec.
+- **Scope**: may only write under `docs/superpowers/plans/`, and under its sibling
+  `plan-drafts/` for the draft (`commands/dark-factory-plan.md:44-52`).
+- **Load** (`:56-133`): `issue.json`, the architect prompt, the spec, memory. Then looks for
+  a draft that an earlier, killed run checkpointed (`push_gate_check.sh` with the
+  `plan-drafts/` prefix). A non-empty draft whose last commit descends from
+  the spec's last commit is resumed: plan writing is skipped, feedback posted on the issue is
+  applied to the draft, and architect review, plan-vs-spec conformance and publish run in
+  full with fresh cycle counters. An empty or stale draft is rewritten at the same path. A
+  finished plan already under `docs/superpowers/plans/` is not a resume signal.
+- **Plan** (`:135-196`): `plan-drafts/YYYY-MM-DD-<feature>.md`, with an
+  `**Issue:** #N` line, a file-structure table and TDD task steps. Before the first
+  architect spawn the command commits the draft and pushes the branch (`timeout 30`); a
+  failed push prints a warning and the run continues on the local commit. The checkpoint is
+  re-run before each `needs-discussion` exit below, so a capped plan leaves its revised
+  draft on the branch and no file under `docs/superpowers/plans/`.
+- **Architect review** (`:198-255`): an `opus` subagent reviews plan against spec.
   "Issues Found" means fix and re-review, at most 3 cycles; still unapproved means post
   the plan and feedback, add `needs-discussion`, exit cleanly.
-- **Plan-vs-spec conformance** (`:170-286`): skipped when `conformance.enabled` is false.
+- **Plan-vs-spec conformance** (`:257-378`): skipped when `conformance.enabled` is false.
   An `opus` reviewer applies the conformance rubric; a material divergence, an
   unparseable verdict or a reviewer error starts a reconcile cycle. More than
   `conformance.max_reconcile_cycles` cycles posts "Spec Conformance — Blocked (Plan)",
   adds `needs-discussion` and exits cleanly. A second, non-gating "shadow" reviewer runs
   on `conformance.shadow_model` unless that is set empty.
-- **Publish** (`:288-378`): out-of-scope gate (allowlist: plans, specs, memory), commit,
+- **Publish** (`:380-502`): moves the draft into `docs/superpowers/plans/` with `git mv` in
+  one commit (reusing the path of an earlier plan for the issue on the branch, if any). This
+  runs before the out-of-scope gate, so the draft path nets out of the diff the gate judges.
+  Then out-of-scope gate (allowlist: plans, specs, memory), commit,
   post "Refinement Pipeline — Plan Generated" with the review dialogue, write
   `refinement-status.md` with `STATUS: PLAN_COMPLETE`. The comment tells the human to
   move the issue to **Ready** to approve.
+
+The command pushes only the draft checkpoint. `plan-push-and-advance` pushes the published
+plan and applies `plan-pending-review`.
 
 ### `dark-factory-implement`
 
@@ -673,6 +690,8 @@ that this branch changed relative to `origin/main` and that belongs to the issue
 issue number appears in the file name, or `#<N>` appears in the committed content, or
 (second pass) a commit on the branch whose subject mentions `#<N>` touched that file. It
 prints nothing if there is none, and always exits 0 (`scripts/push_gate_check.sh:56-115`).
+A draft plan under `plan-drafts/` is not an artifact for this gate: a plan
+run that ends with only a draft takes the "No artifact" rows below.
 
 | Situation | Outcome (`workflows/archon-dark-factory.yaml:495-588`, plan mirror `:612-705`) |
 |---|---|
@@ -686,8 +705,10 @@ In the three no-label cases the node still exits 0, so the run itself succeeds. 
 comments state that the item "remains eligible for automatic retry"; retry counting and
 its limit are the scheduler's ([scheduler.md](scheduler.md), `scheduler.max_retries`).
 The marker comments posted through `scripts/post_marker_comment.sh` use the scheduler
-footer on purpose, so they do not reset the `direct-to-pr` grace clock
-(`scripts/post_marker_comment.sh:16-20`).
+footer by default (its optional fourth argument, `footer-kind`, selects another
+`factory_core/identity.py` footer; the conformance PASS-path shadow comment passes
+`factory`), so they do not reset the `direct-to-pr` grace clock, which only the
+`refinement` footer moves (`scripts/post_marker_comment.sh:20-24`).
 
 What the labels mean for auto-advance is in [triage-labels.md](triage-labels.md) and
 [scheduler.md](scheduler.md) (`direct_to_pr.*`).
@@ -706,8 +727,8 @@ the push gate takes its "clean abort" branch:
 |---|---|---|
 | Issue body too short | under 20 characters (`refine.min_issue_body_length` in config) | `commands/dark-factory-refine.md:100-105` |
 | Product owner answers `UNCERTAIN:` | first occurrence | `commands/dark-factory-refine.md:143-147` |
-| Architect does not approve the plan | 3 review cycles | `commands/dark-factory-plan.md:154-165` |
-| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:240-268` |
+| Architect does not approve the plan | 3 review cycles | `commands/dark-factory-plan.md:238-252` |
+| Plan diverges materially from the spec | `conformance.max_reconcile_cycles` | `commands/dark-factory-plan.md:352-389` |
 
 ### D. Implementation gates
 
@@ -771,10 +792,10 @@ conformance command does not adjudicate this gate.
 4. An `opus` reviewer subagent applies the conformance rubric
    (`.claude/skills/conformance/RUBRIC.md` in the clone, else
    `/opt/refinement-skills/conformance-reviewer-prompt.md`). A non-gating shadow reviewer
-   runs on `conformance.shadow_model` unless that is empty (`:293-332`). Both run in
+   runs on `conformance.shadow_model` unless that is empty (`:293-340`). Both run in
    the foreground (`run_in_background: false`): the agent waits for the reviewer's response
    inside its turn and never states a verdict without it (#373).
-5. **Scope remediation** (`:351-525`), when the reviewer lists `[OOS]` entries and
+5. **Scope remediation** (`:359-533`), when the reviewer lists `[OOS]` entries and
    `conformance.scope_enforcement` is true: drop entries that are documentation files;
    if `conformance.excise_out_of_scope`, revert each remaining change with a
    `revert: excise out-of-scope change…` commit; de-duplicate with
@@ -782,16 +803,16 @@ conformance command does not adjudicate this gate.
    and `conformance.backlog_label` and add it to the board, or comment on the existing
    ticket; post a "Scope enforcement: excised N…" comment on the origin issue; re-run the
    review.
-6. Verdict (`:339-349`): "Conforms" or "Minor deviations" passes. "Material divergence"
+6. Verdict (`:347-357`): "Conforms" or "Minor deviations" passes. "Material divergence"
    passes as advisory when there is no spec or `conformance.block_on_material` is false;
    otherwise it starts the reconcile loop. An unparseable verdict, error or refusal
    always starts the reconcile loop.
-7. **Reconcile loop** (`:527-578`): write a failing test, fix the code, commit
+7. **Reconcile loop** (`:535-590`): write a failing test, fix the code, commit
    `fix: align implementation with spec (conformance cycle N)`, re-review. A cycle entered
    because the reviewer call errored, timed out or returned nothing skips the fix and just
    re-spawns the reviewer; it still counts as a cycle. More than
    `conformance.max_reconcile_cycles` cycles is BLOCKED.
-8. **Artifact guard** (Phase 6, `:754-794`), last on every path: if `conformance.md` has no
+8. **Artifact guard** (Phase 6, `:781-821`), last on every path: if `conformance.md` has no
    `STATUS:` line it acts on a reviewer response it holds (Phase 4 or 5), else leaves the
    file absent and exits 1 so `conformance-gate` takes its missing-verdict path. It never
    writes a verdict itself (#373).
@@ -811,12 +832,12 @@ notices. It writes `diff-ranking.json` (`scripts/diff_rank.py:234-285,340-603`).
 
 | Result | Outcome |
 |---|---|
-| PASS (`:580-674`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue. If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
-| BLOCKED (`:676-752`) | "Spec Conformance — Blocked" comment with the dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
+| PASS (`:593-688`) | `conformance.md` starts `STATUS: PASS` followed by `VERDICT`, `CYCLES`, `NO_SPEC`, `OOS_EXCISED`, `OOS_TICKETS` and the reviewer dialogue, blockquoted (`> `) by `scripts/quote_dialogue.py` (#405). If the shadow ran, a "Shadow (Fable) Review — conformance" comment (marker `df-shadow-review`). If reconcile cycles ran, `[AVOID]` memory entries are written and committed |
+| BLOCKED (`:689-780`) | "Spec Conformance — Blocked" comment with the blockquoted dialogue and next steps; board to **Blocked**; `needs-discussion` label; `conformance.md` starts `STATUS: BLOCKED`; `exit 1` |
 
 **The `conformance-gate` node enforces the result** by reading `conformance.md`, because
 a command node's own `exit 1` is not relied on to stop the DAG
-(`commands/dark-factory-conformance.md:748-752`). `scripts/verdict_gate_check.sh:36-90`:
+(`commands/dark-factory-conformance.md:775-779`). `scripts/verdict_gate_check.sh:36-90`:
 
 | First `STATUS:` line | Gate |
 |---|---|
@@ -946,7 +967,10 @@ and status `PASS`, and a PR exists (`:37-56`). Then it posts "Addressing N advis
 finding(s) from code review...", has a subagent (inherited model) edit the files, and if
 the tree changed commits `fix(review): address N advisory finding(s) from AI code review`
 with `git add -u`, pushes, posts an "Advisory Findings Addressed" PR review comment and
-writes `revise_advisory.md` (`:60-189`). These changes are pushed after validation,
+writes `revise_advisory.md` (`:60-202`). Before staging, when the clone has
+`docs/.citation-lock.yaml`, it runs `scripts/docs_refs_check.py --rederive --base HEAD` on
+the four reference docs (fail-open) so `commands/*.md` citations the fix moved are
+re-derived in the same commit. These changes are pushed after validation,
 conformance and code review have run; nothing re-runs those on the revised code.
 
 ### E. Close
@@ -1323,7 +1347,7 @@ The scheduler-side oddities are tracked in
    (`commands/dark-factory-validate.md:91-118`, pre-#551 line numbers). The conformance and code-review commands
    both state that a command node's internal `exit 1` "does not reliably surface as node
    failure to the DAG executor", which is why `conformance-gate` and `review-gate` exist
-   (`commands/dark-factory-conformance.md:748-752`). There is no equivalent node for
+   (`commands/dark-factory-conformance.md:775-779`). There is no equivalent node for
    `blast.md`; the only reader is `report` (`workflows/archon-dark-factory.yaml:1657-1675`).
    If the exit does not surface, conformance, push, PR creation and `status-in-review`
    would proceed and move a Blocked issue to In Review. The `needs-discussion` label
@@ -1404,7 +1428,7 @@ The scheduler-side oddities are tracked in
       would say `BLOCKERS: 0` on a blocked run; `report` prints that number
       (`workflows/archon-dark-factory.yaml:1687`).
     - Conformance, PASS branch: `conformance.md` is written from `${OOS_EXCISED}` and
-      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:587-589`), but scope
+      `${OOS_TICKETS}` (`commands/dark-factory-conformance.md:602-604`), but scope
       remediation names them `EXCISED_COUNT` and `SPILLOVER_TICKETS` (`:456`, `:514`).
       `report` reads `OOS_EXCISED:`/`OOS_TICKETS:` from the file.
 

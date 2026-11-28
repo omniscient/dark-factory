@@ -125,11 +125,11 @@ keys, which are read by the run container (see Discrepancies D1).
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `direct_to_pr.label` | `direct-to-pr` | label that enables grace-timer auto-advance and end-gate auto-merge | `scripts/scheduler_lib.sh:32` (matched with `grep -qi`, so it is a regex); also `scripts/factory_core/handoff.py:401` (plain substring, only in a process that imports `handoff`; nothing in `scheduler.sh`/`entrypoint.sh` does) | `DIRECT_TO_PR_LABEL` (scheduler) | no |
-| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:273-279`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:231`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
-| `direct_to_pr.plan_grace_minutes` | `30` | same for `plan-pending-review` | `scheduler.sh:314-320`; `commands/dark-factory-plan.md:298` (agent-read) | `PLAN_GRACE_MINUTES` (scheduler only) | no |
+| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:273-279`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:242`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
+| `direct_to_pr.plan_grace_minutes` | `30` | same for `plan-pending-review` | `scheduler.sh:314-320`; `commands/dark-factory-plan.md:424` (agent-read) | `PLAN_GRACE_MINUTES` (scheduler only) | no |
 
-The `direct-to-pr` literal is also hardcoded in `commands/dark-factory-refine.md:230` and
-`commands/dark-factory-plan.md:297`, so renaming the label in config does not change those checks.
+The `direct-to-pr` literal is also hardcoded in `commands/dark-factory-refine.md:241` and
+`commands/dark-factory-plan.md:423`, so renaming the label in config does not change those checks.
 
 ### `conformance` and `code_review`
 
@@ -139,13 +139,13 @@ All keys here are read by phase agents following the command files, from the run
 
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
-| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:60`, `commands/dark-factory-plan.md:174` (agent-read); `workflows/archon-dark-factory.yaml:1649` (report text only) | none | no |
-| `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:68`, `commands/dark-factory-plan.md:179` (agent-read) | none | no |
+| `conformance.enabled` | `true` | false = skip the conformance gate and the plan-phase plan-vs-spec check | `commands/dark-factory-conformance.md:60`, `commands/dark-factory-plan.md:261` (agent-read); `workflows/archon-dark-factory.yaml:1649` (report text only) | none | no |
+| `conformance.max_reconcile_cycles` | `3` | reconcile cycles before escalating | `commands/dark-factory-conformance.md:68`, `commands/dark-factory-plan.md:266` (agent-read) | none | no |
 | `conformance.block_on_material` | `true` | material findings block | `commands/dark-factory-conformance.md:69` (agent-read) | none | no |
 | `conformance.scope_enforcement` | `true` | detect out-of-scope changes | `commands/dark-factory-conformance.md:70` (agent-read) | none | no |
 | `conformance.excise_out_of_scope` | `true` | revert out-of-scope changes (false = file a ticket only) | `commands/dark-factory-conformance.md:71` (agent-read) | none | no |
 | `conformance.backlog_label` | `scope-spillover` | label on auto-created spillover tickets | `commands/dark-factory-conformance.md:72` (agent-read) | none | no |
-| `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:76-77`, `commands/dark-factory-plan.md:186-187` (agent-read, python reads the clone's config; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`) | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
+| `conformance.shadow_model` | `claude-fable-5-1` | shadow reviewer model; `null` or empty in config means no shadow; the env var, when set (even empty), wins and an empty value spawns no shadow | `commands/dark-factory-conformance.md:76-78`, `commands/dark-factory-plan.md:274-276` (agent-read, python reads the clone's config at the repo root; env expansion is `${CONFORMANCE_SHADOW_MODEL-default}`); re-resolved inline before each shadow guard at `commands/dark-factory-conformance.md:610-612,699-701,762-764` | `CONFORMANCE_SHADOW_MODEL` (run, via `.archon/.env`) | no |
 | `code_review.enabled` | `true` | false = skip Gate 3 | `commands/dark-factory-code-review.md:53`; `workflows/archon-dark-factory.yaml:1690` (report text) | none | no |
 | `code_review.block_threshold` | `high` | severity at or above which findings block | `commands/dark-factory-code-review.md:57`; `scripts/code_review_payload.py:152-155,200-206` | none | no |
 | `code_review.fail_open` | `true` | reviewer error becomes advisory | `commands/dark-factory-code-review.md:58` (agent-read) | none | no |
@@ -301,7 +301,7 @@ nothing; set the variable in `.archon/.env` for it to matter.
 [PR #519](https://github.com/omniscient/dark-factory/pull/519); the measuring nodes write
 them, and the cost report aggregates them); they are run artifacts, not settings. The caps
 file is what the later phases source
-(`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:208`,
+(`scripts/load_memory_context.sh:25`, `commands/dark-factory-conformance.md:209`,
 `commands/dark-factory-docs-conformance.md:97`, `commands/dark-factory-code-review.md:110`).
 Scenarios are `refine`, `plan`, `implement`, `conformance`, `docs-conformance`, `code-review`
 (`workflows/archon-dark-factory.yaml:425,465,739,1156,1246,1537`).
@@ -498,7 +498,7 @@ containers (`run-compose.yml:31-47`).
 | `TOKEN_OPTIMIZATION_ENFORCE_BUDGETS` | unset | `scripts/budget_gate.sh:56` (kill-only) | `.archon/.env` |
 | `FACTORY_MANIFEST_LABEL` | `manifest-intake` | `scripts/factory_core/handoff.py:57` | process that imports `handoff` |
 | `SIDE_EFFECT_LEVEL_<PHASE>` | unset | `side_effect.py:215` | `.archon/.env` |
-| `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:77` | `.archon/.env` |
+| `CONFORMANCE_SHADOW_MODEL` | unset | `commands/dark-factory-conformance.md:78` | `.archon/.env` |
 | `PREVIEW_HELPER_DISPATCH_ENABLED` | `false` | `preview_helper_enabled` in `scripts/preview_helper_dispatch.sh`: the lane runs only when this is `true` **and** `PREVIEW_HELPER_ENDPOINT` is set (#587) | `instance.env` (scheduler only; never forwarded) |
 | `PREVIEW_HELPER_ENDPOINT` | unset (a local registry `id`) | `scripts/preview_helper_dispatch.sh` (`_ph_entry`), interpolated by `run-compose.yml` into the `preview-helper` and `preview-helper-proxy` services as their `FACTORY_MODEL_ENDPOINT` (#634, #642). Not in `PROVIDER_PASSTHROUGH_VARS`; the instance-wide `FACTORY_MODEL_ENDPOINT` is not used | `instance.env` (scheduler only) |
 | `PREVIEW_HELPER_DAILY_MAX` | `20` | `preview_helper_check`: helper dispatches per UTC day, counted per attempt in `preview_helper:day:<date>`; a non-numeric value means 20, `0` dispatches nothing | `instance.env` (scheduler only) |
@@ -769,7 +769,7 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 | `ready-for-agent` opt-in label | `scripts/scheduler_lib.sh:26-27`; `scheduler.sh:637` (`--limit 200`), `:1351`; `epic_autopilot.py:631` | opt-in to refinement; also applied to epic children |
 | `spec-pending-review`, `plan-pending-review` | `scheduler.sh:257,276,293,317` | gate labels removed on approval or grace expiry |
 | size labels `size: XL/L/M/S` | `scripts/scheduler_lib.sh:37-52` | dispatch ceiling classification |
-| `direct-to-pr` literal | `commands/dark-factory-refine.md:230`, `commands/dark-factory-plan.md:297` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
+| `direct-to-pr` literal | `commands/dark-factory-refine.md:241`, `commands/dark-factory-plan.md:423` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
 | `MAX_SESSION_WINDOW_HOURS = 5` | `scripts/factory_core/session_window.py:137` | cap on a session-window pause |
 | `model: haiku` for `classify-preview` and `summarize-feedback` | `workflows/archon-dark-factory.yaml:870,169` | replaces the unread `preview.model` |
 | Epic-selector exclude regex `security\|auth\|authz\|authn\|trading\|ibkr` plus `dark.?factory\|scheduler\|factory.self` | `scripts/factory_core/epic_autopilot.py:188-189` | which epics autopilot may start; factory-self terms drop when `allow_self_improvement` is on |

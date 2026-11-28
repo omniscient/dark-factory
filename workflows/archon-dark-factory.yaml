@@ -1655,14 +1655,14 @@ nodes:
 
       CONFORMANCE_SECTION=""
       if [ -f "$ARTIFACTS_DIR/conformance.md" ]; then
-        CONFORMANCE_STATUS=$(grep '^STATUS:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
+        CONFORMANCE_STATUS=$(grep -m1 '^STATUS:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
         case "$CONFORMANCE_STATUS" in
           PASS)
-            CONFORMANCE_VERDICT=$(grep '^VERDICT:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
-            CONFORMANCE_CYCLES=$(grep '^CYCLES:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
-            NO_SPEC=$(grep '^NO_SPEC:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
-            OOS_EXCISED=$(grep '^OOS_EXCISED:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
-            OOS_TICKETS=$(grep '^OOS_TICKETS:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2-)
+            CONFORMANCE_VERDICT=$(grep -m1 '^VERDICT:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
+            CONFORMANCE_CYCLES=$(grep -m1 '^CYCLES:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
+            NO_SPEC=$(grep -m1 '^NO_SPEC:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
+            OOS_EXCISED=$(grep -m1 '^OOS_EXCISED:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2)
+            OOS_TICKETS=$(grep -m1 '^OOS_TICKETS:' "$ARTIFACTS_DIR/conformance.md" | cut -d' ' -f2-)
             ATTESTATION=$(sed -n '/^---$/,$ p' "$ARTIFACTS_DIR/conformance.md" | tail -n +2)
             CONFORMANCE_SECTION=$(printf "### Spec Conformance\n\n%s" "${ATTESTATION}")
             if [ "${NO_SPEC}" = "true" ]; then
@@ -1706,9 +1706,9 @@ nodes:
 
       CODE_REVIEW_SECTION=""
       if [ -f "$ARTIFACTS_DIR/review.md" ]; then
-        CR_STATUS=$(grep '^STATUS:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
-        CR_BLOCKERS=$(grep '^BLOCKERS:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
-        CR_ADVISORY=$(grep '^ADVISORY:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
+        CR_STATUS=$(grep -m1 '^STATUS:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
+        CR_BLOCKERS=$(grep -m1 '^BLOCKERS:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
+        CR_ADVISORY=$(grep -m1 '^ADVISORY:' "$ARTIFACTS_DIR/review.md" | cut -d' ' -f2)
         case "$CR_STATUS" in
           PASS)
             CODE_REVIEW_SECTION=$(printf "### Code Review\n\n✅ Passed — %s advisory finding(s), 0 blocking. See PR review comments." "${CR_ADVISORY:-0}")

@@ -186,26 +186,37 @@ Follow this process:
    a. For each architectural decision made during Phase 4 Q&A where a trade-off was explicitly
    weighed (why approach X over approach Y), call `memory_write.py` once per lesson:
 
-   ```bash
-   REPO_ROOT=$(git rev-parse --show-toplevel)
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+ISSUE_NUM=$(jq -er '.resolved_number' "$ARTIFACTS_DIR/issue.json") || { echo "resolved_number missing or null in $ARTIFACTS_DIR/issue.json — aborting" >&2; exit 1; }
+MEMORY_WRITE="${REPO_ROOT}/dark-factory/scripts/memory_write.py"  # TARGET-PATH
 
-   # Write the rejected approach to architecture.md.
-   # memory_write.py handles expiry cleanup, dedup and the R4 cap internally.
-   # Tool limitation (#652): memory_write.py always writes [AVOID] entries; both the
-   # chosen-approach and rejected-approach lessons are written as [AVOID]. This is a
-   # known tool constraint, not a silent substitution.
-   python3 "${REPO_ROOT}/dark-factory/scripts/memory_write.py" \  # TARGET-PATH
-     --target .archon/memory/architecture.md \
-     --path-prefix .archon/commands/ \
-     --text "<the rejected or chosen approach and concrete reasoning>" \
-     --source refine \
-     --issue "$ISSUE_NUM"
-   ```
+# One call per lesson; memory_write.py handles expiry cleanup, dedup and the R4 cap.
+# The quoted heredoc keeps the lesson literal: shell variables, command
+# substitutions and backticks in it are NOT expanded. Keep the body on the lines
+# between the two LESSON markers; the closing marker stands alone at the start of
+# its line.
+# A weighed decision: --kind avoid, rejected approach FIRST. The [AVOID] tag names it.
+LESSON_TEXT=$(cat <<'LESSON'
+Rejected approach: <what was rejected and the concrete reason>. Chosen approach: <what to do instead>.
+LESSON
+)
+python3 "$MEMORY_WRITE" \
+  --kind avoid \
+  --target .archon/memory/architecture.md \
+  --path-prefix .archon/commands/ \
+  --text "$LESSON_TEXT" \
+  --source refine \
+  --issue "$ISSUE_NUM"
+```
 
    b. For any codebase convention discovered during Phase 3 context assembly that is absent
    from `CLAUDE.md` and `ARCHITECTURE.md`, call `memory_write.py` for the relevant area file
    (`architecture.md`, `backend-patterns.md`, `frontend-patterns.md`, or `dark-factory-ops.md`).
    Choose `--path-prefix` to match the convention's scope (e.g. `backend/app/` for backend).
+   Use the block above with the area file as `--target`, a matching `--path-prefix`, and
+   `--kind pattern` with a positively stated body when the convention contains no prohibition
+   or rejected alternative (otherwise `--kind avoid`, rejected approach first).
 
    c. Do NOT write to `codebase-patterns.md` from the refine agent — that file is maintained
    by the implement agent for runtime-proven lessons only.
