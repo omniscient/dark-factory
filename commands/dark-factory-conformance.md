@@ -302,7 +302,13 @@ ARTIFACT_EOF
      wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this step's
      (Opus) response text in hand for the current cycle.
 
-5. Append the subagent's output to `CONFORMANCE_DIALOGUE`
+5. Append the subagent's output to `CONFORMANCE_DIALOGUE`, then save the whole accumulated
+   `CONFORMANCE_DIALOGUE`, verbatim, with the Write tool to
+   `$ARTIFACTS_DIR/conformance_dialogue.md` (overwrite it with the full accumulated text each
+   time; never write it with `echo`, `printf` or a here-document). Phase 4 and Phase 5 embed
+   that file in `conformance.md` and the BLOCKED comment only through
+   `scripts/quote_dialogue.py` (#405); the `CONFORMANCE_DIALOGUE` working value stays raw for
+   Phase 3.6's `[OOS]` scan, the verdict parse and Phase 4's memory-write extraction.
 
 5a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent immediately
     after, with the identical rubric/input the Opus spawn just saw:
@@ -325,7 +331,9 @@ ARTIFACT_EOF
      response verbatim (or `**Verdict:** (unparseable — SHADOW_STATUS: UNCERTAIN)` if none
      was found), for Requirement 5's "structured fields **and** the shadow verdict line" in
      the durable comment.
-   - Append the raw response to `SHADOW_DIALOGUE` (separate from `CONFORMANCE_DIALOGUE`).
+   - Append the raw response to `SHADOW_DIALOGUE` (separate from `CONFORMANCE_DIALOGUE`),
+     then save the whole accumulated `SHADOW_DIALOGUE`, verbatim, with the Write tool to
+     `$ARTIFACTS_DIR/shadow_dialogue.md` (same rule as step 5).
    If `$SHADOW_MODEL_PIN` is empty, skip this step entirely for this cycle.
 
    (Step 3.6's re-run of "Step 3.1 again" per 3.6.4 naturally re-executes 5a too — no
@@ -562,7 +570,9 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
      turn (keep issuing tool calls) until the response arrives — never end the turn to
      wait. Never state a verdict, and never enter Phase 4 or Phase 5, without this
      re-spawn's (Opus) response text in hand for the current cycle.
-7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator
+7. Prepend `Cycle $CONFORMANCE_CYCLE:` header and append the new output to `CONFORMANCE_DIALOGUE` with a `---` separator,
+   then re-save the whole accumulated `CONFORMANCE_DIALOGUE` to
+   `$ARTIFACTS_DIR/conformance_dialogue.md` with the Write tool, per Step 3.1 step 5
 7a. If `$SHADOW_MODEL_PIN` is non-empty, re-spawn the shadow subagent too (mirroring Step
     3.1's 5a for this cycle — prompt is the verbatim contents of
     `$ARTIFACTS_DIR/conformance_prompt.md` produced by step 5a). Prepend
@@ -570,6 +580,8 @@ Store `SPILLOVER_TICKETS` so the `report` node can include it.
     separator, mirroring `CONFORMANCE_DIALOGUE`'s cycle numbering one-to-one. Update
     `SHADOW_MODEL`/`SHADOW_STATUS`/`SHADOW_FINDINGS_COUNT`/`SHADOW_SEVERITY`/
     `SHADOW_VERDICT_LINE` from this cycle's response (best-effort `UNCERTAIN` on any error).
+    Then re-save the whole accumulated `SHADOW_DIALOGUE` to
+    `$ARTIFACTS_DIR/shadow_dialogue.md` with the Write tool, per Step 3.1 step 5a.
     - **Foreground dispatch (#373):** pass `run_in_background: false` on this shadow
       re-spawn too, and do not end your turn until it has returned — a result or an error.
       If the tool returns only a launch acknowledgement, poll inside your turn until it
@@ -689,6 +701,7 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    SHADOW_MODEL_PIN="${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}"
    SHADOW_BLOCK=""
    if [ -n "${SHADOW_MODEL_PIN:-}" ]; then
+     SHADOW_QUOTED=$(python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/shadow_dialogue.md" || printf '> (dialogue could not be quoted)\n')  # TARGET-PATH
      SHADOW_BLOCK="## Shadow (Fable) Review — conformance
 
    ${SHADOW_VERDICT_LINE:-**Verdict:** (unparseable — SHADOW_STATUS: UNCERTAIN)}
@@ -700,13 +713,14 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
    SHADOW_SEVERITY: ${SHADOW_SEVERITY:-none}
    \`\`\`
 
-   $SHADOW_DIALOGUE"
+   $SHADOW_QUOTED"
    fi
-   gh issue comment $ISSUE_NUM --body "## Spec Conformance — Blocked
+   CONFORMANCE_QUOTED=$(python3 dark-factory/scripts/quote_dialogue.py "$ARTIFACTS_DIR/conformance_dialogue.md" || printf '> (dialogue could not be quoted)\n')  # TARGET-PATH
+   BODY="## Spec Conformance — Blocked
 
    The implementation has material divergences from the spec that could not be resolved in $MAX_CYCLES reconcile cycle(s).
 
-   $CONFORMANCE_DIALOGUE
+   $CONFORMANCE_QUOTED
 
    $SHADOW_BLOCK
 
@@ -719,6 +733,10 @@ This phase is only reached if reconcile failed after `MAX_CYCLES`.
 
    ---
    $FOOTER"
+   TMPFILE=$(mktemp /tmp/df-conformance-blocked-XXXXXX.md)
+   printf '%s\n' "$BODY" > "$TMPFILE"
+   gh issue comment $ISSUE_NUM --body-file "$TMPFILE"
+   rm -f "$TMPFILE"
    ```
 
 2. Move the issue to **Blocked** on the project board:

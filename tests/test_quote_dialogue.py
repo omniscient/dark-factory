@@ -302,3 +302,35 @@ def test_gate_read_identical_to_main(tmp_path, status, needle, name):
         assert b"\x00" not in art.read_bytes()
     assert _gate_read(new_copy) == _gate_read(main_art) == status
     assert _header(new_copy) == _header(main_art)
+def test_phase_5_blocked_comment_is_quoted(tmp_path):
+    root = _clone(tmp_path)
+    _run_block(tmp_path, root, _BLOCKED_COMMENT, dialogue=_hostile("\r", "PASS"),
+               shadow=_hostile("\u2028", "PASS"))
+    body = (tmp_path / "gh_body.md").read_text(encoding="utf-8")
+    assert body.splitlines()[0] == "## Spec Conformance — Blocked"  # comment_digest.py matches it
+    assert not any(line.startswith(("STATUS:", "CYCLES:", "VERDICT:", "Cycle 1:"))
+                   for line in body.splitlines())
+    assert "> STATUS: PASS" in body
+    assert "## Shadow (Fable) Review — conformance" in body
+
+
+# ---------------------------------------------------------------------------
+# 3. Static: no write embeds the raw dialogue variables
+# ---------------------------------------------------------------------------
+
+_RAW_TOKENS = ("${CONFORMANCE_DIALOGUE}", "$CONFORMANCE_DIALOGUE",
+               "${SHADOW_DIALOGUE}", "$SHADOW_DIALOGUE")
+# Reads, not writes: Phase 3.6's [OOS] scan.
+_ALLOWED_READS = ('done <<< "$CONFORMANCE_DIALOGUE"',)
+
+
+@pytest.mark.parametrize("path", [_CONF, _PLAN], ids=lambda p: p.name)
+def test_no_bash_write_interpolates_raw_dialogue(path):
+    text = path.read_text(encoding="utf-8")
+    for block in re.findall(r"^[ \t]*```bash\n(.*?)^[ \t]*```[ \t]*$", text, re.M | re.S):
+        for line in block.splitlines():
+            s = line.strip()
+            if s.startswith("#") or s in _ALLOWED_READS:
+                continue
+            for tok in _RAW_TOKENS:
+                assert tok not in s, (path.name, s)
