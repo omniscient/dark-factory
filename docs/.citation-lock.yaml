@@ -1,0 +1,483 @@
+# Citation lock for commands/*.md line citations (#662). Written by
+# scripts/docs_refs_check.py --seed / --rederive / --accept only; do not edit by hand.
+entries:
+  - doc: "docs/configuration.md"
+    target: "commands/ceiling-revisit.md"
+    lines: [88, 108]
+    hash: "c7c323f48cd79bd783c8b50c3b2699ccfdc72a463e51269f3e59e11b864b751c"
+    excerpt: "# Read effective ABOVE_CEILING_KEYWORDS from .archon/.env when the target"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/ceiling-revisit.md"
+    lines: [95, 95]
+    hash: "92df5b5dc98f2088f5c88dcc6a0313ad7d900a2b85eb6ff29fd96a0faaaea77b"
+    excerpt: "CURRENT=\"migration|migrate|performance|perf|architectur|refactor\""
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [53, 53]
+    hash: "07b920e64c75f4f2fa5d61a9d6294623444a3bc513c7c142c46f87e6e86ea685"
+    excerpt: "2. If `code_review.enabled` is `false`:"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [57, 57]
+    hash: "670f6e2ddaa252b8fabb44a420ef7fd6d2dc742730c2ba06be5b00e1bd9c71b8"
+    excerpt: "4. Extract `BLOCK_THRESHOLD` from `code_review.block_threshold` (default: `high`"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [58, 58]
+    hash: "0fe312d6ab806a6fd41798be8f2361c52fd847ff032d1147e62f6572896c4e3a"
+    excerpt: "5. Extract `FAIL_OPEN` from `code_review.fail_open` (default: `true`)."
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [59, 59]
+    hash: "e2f9473b4318cdb96ae12c56a907eba1eec94d4a94ab66db2d3533fdaeed02d9"
+    excerpt: "6. Extract `MAX_FINDINGS` from `code_review.max_findings` (default: `50`)."
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [60, 64]
+    hash: "d10c4bcc1354e8c255e2ec6253bc99edba50f09af08b2c8ee1178ef657d07b40"
+    excerpt: "7. Extract `SEVERITY_ORDER_CSV` from `code_review.severity_order` in config.yaml"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [110, 110]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [60, 60]
+    hash: "0f240915df11f97274fcdda5e6336c7292df72a6f63cf4e066d2412f39a84fed"
+    excerpt: "2. If `conformance.enabled` is `false`:"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [68, 68]
+    hash: "fb3b4269fe93500b2c99e952df7df406d9189ded87a9f3d49ac5059e2e95a7e6"
+    excerpt: "6. Extract `MAX_CYCLES` from `conformance.max_reconcile_cycles` (default: 3)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [69, 69]
+    hash: "751021c68ebd0aaaef5cbd055b15b9ee68a84a4c89f2318275bdb8bd51ac8d28"
+    excerpt: "7. Extract `BLOCK_ON_MATERIAL` from `conformance.block_on_material` (default: tr"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [70, 70]
+    hash: "b3166595a42fb38b7fd74958c79bf2c284e12cfcc7ca1c32d6211fbdc98d3e44"
+    excerpt: "8. Extract `SCOPE_ENFORCEMENT` from `conformance.scope_enforcement` (default: tr"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [71, 71]
+    hash: "804b32636c3a73dbe950c7606594e6c8b3c6eafcf4487b15fea7d6eb0da6f195"
+    excerpt: "9. Extract `EXCISE_OOS` from `conformance.excise_out_of_scope` (default: true)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [72, 72]
+    hash: "53d4c62f11397e81782bfc22ff93dcb98a4d8df5eda2ee24144819d0240df011"
+    excerpt: "10. Extract `BACKLOG_LABEL` from `conformance.backlog_label` (default: `scope-sp"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [76, 78]
+    hash: "0a5ab42d4db62a7e142055e58716d3793eed70d45cd4f4a6e6491f1e00e7a779"
+    excerpt: "ROOT=$(git rev-parse --show-toplevel 2>/dev/null)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [78, 78]
+    hash: "f40a7a680ded5806a6e3c151702ded49be3e1e5436121086afafec9922b9d049"
+    excerpt: "SHADOW_MODEL_PIN=\"${CONFORMANCE_SHADOW_MODEL-$SHADOW_MODEL_DEFAULT}\""
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [209, 209]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [610, 612]
+    hash: "0a5ab42d4db62a7e142055e58716d3793eed70d45cd4f4a6e6491f1e00e7a779"
+    excerpt: "ROOT=$(git rev-parse --show-toplevel 2>/dev/null)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [699, 701]
+    hash: "0a5ab42d4db62a7e142055e58716d3793eed70d45cd4f4a6e6491f1e00e7a779"
+    excerpt: "ROOT=$(git rev-parse --show-toplevel 2>/dev/null)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [762, 764]
+    hash: "0a5ab42d4db62a7e142055e58716d3793eed70d45cd4f4a6e6491f1e00e7a779"
+    excerpt: "ROOT=$(git rev-parse --show-toplevel 2>/dev/null)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [68, 68]
+    hash: "2dfe5dbc38d1ac28262f77a886bc3ca060b7064557a52a181021d472b7fd4366"
+    excerpt: "read -r DOCS_ENABLED DOCS_MODE < <(python3 dark-factory/scripts/factory_core/cli"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [72, 75]
+    hash: "214910d4ede9bbdb19dac339ffa420eda14fe5a8a8d7e470acdfe5fc321470d0"
+    excerpt: "1. If `DOCS_ENABLED` is `false`, write the SKIPPED verdict and exit `0` — nothin"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [97, 97]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [213, 213]
+    hash: "61af1c1fe77188332aea986e29e3ce9aaa7a899a4675e26dfacbafc9c3458419"
+    excerpt: "read -r _EN DOCS_MODE < <(python3 dark-factory/scripts/factory_core/cli.py docs-"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [261, 261]
+    hash: "73fe62e8a94cfa18fde8537bb05609eccd4684d67a39c367082f43fbae4672d5"
+    excerpt: "3. Repeat until approved (max 3 cycles)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [266, 266]
+    hash: "4712ee9fee33b91405c4f12aaec7ea3a670b49374adf458f8216af601689a464"
+    excerpt: "(`$PLAN_FILE`, under `docs/superpowers/plan-drafts/`)"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [274, 276]
+    hash: "7d411a2e62e31d138cda2c98bfdf3b50ea130a1b5db35ec4ef73898958b01093"
+    excerpt: ""
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [423, 423]
+    hash: "9a5452d4f182c74e9312bf53824e466a3ce0bab412af91462f1aa4185cfa6a38"
+    excerpt: "--json labels --jq '.labels[].name' | grep -q \"direct-to-pr\" && echo \"yes\" || ec"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [424, 424]
+    hash: "e1f6cf80a0577373d76fa0cfdd945010a1bbdcc7719fadc08e2972f1b4dfa1de"
+    excerpt: "PLAN_GRACE=$(python3 -c \"import yaml; d=yaml.safe_load(open('.claude/skills/refi"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [241, 241]
+    hash: "9a5452d4f182c74e9312bf53824e466a3ce0bab412af91462f1aa4185cfa6a38"
+    excerpt: "--json labels --jq '.labels[].name' | grep -q \"direct-to-pr\" && echo \"yes\" || ec"
+    seeded: true
+  - doc: "docs/configuration.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [242, 242]
+    hash: "4bc1dd3782fd0f801ef712b897c13244f781fa324c4376b1ce201cd301631c63"
+    excerpt: "SPEC_GRACE=$(python3 -c \"import yaml; d=yaml.safe_load(open('.claude/skills/refi"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/ceiling-revisit.md"
+    lines: [88, 88]
+    hash: "87d33fbdbd00ba744069cd3172394120b7abacd22d4421be7f1b4d2a3ec3b169"
+    excerpt: "# Read effective ABOVE_CEILING_KEYWORDS from .archon/.env when the target"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [110, 110]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [116, 116]
+    hash: "fb99b2609ea8b7d38a21274c671407f5f5a209559acf872c09140b3df47dbf6f"
+    excerpt: "python3 dark-factory/scripts/diff_rank.py \\  # TARGET-PATH"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [174, 174]
+    hash: "949bf71e51fee407450cdee7ce579055e41047880d4c01a12c06b8755dbf2fc0"
+    excerpt: "if [ -f \".claude/skills/code-review/RUBRIC.md\" ]; then"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [181, 181]
+    hash: "2f42e3114e340e313a4716c13bc273ac1c4ca7a400a6bb8a45e5f6d28b6d7ddb"
+    excerpt: "python3 dark-factory/scripts/factory_core/cli.py render-prompt \\"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [288, 288]
+    hash: "37dd21a712cdcd5bc1478bd5854b0b144ed47e3483c83c983e3feb05a63a2702"
+    excerpt: "# Memory write: only when STATUS=BLOCKED (blocking findings confirmed)"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [181, 181]
+    hash: "48fd85c3ba1c2f02ee4a52643563bebc0d3420618081b48fb6c9c1c7dc703474"
+    excerpt: "# Run the hunk filter; on script error fall back to raw diff (fail-open)"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [208, 208]
+    hash: "8a7782182c100fe56753932e97700655192b459f452b240e3cc6273766432251"
+    excerpt: "RANK_IN=$(mktemp /tmp/rank_in_XXXXXX.txt)"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [210, 210]
+    hash: "b18efbb4ee58fbc7a765542a4b675c8af3b261b8f47e4d4e931e9e6239829093"
+    excerpt: "printf '%s' \"$TRIAGED_DIFF\" > \"$RANK_IN\""
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [278, 278]
+    hash: "c51c1384d6d4891e232aa78106c0a2e9cc7555ba3c1679793a37a75630847543"
+    excerpt: "if [ -f \".claude/skills/conformance/RUBRIC.md\" ]; then"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [284, 284]
+    hash: "c76223d4b9f38a3fcecc130f30e875655c4de86bbb63d7550b3de99ab82261d2"
+    excerpt: "# TARGET-PATH"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [313, 313]
+    hash: "043851cbed8eb482148cc655c3652aa51c40fd47fe4db2a3fa5ad9b93474755f"
+    excerpt: "5a. If `$SHADOW_MODEL_PIN` is non-empty, spawn a second, non-gating subagent imm"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [602, 602]
+    hash: "43a6005289757e656fcd290ecde87e4b48b1438a5276821989765ea5582a7108"
+    excerpt: "emit_verdict \"conformance\" \"PASS\" \"${MATERIAL_COUNT:-0}\" \"none\""
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [669, 669]
+    hash: "6026041711330fa545c029203211cb7a7790fe16ca7f48754aa7ea84c1155bf2"
+    excerpt: "write_memory_entry \"$TARGET\" \"$PATH_PREFIX\" \"$VIOLATION_TEXT\" conformance \"${ISS"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [97, 97]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [116, 116]
+    hash: "908b39696150b1e6da5b56462db02213929249702de5694eb0f465201bd92f26"
+    excerpt: "python3 dark-factory/scripts/diff_rank.py \\"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [174, 174]
+    hash: "6606e9e4899d61314e2b5498d65af627c06b8440b3e585dacac338794b0d776d"
+    excerpt: "if [ -f \".claude/skills/docs-conformance/RUBRIC.md\" ]; then"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [182, 182]
+    hash: "2f42e3114e340e313a4716c13bc273ac1c4ca7a400a6bb8a45e5f6d28b6d7ddb"
+    excerpt: "python3 dark-factory/scripts/factory_core/cli.py render-prompt \\"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-docs-conformance.md"
+    lines: [237, 237]
+    hash: "5a17b1e0d76b23e656fc8909810c14c3999ce93270b89df88b1bfc622b540f2e"
+    excerpt: "emit_verdict \"docs-conformance\" \"$STATUS\" \"$COUNT\" \"$SEV\""
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [62, 62]
+    hash: "7254dd2a06d037e9936b21b0b80134dc6b2dda00fa17c147c53f6129ec72623e"
+    excerpt: "via steps 5-6. No DAG node currently produces `context-pack.md` for the `plan` s"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [217, 217]
+    hash: "43f6189f31725965ee2e222dbb5db888e8c2973053272f64b3f84d6ffff98ca0"
+    excerpt: "already populated by `load_memory_context.sh plan` and scoped to the changed fil"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [466, 466]
+    hash: "e28095edb2e19c87d2bf0f0388e7e780f40910cf02ae4eb7566c07abc6aa46d3"
+    excerpt: "OOS_FILES=$(bash \"${REPO_ROOT}/dark-factory/scripts/oos_excise.sh\" \"docs/superpo"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [69, 69]
+    hash: "ec7f552759087ceac3edaa93e1454584585b968109f5128f7932697aa6d821db"
+    excerpt: "No DAG node currently produces `context-pack.md` for the `refine` scenario, so t"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [132, 132]
+    hash: "2f42e3114e340e313a4716c13bc273ac1c4ca7a400a6bb8a45e5f6d28b6d7ddb"
+    excerpt: "python3 dark-factory/scripts/factory_core/cli.py render-prompt \\"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [171, 171]
+    hash: "8014d67919f50bc2fb8f36258667b51cfc7f69d5bde099ce3663f5fcca8d8bf5"
+    excerpt: "OOS_FILES=$(bash \"${REPO_ROOT}/dark-factory/scripts/oos_excise.sh\" \"docs/superpo"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [204, 204]
+    hash: "3f0a80b154bfcb6d61d9465405bc395423f81eef0db734aeb76265e5d235b480"
+    excerpt: "python3 \"$MEMORY_WRITE\" \\"
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [101, 101]
+    hash: "dd19e711cf8b7794e948f2cc8dc594a01382ad2dec31c9f5649cfcc7864b957c"
+    excerpt: "MEMORY_CONTEXT=$(python3 \"${REPO_ROOT}/dark-factory/scripts/memory_retrieve.py\" "
+    seeded: true
+  - doc: "docs/features.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [141, 141]
+    hash: "9c71ae7c8b086f4b715c71ea00c67331b3c1498026d551acdc2438c226d1cdfa"
+    excerpt: "### Backend validation (always run)"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/ceiling-revisit.md"
+    lines: [31, 36]
+    hash: "5f77bbabdc1d40f735f5ef0f9ca797a965960dcd2569ea976a43dddce992380f"
+    excerpt: "## Purpose"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [110, 110]
+    hash: "4d6b0ad6dc573cac75fca420c373da198ea0cc3ef0de4a3a8eb6049256278229"
+    excerpt: "[ -f \"$ARTIFACTS_DIR/token-opt-caps.env\" ] && . \"$ARTIFACTS_DIR/token-opt-caps.e"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-code-review.md"
+    lines: [278, 280]
+    hash: "022fc95b137db577cb5cc5bbd32846f01e51418f1a087171837b4208f2ff7326"
+    excerpt: "emit_verdict \"code-review\" \"BLOCKED\" \"${BLOCKER_COUNT:-0}\" \"high\""
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [151, 220]
+    hash: "d5555bd5cf14f3ca15e0b2d977538bc585be8ed86e84f0db26fd50c2d148872e"
+    excerpt: "```bash"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [208, 208]
+    hash: "8a7782182c100fe56753932e97700655192b459f452b240e3cc6273766432251"
+    excerpt: "RANK_IN=$(mktemp /tmp/rank_in_XXXXXX.txt)"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [602, 604]
+    hash: "732682c4ed0991b656bc48926ddc0ac78f7902ef74d888e47addfd9567c8e3a0"
+    excerpt: "emit_verdict \"conformance\" \"PASS\" \"${MATERIAL_COUNT:-0}\" \"none\""
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-conformance.md"
+    lines: [775, 779]
+    hash: "df724f2b56b677929635f24f285fc8a1b7afce1bc65379562e502b8005ad0688"
+    excerpt: "5. Exit non-zero (`exit 1`) — kept for forward-compatibility, but the actual enf"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-implement.md"
+    lines: [44, 52]
+    hash: "9ff4318cecd76c429116ff287125d2771b8410e4808e426156614befa3b22d03"
+    excerpt: "## CRITICAL: Epic Guard"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [44, 52]
+    hash: "7abb75777f5315cb2f25a988db80b74d7eb356d8fd20c4fb88d3b10aef5d2601"
+    excerpt: "## SCOPE BOUNDARY"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [238, 252]
+    hash: "c8aa23c59f743e621bf56aafda5afb1769fa27e03a1bdacf9cd73d56c424affc"
+    excerpt: "|| { echo \"render-prompt failed — aborting plan phase (see stderr above)\"; exit "
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-plan.md"
+    lines: [352, 389]
+    hash: "242fe86b1305e517f6e65005529848ba8be70d4d0f072737ca2d33b7708fd924"
+    excerpt: "8. **Reconcile loop** (only if MATERIAL):"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [24, 29]
+    hash: "c4281506bf24e3f0ed3ba2cb211386f307196b5d28b13081ee9dbb44d8fa6e57"
+    excerpt: "## CRITICAL: Skip Guard"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [33, 49]
+    hash: "d870b3492c9b654134b8514b9ae098da60e4b793956b9f22cdb7eedd236be585"
+    excerpt: "<!-- headless-contract:begin -->"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [65, 72]
+    hash: "ca44418f2b1997e3f1922b50fd1e5cb25c803ee7975b96b1f04de2caafe63533"
+    excerpt: "1. Check for a pre-assembled context pack: if `$ARTIFACTS_DIR/context-pack.md` e"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [100, 105]
+    hash: "2ab0fc60e92b51672beb3f6d4baf21106e7a294101ff733c89c106f1dfb6dba2"
+    excerpt: "## Phase 2: PRE-FLIGHT"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [102, 102]
+    hash: "b3894b504b0d1d17979040d0f45d3bfefa2a462eccb245c534f45bcc25879e7d"
+    excerpt: "Check the issue body length. If fewer than 20 characters:"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-refine.md"
+    lines: [143, 147]
+    hash: "3b49fb9cb02de827edd2b6e6609896d1e8f1b06a392b664800f20113c21906c6"
+    excerpt: "3. If the subagent returns a response starting with `UNCERTAIN:`:"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [44, 83]
+    hash: "accfe13ec245e6d83f64d0f8ec92c31c998541bfecc93c5281a43ffa17fe0f04"
+    excerpt: "## Phase 0: BLAST-RADIUS HARD GATE"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [91, 118]
+    hash: "8672e867e56798ee3df9a669aef8fffe961fddd0fb04d4aa9cb756aa312cc32d"
+    excerpt: "Load conformance memory (entries tagged `source:conformance` only — implementati"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [104, 107]
+    hash: "c4af330ac62b59d71bfda0105f597b937b763864fb55eaf81c085368d17364ef"
+    excerpt: "$ISSUE_ARG \\"
+    seeded: true
+  - doc: "docs/run-lifecycle.md"
+    target: "commands/dark-factory-validate.md"
+    lines: [141, 149]
+    hash: "0201ae7cc32dc6c3136d0ce34d0472bef1593e5505903d5a7b7c48b1d5247288"
+    excerpt: "### Backend validation (always run)"
+    seeded: true
