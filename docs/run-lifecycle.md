@@ -533,8 +533,8 @@ context from `issue.json`, not from the chat.
 - **Spec** (`:152-174`): written to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`
   with an `**Issue:** #N` line; then the out-of-scope gate (`oos_excise.sh`,
   [gate C2](#c-refine-and-plan)); then commit.
-- **Memory** (`:176-219`): optional entries through `scripts/memory_write.py`.
-- **Publish** (`:221-287`): posts "Refinement Pipeline — Spec Generated" with the full
+- **Memory** (`:176-230`): optional entries through `scripts/memory_write.py`.
+- **Publish** (`:232-298`): posts "Refinement Pipeline — Spec Generated" with the full
   Q&A, and writes `refinement-status.md` with `STATUS: SPEC_COMPLETE`. The comment tells
   the human to move the issue to **Refined** to approve; for `direct-to-pr` issues it
   announces auto-advance after `direct_to_pr.spec_grace_minutes`.
