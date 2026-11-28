@@ -114,6 +114,14 @@ returned verbatim, never rejected or normalized. `GATE_TYPE`/`FINDINGS_COUNT`/
 `SEVERITY` are optional on parse, required on emit. `SEVERITY` ∈
 `{none, low, medium, high, critical}`.
 
+Conformance reviewer prose never starts a line in `conformance.md`. That artifact and the
+conformance comments (`dark-factory-conformance.md` Phase 5, `dark-factory-plan.md`
+Phase 3.5 step 8b and Phase 4) embed a reviewer's dialogue only through
+`scripts/quote_dialogue.py`, which prefixes every line — under `str.splitlines()`, the
+splitter `parse_verdict` uses — with `> `, so an echoed `STATUS:` or `CYCLES:` line
+cannot be read as a header field by `run_record.py`'s last-wins parse or the `report`
+node's greps (#405). `review.md` (`dark-factory-code-review.md`) does not do this yet.
+
 ## Target-verifier registration contract
 
 A target repo declares a check-only verifier via a loop entry's
