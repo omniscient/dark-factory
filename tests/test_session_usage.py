@@ -533,6 +533,8 @@ def test_line_floor_bounds_a_file_of_empty_lines(tmp_path, monkeypatch):
     assert t["skipped_for_size"] == ["p/over.jsonl"]
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"),
+                     reason="SIGALRM is POSIX-only and main-thread-only")
 def test_compression_bomb_is_skipped_at_the_shipped_bounds(tmp_path):
     (tmp_path / "p").mkdir()
     with gzip.open(tmp_path / "p" / "bomb.jsonl.gz", "wb") as fh:   # ~70 MiB of blank lines

@@ -36,8 +36,9 @@ _STARTED, _COMPLETED = "dag_node_started", "dag_node_completed"
 _FAILED = "dag_node_failed"
 MAX_LINE_BYTES = 8 * 1024 * 1024
 # #656: bounds on one load_transcripts() call. The two byte bounds equal the writer-side
-# limits of entrypoint.sh's _keep_run_transcripts, so a kept store never trips them; a
-# line counts as at least LINE_CHARGE_FLOOR bytes, which bounds the number of lines.
+# limits of entrypoint.sh's _keep_run_transcripts, so a kept store never trips them for
+# real transcripts (lines over the floor); a line counts as at least LINE_CHARGE_FLOOR
+# bytes, which bounds the number of lines.
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CALL_BYTES = 256 * 1024 * 1024
 LINE_CHARGE_FLOOR = 64
