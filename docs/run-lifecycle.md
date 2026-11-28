@@ -1025,7 +1025,7 @@ order. Steps 1 and 2 also run from the `on_failure` trap (`entrypoint.sh:713-734
 
 1. `archon workflow cost --last --json --quiet` is captured.
 2. `factory_core/cli.py run-record assemble` builds `run-record.json`
-   (`scripts/factory_core/run_record.py:1138-1395`): it parses `validation.md`,
+   (`scripts/factory_core/run_record.py:1159-1415`): it parses `validation.md`,
    `conformance.md`, `review.md` and `conflict_resolution.md` into stage verdicts. The
    validate, conformance and code-review nodes write the first three into Archon's
    per-workflow-run directory, `runs/<workflow run id>` (the id is the cost JSON's
@@ -1217,7 +1217,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
 
 ### Workflow failure (non-zero exit from `archon workflow run`)
 
-`entrypoint.sh:1300-1355`, in order:
+`entrypoint.sh:1309-1364`, in order:
 
 1. Session-window match on a cloud run: exit 0 (gate F).
 2. Rate-limit match with backoff disabled, on a cloud run: sleep and retry. A verified-local
@@ -1238,7 +1238,7 @@ this repository; see [oddity 5](#open-questions-and-oddities).
    ranked above the preview noise every self-target run leaves, #373),
    `environmental:preview_infra`, and
    `substantive:oos_files|build_failure|test_failure|unknown:<exit code>`
-   (`entrypoint.sh:534-610`, `scripts/factory_core/error_signature.py:80-126`).
+   (`entrypoint.sh:534-619`, `scripts/factory_core/error_signature.py:80-126`).
 5. Exit with the workflow's exit code.
 
 This path does not go through `on_failure`; see
@@ -1247,24 +1247,27 @@ measurement that contradicts it.
 
 ### Entrypoint failure (`on_failure`, the `ERR` trap)
 
-Any unguarded failing command after `entrypoint.sh:902`: clone failure, dependency
+Any unguarded failing command after `entrypoint.sh:911`: clone failure, dependency
 install failure, the adapter gate, the missing smoke hook, a failed push in the
-deconflict path. `on_failure` (`:738-901`):
+deconflict path. `on_failure` (`:747-910`):
 
 1. Appends a `failed` entry to `runs.jsonl` and assembles a `run-record.json` with
    `status: failed`.
 2. For `refine`, `plan`, `deconflict`: writes the error signature and posts
    "Refinement Pipeline — Failed" (marker `df-refine-failure`) with the exit code and the
-   retry command. **No board change**; the scheduler's breaker owns that (`:840-861`).
+   retry command. **No board change**; the scheduler's breaker owns that (`:849-870`).
 3. For `fix`, `continue`: writes the error signature, posts the post-mortem, moves the
    board to **Blocked**, and posts "Dark Factory Run — Failed" (marker
-   `df-factory-failure`) saying so (`:862-888`).
+   `df-factory-failure`) saying so (`:871-897`).
 4. For `close` or runs without an issue number: no comment.
 5. If step 2 or 3 wrote a signature, records its failure class
    (`scripts/factory_core/failure_taxonomy.py`) on the assembled record:
    `run-record annotate-failure` sets `harness_economics.failure_spend.by_class[<class>]`
-   to the run's whole-run failure spend in `run-record.json` and its durable copy, and
-   appends nothing to `runs.jsonl`. Bounded by `timeout -k 5 20`; any failure is ignored
+   to the record's `failure_spend` tokens and basis in `run-record.json` and its durable
+   copy. If the ledger part already counted that class at assembly (`basis: ledger_rows`,
+   with its summed request tokens and `request_count`), that part moves under the entry's
+   `ledger` key. The verb appends nothing to `runs.jsonl` and posts nothing to Seq, so the
+   phase-level class is only in the run record. Bounded by `timeout -k 5 20`; any failure is ignored
    (#238).
 6. Posts the cost report.
 
@@ -1373,13 +1376,13 @@ The scheduler-side oddities are tracked in
    after a review block.
 
 6. **A failed workflow does not run `on_failure`.** The failure branch ends in
-   `exit "$EXIT_CODE"` (`entrypoint.sh:1351-1354`), and an `ERR` trap does not fire on
-   `exit` (the script says so itself at `:916-917`; confirmed with a small bash probe).
+   `exit "$EXIT_CODE"` (`entrypoint.sh:1360-1363`), and an `ERR` trap does not fire on
+   `exit` (the script says so itself at `:925-926`; confirmed with a small bash probe).
    So on this path there is no "Dark Factory Run — Failed" comment, no move to Blocked,
    no `failed` run-record entry, no assembled `run-record.json`, and no cost report. The
    comment above `_write_error_signature` used to call this the load-bearing call
    site, so it may be intended that the scheduler owns the board here, but the failure
-   bookkeeping in `on_failure` (`:789-901`) is then only reached by setup-time failures.
+   bookkeeping in `on_failure` (`:798-910`) is then only reached by setup-time failures.
    **#238 measured the opposite** in the factory image, with the entrypoint's shell
    options and trap: `ERR` fires on the failed `archon … | tee` pipeline even under
    `set +e`, `on_failure` runs, and its own `set -e` ends the shell with archon's exit code
