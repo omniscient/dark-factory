@@ -366,6 +366,16 @@ def test_crlf_and_reindented_target_lines_hash_the_same(tmp_path):
     assert _content(root) == []
 
 
+def test_crlf_doc_round_trips_through_rederive(tmp_path):
+    root = _lock_tree(tmp_path, "")
+    _doc(root).write_bytes(b"intro\r\n`commands/c.md:3`\r\nend\r\n")
+    _seeded(root)
+    _insert(root, 0, ["new"])
+    printed, failures = rederive([_doc(root)], root)
+    assert failures == []
+    assert _doc(root).read_bytes() == b"intro\r\n`commands/c.md:4`\r\nend\r\n"
+
+
 def test_basename_citation_is_covered(tmp_path):
     root = _lock_tree(tmp_path, "`c.md:3`\n")
     lock = _seeded(root)
@@ -449,6 +459,33 @@ def test_git_unavailable_is_ambiguous(tmp_path, monkeypatch):
     monkeypatch.setattr(docs_refs_check.subprocess, "run", no_git)
     printed, failures = rederive([_doc(root)], root, base="HEAD")
     assert printed == [] and len(failures) == 1 and "does not pick one" in failures[0]
+
+
+def test_base_starting_with_a_dash_is_refused_without_calling_git(tmp_path, monkeypatch):
+    import docs_refs_check
+
+    def no_git(*args, **kwargs):
+        raise AssertionError("git must not be called for a base starting with '-'")
+    monkeypatch.setattr(docs_refs_check, "_git", no_git)
+    pos, reason = docs_refs_check._base_position(tmp_path, "-x", "commands/c.md", 1, 1)
+    assert pos is None and reason is not None and "starts with '-'" in reason
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.parametrize("base, reason", [
+    ("no-such-ref", "could not resolve or diff --base 'no-such-ref'"),
+    ("-x", "starts with '-'"),
+])
+def test_base_resolution_failure_is_named_in_the_ambiguous_message(tmp_path, base, reason):
+    root = _git_tree(tmp_path, "`commands/c.md:4`\n", _BRACES)
+    lock = root / LOCK_FILE
+    _insert(root, 0, ["new"])
+    doc_before, lock_before = _doc(root).read_bytes(), lock.read_bytes()
+    printed, failures = rederive([_doc(root)], root, base=base)
+    assert printed == [] and len(failures) == 1, failures
+    assert "ambiguous" in failures[0] and "the --base diff does not pick one" in failures[0]
+    assert reason in failures[0]
+    assert (_doc(root).read_bytes(), lock.read_bytes()) == (doc_before, lock_before)
 
 
 def test_hand_shifted_citation_is_rekeyed_and_keeps_seeded(tmp_path):
