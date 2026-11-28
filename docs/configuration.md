@@ -125,10 +125,10 @@ keys, which are read by the run container (see Discrepancies D1).
 | Key | Default | Controls | Reader | Env override (scope) | Adapter |
 |---|---|---|---|---|---|
 | `direct_to_pr.label` | `direct-to-pr` | label that enables grace-timer auto-advance and end-gate auto-merge | `scripts/scheduler_lib.sh:32` (matched with `grep -qi`, so it is a regex); also `scripts/factory_core/handoff.py:401` (plain substring, only in a process that imports `handoff`; nothing in `scheduler.sh`/`entrypoint.sh` does) | `DIRECT_TO_PR_LABEL` (scheduler) | no |
-| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:273-279`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:231`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
+| `direct_to_pr.spec_grace_minutes` | `30` | minutes before a `spec-pending-review` ticket on a direct-to-pr issue auto-advances; `0` = next poll | `scheduler.sh:273-279`; the refine agent also reads it from the run's config to print the countdown (`commands/dark-factory-refine.md:242`, agent-read) | `SPEC_GRACE_MINUTES` (scheduler only; the agent's countdown ignores it) | no |
 | `direct_to_pr.plan_grace_minutes` | `30` | same for `plan-pending-review` | `scheduler.sh:314-320`; `commands/dark-factory-plan.md:424` (agent-read) | `PLAN_GRACE_MINUTES` (scheduler only) | no |
 
-The `direct-to-pr` literal is also hardcoded in `commands/dark-factory-refine.md:230` and
+The `direct-to-pr` literal is also hardcoded in `commands/dark-factory-refine.md:241` and
 `commands/dark-factory-plan.md:423`, so renaming the label in config does not change those checks.
 
 ### `conformance` and `code_review`
@@ -769,7 +769,7 @@ blast-radius gate and side-effect levels deliberately read factory-owned config 
 | `ready-for-agent` opt-in label | `scripts/scheduler_lib.sh:26-27`; `scheduler.sh:637` (`--limit 200`), `:1351`; `epic_autopilot.py:631` | opt-in to refinement; also applied to epic children |
 | `spec-pending-review`, `plan-pending-review` | `scheduler.sh:257,276,293,317` | gate labels removed on approval or grace expiry |
 | size labels `size: XL/L/M/S` | `scripts/scheduler_lib.sh:37-52` | dispatch ceiling classification |
-| `direct-to-pr` literal | `commands/dark-factory-refine.md:230`, `commands/dark-factory-plan.md:423` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
+| `direct-to-pr` literal | `commands/dark-factory-refine.md:241`, `commands/dark-factory-plan.md:423` | direct-to-pr checks in phase agents, independent of `direct_to_pr.label` |
 | `MAX_SESSION_WINDOW_HOURS = 5` | `scripts/factory_core/session_window.py:137` | cap on a session-window pause |
 | `model: haiku` for `classify-preview` and `summarize-feedback` | `workflows/archon-dark-factory.yaml:870,169` | replaces the unread `preview.model` |
 | Epic-selector exclude regex `security\|auth\|authz\|authn\|trading\|ibkr` plus `dark.?factory\|scheduler\|factory.self` | `scripts/factory_core/epic_autopilot.py:188-189` | which epics autopilot may start; factory-self terms drop when `allow_self_improvement` is on |
