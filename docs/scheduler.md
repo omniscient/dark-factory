@@ -1028,3 +1028,14 @@ The run-side items are in [run-lifecycle.md](run-lifecycle.md), tracked in
     every failure path is swallowed (a cost log must never break the call it measures).
     Codehost PR lookups go through the code-host provider, not the tracker, and are
     deliberately unmeasured (#607).
+
+26. **The preview-helper lane can delay a merge/continue dispatch for its issue.**
+    `dispatch_preview_helper` (`scripts/preview_helper_dispatch.sh`) starts the helper
+    container with the command `Classify preview (helper) #<issue>`, which makes
+    `is_issue_running` (`scheduler.sh:122-128`) true for that issue number for as long as
+    the helper runs. Both `dispatch_close` and the end-gate's `Continue issue #N` dispatch
+    (P1, [Review triage](#notes-on-individual-stages)) skip while `is_issue_running` reports
+    a container, so a merge or continue for that issue can wait up to the helper's
+    wall-clock limit (`timeouts.total_seconds`, ceiling `PREVIEW_HELPER_LIMIT_CEILING`)
+    while the canary (#564) is active. Accepted by the spec; operators should expect
+    occasional delayed merges during the canary rather than treat them as a stuck run.

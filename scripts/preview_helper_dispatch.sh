@@ -7,6 +7,13 @@
 # (preview_helper_finalize) that runs first in every poll, before the WIP capacity guard. Nothing here
 # calls the tracker or the code host, and nothing reads or writes an issue's own breaker key.
 #
+# One way this lane still touches the gated pipeline: the helper container's command string
+# is "Classify preview (helper) #<issue>", which makes scheduler.sh's is_issue_running true
+# for that issue number while the helper runs. dispatch_close and the end-gate's "Continue
+# issue" dispatch both wait on is_issue_running, so a merge/continue for that issue can be
+# delayed up to the helper's wall-clock limit during the canary. Accepted by the spec; see
+# docs/scheduler.md oddity #26.
+#
 # scheduler.sh runs under `set -euo pipefail` and calls preview_helper_finalize and
 # preview_helper_check bare, so no command here may fail unguarded: every pipeline, command
 # substitution and counter call ends in `|| ...` (an unguarded failure would end the scheduler).
@@ -41,7 +48,11 @@ _ph_inflight_present() { [ -e "$(_ph_inflight)" ] || [ -L "$(_ph_inflight)" ]; }
 # Remove the three artifact names and the in-flight entry, whatever is planted there, through
 # the module (directory descriptors; a link in place of the directory is unlinked, not followed).
 _ph_clear() { _ph_py clear --dir "$(_ph_dir)" --inflight "$(_ph_inflight)" 2>/dev/null || true; }
-_ph_running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qxF -- "$1"; }
+_ph_running() {
+  local names
+  names=$(docker ps --format '{{.Names}}' 2>/dev/null) || return 1
+  grep -qxF -- "$1" <<<"$names"
+}
 # A lane counter read through the scheduler's own state reader: its value, or -1 when the
 # reader fails or prints anything but a number (the callers then decline: fail closed).
 _ph_count() {
@@ -118,8 +129,15 @@ preview_helper_finalize() {
     # instance, remove the proxy, clear everything, count one failure. No run record: there
     # is no trustworthy run id.
     _ph_log "inflight_unreadable action=cleanup"
-    { docker ps --format '{{.Names}}' 2>/dev/null | grep -E -- "^${FACTORY_RUN_PREFIX}ph-[0-9]+$" \
-      | while IFS= read -r name; do docker rm -f "$name" >/dev/null 2>&1 || true; done; } || true
+    # Match the fixed prefix literally (bash glob, not an ERE token from $FACTORY_RUN_PREFIX),
+    # then check the "ph-<digits>" suffix separately so a prefix with ERE metacharacters
+    # (e.g. "." from $REPO) cannot widen the match onto another instance's containers.
+    { docker ps --format '{{.Names}}' 2>/dev/null \
+      | while IFS= read -r name; do
+          [[ "$name" == "${FACTORY_RUN_PREFIX}ph-"* ]] || continue
+          [[ "${name#"${FACTORY_RUN_PREFIX}ph-"}" =~ ^[0-9]+$ ]] || continue
+          docker rm -f "$name" >/dev/null 2>&1 || true
+        done; } || true
     preview_helper_proxy_down
     _ph_clear
     increment_retry "$PREVIEW_HELPER_FAILURE_KEY" >/dev/null 2>&1 || true
@@ -169,8 +187,20 @@ dispatch_preview_helper() {
   now=$(date +%s)
   # Limit 1 until the entry is resolved: read-inflight refuses 0, and nothing is started
   # before the second write below replaces it with the entry's own limit.
+  # No in-flight file exists on this path, so preview_helper_finalize would no-op: record
+  # the abstention directly (the run id is already known) and count the failure ourselves.
   _ph_write_inflight "$run_id" "$issue" "$sha" "$now" 1 \
-    || { _ph_log "skip reason=inflight_write_failed"; return 1; }
+    || {
+      _ph_log "skip reason=inflight_write_failed"
+      SCHEDULER_STATE_DIR="$SCHEDULER_STATE_DIR" timeout -k 5 "$PREVIEW_HELPER_RECORD_SECONDS" \
+        python3 "${SCHEDULER_SCRIPTS_DIR}/factory_core/preview_helper.py" record-outcome \
+          --run-id "$run_id" --issue "$issue" --head-sha "$sha" \
+          --result-file "$dir/result.json" \
+          --ledger-path "${SCHEDULER_STATE_DIR}/request-ledger.jsonl" \
+          --forced-class dispatch_failed >/dev/null 2>&1 || true
+      increment_retry "$PREVIEW_HELPER_FAILURE_KEY" >/dev/null 2>&1 || true
+      return 1
+    }
 
   # The pointer the proxy correlates on: written by the scheduler, never by the helper.
   _ph_py write-pointer --dir "$dir" --run-id "$run_id" --issue "$issue" 2>/dev/null \
