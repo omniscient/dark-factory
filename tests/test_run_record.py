@@ -904,7 +904,7 @@ def test_assemble_attaches_harness_economics_ungated(tmp_path, monkeypatch):
     assert he["ledger_rows_correlated"] == 0
     assert he["ledger_mechanics"] is None
     assert he["retry_spend"] == {"tokens": None, "request_count": None}
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_assemble_harness_economics_delivered_clean_with_cost(tmp_path, monkeypatch):
@@ -989,7 +989,7 @@ def test_assemble_harness_economics_failure_spend_whole_run_when_blocked(tmp_pat
     rec = json.loads(out.read_text())
     he = rec["harness_economics"]
     assert he["outcome"]["state"] == "blocked"
-    assert he["failure_spend"] == {"tokens": 150, "basis": "whole_run"}
+    assert he["failure_spend"] == {"tokens": 150, "basis": "whole_run", "by_class": {}}
 
 
 def test_assemble_harness_economics_with_ledger_rows(tmp_path, monkeypatch):
@@ -1509,8 +1509,8 @@ _CHECK_SILENT_DEATH = {"artifact_present": False, "needs_discussion": False, "la
 _CHECK_LOOKUP_ERROR = {"artifact_present": False, "needs_discussion": False, "label_lookup": "error"}
 
 
-def test_policy_version_is_1_1():
-    assert rr.POLICY_VERSION == "1.1"
+def test_policy_version_is_1_2():
+    assert rr.POLICY_VERSION == "1.2"
 
 
 def test_outcome_artifact_present_stays_produced_ungated():
@@ -1580,24 +1580,24 @@ def _economics(tmp_path, artifact_check=None, **overrides):
 
 def test_harness_economics_clean_abort_keeps_retry_only_failure_spend(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_CLEAN_ABORT)
-    assert he["policy_version"] == "1.1"
+    assert he["policy_version"] == "1.2"
     assert he["outcome"]["state"] == "clean_abort"
     assert he["factory_cpm"] == 0.0
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_harness_economics_artifactless_failed_is_whole_run_spend(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_SILENT_DEATH)
     assert he["outcome"]["state"] == "failed"
     assert he["factory_cpm"] == 0.0
-    assert he["failure_spend"] == {"tokens": 500, "basis": "whole_run"}
+    assert he["failure_spend"] == {"tokens": 500, "basis": "whole_run", "by_class": {}}
 
 
 def test_harness_economics_artifact_present_scores_like_legacy(tmp_path):
     he = _economics(tmp_path, artifact_check=_CHECK_PRESENT)
     assert he["outcome"]["state"] == "produced_ungated"
     assert he["factory_cpm"] == pytest.approx(2000.0)  # 1.0 * 1e6 / 500 tokens
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
 
 
 def test_harness_economics_without_artifact_check_unchanged(tmp_path):
@@ -1605,7 +1605,23 @@ def test_harness_economics_without_artifact_check_unchanged(tmp_path):
     assert he["outcome"]["state"] == "produced_ungated"
     assert "artifact_check" not in he["outcome"]["evidence"]
     assert he["factory_cpm"] == pytest.approx(2000.0)
-    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only"}
+    assert he["failure_spend"] == {"tokens": 0, "basis": "retry_only", "by_class": {}}
+
+
+def test_failure_spend_by_class_counts_ledger_failure_rows(tmp_path):
+    rows = [
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle"},
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle"},
+        {"run_id": "run-447", "status": 200, "failure_class": None},
+        {"run_id": "run-447", "status": 403, "failure_class": "destination_policy_denial"},
+    ]
+    he = _economics(tmp_path, ledger=(rows, True))
+    assert he["failure_spend"]["by_class"] == {
+        "timeout_idle": {"tokens": None, "basis": "ledger_rows", "request_count": 2},
+        "destination_policy_denial": {"tokens": None, "basis": "ledger_rows", "request_count": 1},
+    }
+    # No ledger: an empty dict, never a missing key.
+    assert _economics(tmp_path)["failure_spend"]["by_class"] == {}
 
 
 class _FakeCompleted:
@@ -2404,7 +2420,7 @@ def test_backfill_keeps_failed_verdict_for_artifactless_refine(tmp_path, monkeyp
     updated = json.loads(path.read_text())
     assert updated["artifact_check"] == _CHECK_SILENT_DEATH
     he = updated["harness_economics"]
-    assert he["policy_version"] == "1.1"
+    assert he["policy_version"] == "1.2"
     assert he["outcome"]["state"] == "failed"
     assert he["outcome"]["score"] == 0.0
 

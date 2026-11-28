@@ -28,7 +28,7 @@ SCHEDULER_STATE_DIR = pathlib.Path(os.environ.get("SCHEDULER_STATE_DIR", "/var/l
 JSONL_PATH = SCHEDULER_STATE_DIR / "runs.jsonl"
 SEQ_URL = os.environ.get("SEQ_URL", "http://seq:5341")
 
-POLICY_VERSION = "1.1"
+POLICY_VERSION = "1.2"
 GATE_STAGE_NAMES = ("validation", "conformance", "review")
 _BLOCKING_VERDICTS = {
     "validation": {"FAIL"},
@@ -1006,6 +1006,19 @@ def _compute_harness_economics(
         failure_spend = {"tokens": tokens_per_task, "basis": "whole_run"}
     else:
         failure_spend = {"tokens": retry_spend["tokens"] or 0, "basis": "retry_only"}
+    # #238 (policy 1.2): failure spend per failure class. Ledger rows count requests per
+    # adapter class here; `run-record annotate-failure` adds the run's own phase-level class
+    # (from its error signature) to the assembled record afterwards. Observed spend only:
+    # a class's declared token_budget_multiplier lives in failure_taxonomy, never here.
+    by_class: dict = {}
+    if ledger_available:
+        for row in rows:
+            rc = row.get("failure_class")
+            if not rc:
+                continue
+            entry = by_class.setdefault(rc, {"tokens": None, "basis": "ledger_rows"})
+            entry["request_count"] = entry.get("request_count", 0) + 1
+    failure_spend["by_class"] = by_class
 
     return {
         "policy_version": POLICY_VERSION,
