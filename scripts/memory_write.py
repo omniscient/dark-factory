@@ -11,11 +11,14 @@ Usage:
         --path-prefix <e.g. dark-factory/scripts/>              \\
         --text        <core lesson text (no tag prefix)>         \\
         --source      <conformance|code-review|refine|implement> \\
-        --issue       <issue number>
+        --issue       <issue number>                            \\
+        [--kind       <pattern|avoid|fix>]   (default: avoid)
 
 Exit 0: write succeeded, or intentionally skipped (dedup/reinforcement). At the
 30-entry cap the oldest authoritative entries are evicted to make room.
 Exit 1: markdown I/O error.
+Exit 2: invalid arguments (argparse), e.g. --kind outside pattern|avoid|fix;
+        nothing is created or written.
 """
 import argparse
 import calendar
@@ -97,6 +100,11 @@ def _parse_args():
     p.add_argument("--text", required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--issue", required=True, type=int)
+    # Closed allowlist: the tag is derived from the validated choice only, so no
+    # caller text reaches the tag position. Default avoid keeps callers that omit
+    # the flag (gate_lib.sh::write_memory_entry) byte-identical to the old output.
+    p.add_argument("--kind", choices=["pattern", "avoid", "fix"], default="avoid",
+                   help="entry tag: pattern -> [PATTERN], avoid -> [AVOID], fix -> [FIX]")
     return p.parse_args()
 
 
@@ -192,7 +200,7 @@ def main():
         safe_source = args.source.replace("-->", "").replace("\n", "").replace("\r", "")
         safe_path = args.path_prefix.replace("-->", "").replace("\n", "").replace("\r", "")
         entry = (
-            f"- [AVOID] {args.text} "
+            f"- [{args.kind.upper()}] {args.text} "
             f"<!-- issue:#{args.issue} date:{today_str} expires:{expires_str} "
             f"source:{safe_source} agent:{safe_source} scope:{scope} "
             f"path:{safe_path} -->"
