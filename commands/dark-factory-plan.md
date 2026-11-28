@@ -108,7 +108,11 @@ if [ -n "$DRAFT_FILE" ]; then
   PLAN_FILE="$DRAFT_FILE"
   # Stale-draft guard: a draft written against an older spec is not resumed.
   DRAFT_SHA=$(git log -1 --format=%H -- "$DRAFT_FILE")
-  SPEC_SHA=$(git log -1 --format=%H -- "$SPEC_FILE" 2>/dev/null || true)
+  if git ls-files --error-unmatch -- "$SPEC_FILE" >/dev/null 2>&1; then
+    SPEC_SHA=$(git log -1 --format=%H -- "$SPEC_FILE")
+  else
+    SPEC_SHA=""  # untracked (e.g. the context-pack copy under $ARTIFACTS_DIR) — not newer by definition
+  fi
   if [ -s "$DRAFT_FILE" ] && { [ -z "$SPEC_SHA" ] || git merge-base --is-ancestor "$SPEC_SHA" "$DRAFT_SHA"; }; then
     RESUMING_DRAFT=true
   fi
@@ -182,7 +186,10 @@ missing, and falls back to `issue.json` for `ISSUE_NUM`:
 ISSUE_NUM=${ISSUE_NUM:-$(jq -r '.resolved_number' "$ARTIFACTS_DIR/issue.json")}
 BRANCH=$(git branch --show-current)
 git add -- "$PLAN_FILE"
-git commit -m "docs(#${ISSUE_NUM}): checkpoint draft plan" -- "$PLAN_FILE" || true
+if ! git diff --cached --quiet -- "$PLAN_FILE"; then
+  git commit -m "docs(#${ISSUE_NUM}): checkpoint draft plan" -- "$PLAN_FILE" \
+    || echo "WARN: draft plan checkpoint commit failed for #${ISSUE_NUM} (hook rejection or git identity not configured?) — proceeding without a new checkpoint commit."
+fi
 if ! timeout 30 git push -u origin "$BRANCH"; then
   echo "WARN: draft plan checkpoint push failed for #${ISSUE_NUM} — proceeding on the locally committed draft; this run is not kill-durable until a later push succeeds."
 fi
@@ -194,6 +201,15 @@ under "Issues Found", Phase 3.5 step 8b), so the revised draft — not the pre-r
 what the operator sees and what the next dispatch resumes. On an unchanged draft the commit is
 a no-op. The block never applies a label: `plan-pending-review` is applied only by the
 `plan-push-and-advance` node, and only to a file under `docs/superpowers/plans/`.
+
+If the issue is instead sent back to refine after this checkpoint (for example, the spec is
+amended), refine's own OOS gate — scoped to `docs/superpowers/specs/` and `.archon/memory/`
+(#293) — does not treat `docs/superpowers/plan-drafts/` as in scope for refine, so it deletes
+the checkpointed draft and records it in `out-of-scope.md` as spillover (pinned by
+`test_refine_oos_gate_excises_a_draft`). This is intentional, not a gap: a draft written
+against the pre-amendment spec must not silently survive the amendment, and Phase 1 step 9's
+stale-draft guard would discard it on the next plan run anyway once the spec moves. The
+drafts prefix is deliberately left out of refine's allowlist rather than added to it.
 
 ## Phase 3: ARCHITECT REVIEW
 
@@ -414,7 +430,9 @@ If `conformance.enabled` is `false`, skip this phase entirely and proceed to Pha
    git add -- "$PLAN_FILE"
    git mv -f -- "$PLAN_FILE" "$FINAL_FILE" || exit 1
    git rm -r -q --ignore-unmatch -- docs/superpowers/plan-drafts/
-   git commit -m "docs(#${ISSUE_NUM}): add implementation plan"
+   COMMIT_PATHS=("$FINAL_FILE")
+   git diff --cached --quiet -- docs/superpowers/plan-drafts/ || COMMIT_PATHS+=("docs/superpowers/plan-drafts/")
+   git commit -m "docs(#${ISSUE_NUM}): add implementation plan" -- "${COMMIT_PATHS[@]}" || exit 1
    PLAN_FILE="$FINAL_FILE"
    echo "PLAN_FILE=$PLAN_FILE"
    ```
