@@ -1009,18 +1009,20 @@ def _compute_harness_economics(
         failure_spend = {"tokens": tokens_per_task, "basis": "whole_run"}
     else:
         failure_spend = {"tokens": retry_spend["tokens"] or 0, "basis": "retry_only"}
-    # #238 (policy 1.2): failure spend per failure class. Ledger rows count requests per
-    # adapter class here; `run-record annotate-failure` adds the run's own phase-level class
-    # (from its error signature) to the assembled record afterwards. Observed spend only:
-    # a class's declared token_budget_multiplier lives in failure_taxonomy, never here.
+    # #238 (policy 1.2): failure spend per failure class. Ledger rows count requests and
+    # sum their input+output tokens per adapter class here (as _compute_retry_spend does);
+    # `run-record annotate-failure` adds the run's own phase-level class (from its error
+    # signature) to the assembled record afterwards. Observed spend only: a class's
+    # declared token_budget_multiplier lives in failure_taxonomy, never here.
     by_class: dict = {}
     if ledger_available:
         for row in rows:
             rc = row.get("failure_class")
             if not rc:
                 continue
-            entry = by_class.setdefault(rc, {"tokens": None, "basis": "ledger_rows"})
-            entry["request_count"] = entry.get("request_count", 0) + 1
+            entry = by_class.setdefault(rc, {"tokens": 0, "basis": "ledger_rows", "request_count": 0})
+            entry["tokens"] += row.get("gen_ai.usage.input_tokens", 0) + row.get("gen_ai.usage.output_tokens", 0)
+            entry["request_count"] += 1
     failure_spend["by_class"] = by_class
 
     return {
@@ -1455,10 +1457,12 @@ def _annotate_failure_class(path: "pathlib.Path | None", run_id: str, failure_cl
     entry = by_class.get(failure_class)
     if not isinstance(entry, dict):
         entry = by_class[failure_class] = {}
+    elif entry.get("basis") == "ledger_rows":
+        # The ledger part already counted this class: keep it apart under "ledger", so the
+        # record's tokens/basis below never sit next to a count of ledger requests.
+        entry = by_class[failure_class] = {"ledger": entry}
     # The record's failure_spend tokens/basis (fs["basis"] can be "whole_run" or
-    # "retry_only", not always "the run's whole-run spend"); a request_count the ledger
-    # part already counted for the same class (ledger requests, not whole-run) is kept
-    # alongside.
+    # "retry_only", not always "the run's whole-run spend").
     entry.update({"tokens": fs.get("tokens"), "basis": fs.get("basis")})
     tmp = None
     try:

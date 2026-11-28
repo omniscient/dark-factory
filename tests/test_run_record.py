@@ -1610,15 +1610,20 @@ def test_harness_economics_without_artifact_check_unchanged(tmp_path):
 
 def test_failure_spend_by_class_counts_ledger_failure_rows(tmp_path):
     rows = [
-        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle"},
-        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle"},
-        {"run_id": "run-447", "status": 200, "failure_class": None},
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle",
+         "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 5},
+        {"run_id": "run-447", "status": 504, "failure_class": "timeout_idle",
+         "gen_ai.usage.input_tokens": 10},
+        {"run_id": "run-447", "status": 200, "failure_class": None,
+         "gen_ai.usage.input_tokens": 999, "gen_ai.usage.output_tokens": 999},
         {"run_id": "run-447", "status": 403, "failure_class": "destination_policy_denial"},
     ]
     he = _economics(tmp_path, ledger=(rows, True))
+    # Per-class tokens are summed from the rows' own usage, like retry_spend; a row
+    # without usage fields counts as 0.
     assert he["failure_spend"]["by_class"] == {
-        "timeout_idle": {"tokens": None, "basis": "ledger_rows", "request_count": 2},
-        "destination_policy_denial": {"tokens": None, "basis": "ledger_rows", "request_count": 1},
+        "timeout_idle": {"tokens": 45, "basis": "ledger_rows", "request_count": 2},
+        "destination_policy_denial": {"tokens": 0, "basis": "ledger_rows", "request_count": 1},
     }
     # No ledger: an empty dict, never a missing key.
     assert _economics(tmp_path)["failure_spend"]["by_class"] == {}
@@ -3759,7 +3764,7 @@ def test_failure_spend_by_class_adds_ledger_request_counts(tmp_path, monkeypatch
     _annotate(monkeypatch, out, "substantive:unknown:1")
     assert _by_class(out) == {
         "substantive_unknown": {"tokens": 150, "basis": "whole_run"},
-        "timeout_idle": {"tokens": None, "basis": "ledger_rows", "request_count": 2},
+        "timeout_idle": {"tokens": 0, "basis": "ledger_rows", "request_count": 2},
     }
 
 
@@ -3767,11 +3772,19 @@ def test_annotate_failure_keeps_the_ledger_request_count_of_the_same_class(tmp_p
     ledger = tmp_path / "request-ledger.jsonl"
     ledger.write_text(json.dumps({"run_id": "abc123", "status": 504,
                                   "failure_class": "endpoint_unreachable",
-                                  "hosting_location": "local", "endpoint_id": "local-test"}) + "\n")
+                                  "hosting_location": "local", "endpoint_id": "local-test",
+                                  "gen_ai.usage.input_tokens": 7}) + "\n")
     out = _assemble_failed(tmp_path, monkeypatch, ledger=ledger)
     _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
-    assert _by_class(out) == {"endpoint_unreachable": {
-        "tokens": 150, "basis": "whole_run", "request_count": 1}}
+    # The phase-level spend takes the flat keys; the ledger part moves under "ledger", so
+    # a whole_run token total never sits next to a count of ledger requests.
+    expected = {"endpoint_unreachable": {
+        "tokens": 150, "basis": "whole_run",
+        "ledger": {"tokens": 7, "basis": "ledger_rows", "request_count": 1}}}
+    assert _by_class(out) == expected
+    # Annotating again does not nest the ledger part a second time.
+    _annotate(monkeypatch, out, "substantive:endpoint_unreachable:1")
+    assert _by_class(out) == expected
 
 
 # Spec test 8: four hybrid failures (outage, OOM/stalled stream, forbidden destination,
@@ -3817,7 +3830,10 @@ def test_hybrid_failure_is_recorded_without_export_or_backend_switch(
     assert cls.cross_endpoint_retry is False
     assert cls.fallback_model_allowed is False and cls.fallback_phase_allowed is False
     by_class = rec["harness_economics"]["failure_spend"]["by_class"]
-    assert by_class[failure_class]["request_count"] == 1
+    ledger_part = by_class[failure_class]
+    if failure_class == ft.class_for_signature(signature):  # same class: nested apart
+        ledger_part = ledger_part["ledger"]
+    assert ledger_part == {"tokens": 0, "basis": "ledger_rows", "request_count": 1}
     assert by_class[ft.class_for_signature(signature)]["basis"] == "whole_run"
 
 
